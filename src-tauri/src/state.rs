@@ -54,6 +54,7 @@ struct IndexedNote {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 struct PersistedSettings {
     workspace_path: Option<String>,
     custom_note_order: Vec<String>,
