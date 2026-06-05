@@ -378,6 +378,7 @@
 		gap: var(--space-6);
 		border-right: 1px solid var(--border-default);
 		backdrop-filter: blur(var(--blur-md));
+		overflow-y: auto;
 	}
 
 	.eyebrow {
@@ -493,6 +494,8 @@
 		padding: var(--space-8);
 		display: grid;
 		gap: var(--space-6);
+		flex: 1;
+		overflow-y: auto;
 	}
 
 	.topbar {
@@ -512,8 +515,7 @@
 		min-width: 20rem;
 	}
 
-	.search input,
-	select {
+	.search input {
 		width: 100%;
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-xs);
@@ -521,6 +523,29 @@
 		padding: 0.875rem 1rem;
 		color: var(--text-primary);
 		outline: none;
+	}
+
+	select {
+		width: 100%;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-xs);
+		background: var(--bg-panel);
+		padding: 0.875rem 2.5rem 0.875rem 1rem;
+		color: var(--text-primary);
+		outline: none;
+		appearance: none;
+		-webkit-appearance: none;
+		-moz-appearance: none;
+		background-image: url("data:image/svg+xml;utf8,<svg fill='%23a49d9a' height='24' viewBox='0 0 24 24' width='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 10l5 5 5-5z'/><path d='M0 0h24v24H0z' fill='none'/></svg>");
+		background-repeat: no-repeat;
+		background-position: right 12px center;
+		background-size: 20px;
+		cursor: pointer;
+	}
+
+	select option {
+		background: var(--bg-panel);
+		color: var(--text-primary);
 	}
 
 	input::placeholder {

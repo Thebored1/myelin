@@ -455,6 +455,11 @@ impl AppState {
         let workspace_path = workspace.to_path_buf();
         let mut watcher = recommended_watcher(move |result: notify::Result<notify::Event>| {
             if let Ok(event) = result {
+                // Ignore read/open/close access events to avoid infinite reindexing loops when files are read
+                if matches!(event.kind, notify::EventKind::Access(_)) {
+                    return;
+                }
+
                 let is_markdown = event.paths.iter().any(|path| is_markdown_file(path));
                 if !is_markdown {
                     return;

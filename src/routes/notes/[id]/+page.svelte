@@ -5,9 +5,11 @@
 	import { page } from '$app/state';
 	import type { NoteDocument, SearchResponse, NoteSummary } from '$lib/types';
 	import { onMount, onDestroy } from 'svelte';
+	import { sidebarOpen, showSidebarToggle } from '$lib/stores';
 	import Vditor from 'vditor';
 	import 'vditor/dist/index.css';
 	import 'mathlive';
+	import 'mathlive/fonts.css';
 
 	let note = $state<NoteDocument | null>(null);
 	let draftBody = $state('');
@@ -27,15 +29,22 @@
 	let toolbarNeedsToggle = $state(false);
 	let toolbarResizeObserver: ResizeObserver | null = null;
 	
-	let sidebarOpen = $state(false);
+	let saveStatus = $state<'saved' | 'saving' | 'unsaved'>('saved');
+	let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-	function toggleSidebar() {
-		sidebarOpen = !sidebarOpen;
+	function triggerAutoSave() {
+		if (saveStatus !== 'saving') saveStatus = 'unsaved';
+		if (saveTimer) clearTimeout(saveTimer);
+		saveTimer = setTimeout(() => {
+			void saveNote();
+		}, 1000);
 	}
 
 	function insertMath() {
 		if (vditorInstance && mathValue) {
-			vditorInstance.insertValue(`$$${mathValue}$$`);
+			// Replace MathLive specific placeholders with standard KaTeX squares
+			const cleanMath = mathValue.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
+			vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 		}
 		mathDialog?.close();
 	}
@@ -92,9 +101,13 @@
 								toolbarNeedsToggle = false;
 								toolbarExpanded = false;
 							}
+							updateToolbarOverflow();
 						});
 						toolbarResizeObserver.observe(toolbar);
-						if (toolbar.scrollHeight > 55) toolbarNeedsToggle = true;
+						if (toolbar.scrollHeight > 55) {
+							toolbarNeedsToggle = true;
+							updateToolbarOverflow();
+						}
 					}
 				},
 				keydown: (e: KeyboardEvent) => {
@@ -106,6 +119,7 @@
 				},
 				input: (value) => {
 					draftBody = value;
+					triggerAutoSave();
 				}
 			});
 		}
@@ -133,6 +147,7 @@
 	async function saveNote() {
 		if (!note) return;
 		isBusy = true;
+		saveStatus = 'saving';
 		try {
 			note = await invoke<NoteDocument>('save_note', {
 				noteId: note.id,
@@ -143,7 +158,7 @@
 					.filter(Boolean),
 				body: draftBody
 			});
-			message = 'Saved to markdown and reindexed.';
+			saveStatus = 'saved';
 			void fetchRelatedNotes();
 		} finally {
 			isBusy = false;
@@ -216,11 +231,47 @@
 		}
 	}
 
+	function updateToolbarOverflow() {
+		const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
+		if (!toolbar) return;
+		const items = toolbar.querySelectorAll('.vditor-toolbar__item, .vditor-toolbar__divider');
+		items.forEach((item: any) => {
+			if (!toolbarExpanded && item.offsetTop > 20) {
+				item.style.visibility = 'hidden';
+				item.style.pointerEvents = 'none';
+			} else {
+				item.style.visibility = 'visible';
+				item.style.pointerEvents = 'auto';
+			}
+		});
+	}
+
+	$effect(() => {
+		const _trigger = toolbarExpanded;
+		updateToolbarOverflow();
+	});
+
 	onMount(() => {
+		$showSidebarToggle = true;
 		void loadCurrentNote();
 		if (window.innerWidth > 1200) {
-			sidebarOpen = true;
+			$sidebarOpen = true;
 		}
+
+		const mql = window.matchMedia('(max-width: 1200px)');
+		const handleMediaChange = (e: MediaQueryListEvent) => {
+			if (e.matches) {
+				$sidebarOpen = false;
+			} else {
+				$sidebarOpen = true;
+			}
+		};
+		mql.addEventListener('change', handleMediaChange);
+
+		return () => {
+			mql.removeEventListener('change', handleMediaChange);
+			$showSidebarToggle = false;
+		};
 	});
 
 	onDestroy(() => {
@@ -245,17 +296,16 @@
 			{#if message}
 				<p class="status">{message}</p>
 			{/if}
-			<input class="title-input" bind:value={draftTitle} placeholder="Note title" />
-		</div>
-		<div class="header-actions">
-			<button class="secondary" onclick={deleteNote} disabled={isBusy || !note}>Delete</button>
-			<button class="primary" onclick={saveNote} disabled={isBusy || !note}>Save</button>
-			<button class="secondary sidebar-toggle-btn" onclick={toggleSidebar} aria-label="Toggle sidebar" title="Toggle sidebar">
-				<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-					<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-					<line x1="15" y1="3" x2="15" y2="21"></line>
-				</svg>
-			</button>
+			<input class="title-input" bind:value={draftTitle} oninput={triggerAutoSave} placeholder="Note title" />
+			<div class="save-indicator" class:saving={saveStatus === 'saving'}>
+				{#if saveStatus === 'saving'}
+					<svg class="spinner" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg> Saving
+				{:else if saveStatus === 'unsaved'}
+					<span class="dot"></span> Unsaved
+				{:else}
+					<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Saved
+				{/if}
+			</div>
 		</div>
 	</header>
 
@@ -277,15 +327,15 @@
 		</section>
 
 		<!-- Right Sidebar -->
-		{#if sidebarOpen}
+		{#if $sidebarOpen}
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="sidebar-backdrop" onclick={() => sidebarOpen = false}></div>
+			<div class="sidebar-backdrop" onclick={() => $sidebarOpen = false}></div>
 		{/if}
-		<aside class="sidebar" class:open={sidebarOpen}>
+		<aside class="sidebar" class:open={$sidebarOpen}>
 			<div class="sidebar-section">
 				<h3>Tags</h3>
-				<input class="tag-input" bind:value={draftTags} placeholder="comma,separated,tags" onblur={fetchRelatedNotes} />
+				<input class="tag-input" bind:value={draftTags} oninput={triggerAutoSave} placeholder="comma,separated,tags" onblur={fetchRelatedNotes} />
 			</div>
 
 			<div class="sidebar-section">
@@ -352,6 +402,8 @@
 		border-bottom: 1px solid var(--border-default);
 		background: rgba(16, 16, 16, 0.94);
 		backdrop-filter: blur(var(--blur-md));
+		position: relative;
+		z-index: 1;
 	}
 
 	.header-copy {
@@ -410,31 +462,35 @@
 		background: var(--bg-panel);
 	}
 
-	.header-actions {
+	.save-indicator {
 		display: flex;
-		gap: var(--space-2);
+		align-items: center;
+		gap: 0.375rem;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 0.25rem 0.5rem;
 	}
 
-	.header-actions button {
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm);
-		background: var(--bg-panel);
-		color: var(--text-primary);
-		padding: 0.625rem 1rem;
-		cursor: pointer;
-		transition: all var(--duration-fast) var(--ease-standard);
+	.save-indicator.saving {
+		color: var(--accent-100);
 	}
 
-	.header-actions .primary {
-		background: var(--accent-200);
-		color: var(--text-inverse);
-		border-color: var(--accent-200);
+	.save-indicator .dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--neutral-400);
 	}
-	.header-actions .primary:hover:not(:disabled) {
-		background: var(--accent-100);
+
+	.spinner {
+		animation: spin 1s linear infinite;
 	}
-	.header-actions .secondary:hover:not(:disabled) {
-		border-color: var(--neutral-600);
+
+	@keyframes spin {
+		100% { transform: rotate(360deg); }
 	}
 	button:disabled { opacity: 0.6; cursor: not-allowed; }
 
@@ -443,6 +499,7 @@
 		position: relative;
 		display: flex;
 		overflow: hidden;
+		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
 
 	.sidebar-toggle-btn {
@@ -513,12 +570,14 @@
 
 	:global(.vditor-wrapper:not(.toolbar-expanded) .vditor-toolbar) {
 		max-height: 48px;
-		clip-path: inset(-100px -50px 0 -50px);
 	}
 
 	:global(.vditor) {
 		border: none !important;
 		overflow: visible !important;
+		height: 100% !important;
+		display: flex !important;
+		flex-direction: column !important;
 		--panel-background-color: var(--bg-page) !important;
 		--textarea-background-color: var(--bg-page) !important;
 		--toolbar-background-color: rgba(18, 18, 18, 0.96) !important;
@@ -529,6 +588,9 @@
 		flex-direction: column !important;
 		align-items: center !important;
 		background: var(--bg-page) !important;
+		flex: 1 !important;
+		min-height: 0 !important;
+		overflow-y: auto !important;
 	}
 
 	:global(.vditor-ir) {
@@ -547,9 +609,23 @@
 		padding: var(--space-2) var(--space-4) !important;
 		padding-right: 48px !important;
 		transition: max-height 0.2s ease-out;
+		position: relative !important;
+		z-index: 30 !important;
 	}
 
-	/* Sidebar */
+	/* Force Vditor toolbar tooltips to drop downwards to avoid WebKitGTK header overlap bugs */
+	:global(.vditor-tooltipped__n::after) {
+		top: 100% !important;
+		bottom: auto !important;
+		margin-top: 5px !important;
+		margin-bottom: 0 !important;
+	}
+
+	:global(.vditor-tooltipped__n::before) {
+		display: none !important;
+	}
+
+	/* Sidebar (Mobile / Overlay mode by default) */
 	.sidebar {
 		position: absolute;
 		top: 0;
@@ -565,7 +641,7 @@
 		overflow-y: auto;
 		z-index: 100;
 		transform: translateX(100%);
-		transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+		transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 		border-left: 1px solid var(--border-default);
 		box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
 	}
@@ -581,6 +657,26 @@
 		backdrop-filter: blur(var(--blur-sm));
 		z-index: 90;
 		animation: fade-in var(--duration-fast) ease-out;
+	}
+
+	/* Large Screen Styles (Side-by-side docked mode) */
+	@media (min-width: 1201px) {
+		.sidebar {
+			position: relative;
+			transform: none;
+			margin-right: -20rem;
+			box-shadow: none;
+			flex-shrink: 0;
+		}
+
+		.sidebar.open {
+			transform: none;
+			margin-right: 0;
+		}
+
+		.sidebar-backdrop {
+			display: none !important;
+		}
 	}
 
 	.sidebar-section {
