@@ -118,6 +118,37 @@ async fn rebuild_index(state: State<'_, AppState>) -> Result<AppSnapshot, String
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+async fn extract_from_paste(
+    _state: State<'_, AppState>,
+    _note_id: String,
+    _paste_content: String,
+) -> Result<String, String> {
+    Ok("Mocked extracted content from paste...".into())
+}
+
+#[tauri::command]
+async fn summarise_note(
+    _state: State<'_, AppState>,
+    _note_id: String,
+) -> Result<String, String> {
+    Ok("Mocked summary of the note...".into())
+}
+
+#[tauri::command]
+async fn ask_ai(
+    _state: State<'_, AppState>,
+    _note_id: String,
+    _question: String,
+) -> Result<String, String> {
+    Ok("Mocked AI response to your question...".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -150,7 +181,11 @@ pub fn run() {
             reorder_note,
             search_notes,
             get_provider_status,
-            rebuild_index
+            rebuild_index,
+            get_snapshot,
+            extract_from_paste,
+            summarise_note,
+            ask_ai
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

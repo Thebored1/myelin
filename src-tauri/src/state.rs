@@ -19,7 +19,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 const EMBEDDING_DIM: i32 = 64;
@@ -37,6 +37,7 @@ struct InnerState {
     app_data_dir: PathBuf,
     runtime: RwLock<RuntimeState>,
     watcher: Mutex<Option<RecommendedWatcher>>,
+    index_lock: AsyncMutex<()>,
 }
 
 #[derive(Default)]
@@ -101,6 +102,7 @@ impl AppState {
                     },
                 }),
                 watcher: Mutex::new(None),
+                index_lock: AsyncMutex::new(()),
             }),
         })
     }
@@ -403,7 +405,7 @@ impl AppState {
         Ok(self.snapshot())
     }
 
-    fn snapshot(&self) -> AppSnapshot {
+    pub fn snapshot(&self) -> AppSnapshot {
         let runtime = self.inner.runtime.read();
         let note_summaries = runtime
             .notes
@@ -473,6 +475,8 @@ impl AppState {
     }
 
     async fn reindex_workspace(&self, workspace: PathBuf) -> Result<()> {
+        let _guard = self.inner.index_lock.lock().await;
+
         {
             let mut runtime = self.inner.runtime.write();
             runtime.index_state.is_indexing = true;
