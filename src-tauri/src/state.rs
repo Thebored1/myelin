@@ -1,5 +1,5 @@
 use crate::models::{
-    AppSnapshot, IndexState, LibraryFacets, NoteDocument, NoteSummary, ProviderStatus,
+    AppSnapshot, Backlink, IndexState, LibraryFacets, NoteDocument, NoteSummary, ProviderStatus,
     SearchResponse, SearchResult,
 };
 use anyhow::{anyhow, Context, Result};
@@ -159,6 +159,7 @@ impl AppState {
             relative_path,
             created_at: now.clone(),
             updated_at: now,
+            backlinks: Vec::new(),
         };
 
         write_note_file(&path, &document)?;
@@ -204,6 +205,7 @@ impl AppState {
             relative_path: existing.document.relative_path.clone(),
             created_at: existing.document.created_at,
             updated_at: timestamp_now(),
+            backlinks: existing.document.backlinks,
         };
 
         let path = workspace.join(&updated.relative_path);
@@ -257,6 +259,7 @@ impl AppState {
             relative_path: relative_to_workspace(&workspace, &path),
             created_at: now.clone(),
             updated_at: now,
+            backlinks: source.document.backlinks,
         };
 
         write_note_file(&path, &document)?;
@@ -384,7 +387,7 @@ impl AppState {
                     reason,
                 }
             })
-            .filter(|result| result.score > 0.0)
+            .filter(|result| result.score > 0.25)
             .collect::<Vec<_>>();
 
         results.sort_by(|left, right| right.score.total_cmp(&left.score));
@@ -488,7 +491,33 @@ impl AppState {
         }
 
         self.handle.emit("index://status", "started")?;
-        let notes = read_workspace_notes(&workspace)?;
+        let mut notes = read_workspace_notes(&workspace)?;
+        
+        let mut backlinks_map: HashMap<String, Vec<Backlink>> = HashMap::new();
+        for note in &notes {
+            let links = extract_links(&note.document.body);
+            for link in links {
+                let target_note = notes.iter().find(|n| n.document.title == link.target || n.document.id == link.target);
+                if let Some(target) = target_note {
+                    let backlink = Backlink {
+                        source_id: note.document.id.clone(),
+                        source_title: note.document.title.clone(),
+                        target_block: link.block.clone(),
+                        context_excerpt: excerpt_around(&note.document.body, link.start_index, link.end_index),
+                    };
+                    backlinks_map.entry(target.document.id.clone()).or_default().push(backlink);
+                }
+            }
+        }
+        
+        for note in &mut notes {
+            if let Some(links) = backlinks_map.remove(&note.document.id) {
+                note.document.backlinks = links;
+            } else {
+                note.document.backlinks = Vec::new();
+            }
+        }
+
         let table = rebuild_lancedb(&self.index_dir(), &notes).await?;
         let note_count = notes.len();
 
@@ -596,6 +625,7 @@ fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
         relative_path: relative_to_workspace(workspace, path),
         created_at,
         updated_at,
+        backlinks: Vec::new(),
     })
 }
 
@@ -712,6 +742,7 @@ fn summarize(document: &NoteDocument) -> NoteSummary {
         relative_path: document.relative_path.clone(),
         created_at: document.created_at.clone(),
         updated_at: document.updated_at.clone(),
+        backlinks: document.backlinks.clone(),
     }
 }
 
@@ -988,6 +1019,89 @@ fn stable_id_from_path(path: &Path) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.to_string_lossy().hash(&mut hasher);
     format!("legacy-{:x}", hasher.finish())
+}
+
+struct ParsedLink {
+    target: String,
+    block: Option<String>,
+    start_index: usize,
+    end_index: usize,
+}
+
+fn extract_links(body: &str) -> Vec<ParsedLink> {
+    let mut links = Vec::new();
+    
+    // Parse [[Wikilinks]]
+    if let Ok(re) = regex::Regex::new(r"\[\[([^\]]+)\]\]") {
+        for cap in re.captures_iter(body) {
+            if let Some(m) = cap.get(0) {
+                let inner = cap.get(1).unwrap().as_str().to_string();
+                let (target, block) = if let Some(idx) = inner.find('#') {
+                    (inner[..idx].trim().to_string(), Some(inner[idx+1..].trim().to_string()))
+                } else {
+                    (inner.trim().to_string(), None)
+                };
+                links.push(ParsedLink {
+                    target,
+                    block,
+                    start_index: m.start(),
+                    end_index: m.end(),
+                });
+            }
+        }
+    }
+
+    // Parse standard markdown note links: [Text](url)
+    // Vditor might rewrite `/notes/id` to `http://localhost:1420/notes/id`
+    if let Ok(re) = regex::Regex::new(r"\[.*?\]\(([^)]+)\)") {
+        for cap in re.captures_iter(body) {
+            if let Some(m) = cap.get(0) {
+                let inner = cap.get(1).unwrap().as_str().to_string();
+                
+                let (url_part, block) = if let Some(idx) = inner.find('#') {
+                    (&inner[..idx], Some(inner[idx+1..].trim().to_string()))
+                } else {
+                    (inner.as_str(), None)
+                };
+                
+                let url_part = url_part.trim();
+                
+                // Extract the last segment (e.g., UUID from /notes/uuid or http://.../notes/uuid)
+                let target = if let Some(idx) = url_part.rfind('/') {
+                    url_part[idx+1..].to_string()
+                } else if url_part.starts_with("note:") {
+                    url_part[5..].to_string()
+                } else {
+                    url_part.to_string()
+                };
+
+                links.push(ParsedLink {
+                    target,
+                    block,
+                    start_index: m.start(),
+                    end_index: m.end(),
+                });
+            }
+        }
+    }
+    
+    links
+}
+
+fn excerpt_around(body: &str, start: usize, end: usize) -> String {
+    let context_chars = 40;
+    let pre_start = start.saturating_sub(context_chars);
+    let post_end = std::cmp::min(body.len(), end + context_chars);
+    
+    let mut excerpt = String::new();
+    if pre_start > 0 {
+        excerpt.push_str("...");
+    }
+    excerpt.push_str(&body[pre_start..post_end].replace('\n', " "));
+    if post_end < body.len() {
+        excerpt.push_str("...");
+    }
+    excerpt
 }
 
 fn default_provider_status() -> ProviderStatus {

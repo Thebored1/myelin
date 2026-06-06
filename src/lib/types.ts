@@ -1,3 +1,10 @@
+export type Backlink = {
+	sourceId: string;
+	sourceTitle: string;
+	targetBlock: string | null;
+	contextExcerpt: string;
+};
+
 export type NoteSummary = {
 	id: string;
 	title: string;
@@ -7,6 +14,7 @@ export type NoteSummary = {
 	relativePath: string;
 	createdAt: string;
 	updatedAt: string;
+	backlinks: Backlink[];
 };
 
 export type NoteDocument = {
@@ -17,6 +25,7 @@ export type NoteDocument = {
 	relativePath: string;
 	createdAt: string;
 	updatedAt: string;
+	backlinks: Backlink[];
 };
 
 export type ProviderStatus = {

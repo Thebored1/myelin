@@ -12,6 +12,24 @@
 		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
 			appWindow = getCurrentWindow();
 		}
+		
+		// Prevent Ctrl+A globally unless focused in an input or editor
+		const handleGlobalKeydown = (e: KeyboardEvent) => {
+			if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+				const target = e.target as HTMLElement;
+				const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+				const isContentEditable = target.isContentEditable;
+				
+				if (!isInput && !isContentEditable) {
+					e.preventDefault();
+				}
+			}
+		};
+		
+		if (typeof window !== 'undefined') {
+			window.addEventListener('keydown', handleGlobalKeydown);
+			return () => window.removeEventListener('keydown', handleGlobalKeydown);
+		}
 	});
 
 	function minimize() {
@@ -198,8 +216,10 @@
 	/* Adjust layout height for all shells to fit inside the custom height */
 	:global(.shell),
 	:global(.editor-shell) {
+		height: calc(100vh - 32px) !important;
 		min-height: calc(100vh - 32px) !important;
 		max-height: calc(100vh - 32px) !important;
+		overflow: hidden !important;
 	}
 
 	.app-container {
@@ -292,6 +312,12 @@
 		z-index: 9999;
 	}
 
+	:global(.app-container:has(.vditor--fullscreen) .custom-titlebar) {
+		z-index: -1 !important;
+		opacity: 0;
+		pointer-events: none;
+	}
+
 	.titlebar-drag-region {
 		flex: 1;
 		height: 100%;
@@ -304,7 +330,7 @@
 	.titlebar-logo {
 		width: 14px;
 		height: 14px;
-		margin-right: var(--space-2.5);
+		margin-right: var(--space-2);
 		opacity: 0.8;
 	}
 

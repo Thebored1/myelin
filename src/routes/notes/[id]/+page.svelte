@@ -18,12 +18,99 @@
 	let isBusy = $state(false);
 	let message = $state('');
 	
+	let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
+	
 	let relatedNotes = $state<NoteSummary[]>([]);
 	let vditorContainer: HTMLElement | undefined = $state();
 	let vditorInstance: Vditor | null = null;
+	let fullscreenShortcut = $state('Esc');
+	let savedCursorOffset: number = -1;
+	
+	const CURSOR_MARKER = 'ZCURSORZ';
+	
+	function saveCursorPosition() {
+		if (!vditorInstance || !vditorContainer) return;
+		vditorInstance.insertValue(CURSOR_MARKER, true);
+	}
+	
+	function insertAtSavedCursor(linkText: string) {
+		if (!vditorInstance || !vditorContainer) return;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return;
+		
+		editorEl.focus();
+		
+		// Find the text node containing the marker
+		let markerNode: Node | null = null;
+		let markerOffset = -1;
+		
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT, null);
+		let node;
+		while ((node = walker.nextNode())) {
+			const text = node.nodeValue || '';
+			const idx = text.indexOf(CURSOR_MARKER);
+			if (idx !== -1) {
+				markerNode = node;
+				markerOffset = idx;
+				break;
+			}
+		}
+		
+		if (markerNode) {
+			const range = document.createRange();
+			range.setStart(markerNode, markerOffset);
+			range.setEnd(markerNode, markerOffset + CURSOR_MARKER.length);
+			
+			const sel = window.getSelection();
+			if (sel) {
+				sel.removeAllRanges();
+				sel.addRange(range);
+			}
+			
+			editorEl.focus();
+			
+			// Natively delete the highlighted ZCURSORZ marker so it doesn't get left behind
+			document.execCommand('delete', false);
+			
+			// Insert the link at the newly cleared cursor position
+			vditorInstance.insertValue(linkText, true);
+
+		} else {
+			// Fallback if marker somehow got lost
+			vditorInstance.insertValue('\n' + linkText, true);
+		}
+		
+		draftBody = vditorInstance.getValue();
+		triggerAutoSave();
+	}
 	
 	let mathDialog: HTMLDialogElement | undefined = $state();
 	let mathValue = $state('');
+
+	let linkNoteDialog: HTMLDialogElement | undefined = $state();
+	let linkSearchQuery = $state('');
+	let linkSearchResults = $state<NoteSummary[]>([]);
+	let linkSelectedIndex = $state(0);
+	
+	let linkDialogMode = $state<'notes' | 'blocks'>('notes');
+	let selectedNoteForBlocks = $state<NoteDocument | null>(null);
+	
+	type BlockItem = { text: string, id: string | null, original: string, isFullNote?: boolean };
+	let allNoteBlocks = $state<BlockItem[]>([]);
+	let filteredBlocks = $derived(
+		linkDialogMode === 'blocks'
+			? (linkSearchQuery.trim() 
+				? allNoteBlocks.filter(b => b.isFullNote || b.text.toLowerCase().includes(linkSearchQuery.toLowerCase())) 
+				: [...allNoteBlocks])
+			: []
+	);
+	
+	let previewNoteDialog: HTMLDialogElement | undefined = $state();
+	let previewNoteTarget = $state<NoteDocument | null>(null);
+	let previewNoteContainer: HTMLElement | undefined = $state();
+	
+	let blockCache: Record<string, string> = {};
+	let transclusionObserver: MutationObserver | null = null;
 	
 	let toolbarExpanded = $state(false);
 	let toolbarNeedsToggle = $state(false);
@@ -47,6 +134,174 @@
 			vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 		}
 		mathDialog?.close();
+	}
+
+	$effect(() => {
+		const query = linkSearchQuery;
+		if (linkDialogMode === 'notes') {
+			if (query.trim()) {
+				invoke<SearchResponse>('search_notes', { query }).then(res => {
+					linkSearchResults = res.results.map(r => r.note);
+				});
+			} else {
+				linkSearchResults = [];
+			}
+		}
+	});
+
+	async function openPreviewModal(noteId: string) {
+		isBusy = true;
+		try {
+			previewNoteTarget = await invoke<NoteDocument>('load_note', { noteId });
+			previewNoteDialog?.showModal();
+			// Need a tiny delay to ensure previewNoteContainer is bound
+			setTimeout(() => {
+				if (previewNoteContainer && previewNoteTarget) {
+					Vditor.preview(previewNoteContainer, previewNoteTarget.body, {
+						mode: 'dark',
+						theme: { current: 'dark' }
+					});
+				}
+			}, 50);
+		} catch (err) {
+			console.error("Failed to load preview note", err);
+			alert("Could not load preview.");
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function handleVditorClick(e: MouseEvent) {
+		const target = e.target as HTMLElement;
+		
+		let href = '';
+		
+		// 1. Standard HTML links (WYSIWYG or preview modes)
+		const link = target.closest('a');
+		if (link) {
+			href = link.getAttribute('href') || '';
+		}
+
+		// 2. Vditor Instant Rendering (IR) mode links
+		if (!href) {
+			const irLink = target.closest('[data-type="a"]');
+			if (irLink) {
+				const text = irLink.textContent || '';
+				// IR links look like [text](/notes/targetId)
+				const match = text.match(/\]\(([^)]+)\)/);
+				if (match && match[1]) {
+					href = match[1].trim();
+				}
+			}
+		}
+
+		if (!href) return;
+		
+		if (href.startsWith('/notes/')) {
+			e.preventDefault();
+			e.stopPropagation();
+			const targetId = decodeURIComponent(href.replace('/notes/', ''));
+			await openPreviewModal(targetId);
+		}
+	}
+
+	function handleVditorKeydownCapture(e: KeyboardEvent) {
+		// Prevent WYSIWYG mode shortcut (Cmd/Ctrl + Alt + 7)
+		if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.code === "Digit7") {
+			e.preventDefault();
+			e.stopPropagation();
+		}
+	}
+
+	function handleLinkSearchKeydown(e: KeyboardEvent) {
+		const targetListLength = linkDialogMode === 'notes' ? linkSearchResults.length : filteredBlocks.length;
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			linkSelectedIndex = Math.min(targetListLength - 1, linkSelectedIndex + 1);
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			linkSelectedIndex = Math.max(0, linkSelectedIndex - 1);
+		} else if (e.key === 'Enter') {
+			e.preventDefault();
+			if (targetListLength > 0) {
+				if (linkDialogMode === 'notes') {
+					selectNoteForBlocks(linkSearchResults[linkSelectedIndex]);
+				} else {
+					insertBlockLink(filteredBlocks[linkSelectedIndex]);
+				}
+			}
+		}
+	}
+	
+	function autofocus(node: HTMLElement) {
+		node.focus();
+	}
+
+	function parseBlocks(markdown: string): BlockItem[] {
+		const chunks = markdown.split(/\n+/);
+		return chunks.map(chunk => {
+			const text = chunk.trim();
+			if (!text) return null;
+			const idMatch = text.match(/\(\(([a-fA-F0-9]{6})\)\)$/);
+			
+			let cleanDisplay = text.replace(/\s*\(\([a-fA-F0-9]{6}\)\)$/, '');
+			cleanDisplay = cleanDisplay.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+			cleanDisplay = cleanDisplay.replace(/(\*\*|__)(.*?)\1/g, '$2');
+			cleanDisplay = cleanDisplay.replace(/(\*|_)(.*?)\1/g, '$2');
+			cleanDisplay = cleanDisplay.replace(/^#+\s+/g, '');
+			
+			return {
+				text: cleanDisplay,
+				id: idMatch ? idMatch[1] : null,
+				original: text
+			};
+		}).filter(Boolean) as BlockItem[];
+	}
+
+	async function selectNoteForBlocks(target: NoteSummary) {
+		isBusy = true;
+		try {
+			selectedNoteForBlocks = await invoke<NoteDocument>('load_note', { noteId: target.id });
+			allNoteBlocks = [
+				{ text: `Link to entire note: ${target.title}`, id: null, original: '', isFullNote: true },
+				...parseBlocks(selectedNoteForBlocks.body)
+			];
+			linkSearchQuery = '';
+			linkDialogMode = 'blocks';
+			linkSelectedIndex = 0;
+		} catch (e) {
+			console.error("Failed to load note for blocks", e);
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function insertBlockLink(block: BlockItem) {
+		if (!selectedNoteForBlocks) return;
+		
+		if (block.isFullNote) {
+			linkNoteDialog?.close();
+			const linkText = `[${selectedNoteForBlocks.title}](/notes/${selectedNoteForBlocks.id}) `;
+			insertAtSavedCursor(linkText);
+			return;
+		}
+		
+		let blockId = block.id;
+		if (!blockId) {
+			blockId = Math.random().toString(16).substring(2, 8);
+			const newBlockText = `${block.original} ((${blockId}))`;
+			selectedNoteForBlocks.body = selectedNoteForBlocks.body.replace(block.original, newBlockText);
+			await invoke('save_note', {
+				noteId: selectedNoteForBlocks.id,
+				title: selectedNoteForBlocks.title,
+				tags: selectedNoteForBlocks.tags,
+				body: selectedNoteForBlocks.body
+			});
+		}
+		
+		linkNoteDialog?.close();
+		const linkText = `[((${blockId}))](/notes/${selectedNoteForBlocks!.id}#${blockId}) `;
+		insertAtSavedCursor(linkText);
 	}
 
 	async function loadCurrentNote() {
@@ -82,12 +337,29 @@
 							mathDialog?.showModal();
 						}
 					},
+					{
+						name: 'link-note',
+						tipPosition: 'n',
+						tip: 'Link to Note',
+						// hotkey handled in keydown below
+						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
+						click: () => {
+							saveCursorPosition();
+							linkSearchQuery = '';
+							linkSearchResults = [];
+							linkNoteDialog?.showModal();
+							setTimeout(() => {
+								const input = linkNoteDialog?.querySelector('.link-search-input') as HTMLInputElement;
+								if (input) input.focus();
+							}, 50);
+						}
+					},
 					"|",
 					"upload", "record", "table", "|", "undo", "redo", "|", "fullscreen", "edit-mode",
 					{
 						name: "more",
 						toolbar: [
-							"both", "code-theme", "content-theme", "export", "outline", "preview", "devtools", "info", "help"
+							"both", "code-theme", "content-theme", "outline", "devtools", "info", "help"
 						]
 					}
 				],
@@ -106,11 +378,34 @@
 						toolbarResizeObserver.observe(toolbar);
 						if (toolbar.scrollHeight > 55) {
 							toolbarNeedsToggle = true;
-							updateToolbarOverflow();
 						}
+						updateToolbarOverflow();
+						
+						const fsBtn = toolbar.querySelector('button[data-type="fullscreen"]');
+						if (fsBtn) {
+							const label = fsBtn.getAttribute('aria-label') || '';
+							const match = label.match(/<([^>]+)>/);
+							if (match) {
+								fullscreenShortcut = match[1];
+							}
+						}
+
+
 					}
+					// Trigger an initial pass
+					setTimeout(() => {
+						scanForTransclusions();
+					}, 100);
+					setupTransclusionObserver();
 				},
 				keydown: (e: KeyboardEvent) => {
+					if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+						e.preventDefault();
+						// Trigger via the toolbar button's click handler
+						const linkBtn = vditorContainer?.querySelector('button[data-type="link-note"]') as HTMLButtonElement | null;
+						if (linkBtn) linkBtn.click();
+						return;
+					}
 					if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
 						e.preventDefault();
 						const redoBtn = vditorContainer?.querySelector('button[data-type="redo"]') as HTMLButtonElement | null;
@@ -123,6 +418,77 @@
 				}
 			});
 		}
+	}
+
+	function scanForTransclusions() {
+		if (!vditorContainer) return;
+		const links = vditorContainer.querySelectorAll('[data-type="a"]:not(.transclusion-wrapper)');
+		links.forEach(linkWrapper => {
+			const irLink = linkWrapper.querySelector('.vditor-ir__link');
+			if (!irLink) return;
+			const text = irLink.textContent || '';
+			const blockMatch = text.match(/^\(\(([a-fA-F0-9]{6})\)\)$/);
+			if (!blockMatch) return;
+			
+			const blockId = blockMatch[1];
+			const fullText = linkWrapper.textContent || '';
+			const urlMatch = fullText.match(/\]\(\/notes\/([^#]+)#([a-fA-F0-9]{6})\)$/);
+			if (!urlMatch) return;
+			
+			const targetNoteId = urlMatch[1];
+			linkWrapper.classList.add('transclusion-wrapper');
+			
+			const contentEl = document.createElement('span');
+			contentEl.className = 'transclusion-content';
+			const shadowRoot = contentEl.attachShadow({ mode: 'open' });
+			shadowRoot.innerHTML = `
+				<style>
+					:host {
+						opacity: 1 !important;
+						position: relative !important;
+						pointer-events: auto !important;
+						font-size: 1rem !important;
+						line-height: 1.6 !important;
+						display: block !important;
+						color: var(--text-primary);
+						font-family: inherit;
+						white-space: pre-wrap;
+					}
+				</style>
+				<span class="shadow-text"></span>
+			`;
+			
+			if (blockCache[`${targetNoteId}#${blockId}`]) {
+				shadowRoot.querySelector('.shadow-text')!.textContent = blockCache[`${targetNoteId}#${blockId}`];
+			} else {
+				shadowRoot.querySelector('.shadow-text')!.textContent = 'Loading block...';
+				invoke<NoteDocument>('load_note', { noteId: targetNoteId }).then(n => {
+					const blocks = parseBlocks(n.body);
+					const targetBlock = blocks.find(b => b.id === blockId);
+					if (targetBlock) {
+						const cleanText = targetBlock.text.replace(/\s*\(\([a-fA-F0-9]+\)\)$/, '').trim();
+						blockCache[`${targetNoteId}#${blockId}`] = cleanText;
+						shadowRoot.querySelector('.shadow-text')!.textContent = cleanText;
+					} else {
+						shadowRoot.querySelector('.shadow-text')!.textContent = 'Block not found.';
+					}
+				}).catch(() => {
+					shadowRoot.querySelector('.shadow-text')!.textContent = 'Error loading block.';
+				});
+			}
+			linkWrapper.appendChild(contentEl);
+		});
+	}
+
+	function setupTransclusionObserver() {
+		if (!vditorContainer) return;
+		if (transclusionObserver) transclusionObserver.disconnect();
+		
+		transclusionObserver = new MutationObserver(() => {
+			scanForTransclusions();
+		});
+		
+		transclusionObserver.observe(vditorContainer, { childList: true, subtree: true, characterData: true });
 	}
 
 	async function fetchRelatedNotes() {
@@ -281,13 +647,25 @@
 </script>
 
 <svelte:head>
-	<title>{note ? `${note.title} • myelin` : 'myelin'}</title>
+	<title>{note ? note.title : 'Myelin'}</title>
+	<style>
+		/* Bruteforce hide the left scrollbar in split view to prevent Svelte scoping issues */
+		.vditor-sv::-webkit-scrollbar {
+			display: none !important;
+			width: 0 !important;
+			background: transparent !important;
+		}
+		.vditor-sv {
+			scrollbar-width: none !important;
+			-ms-overflow-style: none !important;
+		}
+	</style>
 </svelte:head>
 
 <div class="editor-shell">
 	<header class="editor-header">
 		<div class="header-copy">
-			<button class="back-link" onclick={() => goto(resolve('/'))} aria-label="Back to library" title="Back to library">
+			<button class="back-link" onclick={() => window.location.href = resolve(backUrl)} aria-label="Go back" title="Go back">
 				<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
 					<line x1="19" y1="12" x2="5" y2="12"></line>
 					<polyline points="12 19 5 12 12 5"></polyline>
@@ -313,7 +691,12 @@
 		<!-- Main Content Area -->
 		<section class="main-pane">
 			<div class="content-area" style="position: relative;">
-				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded}></div>
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture}></div>
+				<div class="fullscreen-indicator">
+					Press <span>{fullscreenShortcut}</span> to toggle
+				</div>
 				{#if toolbarNeedsToggle}
 					<div class="toolbar-overlay-toggle-container">
 						<button class="toolbar-overlay-toggle" class:expanded={toolbarExpanded} onclick={() => toolbarExpanded = !toolbarExpanded} aria-label="Toggle toolbar">
@@ -351,7 +734,7 @@
 				<h3>Related Notes</h3>
 				{#if relatedNotes.length > 0}
 					<ul class="related-list">
-						{#each relatedNotes as rel (rel.id)}
+						{#each relatedNotes as rel, i (rel.id + '_' + i)}
 							<li><a href="/notes/{encodeURIComponent(rel.id)}">{rel.title}</a></li>
 						{/each}
 					</ul>
@@ -362,7 +745,25 @@
 
 			<div class="sidebar-section">
 				<h3>Backlinks</h3>
-				<p class="empty-state">No backlinks yet.</p>
+				{#if note && note.backlinks && note.backlinks.length > 0}
+					<ul class="related-list">
+						{#each note.backlinks as link, i (link.sourceId + '_' + (link.targetBlock || '') + '_' + i)}
+							<li>
+								<a href="/notes/{encodeURIComponent(link.sourceId)}">
+									<strong>{link.sourceTitle}</strong>
+									{#if link.targetBlock}
+										<span style="opacity: 0.7; font-size: 0.8em;">#{link.targetBlock}</span>
+									{/if}
+								</a>
+								<p class="context-excerpt" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.4;">
+									{link.contextExcerpt}
+								</p>
+							</li>
+						{/each}
+					</ul>
+				{:else}
+					<p class="empty-state">No backlinks yet.</p>
+				{/if}
 			</div>
 		</aside>
 	</div>
@@ -385,9 +786,97 @@
 	</div>
 </dialog>
 
+<dialog bind:this={linkNoteDialog} class="link-dialog" onkeydown={handleLinkSearchKeydown} onclose={() => { linkSearchQuery = ''; linkSearchResults = []; linkSelectedIndex = 0; linkDialogMode = 'notes'; }}>
+	<div class="dialog-content">
+		{#if linkDialogMode === 'notes'}
+			<h3>Link to Note</h3>
+			<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search and select a note to link your highlighted text to.</p>
+			
+			<input class="link-search-input" bind:value={linkSearchQuery} oninput={() => linkSelectedIndex = 0} use:autofocus placeholder="Search notes..." />
+			
+			{#if linkSearchQuery.trim() || linkSearchResults.length > 0}
+			<div class="link-results-container">
+				{#if linkSearchResults.length > 0}
+					<ul class="link-results-list">
+						{#each linkSearchResults as res, i (res.id + '_' + i)}
+							<li>
+								<button class="link-result-btn" class:selected={i === linkSelectedIndex} onclick={() => selectNoteForBlocks(res)}>
+									<strong>{res.title}</strong>
+									<span class="folder-badge">{res.folder}</span>
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{:else if linkSearchQuery.trim()}
+					<p class="empty-state">No notes found matching your search.</p>
+				{/if}
+			</div>
+			{/if}
+		{:else}
+			<h3>Select Block to Reference</h3>
+			<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Select a specific block from <strong>{selectedNoteForBlocks?.title}</strong> or link the entire note.</p>
+			
+			<input class="link-search-input" bind:value={linkSearchQuery} oninput={() => linkSelectedIndex = 0} use:autofocus placeholder="Search blocks..." />
+			
+			<div class="link-results-container">
+				{#if filteredBlocks.length > 0}
+					<ul class="link-results-list">
+						{#each filteredBlocks as block, i}
+							<li>
+								<button class="link-result-btn" class:selected={i === linkSelectedIndex} onclick={() => insertBlockLink(block)}>
+									<span style={block.isFullNote ? 'font-weight: bold;' : 'font-size: 0.9em; opacity: 0.9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;'}>
+										{block.text}
+									</span>
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{:else}
+					<p class="empty-state">No matching blocks found.</p>
+				{/if}
+			</div>
+		{/if}
+		
+		<div class="dialog-actions">
+			{#if linkDialogMode === 'blocks'}
+				<button class="secondary" style="margin-right: auto;" onclick={() => { linkDialogMode = 'notes'; linkSearchQuery = ''; linkSelectedIndex = 0; }}>Back</button>
+			{/if}
+			<button class="secondary" onclick={() => linkNoteDialog?.close()}>Cancel</button>
+		</div>
+	</div>
+</dialog>
+
+<dialog bind:this={previewNoteDialog} class="preview-dialog" onclose={() => { previewNoteTarget = null; }}>
+	{#if previewNoteTarget}
+		<div class="preview-layout">
+			<div class="preview-main">
+				<div class="preview-header">
+					<h2>{previewNoteTarget.title}</h2>
+					<div class="preview-meta">
+						{#if previewNoteTarget.tags.length > 0}
+							<span>{previewNoteTarget.tags.join(', ')}</span>
+						{/if}
+					</div>
+				</div>
+				<div class="preview-content-scroll">
+					<div bind:this={previewNoteContainer} class="vditor-reset" style="padding: 2rem; min-height: 100%;"></div>
+				</div>
+			</div>
+			<div class="preview-sidebar">
+				<button class="icon-btn" onclick={() => previewNoteDialog?.close()} title="Close Preview">
+					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+				</button>
+				<button class="icon-btn" onclick={() => { previewNoteDialog?.close(); window.location.href = resolve(`/notes/${encodeURIComponent(previewNoteTarget!.id)}?returnTo=/notes/${encodeURIComponent(note!.id)}`); }} title="Expand Note">
+					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"></path><path d="M9 21H3v-6"></path><path d="M21 3l-7 7"></path><path d="M3 21l7-7"></path></svg>
+				</button>
+			</div>
+		</div>
+	{/if}
+</dialog>
+
 <style>
 	.editor-shell {
-		min-height: 100vh;
+		height: 100vh;
 		display: grid;
 		grid-template-rows: auto 1fr;
 		animation: fade-in var(--duration-page) var(--ease-out);
@@ -472,6 +961,7 @@
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		padding: 0.25rem 0.5rem;
+		margin-left: auto;
 	}
 
 	.save-indicator.saving {
@@ -519,7 +1009,8 @@
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-page);
-		align-items: center;
+		align-items: stretch;
+		min-height: 0;
 	}
 
 	.content-area {
@@ -527,6 +1018,7 @@
 		flex: 1;
 		display: flex;
 		flex-direction: column;
+		min-height: 0;
 	}
 
 	.vditor-wrapper {
@@ -570,6 +1062,26 @@
 
 	:global(.vditor-wrapper:not(.toolbar-expanded) .vditor-toolbar) {
 		max-height: 48px;
+		overflow: visible !important;
+	}
+
+	/* Force all upward-facing tooltips (__n, __ne, __nw) to point downwards vertically */
+	:global(.vditor-toolbar .vditor-tooltipped__n::after),
+	:global(.vditor-toolbar .vditor-tooltipped__ne::after),
+	:global(.vditor-toolbar .vditor-tooltipped__nw::after) {
+		bottom: auto !important;
+		top: 100% !important;
+		margin-bottom: 0 !important;
+		margin-top: 5px !important;
+	}
+
+	:global(.vditor-toolbar .vditor-tooltipped__n::before),
+	:global(.vditor-toolbar .vditor-tooltipped__ne::before),
+	:global(.vditor-toolbar .vditor-tooltipped__nw::before) {
+		top: auto !important;
+		bottom: -5px !important;
+		border-top-color: transparent !important;
+		border-bottom-color: #3b3e43 !important;
 	}
 
 	:global(.vditor) {
@@ -586,17 +1098,69 @@
 	:global(.vditor-content) {
 		display: flex !important;
 		flex-direction: column !important;
-		align-items: center !important;
+		align-items: stretch !important;
+		width: 100% !important;
 		background: var(--bg-page) !important;
+		flex: 1 !important;
+		min-height: 0 !important;
+		overflow: hidden !important;
+	}
+
+	:global(.vditor-ir),
+	:global(.vditor-sv),
+	:global(.vditor-preview) {
+		width: 100% !important;
+		box-sizing: border-box !important;
 		flex: 1 !important;
 		min-height: 0 !important;
 		overflow-y: auto !important;
 	}
 
-	:global(.vditor-ir) {
-		width: 100% !important;
-		max-width: 210mm !important;
-		margin: 0 auto !important;
+	/* Hide the middle scrollbar in Split View (left pane) */
+	:global(.vditor-sv)::-webkit-scrollbar {
+		display: none !important;
+		width: 0 !important;
+		background: transparent !important;
+	}
+	:global(.vditor-sv) {
+		scrollbar-width: none !important;
+		-ms-overflow-style: none !important;
+	}
+
+	:global(.vditor-reset) {
+		/* Centering content while keeping scrollbar at the edge */
+		padding-left: max(var(--space-6), calc(50% - 105mm)) !important;
+		padding-right: max(var(--space-6), calc(50% - 105mm)) !important;
+	}
+
+	:global(.vditor-preview__action) {
+		display: none !important;
+	}
+
+	@media (min-width: 1200px) {
+		:global(.vditor-content:has(.vditor-sv[style*="block"])) {
+			flex-direction: row !important;
+			align-items: stretch !important;
+			justify-content: center !important;
+			gap: 0 !important;
+			padding: 0 !important;
+		}
+		
+		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-ir),
+		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-sv),
+		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-preview) {
+			margin: 0 !important;
+		}
+
+		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-reset) {
+			padding-left: var(--space-6) !important;
+			padding-right: var(--space-6) !important;
+		}
+	}
+
+	:global(.vditor-reset),
+	:global(.vditor-textarea) {
+		font-family: var(--font-mono) !important;
 	}
 	
 	:global(.vditor-ir),
@@ -613,17 +1177,7 @@
 		z-index: 30 !important;
 	}
 
-	/* Force Vditor toolbar tooltips to drop downwards to avoid WebKitGTK header overlap bugs */
-	:global(.vditor-tooltipped__n::after) {
-		top: 100% !important;
-		bottom: auto !important;
-		margin-top: 5px !important;
-		margin-bottom: 0 !important;
-	}
 
-	:global(.vditor-tooltipped__n::before) {
-		display: none !important;
-	}
 
 	/* Sidebar (Mobile / Overlay mode by default) */
 	.sidebar {
@@ -817,5 +1371,238 @@
 		background: var(--accent-200);
 		color: var(--text-inverse);
 		border-color: var(--accent-200);
+	}
+	
+	.link-dialog {
+		padding: 0;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: var(--bg-page);
+		color: var(--text-primary);
+		max-width: 40rem;
+		width: 100%;
+		backdrop-filter: blur(var(--blur-md));
+		outline: none;
+	}
+	.link-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.6);
+		backdrop-filter: blur(var(--blur-sm));
+	}
+	.link-search-input {
+		width: 100%;
+		border: 2px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: var(--bg-panel);
+		padding: 1rem 1.25rem;
+		font-size: 1.125rem;
+		color: var(--text-primary);
+		outline: none;
+		font-family: var(--font-sans);
+		margin-bottom: var(--space-4);
+		transition: border-color 0.2s;
+	}
+	.link-search-input:focus { border-color: var(--accent-200); }
+	
+	.link-results-container {
+		max-height: 300px;
+		overflow-y: auto;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
+		background: var(--bg-panel);
+		padding: var(--space-2);
+	}
+	
+	.link-results-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	
+	.link-result-btn {
+		width: 100%;
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 0.5rem 0.75rem;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-xs);
+		color: var(--text-primary);
+		cursor: pointer;
+		text-align: left;
+		transition: background 0.1s;
+	}
+	.link-result-btn:hover,
+	.link-result-btn.selected {
+		background: rgba(238, 96, 24, 0.12);
+	}
+	
+	.folder-badge {
+		font-size: 0.7rem;
+		color: var(--text-secondary);
+		background: var(--bg-page);
+		padding: 0.125rem 0.375rem;
+		border-radius: 1rem;
+		border: 1px solid var(--border-subtle);
+	}
+
+	.preview-dialog {
+		padding: 0;
+		border: none;
+		border-radius: var(--radius-md);
+		background: transparent;
+		color: var(--text-primary);
+		width: 800px;
+		max-width: 90vw;
+		height: 75vh;
+		max-height: 80vh;
+		outline: none;
+	}
+	.preview-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.4);
+		backdrop-filter: blur(var(--blur-sm));
+	}
+	.preview-layout {
+		display: flex;
+		height: 100%;
+		gap: var(--space-4);
+		position: relative;
+	}
+	.preview-main {
+		flex: 1;
+		background: var(--bg-page);
+		border-radius: var(--radius-md);
+		border: 1px solid var(--border-default);
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		box-shadow: 0 12px 48px rgba(0,0,0,0.5);
+	}
+	.preview-header {
+		padding: var(--space-6) var(--space-8);
+		border-bottom: 1px solid var(--border-subtle);
+		background: var(--bg-panel);
+	}
+	.preview-header h2 {
+		margin: 0 0 var(--space-2) 0;
+		font-size: 1.5rem;
+		color: var(--text-hero);
+	}
+	.preview-meta span {
+		font-family: var(--font-mono);
+		font-size: 0.875rem;
+		color: var(--text-secondary);
+		background: var(--neutral-600);
+		padding: 0.1rem 0.4rem;
+		border-radius: var(--radius-xs);
+	}
+	.preview-content-scroll {
+		flex: 1;
+		overflow-y: auto;
+		background: var(--bg-page);
+	}
+	.preview-sidebar {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		padding-top: var(--space-4);
+		align-items: center;
+	}
+	.icon-btn {
+		width: 48px;
+		height: 48px;
+		border-radius: 50%;
+		background: var(--bg-panel);
+		border: 1px solid var(--border-default);
+		color: var(--text-primary);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition: all 0.2s;
+	}
+	.icon-btn:hover {
+		background: var(--neutral-600);
+		color: var(--text-inverse);
+	}
+	
+	/* Transclusion CSS */
+	:global(.transclusion-wrapper) {
+		display: block;
+		margin: var(--space-4) 0;
+		padding: var(--space-3) var(--space-4);
+		background: rgba(238, 96, 24, 0.05);
+		border-left: 3px solid var(--accent-200);
+		border-radius: var(--radius-sm);
+		color: var(--text-primary);
+		position: relative;
+	}
+	:global(.transclusion-wrapper > *:not(.transclusion-content)) {
+		opacity: 0;
+		position: absolute;
+		pointer-events: none;
+		font-size: 0;
+	}
+	:global(.transclusion-wrapper > .transclusion-content) {
+		opacity: 1;
+		position: relative;
+		pointer-events: auto;
+		font-size: 1rem;
+		line-height: 1.6;
+		display: block;
+	}
+	
+	/* Vditor link theme override */
+	:global(.vditor-reset a),
+	:global(.vditor-ir__link) {
+		color: var(--accent-200) !important;
+		text-decoration-color: var(--accent-200) !important;
+	}
+
+	/* Ensure Vditor fullscreen covers the custom titlebar */
+	:global(.vditor--fullscreen) {
+		z-index: 10000 !important;
+	}
+
+	/* Fullscreen Indicator */
+	.fullscreen-indicator {
+		display: none;
+		position: fixed;
+		bottom: var(--space-8);
+		right: var(--space-8);
+		background: rgba(18, 18, 18, 0.85);
+		color: var(--text-secondary);
+		padding: var(--space-2) var(--space-4);
+		border-radius: var(--radius-full);
+		font-size: 0.875rem;
+		pointer-events: none;
+		z-index: 10001; /* Must be above Vditor's 10000 */
+		backdrop-filter: blur(var(--blur-md));
+		border: 1px solid var(--border-default);
+		box-shadow: var(--shadow-lg);
+	}
+	
+	.fullscreen-indicator span {
+		background: var(--bg-panel);
+		color: var(--text-primary);
+		padding: 2px 6px;
+		border-radius: var(--radius-xs);
+		border: 1px solid var(--border-subtle);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+	}
+
+	:global(.content-area:has(.vditor--fullscreen)) .fullscreen-indicator {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		animation: fade-in 0.3s ease-out;
+	}
+
+	:global(.vditor-hint button[data-mode="wysiwyg"]) {
+		display: none !important;
 	}
 </style>

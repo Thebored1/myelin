@@ -351,7 +351,8 @@
 <style>
 	.shell {
 		display: flex;
-		min-height: 100vh;
+		height: calc(100vh - 32px);
+		max-height: calc(100vh - 32px);
 		position: relative;
 		overflow: hidden;
 		animation: fade-in var(--duration-page) var(--ease-out);
@@ -379,6 +380,7 @@
 		border-right: 1px solid var(--border-default);
 		backdrop-filter: blur(var(--blur-md));
 		overflow-y: auto;
+		min-height: 0;
 	}
 
 	.eyebrow {
@@ -492,10 +494,12 @@
 
 	.content {
 		padding: var(--space-8);
-		display: grid;
+		display: flex;
+		flex-direction: column;
 		gap: var(--space-6);
 		flex: 1;
-		overflow-y: auto;
+		overflow: hidden;
+		min-height: 0;
 	}
 
 	.topbar {
@@ -558,6 +562,10 @@
 		border-radius: var(--radius-sm);
 		border: 1px solid var(--border-default);
 		padding: var(--space-4);
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-height: 0;
 	}
 
 	.notes-header {
@@ -607,6 +615,11 @@
 	.notes-list {
 		display: grid;
 		gap: var(--space-2);
+		flex: 1;
+		overflow-y: auto;
+		min-height: 0;
+		padding-top: 2px;
+		padding-right: var(--space-2);
 	}
 
 	.notes-grid {
@@ -631,6 +644,10 @@
 		margin: var(--space-2) 0;
 		color: var(--text-secondary);
 		line-height: 1.4;
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
 	}
 
 	.meta {

@@ -2,6 +2,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct Backlink {
+    pub source_id: String,
+    pub source_title: String,
+    pub target_block: Option<String>,
+    pub context_excerpt: String,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     pub workspace_path: Option<String>,
     pub notes: Vec<NoteSummary>,
@@ -40,6 +50,8 @@ pub struct NoteSummary {
     pub relative_path: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub backlinks: Vec<Backlink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,6 +71,8 @@ pub struct NoteDocument {
     pub relative_path: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub backlinks: Vec<Backlink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
