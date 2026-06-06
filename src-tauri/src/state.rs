@@ -431,6 +431,11 @@ impl AppState {
         }
     }
 
+    pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {
+        let runtime = self.inner.runtime.read();
+        runtime.notes.values().map(|n| n.document.clone()).collect()
+    }
+
     fn note_summaries(&self) -> Vec<NoteSummary> {
         let runtime = self.inner.runtime.read();
         let notes = runtime

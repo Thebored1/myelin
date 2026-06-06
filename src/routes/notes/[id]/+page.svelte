@@ -95,7 +95,7 @@
 	let linkDialogMode = $state<'notes' | 'blocks'>('notes');
 	let selectedNoteForBlocks = $state<NoteDocument | null>(null);
 	
-	type BlockItem = { text: string, id: string | null, original: string, isFullNote?: boolean };
+	type BlockItem = { text: string, id: string | null, original: string, isFullNote?: boolean, sourceNoteId?: string, sourceNoteTitle?: string };
 	let allNoteBlocks = $state<BlockItem[]>([]);
 	let filteredBlocks = $derived(
 		linkDialogMode === 'blocks'
@@ -200,7 +200,8 @@
 		if (href.startsWith('/notes/')) {
 			e.preventDefault();
 			e.stopPropagation();
-			const targetId = decodeURIComponent(href.replace('/notes/', ''));
+			const fullTargetId = decodeURIComponent(href.replace('/notes/', ''));
+			const targetId = fullTargetId.split('#')[0];
 			await openPreviewModal(targetId);
 		}
 	}
@@ -297,11 +298,138 @@
 				tags: selectedNoteForBlocks.tags,
 				body: selectedNoteForBlocks.body
 			});
+			
+			if (selectedNoteForBlocks.id === note?.id) {
+				setTimeout(() => {
+					if (vditorInstance) {
+						let currentBody = vditorInstance.getValue();
+						if (!currentBody.includes(block.original)) {
+							const escaped = block.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+							const regex = new RegExp(escaped.replace(/\s+/g, '\\s+'));
+							currentBody = currentBody.replace(regex, `$& ((${blockId}))`);
+						} else {
+							currentBody = currentBody.replace(block.original, newBlockText);
+						}
+						vditorInstance.setValue(currentBody);
+						draftBody = currentBody;
+					}
+				}, 50);
+			}
 		}
 		
 		linkNoteDialog?.close();
 		const linkText = `[((${blockId}))](/notes/${selectedNoteForBlocks!.id}#${blockId}) `;
 		insertAtSavedCursor(linkText);
+	}
+
+	let globalSearchDialog: HTMLDialogElement | undefined = $state();
+	let globalSearchQuery = $state('');
+	let globalSelectedIndex = $state(0);
+	
+	let globalBlocks = $state<BlockItem[]>([]);
+	let filteredGlobalBlocks = $derived(
+		globalSearchQuery.trim()
+			? globalBlocks.filter(b => b.text.toLowerCase().includes(globalSearchQuery.toLowerCase()))
+			: globalBlocks.slice(0, 50)
+	);
+
+	async function openGlobalBlockSearch() {
+		saveCursorPosition();
+		globalSearchQuery = '';
+		globalSelectedIndex = 0;
+		globalSearchDialog?.showModal();
+		setTimeout(() => {
+			const input = globalSearchDialog?.querySelector('.link-search-input') as HTMLInputElement;
+			if (input) input.focus();
+		}, 50);
+		
+		isBusy = true;
+		try {
+			const docs = await invoke<NoteDocument[]>('get_all_note_documents');
+			const allBlocks: BlockItem[] = [];
+			for (const doc of docs) {
+				const blocks = parseBlocks(doc.body);
+				for (const b of blocks) {
+					b.sourceNoteId = doc.id;
+					b.sourceNoteTitle = doc.title;
+					allBlocks.push(b);
+				}
+			}
+			globalBlocks = allBlocks;
+		} catch (err) {
+			console.error("Failed to load global blocks", err);
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	function handleGlobalSearchKeydown(e: KeyboardEvent) {
+		const targetListLength = filteredGlobalBlocks.length;
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			globalSelectedIndex = Math.min(targetListLength - 1, globalSelectedIndex + 1);
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			globalSelectedIndex = Math.max(0, globalSelectedIndex - 1);
+		} else if (e.key === 'Enter') {
+			e.preventDefault();
+			if (targetListLength > 0) {
+				void insertGlobalBlockLink(filteredGlobalBlocks[globalSelectedIndex]);
+			}
+		}
+	}
+
+	async function insertGlobalBlockLink(block: BlockItem) {
+		if (!block.sourceNoteId || !block.sourceNoteTitle) return;
+		
+		let blockId = block.id;
+		const isNewBlock = !blockId;
+		if (isNewBlock) {
+			blockId = Math.random().toString(16).substring(2, 8);
+		}
+		
+		globalSearchDialog?.close();
+		const linkText = `[((${blockId}))](/notes/${block.sourceNoteId}#${blockId}) `;
+
+		if (isNewBlock) {
+			const newBlockText = `${block.original} ((${blockId}))`;
+			isBusy = true;
+			try {
+				const sourceDoc = await invoke<NoteDocument>('load_note', { noteId: block.sourceNoteId });
+				sourceDoc.body = sourceDoc.body.replace(block.original, newBlockText);
+				await invoke('save_note', {
+					noteId: sourceDoc.id,
+					title: sourceDoc.title,
+					tags: sourceDoc.tags,
+					body: sourceDoc.body
+				});
+
+				insertAtSavedCursor(linkText);
+
+				if (block.sourceNoteId === note?.id) {
+					setTimeout(() => {
+						if (vditorInstance) {
+							let currentBody = vditorInstance.getValue();
+							if (!currentBody.includes(block.original)) {
+								const escaped = block.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+								const regex = new RegExp(escaped.replace(/\s+/g, '\\s+'));
+								currentBody = currentBody.replace(regex, `$& ((${blockId}))`);
+							} else {
+								currentBody = currentBody.replace(block.original, newBlockText);
+							}
+							vditorInstance.setValue(currentBody);
+							draftBody = currentBody;
+						}
+					}, 50);
+				}
+			} catch(e) {
+				console.error("Failed to update source note", e);
+			} finally {
+				isBusy = false;
+			}
+		} else {
+			insertAtSavedCursor(linkText);
+		}
 	}
 
 	async function loadCurrentNote() {
@@ -354,6 +482,15 @@
 							}, 50);
 						}
 					},
+					{
+						name: 'search-blocks',
+						tipPosition: 'n',
+						tip: 'Search Global Blocks',
+						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+						click: () => {
+							openGlobalBlockSearch();
+						}
+					},
 					"|",
 					"upload", "record", "table", "|", "undo", "redo", "|", "fullscreen", "edit-mode",
 					{
@@ -399,11 +536,15 @@
 					setupTransclusionObserver();
 				},
 				keydown: (e: KeyboardEvent) => {
-					if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+					if ((e.ctrlKey || e.metaKey) && e.code === 'Comma') {
 						e.preventDefault();
-						// Trigger via the toolbar button's click handler
-						const linkBtn = vditorContainer?.querySelector('button[data-type="link-note"]') as HTMLButtonElement | null;
-						if (linkBtn) linkBtn.click();
+						if (e.shiftKey) {
+							const globalSearchBtn = vditorContainer?.querySelector('button[data-type="search-blocks"]') as HTMLButtonElement | null;
+							if (globalSearchBtn) globalSearchBtn.click();
+						} else {
+							const linkBtn = vditorContainer?.querySelector('button[data-type="link-note"]') as HTMLButtonElement | null;
+							if (linkBtn) linkBtn.click();
+						}
 						return;
 					}
 					if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
@@ -441,34 +582,39 @@
 			const contentEl = document.createElement('span');
 			contentEl.className = 'transclusion-content';
 			const shadowRoot = contentEl.attachShadow({ mode: 'open' });
-			shadowRoot.innerHTML = `
-				<style>
+			shadowRoot.innerHTML = `<style>
 					:host {
 						opacity: 1 !important;
 						position: relative !important;
 						pointer-events: auto !important;
 						font-size: 1rem !important;
-						line-height: 1.6 !important;
+						line-height: 1.625 !important;
 						display: block !important;
-						color: var(--text-primary);
-						font-family: inherit;
+						color: var(--text-secondary) !important;
+						font-family: var(--font-mono) !important;
 						white-space: pre-wrap;
 					}
-				</style>
-				<span class="shadow-text"></span>
-			`;
+					a { color: var(--accent-200); text-decoration: none; pointer-events: none; }
+					strong { font-weight: 600; color: var(--text-primary); }
+					em { font-style: italic; }
+				</style><span class="shadow-text"></span>`;
 			
 			if (blockCache[`${targetNoteId}#${blockId}`]) {
-				shadowRoot.querySelector('.shadow-text')!.textContent = blockCache[`${targetNoteId}#${blockId}`];
+				shadowRoot.querySelector('.shadow-text')!.innerHTML = blockCache[`${targetNoteId}#${blockId}`];
 			} else {
 				shadowRoot.querySelector('.shadow-text')!.textContent = 'Loading block...';
 				invoke<NoteDocument>('load_note', { noteId: targetNoteId }).then(n => {
 					const blocks = parseBlocks(n.body);
 					const targetBlock = blocks.find(b => b.id === blockId);
 					if (targetBlock) {
-						const cleanText = targetBlock.text.replace(/\s*\(\([a-fA-F0-9]+\)\)$/, '').trim();
-						blockCache[`${targetNoteId}#${blockId}`] = cleanText;
-						shadowRoot.querySelector('.shadow-text')!.textContent = cleanText;
+						const rawMd = targetBlock.original.replace(/\s*\(\([a-fA-F0-9]+\)\)$/, '').trim();
+						let htmlText = rawMd;
+						htmlText = htmlText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+						htmlText = htmlText.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+						htmlText = htmlText.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+						
+						blockCache[`${targetNoteId}#${blockId}`] = htmlText;
+						shadowRoot.querySelector('.shadow-text')!.innerHTML = htmlText;
 					} else {
 						shadowRoot.querySelector('.shadow-text')!.textContent = 'Block not found.';
 					}
@@ -842,6 +988,42 @@
 				<button class="secondary" style="margin-right: auto;" onclick={() => { linkDialogMode = 'notes'; linkSearchQuery = ''; linkSelectedIndex = 0; }}>Back</button>
 			{/if}
 			<button class="secondary" onclick={() => linkNoteDialog?.close()}>Cancel</button>
+		</div>
+	</div>
+</dialog>
+
+<dialog bind:this={globalSearchDialog} class="link-dialog" onkeydown={handleGlobalSearchKeydown} onclose={() => { globalSearchQuery = ''; globalSelectedIndex = 0; globalBlocks = []; }}>
+	<div class="dialog-content">
+		<h3>Search Global Blocks</h3>
+		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search blocks across all notes.</p>
+		
+		<input class="link-search-input" bind:value={globalSearchQuery} oninput={() => globalSelectedIndex = 0} placeholder="Search global blocks..." />
+		
+		<div class="link-results-container">
+			{#if filteredGlobalBlocks.length > 0}
+				<ul class="link-results-list">
+					{#each filteredGlobalBlocks as block, i}
+						<li>
+							<button class="link-result-btn" class:selected={i === globalSelectedIndex} onclick={() => insertGlobalBlockLink(block)}>
+								<div>
+									<span style="font-size: 0.9em; opacity: 0.9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: left;">
+										{block.text}
+									</span>
+									<span style="font-size: 0.7em; opacity: 0.6; display: block; margin-top: 2px; text-align: left;">
+										From: {block.sourceNoteTitle}
+									</span>
+								</div>
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="empty-state">{globalBlocks.length > 0 ? "No matching blocks found." : "Loading blocks..."}</p>
+			{/if}
+		</div>
+		
+		<div class="dialog-actions">
+			<button class="secondary" onclick={() => globalSearchDialog?.close()}>Cancel</button>
 		</div>
 	</div>
 </dialog>
@@ -1532,13 +1714,13 @@
 	/* Transclusion CSS */
 	:global(.transclusion-wrapper) {
 		display: block;
-		margin: var(--space-4) 0;
-		padding: var(--space-3) var(--space-4);
-		background: rgba(238, 96, 24, 0.05);
-		border-left: 3px solid var(--accent-200);
-		border-radius: var(--radius-sm);
-		color: var(--text-primary);
+		margin: 1rem 0 !important;
+		padding: var(--space-3) 1rem !important;
+		background: rgba(238, 96, 24, 0.05) !important;
+		border-left: 3px solid var(--accent-200) !important;
+		border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
 		position: relative;
+		font-size: 0 !important;
 	}
 	:global(.transclusion-wrapper > *:not(.transclusion-content)) {
 		opacity: 0;
@@ -1550,8 +1732,8 @@
 		opacity: 1;
 		position: relative;
 		pointer-events: auto;
-		font-size: 1rem;
-		line-height: 1.6;
+		font-size: 1rem !important;
+		line-height: 1.625;
 		display: block;
 	}
 	

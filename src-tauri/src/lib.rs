@@ -133,6 +133,11 @@ async fn extract_from_paste(
 }
 
 #[tauri::command]
+async fn get_all_note_documents(state: State<'_, AppState>) -> Result<Vec<NoteDocument>, String> {
+    Ok(state.get_all_note_documents())
+}
+
+#[tauri::command]
 async fn summarise_note(
     _state: State<'_, AppState>,
     _note_id: String,
@@ -183,6 +188,7 @@ pub fn run() {
             get_provider_status,
             rebuild_index,
             get_snapshot,
+            get_all_note_documents,
             extract_from_paste,
             summarise_note,
             ask_ai
