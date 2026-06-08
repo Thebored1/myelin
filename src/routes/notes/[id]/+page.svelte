@@ -24,13 +24,78 @@
 	let vditorContainer: HTMLElement | undefined = $state();
 	let vditorInstance: Vditor | null = null;
 	let fullscreenShortcut = $state('Esc');
-	let savedCursorOffset: number = -1;
-	
-	const CURSOR_MARKER = 'ZCURSORZ';
+	let savedEditorRange: Range | null = null;
+	let shouldRefocusEditor = false;
+
+	function focusEditor() {
+		if (!vditorInstance || !vditorContainer) return;
+		vditorInstance.focus();
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		editorEl?.focus();
+	}
+
+	function refocusEditorSoon() {
+		shouldRefocusEditor = false;
+		setTimeout(() => {
+			focusEditor();
+		}, 0);
+	}
+
+	function getSelectionTextOffset(editorEl: HTMLElement): number | null {
+		const selection = window.getSelection();
+		if (!selection || selection.rangeCount === 0) return null;
+
+		const range = selection.getRangeAt(0);
+		if (!editorEl.contains(range.endContainer)) return null;
+
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		let offset = 0;
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			const textLength = node.textContent?.length ?? 0;
+			if (node === range.endContainer) {
+				return offset + range.endOffset;
+			}
+			offset += textLength;
+		}
+
+		return offset;
+	}
+
+	function restoreSelectionTextOffset(editorEl: HTMLElement, targetOffset: number) {
+		const selection = window.getSelection();
+		if (!selection) return;
+
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		let offset = 0;
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			const textLength = node.textContent?.length ?? 0;
+			const nextOffset = offset + textLength;
+			if (targetOffset <= nextOffset) {
+				const range = document.createRange();
+				range.setStart(node, Math.max(0, targetOffset - offset));
+				range.collapse(true);
+				selection.removeAllRanges();
+				selection.addRange(range);
+				return;
+			}
+			offset = nextOffset;
+		}
+
+		editorEl.focus();
+	}
 	
 	function saveCursorPosition() {
 		if (!vditorInstance || !vditorContainer) return;
-		vditorInstance.insertValue(CURSOR_MARKER, true);
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0) return;
+
+		const range = selection.getRangeAt(0);
+		if (!editorEl.contains(range.commonAncestorContainer)) return;
+
+		savedEditorRange = range.cloneRange();
 	}
 	
 	function insertAtSavedCursor(linkText: string) {
@@ -38,48 +103,21 @@
 		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		if (!editorEl) return;
 		
-		editorEl.focus();
-		
-		// Find the text node containing the marker
-		let markerNode: Node | null = null;
-		let markerOffset = -1;
-		
-		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT, null);
-		let node;
-		while ((node = walker.nextNode())) {
-			const text = node.nodeValue || '';
-			const idx = text.indexOf(CURSOR_MARKER);
-			if (idx !== -1) {
-				markerNode = node;
-				markerOffset = idx;
-				break;
-			}
-		}
-		
-		if (markerNode) {
-			const range = document.createRange();
-			range.setStart(markerNode, markerOffset);
-			range.setEnd(markerNode, markerOffset + CURSOR_MARKER.length);
-			
-			const sel = window.getSelection();
-			if (sel) {
-				sel.removeAllRanges();
-				sel.addRange(range);
-			}
-			
-			editorEl.focus();
-			
-			// Natively delete the highlighted ZCURSORZ marker so it doesn't get left behind
-			document.execCommand('delete', false);
-			
-			// Insert the link at the newly cleared cursor position
-			vditorInstance.insertValue(linkText, true);
+		focusEditor();
 
-		} else {
-			// Fallback if marker somehow got lost
-			vditorInstance.insertValue('\n' + linkText, true);
+		const selection = window.getSelection();
+		if (savedEditorRange && selection) {
+			selection.removeAllRanges();
+			selection.addRange(savedEditorRange);
+		}
+
+		const inserted = document.execCommand('insertText', false, linkText);
+		if (!inserted) {
+			vditorInstance.insertValue(linkText, true);
 		}
 		
+		savedEditorRange = null;
+		focusEditor();
 		draftBody = vditorInstance.getValue();
 		triggerAutoSave();
 	}
@@ -281,9 +319,11 @@
 		if (!selectedNoteForBlocks) return;
 		
 		if (block.isFullNote) {
+			shouldRefocusEditor = true;
 			linkNoteDialog?.close();
 			const linkText = `[${selectedNoteForBlocks.title}](/notes/${selectedNoteForBlocks.id}) `;
 			insertAtSavedCursor(linkText);
+			refocusEditorSoon();
 			return;
 		}
 		
@@ -302,6 +342,8 @@
 			if (selectedNoteForBlocks.id === note?.id) {
 				setTimeout(() => {
 					if (vditorInstance) {
+						const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+						const selectionOffset = editorEl ? getSelectionTextOffset(editorEl) : null;
 						let currentBody = vditorInstance.getValue();
 						if (!currentBody.includes(block.original)) {
 							const escaped = block.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -312,14 +354,23 @@
 						}
 						vditorInstance.setValue(currentBody);
 						draftBody = currentBody;
+						if (selectionOffset !== null) {
+							setTimeout(() => {
+								focusEditor();
+								const refreshedEditorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+								if (refreshedEditorEl) restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
+							}, 0);
+						}
 					}
 				}, 50);
 			}
 		}
 		
+		shouldRefocusEditor = true;
 		linkNoteDialog?.close();
 		const linkText = `[((${blockId}))](/notes/${selectedNoteForBlocks!.id}#${blockId}) `;
 		insertAtSavedCursor(linkText);
+		refocusEditorSoon();
 	}
 
 	let globalSearchDialog: HTMLDialogElement | undefined = $state();
@@ -388,6 +439,7 @@
 			blockId = Math.random().toString(16).substring(2, 8);
 		}
 		
+		shouldRefocusEditor = true;
 		globalSearchDialog?.close();
 		const linkText = `[((${blockId}))](/notes/${block.sourceNoteId}#${blockId}) `;
 
@@ -405,10 +457,13 @@
 				});
 
 				insertAtSavedCursor(linkText);
+				refocusEditorSoon();
 
 				if (block.sourceNoteId === note?.id) {
 					setTimeout(() => {
 						if (vditorInstance) {
+							const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+							const selectionOffset = editorEl ? getSelectionTextOffset(editorEl) : null;
 							let currentBody = vditorInstance.getValue();
 							if (!currentBody.includes(block.original)) {
 								const escaped = block.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -419,6 +474,13 @@
 							}
 							vditorInstance.setValue(currentBody);
 							draftBody = currentBody;
+							if (selectionOffset !== null) {
+								setTimeout(() => {
+									focusEditor();
+									const refreshedEditorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+									if (refreshedEditorEl) restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
+								}, 0);
+							}
 						}
 					}, 50);
 				}
@@ -429,6 +491,7 @@
 			}
 		} else {
 			insertAtSavedCursor(linkText);
+			refocusEditorSoon();
 		}
 	}
 
@@ -932,7 +995,7 @@
 	</div>
 </dialog>
 
-<dialog bind:this={linkNoteDialog} class="link-dialog" onkeydown={handleLinkSearchKeydown} onclose={() => { linkSearchQuery = ''; linkSearchResults = []; linkSelectedIndex = 0; linkDialogMode = 'notes'; }}>
+<dialog bind:this={linkNoteDialog} class="link-dialog" onkeydown={handleLinkSearchKeydown} onclose={() => { linkSearchQuery = ''; linkSearchResults = []; linkSelectedIndex = 0; linkDialogMode = 'notes'; if (shouldRefocusEditor) refocusEditorSoon(); }}>
 	<div class="dialog-content">
 		{#if linkDialogMode === 'notes'}
 			<h3>Link to Note</h3>
@@ -992,7 +1055,7 @@
 	</div>
 </dialog>
 
-<dialog bind:this={globalSearchDialog} class="link-dialog" onkeydown={handleGlobalSearchKeydown} onclose={() => { globalSearchQuery = ''; globalSelectedIndex = 0; globalBlocks = []; }}>
+<dialog bind:this={globalSearchDialog} class="link-dialog" onkeydown={handleGlobalSearchKeydown} onclose={() => { globalSearchQuery = ''; globalSelectedIndex = 0; globalBlocks = []; if (shouldRefocusEditor) refocusEditorSoon(); }}>
 	<div class="dialog-content">
 		<h3>Search Global Blocks</h3>
 		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search blocks across all notes.</p>
