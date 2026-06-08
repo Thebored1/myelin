@@ -250,6 +250,12 @@
 			e.preventDefault();
 			e.stopPropagation();
 		}
+
+		// Prevent Ctrl+Arrow keys (Up/Down) from scrolling in the editor, but allow Shift for text selection
+		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+			e.preventDefault();
+			e.stopPropagation();
+		}
 	}
 
 	function handleLinkSearchKeydown(e: KeyboardEvent) {
@@ -624,6 +630,19 @@
 		}
 	}
 
+	function parseBacklinkContext(context: string): string {
+		if (!context) return '';
+		let html = context;
+		// Strip markdown links but keep text and make it look like a link
+		html = html.replace(/\[([^\]]+)\]\([^)]+\)/g, '<span style="color: var(--accent-200); font-weight: 500;">$1</span>');
+		// Strip transclusion syntax
+		html = html.replace(/\(\([a-fA-F0-9]{6}\)\)/g, '<span style="color: var(--text-secondary);">(Block Link)</span>');
+		// Bold and italic
+		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+		html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+		return html;
+	}
+
 	function scanForTransclusions() {
 		if (!vditorContainer) return;
 		const links = vditorContainer.querySelectorAll('[data-type="a"]:not(.transclusion-wrapper)');
@@ -644,45 +663,34 @@
 			
 			const contentEl = document.createElement('span');
 			contentEl.className = 'transclusion-content';
-			const shadowRoot = contentEl.attachShadow({ mode: 'open' });
-			shadowRoot.innerHTML = `<style>
-					:host {
-						opacity: 1 !important;
-						position: relative !important;
-						pointer-events: auto !important;
-						font-size: 1rem !important;
-						line-height: 1.625 !important;
-						display: block !important;
-						color: var(--text-secondary) !important;
-						font-family: var(--font-mono) !important;
-						white-space: pre-wrap;
-					}
-					a { color: var(--accent-200); text-decoration: none; pointer-events: none; }
-					strong { font-weight: 600; color: var(--text-primary); }
-					em { font-style: italic; }
-				</style><span class="shadow-text"></span>`;
+			contentEl.contentEditable = 'false';
+			contentEl.style.userSelect = 'text';
+			
+			const textSpan = document.createElement('span');
+			textSpan.className = 'shadow-text';
+			contentEl.appendChild(textSpan);
 			
 			if (blockCache[`${targetNoteId}#${blockId}`]) {
-				shadowRoot.querySelector('.shadow-text')!.innerHTML = blockCache[`${targetNoteId}#${blockId}`];
+				textSpan.innerHTML = blockCache[`${targetNoteId}#${blockId}`];
 			} else {
-				shadowRoot.querySelector('.shadow-text')!.textContent = 'Loading block...';
+				textSpan.textContent = 'Loading block...';
 				invoke<NoteDocument>('load_note', { noteId: targetNoteId }).then(n => {
 					const blocks = parseBlocks(n.body);
 					const targetBlock = blocks.find(b => b.id === blockId);
 					if (targetBlock) {
 						const rawMd = targetBlock.original.replace(/\s*\(\([a-fA-F0-9]+\)\)$/, '').trim();
 						let htmlText = rawMd;
-						htmlText = htmlText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+						htmlText = htmlText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="mock-link">$1</span>');
 						htmlText = htmlText.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 						htmlText = htmlText.replace(/\*([^*]+)\*/g, '<em>$1</em>');
 						
 						blockCache[`${targetNoteId}#${blockId}`] = htmlText;
-						shadowRoot.querySelector('.shadow-text')!.innerHTML = htmlText;
+						textSpan.innerHTML = htmlText;
 					} else {
-						shadowRoot.querySelector('.shadow-text')!.textContent = 'Block not found.';
+						textSpan.textContent = 'Block not found.';
 					}
 				}).catch(() => {
-					shadowRoot.querySelector('.shadow-text')!.textContent = 'Error loading block.';
+					textSpan.textContent = 'Error loading block.';
 				});
 			}
 			linkWrapper.appendChild(contentEl);
@@ -902,7 +910,7 @@
 			<div class="content-area" style="position: relative;">
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture}></div>
+				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
 				<div class="fullscreen-indicator">
 					Press <span>{fullscreenShortcut}</span> to toggle
 				</div>
@@ -965,7 +973,7 @@
 									{/if}
 								</a>
 								<p class="context-excerpt" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.4;">
-									{link.contextExcerpt}
+									{@html parseBacklinkContext(link.contextExcerpt)}
 								</p>
 							</li>
 						{/each}
@@ -1776,28 +1784,62 @@
 	
 	/* Transclusion CSS */
 	:global(.transclusion-wrapper) {
-		display: block;
+		display: block !important;
 		margin: 1rem 0 !important;
-		padding: var(--space-3) 1rem !important;
-		background: rgba(238, 96, 24, 0.05) !important;
-		border-left: 3px solid var(--accent-200) !important;
-		border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
 		position: relative;
-		font-size: 0 !important;
 	}
+
+	/* The original text (1px tall so caret can enter, but invisible) */
 	:global(.transclusion-wrapper > *:not(.transclusion-content)) {
-		opacity: 0;
-		position: absolute;
+		opacity: 0.001;
+		font-size: 1px !important;
+		line-height: 1px !important;
+		display: inline-block;
+		height: 1px;
+		color: transparent;
 		pointer-events: none;
-		font-size: 0;
+		vertical-align: top;
 	}
-	:global(.transclusion-wrapper > .transclusion-content) {
+
+	/* Show raw text only when cursor is actively inside it (markers expanded) */
+	:global(.transclusion-wrapper:has(> .vditor-ir__marker:not(.vditor-ir__marker--hide)) > *:not(.transclusion-content)) {
 		opacity: 1;
-		position: relative;
+		font-size: inherit !important;
+		line-height: inherit !important;
+		height: auto;
+		display: inline;
+		color: inherit;
 		pointer-events: auto;
-		font-size: 1rem !important;
-		line-height: 1.625;
+	}
+
+	/* Hide transclusion block when cursor is actively inside it */
+	:global(.transclusion-wrapper:has(> .vditor-ir__marker:not(.vditor-ir__marker--hide)) > .transclusion-content) {
+		display: none !important;
+	}
+	
+	/* The transclusion content overlay (styled in Light DOM) */
+	:global(.transclusion-wrapper > .transclusion-content) {
 		display: block;
+		padding: var(--space-3) 1rem;
+		background: rgba(238, 96, 24, 0.05);
+		border-left: 3px solid var(--accent-200);
+		border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		white-space: pre-wrap;
+		pointer-events: auto;
+	}
+	:global(.transclusion-wrapper > .transclusion-content .mock-link) {
+		color: var(--accent-200);
+		text-decoration: none;
+		pointer-events: none;
+	}
+	:global(.transclusion-wrapper > .transclusion-content strong) {
+		font-weight: 600;
+		color: var(--text-primary);
+	}
+	:global(.transclusion-wrapper > .transclusion-content em) {
+		font-style: italic;
 	}
 	
 	/* Vditor link theme override */

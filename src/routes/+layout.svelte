@@ -15,20 +15,43 @@
 		
 		// Prevent Ctrl+A globally unless focused in an input or editor
 		const handleGlobalKeydown = (e: KeyboardEvent) => {
+			const target = e.target as HTMLElement;
+			const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+			const isContentEditable = target.isContentEditable;
+
 			if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-				const target = e.target as HTMLElement;
-				const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
-				const isContentEditable = target.isContentEditable;
-				
 				if (!isInput && !isContentEditable) {
 					e.preventDefault();
 				}
 			}
+
+			// Prevent Ctrl+Arrow and plain arrow keys from scrolling the page
+			const arrowKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+			if (arrowKeys.includes(e.key)) {
+				if (!isInput && !isContentEditable) {
+					e.preventDefault();
+				}
+			}
+
+			// Prevent Ctrl+Arrow keys from scrolling (Up/Down usually scroll), but allow Shift for selection
+			if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+				e.preventDefault();
+			}
 		};
-		
+
+		const handleGlobalWheel = (e: WheelEvent) => {
+			if (e.ctrlKey || e.metaKey) {
+				e.preventDefault(); // Prevent zooming with Ctrl+Scroll
+			}
+		};
+
 		if (typeof window !== 'undefined') {
-			window.addEventListener('keydown', handleGlobalKeydown);
-			return () => window.removeEventListener('keydown', handleGlobalKeydown);
+			window.addEventListener('keydown', handleGlobalKeydown, { passive: false });
+			window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+			return () => {
+				window.removeEventListener('keydown', handleGlobalKeydown);
+				window.removeEventListener('wheel', handleGlobalWheel);
+			};
 		}
 	});
 
