@@ -477,10 +477,7 @@
 					body: sourceDoc.body
 				});
 
-				insertAtSavedCursor(linkText);
-				refocusEditorSoon();
-
-				if (block.sourceNoteId === note?.id) {
+				if (sourceDoc.id === note?.id) {
 					setTimeout(() => {
 						if (vditorInstance) {
 							const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
@@ -505,10 +502,15 @@
 						}
 					}, 50);
 				}
-			} catch(e) {
-				console.error("Failed to update source note", e);
+
+				insertAtSavedCursor(linkText);
+			} catch (err) {
+				console.error("Failed to append block ID to source note", err);
+				message = "Failed to update source note.";
+				setTimeout(() => message = '', 3000);
 			} finally {
 				isBusy = false;
+				refocusEditorSoon();
 			}
 		} else {
 			insertAtSavedCursor(linkText);
