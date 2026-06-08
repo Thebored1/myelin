@@ -256,7 +256,22 @@
 			e.preventDefault();
 			e.stopPropagation();
 		}
+
+		// Vditor has a bug where it freezes during Shift+Arrow selection across nodes.
+		// By completely stopping propagation, the browser's native text selection engine
+		// takes over flawlessly and Vditor's internal range parser never runs.
+		if (e.shiftKey && e.key.startsWith('Arrow')) {
+			e.stopImmediatePropagation();
+		}
 	}
+
+	function handleVditorKeyupCapture(e: KeyboardEvent) {
+		// Stop Vditor's keyup processor (which calls expandMarker and freezes)
+		if (e.shiftKey && e.key.startsWith('Arrow')) {
+			e.stopImmediatePropagation();
+		}
+	}
+
 
 	function handleLinkSearchKeydown(e: KeyboardEvent) {
 		const targetListLength = linkDialogMode === 'notes' ? linkSearchResults.length : filteredBlocks.length;
@@ -661,19 +676,13 @@
 			const targetNoteId = urlMatch[1];
 			linkWrapper.classList.add('transclusion-wrapper');
 			
-			const contentEl = document.createElement('span');
-			contentEl.className = 'transclusion-content';
-			contentEl.contentEditable = 'false';
-			contentEl.style.userSelect = 'text';
-			
-			const textSpan = document.createElement('span');
-			textSpan.className = 'shadow-text';
-			contentEl.appendChild(textSpan);
-			
-			if (blockCache[`${targetNoteId}#${blockId}`]) {
-				textSpan.innerHTML = blockCache[`${targetNoteId}#${blockId}`];
+			// Load block content for the tooltip and CSS rendering — no DOM injection
+			const cacheKey = `${targetNoteId}#${blockId}`;
+			if (blockCache[cacheKey]) {
+				const plainText = blockCache[cacheKey].replace(/<[^>]+>/g, '');
+				(linkWrapper as HTMLElement).title = plainText;
+				(linkWrapper as HTMLElement).setAttribute('data-block-content', plainText);
 			} else {
-				textSpan.textContent = 'Loading block...';
 				invoke<NoteDocument>('load_note', { noteId: targetNoteId }).then(n => {
 					const blocks = parseBlocks(n.body);
 					const targetBlock = blocks.find(b => b.id === blockId);
@@ -683,17 +692,14 @@
 						htmlText = htmlText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="mock-link">$1</span>');
 						htmlText = htmlText.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 						htmlText = htmlText.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-						
-						blockCache[`${targetNoteId}#${blockId}`] = htmlText;
-						textSpan.innerHTML = htmlText;
-					} else {
-						textSpan.textContent = 'Block not found.';
+						blockCache[cacheKey] = htmlText;
+						// Set plain-text tooltip and data attribute
+						const plainText = htmlText.replace(/<[^>]+>/g, '');
+						(linkWrapper as HTMLElement).title = plainText;
+						(linkWrapper as HTMLElement).setAttribute('data-block-content', plainText);
 					}
-				}).catch(() => {
-					textSpan.textContent = 'Error loading block.';
-				});
+				}).catch(() => {});
 			}
-			linkWrapper.appendChild(contentEl);
 		});
 	}
 
@@ -834,6 +840,27 @@
 		updateToolbarOverflow();
 	});
 
+	function handleGlobalSelectionChange() {
+		if (!vditorContainer) return;
+		const sel = window.getSelection();
+		
+		// Clean up previous expansion
+		vditorContainer.querySelectorAll('.force-expand').forEach(el => {
+			el.classList.remove('force-expand');
+		});
+
+		// Only expand if there's an active text selection (not collapsed)
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+
+		// Expand links that intersect the current selection
+		const links = vditorContainer.querySelectorAll('[data-type="a"]');
+		links.forEach(link => {
+			if (sel.containsNode(link, true)) {
+				link.classList.add('force-expand');
+			}
+		});
+	}
+
 	onMount(() => {
 		$showSidebarToggle = true;
 		void loadCurrentNote();
@@ -850,9 +877,11 @@
 			}
 		};
 		mql.addEventListener('change', handleMediaChange);
+		document.addEventListener('selectionchange', handleGlobalSelectionChange);
 
 		return () => {
 			mql.removeEventListener('change', handleMediaChange);
+			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
 			$showSidebarToggle = false;
 		};
 	});
@@ -860,6 +889,9 @@
 	onDestroy(() => {
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
 		if (vditorInstance) vditorInstance.destroy();
+		if (typeof document !== 'undefined') {
+			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
+		}
 	});
 </script>
 
@@ -910,7 +942,7 @@
 			<div class="content-area" style="position: relative;">
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
+				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onkeyupcapture={handleVditorKeyupCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
 				<div class="fullscreen-indicator">
 					Press <span>{fullscreenShortcut}</span> to toggle
 				</div>
@@ -1782,44 +1814,44 @@
 		color: var(--text-inverse);
 	}
 	
-	/* Transclusion CSS */
-	:global(.transclusion-wrapper) {
-		display: block !important;
-		margin: 1rem 0 !important;
-		position: relative;
-	}
-
-	/* The original text (1px tall so caret can enter, but invisible) */
-	:global(.transclusion-wrapper > *:not(.transclusion-content)) {
-		opacity: 0.001;
-		font-size: 1px !important;
-		line-height: 1px !important;
-		display: inline-block;
-		height: 1px;
-		color: transparent;
-		pointer-events: none;
-		vertical-align: top;
-	}
-
-	/* Show raw text only when cursor is actively inside it (markers expanded) */
-	:global(.transclusion-wrapper:has(> .vditor-ir__marker:not(.vditor-ir__marker--hide)) > *:not(.transclusion-content)) {
-		opacity: 1;
-		font-size: inherit !important;
-		line-height: inherit !important;
-		height: auto;
-		display: inline;
-		color: inherit;
-		pointer-events: auto;
-	}
-
-	/* Hide transclusion block when cursor is actively inside it */
-	:global(.transclusion-wrapper:has(> .vditor-ir__marker:not(.vditor-ir__marker--hide)) > .transclusion-content) {
+	/* Base State (Collapsed): Hide the link text completely to make the transclusion look seamless */
+	:global(.transclusion-wrapper[data-block-content]:not([data-block-content=""]):not(.vditor-ir__node--expand):not(.force-expand) .vditor-ir__link) {
 		display: none !important;
 	}
-	
-	/* The transclusion content overlay (styled in Light DOM) */
-	:global(.transclusion-wrapper > .transclusion-content) {
+	/* Strip the wrapper pill background when collapsed because we only want the ::after to show */
+	:global(.transclusion-wrapper[data-block-content]:not([data-block-content=""]):not(.vditor-ir__node--expand):not(.force-expand)) {
+		padding: 0 !important;
+		background: transparent !important;
+		border: none !important;
+		display: block !important;
+	}
+	/* Ensure the ::after preview has no top margin since there's no text above it */
+	:global(.transclusion-wrapper[data-block-content]:not([data-block-content=""]):not(.vditor-ir__node--expand):not(.force-expand)::after) {
+		margin-top: 0 !important;
+	}
+
+	/* Active State (Selected or Edited): Restore the orange pill styling */
+	:global(.transclusion-wrapper.force-expand),
+	:global(.transclusion-wrapper.vditor-ir__node--expand) {
+		padding: 0.25rem 0.5rem !important;
+		background: rgba(238, 96, 24, 0.06) !important;
+		border-left: 3px solid var(--accent-200) !important;
+		border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
+		display: inline-block !important;
+	}
+
+	/* Style the link text nicely when active */
+	:global(.transclusion-wrapper .vditor-ir__link) {
+		color: var(--accent-200) !important;
+		font-family: var(--font-mono) !important;
+		font-size: 0.875em !important;
+	}
+
+	/* Render the block content seamlessly via pseudo-element */
+	:global(.transclusion-wrapper::after) {
+		content: attr(data-block-content);
 		display: block;
+		margin-top: 0.5rem;
 		padding: var(--space-3) 1rem;
 		background: rgba(238, 96, 24, 0.05);
 		border-left: 3px solid var(--accent-200);
@@ -1827,19 +1859,23 @@
 		color: var(--text-secondary);
 		font-family: var(--font-mono);
 		white-space: pre-wrap;
-		pointer-events: auto;
+		font-size: 0.85em;
+		line-height: 1.5;
+		cursor: default;
 	}
-	:global(.transclusion-wrapper > .transclusion-content .mock-link) {
-		color: var(--accent-200);
-		text-decoration: none;
-		pointer-events: none;
+
+	/* Hide the transclusion content when the link is actively selected or edited to prevent visual clutter */
+	:global(.transclusion-wrapper.force-expand::after),
+	:global(.transclusion-wrapper.vditor-ir__node--expand::after) {
+		display: none !important;
 	}
-	:global(.transclusion-wrapper > .transclusion-content strong) {
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-	:global(.transclusion-wrapper > .transclusion-content em) {
-		font-style: italic;
+
+	/* Prevent Vditor from "truncating" (hiding) link markers ONLY when actively selected or edited */
+	:global(.vditor-ir__node[data-type="a"].force-expand .vditor-ir__marker),
+	:global(.vditor-ir__node[data-type="a"].vditor-ir__node--expand .vditor-ir__marker) {
+		display: inline !important;
+		opacity: 0.6;
+		font-family: var(--font-mono);
 	}
 	
 	/* Vditor link theme override */
