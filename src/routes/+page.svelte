@@ -26,6 +26,53 @@
 	let pendingCreateCount = 0;
 	let createLoopRunning = false;
 	let sidebarOpen = $state(false);
+
+	let commonplaces = $derived.by(() => {
+		if (!app?.notes) return [];
+		
+		const graph = new Map<string, Set<string>>();
+		app.notes.forEach((note) => {
+			if (!graph.has(note.id)) graph.set(note.id, new Set());
+			note.backlinks.forEach((link) => {
+				if (!graph.has(link.sourceId)) graph.set(link.sourceId, new Set());
+				graph.get(note.id)!.add(link.sourceId);
+				graph.get(link.sourceId)!.add(note.id);
+			});
+		});
+
+		const visited = new Set<string>();
+		const clusters: NoteSummary[][] = [];
+		const noteMap = new Map(app.notes.map((n) => [n.id, n]));
+
+		app.notes.forEach((note) => {
+			if (!visited.has(note.id)) {
+				const cluster: string[] = [];
+				const queue = [note.id];
+				visited.add(note.id);
+				
+				while (queue.length > 0) {
+					const curr = queue.shift()!;
+					cluster.push(curr);
+					
+					graph.get(curr)?.forEach((neighbor) => {
+						if (!visited.has(neighbor)) {
+							visited.add(neighbor);
+							queue.push(neighbor);
+						}
+					});
+				}
+				
+				if (cluster.length > 1) {
+					const mapped = cluster.map((id) => noteMap.get(id)).filter((n): n is NoteSummary => !!n);
+					if (mapped.length > 1) {
+						clusters.push(mapped);
+					}
+				}
+			}
+		});
+		
+		return clusters.sort((a, b) => b.length - a.length);
+	});
 	let visibleNotes = $derived.by(() => {
 		const baseNotes = (
 			query && searchResults
@@ -281,14 +328,35 @@
 			</label>
 		</header>
 
-		<section class="nodes-placeholder">
-			<div class="nodes-header">
-				<h3>Nodes</h3>
-				<span>0</span>
+		<section class="commonplace-section">
+			<div class="commonplace-header">
+				<h3>Commonplace</h3>
+				<span>{commonplaces.length}</span>
 			</div>
-			<div class="nodes-empty-state">
-				<p>Nodes are not available yet.</p>
-			</div>
+			
+			{#if commonplaces.length === 0}
+				<div class="commonplace-empty-state">
+					<p>No interconnected notes found yet. Link notes together to form Commonplaces.</p>
+				</div>
+			{:else}
+				<div class="commonplaces-grid">
+					{#each commonplaces as cluster, i}
+						<div class="commonplace-card">
+							<div class="commonplace-card-header">
+								<h4>Cluster {i + 1}</h4>
+								<span>{cluster.length} connected notes</span>
+							</div>
+							<div class="commonplace-notes">
+								{#each cluster as note}
+									<button class="note-pill" onclick={() => openNote(note.id)}>
+										{note.title}
+									</button>
+								{/each}
+							</div>
+						</div>
+					{/each}
+				</div>
+			{/if}
 		</section>
 
 		<section class="notes">
@@ -579,11 +647,11 @@
 		min-height: 0;
 	}
 
-	.nodes-placeholder {
+	.commonplace-section {
 		margin-bottom: var(--space-8);
 	}
 
-	.nodes-empty-state {
+	.commonplace-empty-state {
 		padding: var(--space-6) 0;
 		text-align: center;
 		color: var(--text-secondary);
@@ -594,7 +662,7 @@
 	}
 
 	.notes-header,
-	.nodes-header {
+	.commonplace-header {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
@@ -604,11 +672,76 @@
 	}
 
 	.notes-header span,
-	.nodes-header span,
+	.commonplace-header span,
 	.meta {
 		font-family: var(--font-mono);
 		font-size: 0.75rem;
 		color: var(--text-secondary);
+	}
+
+	.commonplaces-grid {
+		column-width: 18rem;
+		column-gap: var(--space-4);
+		margin-top: var(--space-4);
+	}
+
+	.commonplace-card {
+		break-inside: avoid;
+		margin-bottom: var(--space-4);
+		background: rgba(20, 20, 20, 0.4);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		padding: var(--space-4);
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+	}
+
+	.commonplace-card-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+	}
+
+	.commonplace-card-header h4 {
+		margin: 0;
+		font-size: 1rem;
+		color: var(--text-primary);
+	}
+
+	.commonplace-card-header span {
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+	}
+
+	.commonplace-notes {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2);
+	}
+
+	.note-pill {
+		background: var(--bg-panel);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		padding: 0.35rem 0.75rem;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		transition: all var(--duration-fast) var(--ease-standard);
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+		text-align: left;
+		line-height: 1.4;
+		max-width: 100%;
+	}
+
+	.note-pill:hover {
+		border-color: var(--accent-200);
+		color: var(--text-primary);
+		transform: translateY(-1px);
 	}
 
 	.library-controls,
