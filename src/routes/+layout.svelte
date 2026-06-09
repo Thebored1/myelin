@@ -225,6 +225,15 @@
 		overflow: hidden;
 	}
 
+	:global(input),
+	:global(textarea),
+	:global(select),
+	:global(button),
+	:global(.vditor),
+	:global(.interactive) {
+		font-family: var(--font-mono);
+	}
+
 	:global(*),
 	:global(*::before),
 	:global(*::after) {

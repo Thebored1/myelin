@@ -86,7 +86,8 @@
 			excerpt: excerptFromBody(note.body),
 			relativePath: note.relativePath,
 			createdAt: note.createdAt,
-			updatedAt: note.updatedAt
+			updatedAt: note.updatedAt,
+			backlinks: note.backlinks
 		};
 
 		const existingIndex = app.notes.findIndex((entry) => entry.id === note.id);
@@ -279,6 +280,16 @@
 				/>
 			</label>
 		</header>
+
+		<section class="nodes-placeholder">
+			<div class="nodes-header">
+				<h3>Nodes</h3>
+				<span>0</span>
+			</div>
+			<div class="nodes-empty-state">
+				<p>Nodes are not available yet.</p>
+			</div>
+		</section>
 
 		<section class="notes">
 			<div class="notes-header">
@@ -568,7 +579,22 @@
 		min-height: 0;
 	}
 
-	.notes-header {
+	.nodes-placeholder {
+		margin-bottom: var(--space-8);
+	}
+
+	.nodes-empty-state {
+		padding: var(--space-6) 0;
+		text-align: center;
+		color: var(--text-secondary);
+		font-size: 0.875rem;
+		border: 1px dashed var(--border-subtle);
+		border-radius: var(--radius-md);
+		margin-top: var(--space-4);
+	}
+
+	.notes-header,
+	.nodes-header {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
@@ -578,6 +604,7 @@
 	}
 
 	.notes-header span,
+	.nodes-header span,
 	.meta {
 		font-family: var(--font-mono);
 		font-size: 0.75rem;

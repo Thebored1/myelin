@@ -1,5 +1,6 @@
 mod models;
 mod state;
+pub mod git_history;
 
 use models::{AppSnapshot, NoteDocument, ProviderStatus, SearchResponse};
 use state::AppState;
@@ -22,9 +23,9 @@ async fn set_workspace(
 }
 
 #[tauri::command]
-async fn create_note(state: State<'_, AppState>, title: String) -> Result<NoteDocument, String> {
+async fn create_note(state: State<'_, AppState>, title: String, source_pdf: Option<String>) -> Result<NoteDocument, String> {
     state
-        .create_note(title)
+        .create_note(title, source_pdf)
         .await
         .map_err(|error| error.to_string())
 }
@@ -44,9 +45,11 @@ async fn save_note(
     title: String,
     tags: Vec<String>,
     body: String,
+    source_pdf: Option<String>,
+    annotations: Option<Vec<crate::models::PdfAnnotation>>,
 ) -> Result<NoteDocument, String> {
     state
-        .save_note(note_id, title, tags, body)
+        .save_note(note_id, title, tags, body, source_pdf, annotations)
         .await
         .map_err(|error| error.to_string())
 }
@@ -138,6 +141,14 @@ async fn get_all_note_documents(state: State<'_, AppState>) -> Result<Vec<NoteDo
 }
 
 #[tauri::command]
+async fn read_pdf_binary(state: State<'_, AppState>, note_id: String) -> Result<Vec<u8>, String> {
+    state
+        .read_pdf_binary(note_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn summarise_note(
     _state: State<'_, AppState>,
     _note_id: String,
@@ -152,6 +163,29 @@ async fn ask_ai(
     _question: String,
 ) -> Result<String, String> {
     Ok("Mocked AI response to your question...".into())
+}
+
+#[tauri::command]
+async fn get_note_history(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> Result<Vec<crate::git_history::GitCommit>, String> {
+    state
+        .get_note_history(note_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_note_version(
+    state: State<'_, AppState>,
+    note_id: String,
+    commit_hash: String,
+) -> Result<String, String> {
+    state
+        .get_note_version(note_id, commit_hash)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -190,8 +224,11 @@ pub fn run() {
             get_snapshot,
             get_all_note_documents,
             extract_from_paste,
+            read_pdf_binary,
             summarise_note,
-            ask_ai
+            ask_ai,
+            get_note_history,
+            get_note_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

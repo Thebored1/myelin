@@ -1,16 +1,15 @@
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
-	import { goto, beforeNavigate } from '$app/navigation';
+	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import type { NoteDocument, SearchResponse, NoteSummary, PdfAnnotation } from '$lib/types';
+	import type { NoteDocument, SearchResponse, NoteSummary } from '$lib/types';
 	import { onMount, onDestroy } from 'svelte';
 	import { sidebarOpen, showSidebarToggle } from '$lib/stores';
 	import Vditor from 'vditor';
 	import 'vditor/dist/index.css';
 	import 'mathlive';
 	import 'mathlive/fonts.css';
-	import PdfViewer from '$lib/components/PdfViewer.svelte';
 
 	let note = $state<NoteDocument | null>(null);
 	let draftBody = $state('');
@@ -27,49 +26,6 @@
 	let fullscreenShortcut = $state('Esc');
 	let savedEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
-
-	let isMainNotePdf = $state(false);
-	let activePdfId = $state<string | null>(null);
-	let activePdfBytes = $state<Uint8Array | null>(null);
-	let scratchpadSavedId = $state<string | null>(null);
-	let showAttachedNote = $state(false);
-	
-	let splitRatio = $state(50);
-	let isResizing = $state(false);
-	let mainLayoutEl: HTMLElement | undefined = $state();
-
-	function startResizing() {
-		isResizing = true;
-	}
-
-	function handleGlobalMouseMove(e: MouseEvent) {
-		if (!isResizing || !mainLayoutEl) return;
-		const rect = mainLayoutEl.getBoundingClientRect();
-		const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
-		if (newRatio > 20 && newRatio < 80) {
-			splitRatio = newRatio;
-		}
-	}
-
-	function stopResizing() {
-		if (isResizing) {
-			isResizing = false;
-			if (vditorInstance) {
-				// Let Vditor resize after layout shift
-				setTimeout(() => {
-					window.dispatchEvent(new Event('resize'));
-				}, 50);
-			}
-		}
-	}
-
-	function handlePdfQuote(text: string, page: number) {
-		if (vditorInstance) {
-			showAttachedNote = true;
-			vditorInstance.insertValue(`\n> ${text}\n> *(Page ${page})*\n\n`);
-			triggerAutoSave();
-		}
-	}
 
 	function focusEditor() {
 		if (!vditorInstance || !vditorContainer) return;
@@ -200,8 +156,6 @@
 	
 	let saveStatus = $state<'saved' | 'saving' | 'unsaved'>('saved');
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
-	let navigationWarningDialog: HTMLDialogElement | undefined = $state();
-	let pendingNavigationUrl = $state('');
 
 	function triggerAutoSave() {
 		if (saveStatus !== 'saving') saveStatus = 'unsaved';
@@ -567,40 +521,15 @@
 	async function loadCurrentNote() {
 		const noteId = page.params.id;
 		note = await invoke<NoteDocument>('load_note', { noteId });
-		isMainNotePdf = note.relativePath.toLowerCase().endsWith('.pdf');
-		if (isMainNotePdf) {
-			draftTitle = note.title;
-			draftBody = "";
-			draftTags = note.tags.join(', ');
-			activePdfId = note.id;
-			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: note.id });
-			activePdfBytes = new Uint8Array(bytes);
-			scratchpadSavedId = null;
-			showAttachedNote = false;
-		} else {
-			draftTitle = note.title;
-			draftBody = note.body;
-			draftTags = note.tags.join(', ');
-			
-			if (note.sourcePdf) {
-				activePdfId = note.sourcePdf;
-				const bytes = await invoke<number[]>('read_pdf_binary', { noteId: note.sourcePdf });
-				activePdfBytes = new Uint8Array(bytes);
-				showAttachedNote = draftBody.trim().length > 0;
-			} else {
-				activePdfId = null;
-				activePdfBytes = null;
-				showAttachedNote = true;
-			}
-		}
-
+		draftTitle = note.title;
+		draftBody = note.body;
+		draftTags = note.tags.join(', ');
 		message = '';
 		void fetchRelatedNotes();
 		
 		if (vditorContainer) {
 			vditorInstance = new Vditor(vditorContainer, {
 				value: draftBody,
-				placeholder: isMainNotePdf ? "Scratchpad for PDF notes..." : "Start typing here...",
 				mode: 'ir',
 				theme: 'dark',
 				icon: 'material',
@@ -806,66 +735,22 @@
 		}
 	}
 
-	function handleAnnotationsChange(anns: PdfAnnotation[]) {
-		if (note) {
-			note.annotations = anns;
-			triggerAutoSave();
-		}
-	}
-
-	function handleImageExtract(base64: string) {
-		if (vditorInstance) {
-			showAttachedNote = true; // Ensure Vditor is visible
-			const imageMd = `\n\n![Extracted Image](${base64})\n\n`;
-			vditorInstance.insertValue(imageMd);
-			triggerAutoSave();
-		}
-	}
-
 	async function saveNote() {
 		if (!note) return;
 		isBusy = true;
 		saveStatus = 'saving';
 		try {
-			let targetId = note.id;
-			if (isMainNotePdf) {
-				if (!scratchpadSavedId) {
-					const newNote = await invoke<NoteDocument>('create_note', { 
-						title: draftTitle,
-						sourcePdf: activePdfId
-					});
-					scratchpadSavedId = newNote.id;
-				}
-				targetId = scratchpadSavedId;
-			}
-
-			const sentTitle = draftTitle;
-			const saved = await invoke<NoteDocument>('save_note', {
-				noteId: targetId,
-				title: sentTitle,
+			note = await invoke<NoteDocument>('save_note', {
+				noteId: note.id,
+				title: draftTitle,
 				tags: draftTags
 					.split(',')
 					.map((tag) => tag.trim())
 					.filter(Boolean),
-				body: draftBody,
-				sourcePdf: activePdfId,
-				annotations: note.annotations
+				body: draftBody
 			});
-
-			if (!isMainNotePdf) {
-				note = saved;
-			}
-			
-			if (draftTitle === sentTitle) {
-				draftTitle = saved.title;
-			}
-			
 			saveStatus = 'saved';
 			void fetchRelatedNotes();
-		} catch (err) {
-			console.error("Save error:", err);
-			saveStatus = 'unsaved';
-			message = `Save failed: ${err}`;
 		} finally {
 			isBusy = false;
 		}
@@ -888,53 +773,10 @@
 		try {
 			const duplicated = await invoke<NoteDocument>('duplicate_note', { noteId: note.id });
 			// Navigate and reload
-			safeNavigate(`/notes/${encodeURIComponent(duplicated.id)}`);
+			window.location.href = resolve(`/notes/${encodeURIComponent(duplicated.id)}`);
 		} finally {
 			isBusy = false;
 		}
-	}
-
-	let isProgrammaticNavigation = false;
-
-	function safeNavigate(url: string) {
-		if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-			pendingNavigationUrl = url;
-			navigationWarningDialog?.showModal();
-			return;
-		}
-		isProgrammaticNavigation = true;
-		window.location.href = resolve(url);
-	}
-
-	function handleBeforeUnload(e: BeforeUnloadEvent) {
-		if (isProgrammaticNavigation) return;
-		if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-			e.preventDefault();
-			e.returnValue = '';
-		}
-	}
-
-	beforeNavigate(({ cancel, to }) => {
-		if (isProgrammaticNavigation) return;
-		if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-			pendingNavigationUrl = to?.url.pathname || '';
-			navigationWarningDialog?.showModal();
-			cancel();
-		}
-	});
-
-	function confirmNavigation() {
-		navigationWarningDialog?.close();
-		if (pendingNavigationUrl) {
-			isProgrammaticNavigation = true;
-			window.location.href = resolve(pendingNavigationUrl);
-			pendingNavigationUrl = '';
-		}
-	}
-
-	function cancelNavigation() {
-		navigationWarningDialog?.close();
-		pendingNavigationUrl = '';
 	}
 
 	// AI Actions
@@ -1038,16 +880,9 @@
 		};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
-		window.addEventListener('mousemove', handleGlobalMouseMove);
-		window.addEventListener('mouseup', stopResizing);
-		window.addEventListener('beforeunload', handleBeforeUnload);
 
 		return () => {
 			mql.removeEventListener('change', handleMediaChange);
-			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
-			window.removeEventListener('mousemove', handleGlobalMouseMove);
-			window.removeEventListener('mouseup', stopResizing);
-			window.removeEventListener('beforeunload', handleBeforeUnload);
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
 			$showSidebarToggle = false;
 		};
@@ -1081,7 +916,7 @@
 <div class="editor-shell">
 	<header class="editor-header">
 		<div class="header-copy">
-			<button class="back-link" onclick={() => safeNavigate(backUrl)} aria-label="Go back" title="Go back">
+			<button class="back-link" onclick={() => window.location.href = resolve(backUrl)} aria-label="Go back" title="Go back">
 				<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
 					<line x1="19" y1="12" x2="5" y2="12"></line>
 					<polyline points="12 19 5 12 12 5"></polyline>
@@ -1103,28 +938,9 @@
 		</div>
 	</header>
 
-	<div class="main-layout" class:split-layout={activePdfBytes !== null && showAttachedNote} bind:this={mainLayoutEl}>
-		{#if activePdfBytes}
-			<section class="pdf-pane" style="width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
-				<PdfViewer 
-					pdfBytes={activePdfBytes} 
-					annotations={note?.annotations || []}
-					onQuote={handlePdfQuote} 
-					onAnnotationsChange={handleAnnotationsChange}
-					onImageExtract={handleImageExtract}
-					onAttachNote={() => showAttachedNote = true}
-					showAttachButton={!showAttachedNote}
-				/>
-			</section>
-			{#if showAttachedNote}
-				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div class="resizer" onmousedown={startResizing} class:resizing={isResizing}></div>
-			{/if}
-		{/if}
-
+	<div class="main-layout">
 		<!-- Main Content Area -->
-		{#if showAttachedNote || !activePdfBytes}
-		<section class="main-pane" style={activePdfBytes ? `width: ${100 - splitRatio}%` : ''}>
+		<section class="main-pane">
 			<div class="content-area" style="position: relative;">
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1201,7 +1017,6 @@
 				{/if}
 			</div>
 		</aside>
-		{/if}
 	</div>
 </div>
 
@@ -1338,25 +1153,12 @@
 				<button class="icon-btn" onclick={() => previewNoteDialog?.close()} title="Close Preview">
 					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
 				</button>
-				<button class="icon-btn" onclick={() => { previewNoteDialog?.close(); safeNavigate(`/notes/${encodeURIComponent(previewNoteTarget!.id)}?returnTo=/notes/${encodeURIComponent(note!.id)}`); }} title="Expand Note">
+				<button class="icon-btn" onclick={() => { previewNoteDialog?.close(); window.location.href = resolve(`/notes/${encodeURIComponent(previewNoteTarget!.id)}?returnTo=/notes/${encodeURIComponent(note!.id)}`); }} title="Expand Note">
 					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"></path><path d="M9 21H3v-6"></path><path d="M21 3l-7 7"></path><path d="M3 21l7-7"></path></svg>
 				</button>
 			</div>
 		</div>
 	{/if}
-</dialog>
-
-<dialog bind:this={navigationWarningDialog} class="dialog math-dialog" onclose={cancelNavigation}>
-	<div class="dialog-content">
-		<h3 style="margin-top: 0;">Unsaved Changes</h3>
-		<p style="color: var(--text-secondary); margin-bottom: var(--space-6);">
-			The document is currently saving. Are you sure you want to leave? Unsaved changes may be lost.
-		</p>
-		<div class="dialog-actions">
-			<button class="secondary" onclick={cancelNavigation}>Cancel</button>
-			<button class="primary" onclick={confirmNavigation}>Leave Page</button>
-		</div>
-	</div>
 </dialog>
 
 <style>
@@ -1815,12 +1617,11 @@
 		padding: 0;
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-sm);
-		background: var(--bg-panel);
+		background: var(--bg-page);
 		color: var(--text-primary);
 		max-width: 40rem;
 		width: 100%;
 		backdrop-filter: blur(var(--blur-md));
-		box-shadow: none;
 	}
 	.math-dialog::backdrop {
 		background: rgba(0, 0, 0, 0.6);
@@ -1863,13 +1664,12 @@
 		padding: 0;
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-sm);
-		background: var(--bg-panel);
+		background: var(--bg-page);
 		color: var(--text-primary);
 		max-width: 40rem;
 		width: 100%;
 		backdrop-filter: blur(var(--blur-md));
 		outline: none;
-		box-shadow: none;
 	}
 	.link-dialog::backdrop {
 		background: rgba(0, 0, 0, 0.6);

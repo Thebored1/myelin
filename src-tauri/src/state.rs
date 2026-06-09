@@ -68,6 +68,7 @@ struct Frontmatter {
     tags: Option<Vec<String>>,
     created_at: Option<String>,
     updated_at: Option<String>,
+    source_pdf: Option<String>,
 }
 
 impl AppState {
@@ -139,32 +140,80 @@ impl AppState {
         Ok(self.snapshot())
     }
 
-    pub async fn create_note(&self, title: String) -> Result<NoteDocument> {
+    fn ensure_unique_title(&self, requested_title: &str, current_note_id: Option<&str>) -> String {
+        let runtime = self.inner.runtime.read();
+        
+        let base_title = if requested_title.trim().is_empty() {
+            "Untitled note"
+        } else {
+            requested_title.trim()
+        };
+
+        let mut title = base_title.to_string();
+        let mut counter = 1;
+        
+        loop {
+            let exists = runtime.notes.iter().any(|(id, note)| {
+                note.document.title.to_lowercase() == title.to_lowercase() && Some(id.as_str()) != current_note_id
+            });
+            
+            if !exists {
+                return title;
+            }
+            
+            title = format!("{} {}", base_title, counter);
+            counter += 1;
+        }
+    }
+
+    pub async fn create_note(&self, title: String, source_pdf: Option<String>) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let now = timestamp_now();
         let id = Uuid::new_v4().to_string();
-        let safe_slug = slugify(&title);
+        
+        let unique_title = self.ensure_unique_title(&title, None);
+        let safe_slug = slugify(&unique_title);
         let file_name = format!("{safe_slug}--{}.md", &id[..8]);
         let path = unique_note_path(&workspace, &file_name);
         let relative_path = relative_to_workspace(&workspace, &path);
+        
         let document = NoteDocument {
             id,
-            title: if title.trim().is_empty() {
-                "Untitled note".into()
-            } else {
-                title.trim().into()
-            },
+            title: unique_title,
             tags: Vec::new(),
             body: String::new(),
             relative_path,
             created_at: now.clone(),
             updated_at: now,
+            source_pdf,
+            annotations: Vec::new(),
             backlinks: Vec::new(),
         };
 
-        write_note_file(&path, &document)?;
-        self.reindex_workspace(workspace).await?;
-        self.load_note(document.id).await
+        let vector = hashed_embedding(&format!(
+            "{}\n{}\n{}",
+            document.title,
+            document.tags.join(" "),
+            document.body
+        ));
+
+        {
+            let mut runtime = self.inner.runtime.write();
+            runtime.notes.insert(document.id.clone(), IndexedNote {
+                document: document.clone(),
+                vector,
+            });
+        }
+
+        write_note_file(&workspace, &path, &document)?;
+        
+        let state = self.clone();
+        let workspace_clone = workspace.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = state.reindex_workspace(workspace_clone).await;
+        });
+
+        Ok(document)
     }
 
     pub async fn load_note(&self, note_id: String) -> Result<NoteDocument> {
@@ -182,6 +231,8 @@ impl AppState {
         title: String,
         tags: Vec<String>,
         body: String,
+        source_pdf: Option<String>,
+        annotations: Option<Vec<crate::models::PdfAnnotation>>,
     ) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let existing = {
@@ -193,9 +244,11 @@ impl AppState {
                 .ok_or_else(|| anyhow!("note not found"))?
         };
 
+        let unique_title = self.ensure_unique_title(&title, Some(&note_id));
+
         let updated = NoteDocument {
             id: existing.document.id,
-            title: title.trim().to_string(),
+            title: unique_title,
             tags: tags
                 .into_iter()
                 .map(|tag| tag.trim().to_string())
@@ -205,13 +258,37 @@ impl AppState {
             relative_path: existing.document.relative_path.clone(),
             created_at: existing.document.created_at,
             updated_at: timestamp_now(),
+            source_pdf,
+            annotations: annotations.unwrap_or_default(),
             backlinks: existing.document.backlinks,
         };
 
         let path = workspace.join(&updated.relative_path);
-        write_note_file(&path, &updated)?;
-        self.reindex_workspace(workspace).await?;
-        self.load_note(note_id).await
+        
+        let vector = hashed_embedding(&format!(
+            "{}\n{}\n{}",
+            updated.title,
+            updated.tags.join(" "),
+            updated.body
+        ));
+
+        {
+            let mut runtime = self.inner.runtime.write();
+            runtime.notes.insert(note_id.clone(), IndexedNote {
+                document: updated.clone(),
+                vector,
+            });
+        }
+
+        write_note_file(&workspace, &path, &updated)?;
+        
+        let state = self.clone();
+        let workspace_clone = workspace.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = state.reindex_workspace(workspace_clone).await;
+        });
+
+        Ok(updated)
     }
 
     pub async fn delete_note(&self, note_id: String) -> Result<AppSnapshot> {
@@ -259,10 +336,12 @@ impl AppState {
             relative_path: relative_to_workspace(&workspace, &path),
             created_at: now.clone(),
             updated_at: now,
+            source_pdf: source.document.source_pdf.clone(),
+            annotations: source.document.annotations.clone(),
             backlinks: source.document.backlinks,
         };
 
-        write_note_file(&path, &document)?;
+        write_note_file(&workspace, &path, &document)?;
         self.reindex_workspace(workspace).await?;
         self.load_note(duplicate_id).await
     }
@@ -397,7 +476,44 @@ impl AppState {
             results: results.into_iter().take(20).collect(),
         })
     }
+    pub async fn read_pdf_binary(&self, note_id: String) -> Result<Vec<u8>> {
+        let workspace = self.require_workspace()?;
+        let path = {
+            let runtime = self.inner.runtime.read();
+            let note = runtime
+                .notes
+                .get(&note_id)
+                .ok_or_else(|| anyhow!("note not found"))?;
+            workspace.join(&note.document.relative_path)
+        };
+        fs::read(path).map_err(|e| anyhow!("failed to read PDF: {}", e))
+    }
 
+    pub async fn get_note_history(&self, note_id: String) -> Result<Vec<crate::git_history::GitCommit>> {
+        let workspace = self.require_workspace()?;
+        let path = {
+            let runtime = self.inner.runtime.read();
+            let note = runtime
+                .notes
+                .get(&note_id)
+                .ok_or_else(|| anyhow!("note not found"))?;
+            workspace.join(&note.document.relative_path)
+        };
+        crate::git_history::get_file_history(&workspace, path.to_str().unwrap())
+    }
+
+    pub async fn get_note_version(&self, note_id: String, commit_hash: String) -> Result<String> {
+        let workspace = self.require_workspace()?;
+        let path = {
+            let runtime = self.inner.runtime.read();
+            let note = runtime
+                .notes
+                .get(&note_id)
+                .ok_or_else(|| anyhow!("note not found"))?;
+            workspace.join(&note.document.relative_path)
+        };
+        crate::git_history::get_file_at_commit(&workspace, &commit_hash, path.to_str().unwrap())
+    }
     pub async fn provider_status(&self) -> Result<ProviderStatus> {
         Ok(default_provider_status())
     }
@@ -468,7 +584,7 @@ impl AppState {
                     return;
                 }
 
-                let is_markdown = event.paths.iter().any(|path| is_markdown_file(path));
+                let is_markdown = event.paths.iter().any(|path| is_note_file(path));
                 if !is_markdown {
                     return;
                 }
@@ -496,7 +612,11 @@ impl AppState {
         }
 
         self.handle.emit("index://status", "started")?;
-        let mut notes = read_workspace_notes(&workspace)?;
+        
+        let workspace_clone = workspace.clone();
+        let mut notes = tauri::async_runtime::spawn_blocking(move || {
+            read_workspace_notes(&workspace_clone)
+        }).await.map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
         
         let mut backlinks_map: HashMap<String, Vec<Backlink>> = HashMap::new();
         for note in &notes {
@@ -584,27 +704,74 @@ fn save_settings(app_data_dir: &Path, settings: &PersistedSettings) -> Result<()
         .with_context(|| format!("failed to write settings at {}", settings_path.display()))
 }
 
+fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    if entry.depth() > 0 && name.starts_with('.') {
+        return true;
+    }
+    name == "node_modules" || name == "target" || name == "dist" || name == "build"
+}
+
 fn read_workspace_notes(workspace: &Path) -> Result<Vec<IndexedNote>> {
     let mut notes = Vec::new();
     for entry in walkdir::WalkDir::new(workspace)
         .into_iter()
+        .filter_entry(|e| !is_hidden_or_ignored(e))
         .filter_map(|entry| entry.ok())
     {
-        if entry.file_type().is_file() && is_markdown_file(entry.path()) {
-            if let Ok(document) = parse_note_file(workspace, entry.path()) {
-                let vector = hashed_embedding(&format!(
-                    "{}\n{}\n{}",
-                    document.title,
-                    document.tags.join(" "),
-                    document.body
-                ));
-                notes.push(IndexedNote { document, vector });
+        if entry.file_type().is_file() && is_note_file(entry.path()) {
+            if let Some(extension) = entry.path().extension().and_then(std::ffi::OsStr::to_str) {
+                let doc_result = if extension.eq_ignore_ascii_case("pdf") {
+                    parse_pdf_file(workspace, entry.path())
+                } else {
+                    parse_note_file(workspace, entry.path())
+                };
+
+                if let Ok(document) = doc_result {
+                    let vector = hashed_embedding(&format!(
+                        "{}\n{}\n{}",
+                        document.title,
+                        document.tags.join(" "),
+                        document.body
+                    ));
+                    notes.push(IndexedNote { document, vector });
+                }
             }
         }
     }
 
     notes.sort_by(|left, right| right.document.updated_at.cmp(&left.document.updated_at));
     Ok(notes)
+}
+
+fn parse_pdf_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
+    let title = default_title_from_path(path);
+    let now = timestamp_now();
+    let id = stable_id_from_path(path);
+
+    let annotations = {
+        let annotations_path = workspace.join(".myelin").join("annotations").join(format!("{}.annotations.json", id));
+        if annotations_path.exists() {
+            fs::read_to_string(&annotations_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            None
+        }
+    };
+
+    Ok(NoteDocument {
+        id,
+        title,
+        tags: Vec::new(),
+        body: String::new(),
+        relative_path: relative_to_workspace(workspace, path),
+        created_at: now.clone(),
+        updated_at: now,
+        source_pdf: None,
+        annotations: annotations.unwrap_or_default(),
+        backlinks: Vec::new(),
+    })
 }
 
 fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
@@ -621,23 +788,51 @@ fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
         .unwrap_or_else(|| first_heading(&body).unwrap_or_else(|| default_title_from_path(path)));
     let created_at = metadata.created_at.unwrap_or_else(timestamp_now);
     let updated_at = metadata.updated_at.unwrap_or_else(timestamp_now);
+    let id = metadata.id.unwrap_or_else(|| stable_id_from_path(path));
+
+    let annotations = {
+        let annotations_path = workspace.join(".myelin").join("annotations").join(format!("{}.annotations.json", id));
+        if annotations_path.exists() {
+            fs::read_to_string(&annotations_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            None
+        }
+    };
 
     Ok(NoteDocument {
-        id: metadata.id.unwrap_or_else(|| stable_id_from_path(path)),
+        id,
         title,
         tags: metadata.tags.unwrap_or_default(),
         body,
         relative_path: relative_to_workspace(workspace, path),
         created_at,
         updated_at,
+        source_pdf: metadata.source_pdf,
+        annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
     })
 }
 
-fn write_note_file(path: &Path, document: &NoteDocument) -> Result<()> {
+fn write_note_file(workspace: &Path, path: &Path, document: &NoteDocument) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+    }
+
+    if !document.annotations.is_empty() {
+        let annotations = &document.annotations;
+        let annotations_dir = workspace.join(".myelin").join("annotations");
+        fs::create_dir_all(&annotations_dir)?;
+        let annotations_path = annotations_dir.join(format!("{}.annotations.json", document.id));
+        let tmp_ann_path = annotations_dir.join(format!("{}.annotations.tmp", document.id));
+        fs::write(&tmp_ann_path, serde_json::to_string(annotations)?)?;
+        fs::rename(&tmp_ann_path, &annotations_path)?;
+    }
+
+    if path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()) == Some("pdf".to_string()) {
+        return Ok(());
     }
 
     let frontmatter = Frontmatter {
@@ -646,6 +841,7 @@ fn write_note_file(path: &Path, document: &NoteDocument) -> Result<()> {
         tags: Some(document.tags.clone()),
         created_at: Some(document.created_at.clone()),
         updated_at: Some(document.updated_at.clone()),
+        source_pdf: document.source_pdf.clone(),
     };
     let yaml = serde_yaml::to_string(&frontmatter)?.trim().to_string();
     let rendered = format!("---\n{yaml}\n---\n\n{}", document.body.trim_end());
@@ -747,6 +943,7 @@ fn summarize(document: &NoteDocument) -> NoteSummary {
         relative_path: document.relative_path.clone(),
         created_at: document.created_at.clone(),
         updated_at: document.updated_at.clone(),
+        source_pdf: document.source_pdf.clone(),
         backlinks: document.backlinks.clone(),
     }
 }
@@ -1013,10 +1210,10 @@ fn unique_note_path(workspace: &Path, file_name: &str) -> PathBuf {
     workspace.join(format!("{stem}-{}.{}", Uuid::new_v4(), extension))
 }
 
-fn is_markdown_file(path: &Path) -> bool {
+fn is_note_file(path: &Path) -> bool {
     path.extension()
-        .and_then(OsStr::to_str)
-        .map(|extension| extension.eq_ignore_ascii_case("md"))
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|extension| extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("pdf"))
         .unwrap_or(false)
 }
 

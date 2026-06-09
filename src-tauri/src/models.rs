@@ -2,6 +2,20 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct PdfAnnotation {
+    pub id: String,
+    pub page: i32,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub points: Option<Vec<(f64, f64)>>,
+    pub rect: Option<(f64, f64, f64, f64)>,
+    pub rects: Option<Vec<(f64, f64, f64, f64)>>,
+    pub color: String,
+    pub stroke_width: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Backlink {
     pub source_id: String,
     pub source_title: String,
@@ -51,6 +65,8 @@ pub struct NoteSummary {
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
+    pub source_pdf: Option<String>,
+    #[serde(default)]
     pub backlinks: Vec<Backlink>,
 }
 
@@ -72,7 +88,11 @@ pub struct NoteDocument {
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
+    pub source_pdf: Option<String>,
+    #[serde(default)]
     pub backlinks: Vec<Backlink>,
+    #[serde(default)]
+    pub annotations: Vec<PdfAnnotation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -24,6 +24,7 @@
 		"@tauri-apps/api": "^2.11.0",
 		"@tauri-apps/cli": "^2.11.2",
 		"@types/node": "^24",
+		"@types/pdfjs-dist": "^2.10.377",
 		"eslint": "^10.4.0",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.17.0",
@@ -42,6 +43,7 @@
 		"@types/marked": "^5.0.2",
 		"katex": "^0.17.0",
 		"mathlive": "^0.109.2",
+		"pdfjs-dist": "^5.6.205",
 		"vditor": "^3.11.2"
 	}
 }

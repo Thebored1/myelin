@@ -14,6 +14,7 @@ export type NoteSummary = {
 	relativePath: string;
 	createdAt: string;
 	updatedAt: string;
+	sourcePdf?: string | null;
 	backlinks: Backlink[];
 };
 
@@ -25,7 +26,20 @@ export type NoteDocument = {
 	relativePath: string;
 	createdAt: string;
 	updatedAt: string;
+	sourcePdf?: string | null;
 	backlinks: Backlink[];
+	annotations: PdfAnnotation[];
+};
+
+export type PdfAnnotation = {
+	id: string;
+	page: number;
+	type: 'highlight' | 'draw' | 'image_extract' | 'text_highlight';
+	points?: [number, number][];
+	rect?: [number, number, number, number];
+	rects?: [number, number, number, number][];
+	color: string;
+	strokeWidth: number;
 };
 
 export type ProviderStatus = {
