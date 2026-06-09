@@ -64,11 +64,7 @@
 	}
 
 	function handlePdfQuote(text: string, page: number) {
-		if (vditorInstance) {
-			showAttachedNote = true;
-			vditorInstance.insertValue(`\n> ${text}\n> *(Page ${page})*\n\n`);
-			triggerAutoSave();
-		}
+		appendToNoteBody(`\n> ${text}\n> *(Page ${page})*\n\n`);
 	}
 
 	function focusEditor() {
@@ -189,7 +185,7 @@
 	
 	let previewNoteDialog: HTMLDialogElement | undefined = $state();
 	let previewNoteTarget = $state<NoteDocument | null>(null);
-	let previewNoteContainer: HTMLElement | undefined = $state();
+	let previewNoteContainer: HTMLDivElement | undefined = $state();
 	
 	let blockCache: Record<string, string> = {};
 	let transclusionObserver: MutationObserver | null = null;
@@ -201,7 +197,31 @@
 	let saveStatus = $state<'saved' | 'saving' | 'unsaved'>('saved');
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
 	let navigationWarningDialog: HTMLDialogElement | undefined = $state();
+	let deleteAttachedNoteDialog: HTMLDialogElement | undefined = $state();
 	let pendingNavigationUrl = $state('');
+	let shouldRenderEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
+	let shouldInitEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
+
+	function appendToNoteBody(content: string) {
+		showAttachedNote = true;
+		if (vditorInstance) {
+			vditorInstance.insertValue(content);
+			draftBody = vditorInstance.getValue();
+		} else {
+			draftBody = `${draftBody}${content}`;
+		}
+		triggerAutoSave();
+	}
+
+	function destroyEditorInstance() {
+		if (!vditorInstance) return;
+		try {
+			vditorInstance.destroy();
+		} catch (e) {
+			console.warn("Vditor destroy error:", e);
+		}
+		vditorInstance = null;
+	}
 
 	function triggerAutoSave() {
 		if (saveStatus !== 'saving') saveStatus = 'unsaved';
@@ -565,26 +585,34 @@
 	}
 
 	async function loadCurrentNote() {
+		destroyEditorInstance();
+
 		const noteId = page.params.id;
 		note = await invoke<NoteDocument>('load_note', { noteId });
-		isMainNotePdf = note.relativePath.toLowerCase().endsWith('.pdf');
+		const loadedNote = note;
+		isMainNotePdf = loadedNote.relativePath.toLowerCase().endsWith('.pdf');
 		if (isMainNotePdf) {
-			draftTitle = note.title;
-			draftBody = "";
-			draftTags = note.tags.join(', ');
-			activePdfId = note.id;
-			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: note.id });
+			const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
+			const existingScratchpad =
+				allNotes
+					.filter((candidate) => candidate.sourcePdf === loadedNote.id)
+					.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+			draftTitle = loadedNote.title;
+			draftBody = existingScratchpad?.body ?? "";
+			draftTags = loadedNote.tags.join(', ');
+			activePdfId = loadedNote.id;
+			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.id });
 			activePdfBytes = new Uint8Array(bytes);
-			scratchpadSavedId = null;
-			showAttachedNote = false;
+			scratchpadSavedId = existingScratchpad?.id ?? null;
+			showAttachedNote = draftBody.trim().length > 0;
 		} else {
-			draftTitle = note.title;
-			draftBody = note.body;
-			draftTags = note.tags.join(', ');
+			draftTitle = loadedNote.title;
+			draftBody = loadedNote.body;
+			draftTags = loadedNote.tags.join(', ');
 			
-			if (note.sourcePdf) {
-				activePdfId = note.sourcePdf;
-				const bytes = await invoke<number[]>('read_pdf_binary', { noteId: note.sourcePdf });
+			if (loadedNote.sourcePdf) {
+				activePdfId = loadedNote.sourcePdf;
+				const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
 				activePdfBytes = new Uint8Array(bytes);
 				showAttachedNote = draftBody.trim().length > 0;
 			} else {
@@ -597,126 +625,135 @@
 		message = '';
 		void fetchRelatedNotes();
 		
-		if (vditorContainer) {
+	}
+
+	function initVditor() {
+		if (!vditorContainer || vditorInstance) return;
+		
+		try {
 			vditorInstance = new Vditor(vditorContainer, {
-				value: draftBody,
-				placeholder: isMainNotePdf ? "Scratchpad for PDF notes..." : "Start typing here...",
-				mode: 'ir',
-				theme: 'dark',
-				icon: 'material',
-				lang: 'en_US',
-				tab: '\t',
-				cache: { enable: false },
-				toolbarConfig: { pin: true },
-				toolbar: [
-					"emoji", "headings", "bold", "italic", "strike", "link", "|",
-					"list", "ordered-list", "check", "outdent", "indent", "|",
-					"quote", "line", "code", "inline-code", "insert-before", "insert-after", "|",
-					{
-						name: 'mathlive',
-						tipPosition: 'n',
-						tip: 'MathLive Editor',
-						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"></path></svg>',
-						click: () => {
-							mathValue = '';
-							mathDialog?.showModal();
-						}
-					},
-					{
-						name: 'link-note',
-						tipPosition: 'n',
-						tip: 'Link to Note',
-						// hotkey handled in keydown below
-						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
-						click: () => {
-							saveCursorPosition();
-							linkSearchQuery = '';
-							linkSearchResults = [];
-							linkNoteDialog?.showModal();
-							setTimeout(() => {
-								const input = linkNoteDialog?.querySelector('.link-search-input') as HTMLInputElement;
-								if (input) input.focus();
-							}, 50);
-						}
-					},
-					{
-						name: 'search-blocks',
-						tipPosition: 'n',
-						tip: 'Search Global Blocks',
-						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
-						click: () => {
-							openGlobalBlockSearch();
-						}
-					},
-					"|",
-					"upload", "record", "table", "|", "undo", "redo", "|", "fullscreen", "edit-mode",
-					{
-						name: "more",
-						toolbar: [
-							"both", "code-theme", "content-theme", "outline", "devtools", "info", "help"
-						]
+			value: draftBody,
+			placeholder: isMainNotePdf ? "Scratchpad for PDF notes..." : "Start typing here...",
+			mode: 'ir',
+			theme: 'dark',
+			icon: 'material',
+			lang: 'en_US',
+			tab: '\t',
+			cache: { enable: false },
+			toolbarConfig: { pin: true },
+			toolbar: [
+				"emoji", "headings", "bold", "italic", "strike", "link", "|",
+				"list", "ordered-list", "check", "outdent", "indent", "|",
+				"quote", "line", "code", "inline-code", "insert-before", "insert-after", "|",
+				{
+					name: 'mathlive',
+					tipPosition: 'n',
+					tip: 'MathLive Editor',
+					icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"></path></svg>',
+					click: () => {
+						mathValue = '';
+						mathDialog?.showModal();
 					}
-				],
-				after: () => {
-					const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
-					if (toolbar) {
-						toolbarResizeObserver = new ResizeObserver(() => {
-							if (toolbar.scrollHeight > 55) {
-								toolbarNeedsToggle = true;
-							} else {
-								toolbarNeedsToggle = false;
-								toolbarExpanded = false;
-							}
-							updateToolbarOverflow();
-						});
-						toolbarResizeObserver.observe(toolbar);
+				},
+				{
+					name: 'link-note',
+					tipPosition: 'n',
+					tip: 'Link to Note',
+					icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
+					click: () => {
+						saveCursorPosition();
+						linkSearchQuery = '';
+						linkSearchResults = [];
+						linkNoteDialog?.showModal();
+						setTimeout(() => {
+							const input = linkNoteDialog?.querySelector('.link-search-input') as HTMLInputElement;
+							if (input) input.focus();
+						}, 50);
+					}
+				},
+				{
+					name: 'search-blocks',
+					tipPosition: 'n',
+					tip: 'Search Global Blocks',
+					icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+					click: () => {
+						openGlobalBlockSearch();
+					}
+				},
+				"|",
+				"upload", "record", "table", "|", "undo", "redo", "|", "fullscreen", "edit-mode",
+				{
+					name: "more",
+					toolbar: [
+						"both", "code-theme", "content-theme", "outline", "devtools", "info", "help"
+					]
+				}
+			],
+			after: () => {
+				const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
+				if (toolbar) {
+					toolbarResizeObserver = new ResizeObserver(() => {
 						if (toolbar.scrollHeight > 55) {
 							toolbarNeedsToggle = true;
+						} else {
+							toolbarNeedsToggle = false;
+							toolbarExpanded = false;
 						}
 						updateToolbarOverflow();
-						
-						const fsBtn = toolbar.querySelector('button[data-type="fullscreen"]');
-						if (fsBtn) {
-							const label = fsBtn.getAttribute('aria-label') || '';
-							const match = label.match(/<([^>]+)>/);
-							if (match) {
-								fullscreenShortcut = match[1];
-							}
+					});
+					toolbarResizeObserver.observe(toolbar);
+					if (toolbar.scrollHeight > 55) {
+						toolbarNeedsToggle = true;
+					}
+					updateToolbarOverflow();
+					
+					const fsBtn = toolbar.querySelector('button[data-type="fullscreen"]');
+					if (fsBtn) {
+						const label = fsBtn.getAttribute('aria-label') || '';
+						const match = label.match(/<([^>]+)>/);
+						if (match) {
+							fullscreenShortcut = match[1];
 						}
-
-
 					}
-					// Trigger an initial pass
-					setTimeout(() => {
-						scanForTransclusions();
-					}, 100);
-					setupTransclusionObserver();
-				},
-				keydown: (e: KeyboardEvent) => {
-					if ((e.ctrlKey || e.metaKey) && e.code === 'Comma') {
-						e.preventDefault();
-						if (e.shiftKey) {
-							const globalSearchBtn = vditorContainer?.querySelector('button[data-type="search-blocks"]') as HTMLButtonElement | null;
-							if (globalSearchBtn) globalSearchBtn.click();
-						} else {
-							const linkBtn = vditorContainer?.querySelector('button[data-type="link-note"]') as HTMLButtonElement | null;
-							if (linkBtn) linkBtn.click();
-						}
-						return;
-					}
-					if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
-						e.preventDefault();
-						const redoBtn = vditorContainer?.querySelector('button[data-type="redo"]') as HTMLButtonElement | null;
-						if (redoBtn) redoBtn.click();
-					}
-				},
-				input: (value) => {
-					draftBody = value;
-					triggerAutoSave();
 				}
-			});
+				setTimeout(() => {
+					scanForTransclusions();
+				}, 100);
+				setupTransclusionObserver();
+			},
+			keydown: (e: KeyboardEvent) => {
+				if ((e.ctrlKey || e.metaKey) && e.code === 'Comma') {
+					e.preventDefault();
+					if (e.shiftKey) {
+						const globalSearchBtn = vditorContainer?.querySelector('button[data-type="search-blocks"]') as HTMLButtonElement | null;
+						if (globalSearchBtn) globalSearchBtn.click();
+					} else {
+						const linkBtn = vditorContainer?.querySelector('button[data-type="link-note"]') as HTMLButtonElement | null;
+						if (linkBtn) linkBtn.click();
+					}
+					return;
+				}
+				if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
+					e.preventDefault();
+					const redoBtn = vditorContainer?.querySelector('button[data-type="redo"]') as HTMLButtonElement | null;
+					if (redoBtn) redoBtn.click();
+				}
+			},
+			input: (value) => {
+				draftBody = value;
+				triggerAutoSave();
+			}
+		});
+		} catch (e: any) {
+			message = "Vditor Error: " + (e?.message || String(e));
 		}
 	}
+
+	$effect(() => {
+		if (shouldInitEditor && vditorContainer && !vditorInstance) {
+			initVditor();
+		}
+	});
 
 	function parseBacklinkContext(context: string): string {
 		if (!context) return '';
@@ -814,12 +851,7 @@
 	}
 
 	function handleImageExtract(base64: string) {
-		if (vditorInstance) {
-			showAttachedNote = true; // Ensure Vditor is visible
-			const imageMd = `\n\n![Extracted Image](${base64})\n\n`;
-			vditorInstance.insertValue(imageMd);
-			triggerAutoSave();
-		}
+		appendToNoteBody(`\n\n![Extracted Image](${base64})\n\n`);
 	}
 
 	async function saveNote() {
@@ -903,7 +935,44 @@
 			return;
 		}
 		isProgrammaticNavigation = true;
-		window.location.href = resolve(url);
+		void goto(url);
+	}
+
+	function requestDeleteAttachedNote() {
+		deleteAttachedNoteDialog?.showModal();
+	}
+
+	async function confirmDeleteAttachedNote() {
+		deleteAttachedNoteDialog?.close();
+		const targetId = isMainNotePdf ? scratchpadSavedId : note?.sourcePdf ? note.id : null;
+		const sourcePdfId = isMainNotePdf ? activePdfId : (note?.sourcePdf ?? activePdfId);
+		isBusy = true;
+		try {
+			if (targetId) {
+				await invoke('delete_note', { noteId: targetId });
+			}
+			if (!isMainNotePdf && sourcePdfId) {
+				isProgrammaticNavigation = true;
+				await goto(`/notes/${encodeURIComponent(sourcePdfId)}`);
+				return;
+			}
+			if (saveTimer) {
+				clearTimeout(saveTimer);
+				saveTimer = null;
+			}
+			destroyEditorInstance();
+			draftBody = '';
+			scratchpadSavedId = null;
+			showAttachedNote = false;
+			saveStatus = 'saved';
+			message = '';
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	function cancelDeleteAttachedNote() {
+		deleteAttachedNoteDialog?.close();
 	}
 
 	function handleBeforeUnload(e: BeforeUnloadEvent) {
@@ -917,7 +986,7 @@
 	beforeNavigate(({ cancel, to }) => {
 		if (isProgrammaticNavigation) return;
 		if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-			pendingNavigationUrl = to?.url.pathname || '';
+			pendingNavigationUrl = to?.url ? `${to.url.pathname}${to.url.search}${to.url.hash}` : '';
 			navigationWarningDialog?.showModal();
 			cancel();
 		}
@@ -927,7 +996,7 @@
 		navigationWarningDialog?.close();
 		if (pendingNavigationUrl) {
 			isProgrammaticNavigation = true;
-			window.location.href = resolve(pendingNavigationUrl);
+			void goto(pendingNavigationUrl);
 			pendingNavigationUrl = '';
 		}
 	}
@@ -1112,7 +1181,10 @@
 					onQuote={handlePdfQuote} 
 					onAnnotationsChange={handleAnnotationsChange}
 					onImageExtract={handleImageExtract}
-					onAttachNote={() => showAttachedNote = true}
+					onAttachNote={() => {
+						showAttachedNote = true;
+						setTimeout(() => initVditor(), 100);
+					}}
 					showAttachButton={!showAttachedNote}
 				/>
 			</section>
@@ -1123,15 +1195,27 @@
 		{/if}
 
 		<!-- Main Content Area -->
-		{#if showAttachedNote || !activePdfBytes}
+		{#if shouldRenderEditor}
 		<section class="main-pane" style={activePdfBytes ? `width: ${100 - splitRatio}%` : ''}>
 			<div class="content-area" style="position: relative;">
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onkeyupcapture={handleVditorKeyupCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
+				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} class:has-pdf-note={!!activePdfBytes} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onkeyupcapture={handleVditorKeyupCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
 				<div class="fullscreen-indicator">
 					Press <span>{fullscreenShortcut}</span> to toggle
 				</div>
+				{#if activePdfBytes}
+					<div class="toolbar-close-note-container" style={toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}>
+						<button
+							class="toolbar-close-note-btn"
+							onclick={requestDeleteAttachedNote}
+							disabled={isBusy}
+							title="Delete attached note and close pane"
+						>
+							Close Note
+						</button>
+					</div>
+				{/if}
 				{#if toolbarNeedsToggle}
 					<div class="toolbar-overlay-toggle-container">
 						<button class="toolbar-overlay-toggle" class:expanded={toolbarExpanded} onclick={() => toolbarExpanded = !toolbarExpanded} aria-label="Toggle toolbar">
@@ -1359,6 +1443,19 @@
 	</div>
 </dialog>
 
+<dialog bind:this={deleteAttachedNoteDialog} class="dialog math-dialog" onclose={cancelDeleteAttachedNote}>
+	<div class="dialog-content">
+		<h3 style="margin-top: 0;">Delete Attached Note</h3>
+		<p style="color: var(--text-secondary); margin-bottom: var(--space-6);">
+			All data in this attached note will be deleted permanently, and the note pane will be closed.
+		</p>
+		<div class="dialog-actions">
+			<button class="secondary" onclick={cancelDeleteAttachedNote}>Cancel</button>
+			<button class="danger" onclick={confirmDeleteAttachedNote} disabled={isBusy}>Delete Note</button>
+		</div>
+	</div>
+</dialog>
+
 <style>
 	.editor-shell {
 		height: 100vh;
@@ -1388,7 +1485,6 @@
 	}
 
 	.back-link,
-	.header-actions button,
 	input {
 		font: inherit;
 		font-family: var(--font-mono);
@@ -1477,11 +1573,39 @@
 		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
 
-	.sidebar-toggle-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: 0.5rem;
+	.pdf-pane,
+	.main-pane {
+		min-width: 18rem;
+	}
+
+	.resizer {
+		width: 10px;
+		flex: 0 0 10px;
+		cursor: col-resize;
+		position: relative;
+		background:
+			linear-gradient(
+				90deg,
+				transparent 0,
+				transparent 3px,
+				var(--border-subtle) 3px,
+				var(--border-subtle) 7px,
+				transparent 7px
+			);
+		transition: background 0.2s ease;
+	}
+
+	.resizer:hover,
+	.resizer.resizing {
+		background:
+			linear-gradient(
+				90deg,
+				transparent 0,
+				transparent 2px,
+				var(--accent-100) 2px,
+				var(--accent-100) 8px,
+				transparent 8px
+			);
 	}
 
 	.sidebar-backdrop {
@@ -1496,6 +1620,17 @@
 		background: var(--bg-page);
 		align-items: stretch;
 		min-height: 0;
+	}
+
+	.danger {
+		border: 1px solid rgba(239, 68, 68, 0.35);
+		background: rgba(239, 68, 68, 0.12);
+		color: #fecaca;
+	}
+
+	.danger:hover:not(:disabled) {
+		background: rgba(239, 68, 68, 0.18);
+		color: #fee2e2;
 	}
 
 	.content-area {
@@ -1522,6 +1657,36 @@
 		align-items: center;
 		justify-content: center;
 		z-index: 100;
+	}
+
+	.toolbar-close-note-container {
+		position: absolute;
+		top: 0;
+		height: 48px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 101;
+		pointer-events: none;
+	}
+
+	.toolbar-close-note-btn {
+		pointer-events: auto;
+		border: 1px solid rgba(239, 68, 68, 0.35);
+		background: rgba(239, 68, 68, 0.12);
+		color: #fecaca;
+		border-radius: var(--radius-sm);
+		padding: 0.4rem 0.75rem;
+		height: 32px;
+		font-size: 0.82rem;
+		font-family: var(--font-mono);
+		line-height: 1;
+		white-space: nowrap;
+	}
+
+	.toolbar-close-note-btn:hover:not(:disabled) {
+		background: rgba(239, 68, 68, 0.18);
+		color: #fee2e2;
 	}
 
 	.toolbar-overlay-toggle {
@@ -1660,6 +1825,10 @@
 		transition: max-height 0.2s ease-out;
 		position: relative !important;
 		z-index: 30 !important;
+	}
+
+	:global(.vditor-wrapper.has-pdf-note .vditor-toolbar) {
+		padding-right: 160px !important;
 	}
 
 

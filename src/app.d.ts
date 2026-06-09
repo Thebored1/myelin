@@ -7,6 +7,7 @@ declare global {
 		// interface PageData {}
 		// interface PageState {}
 		// interface Platform {}
+	}
 	namespace svelteHTML {
 		interface IntrinsicElements {
 			'math-field': any;
