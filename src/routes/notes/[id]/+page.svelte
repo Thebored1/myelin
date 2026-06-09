@@ -201,6 +201,7 @@
 	let pendingNavigationUrl = $state('');
 	let shouldRenderEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
 	let shouldInitEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
+	let loadedRouteNoteId = $state('');
 
 	function appendToNoteBody(content: string) {
 		showAttachedNote = true;
@@ -423,7 +424,9 @@
 				noteId: selectedNoteForBlocks.id,
 				title: selectedNoteForBlocks.title,
 				tags: selectedNoteForBlocks.tags,
-				body: selectedNoteForBlocks.body
+				body: selectedNoteForBlocks.body,
+				sourcePdf: selectedNoteForBlocks.sourcePdf,
+				annotations: selectedNoteForBlocks.annotations
 			});
 			
 			if (selectedNoteForBlocks.id === note?.id) {
@@ -540,7 +543,9 @@
 					noteId: sourceDoc.id,
 					title: sourceDoc.title,
 					tags: sourceDoc.tags,
-					body: sourceDoc.body
+					body: sourceDoc.body,
+					sourcePdf: sourceDoc.sourcePdf,
+					annotations: sourceDoc.annotations
 				});
 
 				if (sourceDoc.id === note?.id) {
@@ -584,10 +589,11 @@
 		}
 	}
 
-	async function loadCurrentNote() {
+	async function loadCurrentNote(noteId: string) {
 		destroyEditorInstance();
-
-		const noteId = page.params.id;
+		activePdfBytes = null;
+		activePdfId = null;
+		showAttachedNote = false;
 		note = await invoke<NoteDocument>('load_note', { noteId });
 		const loadedNote = note;
 		isMainNotePdf = loadedNote.relativePath.toLowerCase().endsWith('.pdf');
@@ -975,6 +981,23 @@
 		deleteAttachedNoteDialog?.close();
 	}
 
+	function buildPreviewExpandHref() {
+		const targetId = previewNoteTarget?.sourcePdf ?? previewNoteTarget?.id;
+		const currentNoteId = note?.id;
+		if (!targetId) return null;
+		const basePath = `/notes/${encodeURIComponent(targetId)}`;
+		if (!currentNoteId) return basePath;
+		return `${basePath}?returnTo=/notes/${encodeURIComponent(currentNoteId)}`;
+	}
+
+	function expandPreviewNoteDirect() {
+		const href = buildPreviewExpandHref();
+		if (!href) return;
+		previewNoteDialog?.close();
+		isProgrammaticNavigation = true;
+		window.location.href = href;
+	}
+
 	function handleBeforeUnload(e: BeforeUnloadEvent) {
 		if (isProgrammaticNavigation) return;
 		if (saveStatus === 'saving' || saveStatus === 'unsaved') {
@@ -1092,7 +1115,6 @@
 
 	onMount(() => {
 		$showSidebarToggle = true;
-		void loadCurrentNote();
 		if (window.innerWidth > 1200) {
 			$sidebarOpen = true;
 		}
@@ -1128,6 +1150,13 @@
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
 		}
+	});
+
+	$effect(() => {
+		const routeNoteId = page.params.id;
+		if (!routeNoteId || routeNoteId === loadedRouteNoteId) return;
+		loadedRouteNoteId = routeNoteId;
+		void loadCurrentNote(routeNoteId);
 	});
 </script>
 
@@ -1422,7 +1451,7 @@
 				<button class="icon-btn" onclick={() => previewNoteDialog?.close()} title="Close Preview">
 					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
 				</button>
-				<button class="icon-btn" onclick={() => { previewNoteDialog?.close(); safeNavigate(`/notes/${encodeURIComponent(previewNoteTarget!.id)}?returnTo=/notes/${encodeURIComponent(note!.id)}`); }} title="Expand Note">
+				<button class="icon-btn" onclick={expandPreviewNoteDirect} title="Expand Note">
 					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"></path><path d="M9 21H3v-6"></path><path d="M21 3l-7 7"></path><path d="M3 21l7-7"></path></svg>
 				</button>
 			</div>
