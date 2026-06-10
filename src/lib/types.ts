@@ -1,3 +1,19 @@
+export type ChatMessage = {
+	id?: string;
+	role: string;
+	content: string;
+	isStreaming?: boolean;
+	error?: boolean;
+	tools?: { name: string; details: string }[];
+};
+
+export type GitCommit = {
+	hash: string;
+	author: string;
+	timestamp: string;
+	message: string;
+};
+
 export type Backlink = {
 	sourceId: string;
 	sourceTitle: string;
@@ -29,6 +45,7 @@ export type NoteDocument = {
 	sourcePdf?: string | null;
 	backlinks: Backlink[];
 	annotations: PdfAnnotation[];
+	chatHistory: ChatMessage[];
 };
 
 export type PdfAnnotation = {
@@ -47,6 +64,17 @@ export type ProviderStatus = {
 	availableProviders: string[];
 	healthy: boolean;
 	detail: string;
+	config?: {
+		executablePath?: string;
+		modelPath?: string;
+	};
+	resolved?: {
+		executablePath: string;
+		modelPath: string;
+		host: string;
+		port: number;
+		contextSize: number;
+	};
 };
 
 export type IndexState = {

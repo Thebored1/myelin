@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { goto, beforeNavigate } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import type { NoteDocument, SearchResponse, NoteSummary, PdfAnnotation } from '$lib/types';
+	import type { NoteDocument, SearchResponse, NoteSummary, PdfAnnotation, GitCommit, ChatMessage } from '$lib/types';
 	import { onMount, onDestroy } from 'svelte';
 	import { sidebarOpen, showSidebarToggle } from '$lib/stores';
 	import Vditor from 'vditor';
@@ -19,6 +20,15 @@
 	let isBusy = $state(false);
 	let message = $state('');
 	
+	let activeSidebarTab = $state<'info'|'chat'|'versions'>('info');
+	let noteHistory = $state<GitCommit[]>([]);
+	let versionPreviewContent = $state<string | null>(null);
+	let versionPreviewHash = $state<string | null>(null);
+	let versionPreviewDialog: HTMLDialogElement | undefined = $state();
+	let chatMessages = $state<ChatMessage[]>([]);
+	let chatInput = $state('');
+	let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
+
 	let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
 	
 	let relatedNotes = $state<NoteSummary[]>([]);
@@ -38,22 +48,35 @@
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
 
+	let sidebarWidth = $state(320);
+	let isSidebarResizing = $state(false);
+
+	function startSidebarResizing(e: MouseEvent) {
+		e.preventDefault();
+		isSidebarResizing = true;
+	}
+
 	function startResizing() {
 		isResizing = true;
 	}
 
 	function handleGlobalMouseMove(e: MouseEvent) {
-		if (!isResizing || !mainLayoutEl) return;
-		const rect = mainLayoutEl.getBoundingClientRect();
-		const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
-		if (newRatio > 20 && newRatio < 80) {
-			splitRatio = newRatio;
+		if (isResizing && mainLayoutEl) {
+			const rect = mainLayoutEl.getBoundingClientRect();
+			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
+			if (newRatio > 20 && newRatio < 80) {
+				splitRatio = newRatio;
+			}
+		} else if (isSidebarResizing) {
+			const newWidth = window.innerWidth - e.clientX;
+			sidebarWidth = Math.max(320, Math.min(newWidth, window.innerWidth * 0.8));
 		}
 	}
 
 	function stopResizing() {
-		if (isResizing) {
+		if (isResizing || isSidebarResizing) {
 			isResizing = false;
+			isSidebarResizing = false;
 			if (vditorInstance) {
 				// Let Vditor resize after layout shift
 				setTimeout(() => {
@@ -596,6 +619,11 @@
 		showAttachedNote = false;
 		note = await invoke<NoteDocument>('load_note', { noteId });
 		const loadedNote = note;
+		chatMessages = loadedNote.chatHistory || [];
+		noteHistory = [];
+		versionPreviewContent = null;
+		activeSidebarTab = 'info';
+
 		isMainNotePdf = loadedNote.relativePath.toLowerCase().endsWith('.pdf');
 		if (isMainNotePdf) {
 			const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
@@ -900,6 +928,9 @@
 			
 			saveStatus = 'saved';
 			void fetchRelatedNotes();
+			if (activeSidebarTab === 'versions') {
+				void fetchNoteHistory();
+			}
 		} catch (err) {
 			console.error("Save error:", err);
 			saveStatus = 'unsaved';
@@ -927,6 +958,105 @@
 			const duplicated = await invoke<NoteDocument>('duplicate_note', { noteId: note.id });
 			// Navigate and reload
 			safeNavigate(`/notes/${encodeURIComponent(duplicated.id)}`);
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function sendChatMessage() {
+		if (!note || !chatInput.trim()) return;
+		const userText = chatInput.trim();
+		chatInput = '';
+		if (chatTextareaEl) chatTextareaEl.style.height = 'auto';
+		chatMessages = [...chatMessages, { role: 'user', content: userText }];
+		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true }];
+		
+		try {
+			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId: Date.now().toString() });
+		} catch (e) {
+			console.error("AI Error:", e);
+			failStreamingChatMessage();
+		}
+	}
+
+	function finishStreamingChatMessage() {
+		chatMessages = chatMessages.map(m => {
+			if (m.isStreaming) return { ...m, isStreaming: false };
+			return m;
+		});
+		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+	}
+
+	function failStreamingChatMessage() {
+		chatMessages = chatMessages.map(m => {
+			if (m.isStreaming) return { ...m, isStreaming: false, error: true, content: 'Failed to generate response.' };
+			return m;
+		});
+		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+	}
+
+	async function fetchNoteHistory() {
+		if (!note) return;
+		isBusy = true;
+		try {
+			const history = await invoke<GitCommit[]>('get_note_history', { noteId: note.id });
+			noteHistory = history
+				.filter(c => c.message && c.message.trim() !== '')
+				.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+		} catch (e) {
+			console.error("Failed to fetch history:", e);
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function previewVersion(commitHash: string) {
+		if (!note) return;
+		isBusy = true;
+		try {
+			let rawContent = await invoke<string>('get_note_version', { noteId: note.id, commitHash });
+			if (rawContent.match(/^---\r?\n/)) {
+				const match = rawContent.match(/^---\r?\n[\s\S]*?\n---\r?\n/);
+				if (match) {
+					rawContent = rawContent.slice(match[0].length);
+				}
+			}
+			versionPreviewContent = rawContent;
+			versionPreviewHash = commitHash;
+			if (versionPreviewDialog) {
+				versionPreviewDialog.showModal();
+			}
+		} catch (e) {
+			console.error("Failed to fetch version:", e);
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function restoreVersion(commitHash: string) {
+		if (!note) return;
+		isBusy = true;
+		try {
+			let rawContent = await invoke<string>('get_note_version', { noteId: note.id, commitHash });
+			if (rawContent.match(/^---\r?\n/)) {
+				const match = rawContent.match(/^---\r?\n[\s\S]*?\n---\r?\n/);
+				if (match) {
+					rawContent = rawContent.slice(match[0].length);
+				}
+			}
+			draftBody = rawContent;
+			if (vditorInstance) {
+				vditorInstance.setValue(rawContent);
+			}
+			versionPreviewContent = null;
+			versionPreviewHash = null;
+			if (versionPreviewDialog) {
+				versionPreviewDialog.close();
+			}
+			triggerAutoSave();
+			activeSidebarTab = 'info';
+		} catch (e) {
+			console.error("Failed to restore version:", e);
 		} finally {
 			isBusy = false;
 		}
@@ -1114,6 +1244,10 @@
 	}
 
 	onMount(() => {
+		let unlistenChunk: UnlistenFn;
+		let unlistenDone: UnlistenFn;
+		let unlistenError: UnlistenFn;
+
 		$showSidebarToggle = true;
 		if (window.innerWidth > 1200) {
 			$sidebarOpen = true;
@@ -1129,6 +1263,35 @@
 		};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
+
+		let unlistenTool: () => void;
+
+		// Setup AI Streaming listeners
+		listen<{ tool: string, details: string }>('ai://chat_tool', (event) => {
+			chatMessages = chatMessages.map(m => {
+				if (m.isStreaming) {
+					const tools = m.tools || [];
+					return { ...m, tools: [...tools, { name: event.payload.tool, details: event.payload.details }] };
+				}
+				return m;
+			});
+		}).then(fn => unlistenTool = fn);
+
+		listen<{ delta: string, requestId: string }>('ai://chat_chunk', (event) => {
+			chatMessages = chatMessages.map(m => {
+				if (m.isStreaming) return { ...m, content: m.content + event.payload.delta };
+				return m;
+			});
+		}).then(fn => unlistenChunk = fn);
+
+		listen('ai://chat_done', () => {
+			finishStreamingChatMessage();
+		}).then(fn => unlistenDone = fn);
+
+		listen('ai://chat_error', () => {
+			failStreamingChatMessage();
+		}).then(fn => unlistenError = fn);
+
 		window.addEventListener('mousemove', handleGlobalMouseMove);
 		window.addEventListener('mouseup', stopResizing);
 		window.addEventListener('beforeunload', handleBeforeUnload);
@@ -1139,8 +1302,12 @@
 			window.removeEventListener('mousemove', handleGlobalMouseMove);
 			window.removeEventListener('mouseup', stopResizing);
 			window.removeEventListener('beforeunload', handleBeforeUnload);
-			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
 			$showSidebarToggle = false;
+
+			if (unlistenChunk) unlistenChunk();
+			if (unlistenDone) unlistenDone();
+			if (unlistenError) unlistenError();
+			if (unlistenTool) unlistenTool();
 		};
 	});
 
@@ -1263,60 +1430,160 @@
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div class="sidebar-backdrop" onclick={() => $sidebarOpen = false}></div>
 		{/if}
-		<aside class="sidebar" class:open={$sidebarOpen}>
-			<div class="sidebar-section">
-				<h3>Tags</h3>
-				<input class="tag-input" bind:value={draftTags} oninput={triggerAutoSave} placeholder="comma,separated,tags" onblur={fetchRelatedNotes} />
+		<aside class="sidebar" class:open={$sidebarOpen} style="--sidebar-width: {sidebarWidth}px;">
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="sidebar-resizer" onmousedown={startSidebarResizing} class:resizing={isSidebarResizing}></div>
+			<div class="sidebar-tabs">
+				<button class:active={activeSidebarTab === 'info'} onclick={() => activeSidebarTab = 'info'}>Info</button>
+				<button class:active={activeSidebarTab === 'chat'} onclick={() => activeSidebarTab = 'chat'}>Chat</button>
+				<button class:active={activeSidebarTab === 'versions'} onclick={() => { activeSidebarTab = 'versions'; fetchNoteHistory(); }}>History</button>
 			</div>
 
-			<div class="sidebar-section">
-				<h3>AI Actions</h3>
-				<div class="ai-actions">
-					<button class="secondary" onclick={runExtract} disabled={isBusy || !note}>✨ Extract from paste</button>
-					<button class="secondary" onclick={runSummarise} disabled={isBusy || !note}>✨ Summarise</button>
-					<button class="secondary" onclick={runAskAI} disabled={isBusy || !note}>✨ Ask AI about this note</button>
-				</div>
-			</div>
+			<div class="sidebar-content">
+				{#if activeSidebarTab === 'info'}
+					<div class="sidebar-section">
+						<h3>Tags</h3>
+						<input class="tag-input" bind:value={draftTags} oninput={triggerAutoSave} placeholder="comma,separated,tags" onblur={fetchRelatedNotes} />
+					</div>
 
-			<div class="sidebar-section">
-				<h3>Related Notes</h3>
-				{#if relatedNotes.length > 0}
-					<ul class="related-list">
-						{#each relatedNotes as rel, i (rel.id + '_' + i)}
-							<li><a href="/notes/{encodeURIComponent(rel.id)}">{rel.title}</a></li>
-						{/each}
-					</ul>
-				{:else}
-					<p class="empty-state">No related notes found.</p>
-				{/if}
-			</div>
+					<div class="sidebar-section">
+						<h3>AI Actions</h3>
+						<div class="ai-actions">
+							<button class="secondary" onclick={runExtract} disabled={isBusy || !note}>✨ Extract from paste</button>
+							<button class="secondary" onclick={runSummarise} disabled={isBusy || !note}>✨ Summarise</button>
+							<button class="secondary" onclick={runAskAI} disabled={isBusy || !note}>✨ Ask AI about this note</button>
+						</div>
+					</div>
 
-			<div class="sidebar-section">
-				<h3>Backlinks</h3>
-				{#if note && note.backlinks && note.backlinks.length > 0}
-					<ul class="related-list">
-						{#each note.backlinks as link, i (link.sourceId + '_' + (link.targetBlock || '') + '_' + i)}
-							<li>
-								<a href="/notes/{encodeURIComponent(link.sourceId)}">
-									<strong>{link.sourceTitle}</strong>
-									{#if link.targetBlock}
-										<span style="opacity: 0.7; font-size: 0.8em;">#{link.targetBlock}</span>
-									{/if}
-								</a>
-								<p class="context-excerpt" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.4;">
-									{@html parseBacklinkContext(link.contextExcerpt)}
-								</p>
-							</li>
-						{/each}
-					</ul>
-				{:else}
-					<p class="empty-state">No backlinks yet.</p>
+					<div class="sidebar-section">
+						<h3>Related Notes</h3>
+						{#if relatedNotes.length > 0}
+							<ul class="related-list">
+								{#each relatedNotes as rel, i (rel.id + '_' + i)}
+									<li><a href="/notes/{encodeURIComponent(rel.id)}">{rel.title}</a></li>
+								{/each}
+							</ul>
+						{:else}
+							<p class="empty-state">No related notes found.</p>
+						{/if}
+					</div>
+
+					<div class="sidebar-section">
+						<h3>Backlinks</h3>
+						{#if note && note.backlinks && note.backlinks.length > 0}
+							<ul class="related-list">
+								{#each note.backlinks as link, i (link.sourceId + '_' + (link.targetBlock || '') + '_' + i)}
+									<li>
+										<a href="/notes/{encodeURIComponent(link.sourceId)}">
+											<strong>{link.sourceTitle}</strong>
+											{#if link.targetBlock}
+												<span style="opacity: 0.7; font-size: 0.8em;">#{link.targetBlock}</span>
+											{/if}
+										</a>
+										<p class="context-excerpt" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.4;">
+											{@html parseBacklinkContext(link.contextExcerpt)}
+										</p>
+									</li>
+								{/each}
+							</ul>
+						{:else}
+							<p class="empty-state">No backlinks yet.</p>
+						{/if}
+					</div>
+
+				{:else if activeSidebarTab === 'chat'}
+					<div class="chat-container">
+						<div class="chat-messages">
+							{#if chatMessages.length === 0}
+								<p class="empty-state">Ask me anything about this note or your library!</p>
+							{:else}
+								{#each chatMessages as msg, i}
+									<div class="chat-message {msg.role}">
+										<div class="chat-bubble">
+											{#if msg.tools && msg.tools.length > 0}
+												<div class="chat-tools">
+													{#each msg.tools as tool}
+														<div class="chat-tool-indicator">
+															<span class="tool-icon">⚡</span> 
+															<span class="tool-name">{tool.name}</span>
+															{#if tool.details}
+																<span class="tool-details">{tool.details.substring(0, 30)}{tool.details.length > 30 ? '...' : ''}</span>
+															{/if}
+														</div>
+													{/each}
+												</div>
+											{/if}
+											{@html msg.content || (msg.isStreaming && (!msg.tools || msg.tools.length === 0) ? '<span class="loading-dots"></span>' : '')}
+										</div>
+									</div>
+								{/each}
+							{/if}
+						</div>
+						<div class="chat-input-area">
+							<textarea 
+								bind:this={chatTextareaEl}
+								bind:value={chatInput}  
+								onkeydown={(e) => {
+									if (e.key === 'Enter' && !e.shiftKey) {
+										e.preventDefault();
+										if (chatInput.trim()) sendChatMessage();
+									}
+								}} 
+								oninput={(e) => {
+									const target = e.target as HTMLTextAreaElement;
+									target.style.height = 'auto';
+									target.style.height = `${Math.min(target.scrollHeight, 200)}px`;
+								}}
+								placeholder="Ask AI..." 
+								rows="1"
+							></textarea>
+						</div>
+					</div>
+
+				{:else if activeSidebarTab === 'versions'}
+					<div class="versions-container">
+						{#if isBusy && noteHistory.length === 0}
+							<p class="empty-state">Loading history...</p>
+						{:else if noteHistory.length === 0}
+							<p class="empty-state">No history found.</p>
+						{:else}
+							<ul class="history-list">
+								{#each noteHistory as commit (commit.hash)}
+									<li>
+										<div class="commit-header">
+											<strong>{commit.message}</strong>
+											<span class="commit-date">{new Date(commit.timestamp).toLocaleString()}</span>
+										</div>
+										<div class="commit-actions">
+											<button class="secondary" onclick={() => previewVersion(commit.hash)}>Preview</button>
+											<button class="secondary" onclick={() => restoreVersion(commit.hash)}>Restore</button>
+										</div>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+					</div>
 				{/if}
 			</div>
 		</aside>
 		{/if}
 	</div>
 </div>
+
+<dialog bind:this={versionPreviewDialog} class="version-preview-dialog" onclose={() => versionPreviewContent = null}>
+	<div class="dialog-content" style="max-width: 800px; width: 90vw;">
+		<h3>Version Preview</h3>
+		<div class="preview-content" style="max-height: 60vh; overflow-y: auto; background: var(--bg-page); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-default); white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.875rem; margin: 1rem 0;">
+			{versionPreviewContent || 'Loading...'}
+		</div>
+		<div class="dialog-actions">
+			<button class="secondary" onclick={() => versionPreviewDialog?.close()}>Close</button>
+			{#if versionPreviewHash}
+				<button class="primary" onclick={() => restoreVersion(versionPreviewHash!)}>Restore This Version</button>
+			{/if}
+		</div>
+	</div>
+</dialog>
 
 <dialog bind:this={mathDialog} class="math-dialog" onclose={() => mathValue = ''}>
 	<div class="dialog-content">
@@ -1676,6 +1943,10 @@
 		border: none !important;
 	}
 
+	:global(.vditor-reset) {
+		padding-top: var(--space-6) !important;
+	}
+
 	.toolbar-overlay-toggle-container {
 		position: absolute;
 		top: 0;
@@ -1868,10 +2139,10 @@
 		top: 0;
 		right: 0;
 		bottom: 0;
-		width: 20rem;
+		width: var(--sidebar-width, 20rem);
 		max-width: 85vw;
 		background: var(--bg-panel);
-		padding: var(--space-6);
+		padding: 0 var(--space-6) var(--space-6) var(--space-6);
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-6);
@@ -1880,6 +2151,7 @@
 		transform: translateX(100%);
 		transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 		border-left: 1px solid var(--border-default);
+		border-radius: 0 !important;
 		box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
 	}
 
@@ -1901,7 +2173,7 @@
 		.sidebar {
 			position: relative;
 			transform: none;
-			margin-right: -20rem;
+			margin-right: calc(var(--sidebar-width, 20rem) * -1);
 			box-shadow: none;
 			flex-shrink: 0;
 		}
@@ -1914,6 +2186,20 @@
 		.sidebar-backdrop {
 			display: none !important;
 		}
+	}
+
+	.sidebar-resizer {
+		position: absolute;
+		left: -3px;
+		top: 0;
+		bottom: 0;
+		width: 6px;
+		cursor: ew-resize;
+		z-index: 1000;
+		transition: background 0.2s ease;
+	}
+	.sidebar-resizer:hover, .sidebar-resizer.resizing {
+		background: var(--accent-100);
 	}
 
 	.sidebar-section {
@@ -2327,5 +2613,202 @@
 
 	:global(.vditor-hint button[data-mode="wysiwyg"]) {
 		display: none !important;
+	}
+
+	/* Sidebar Tabs */
+	.sidebar-tabs {
+		display: flex;
+		height: 48px;
+		border-bottom: 1px solid var(--border-subtle);
+		margin-bottom: var(--space-4);
+		flex-shrink: 0;
+	}
+	.sidebar-tabs button {
+		flex: 1;
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		padding: 0;
+		font-family: var(--font-sans);
+		font-size: 0.875rem;
+		cursor: pointer;
+		border-bottom: 2px solid transparent;
+		transition: all var(--duration-fast);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.sidebar-tabs button.active {
+		color: var(--accent-100);
+		border-bottom-color: var(--accent-100);
+	}
+	.sidebar-tabs button:hover:not(.active) {
+		color: var(--text-primary);
+	}
+
+	.sidebar-content {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-6);
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+	}
+
+	.sidebar-content::-webkit-scrollbar,
+	.chat-messages::-webkit-scrollbar,
+	.versions-container::-webkit-scrollbar,
+	.sidebar::-webkit-scrollbar {
+		display: none;
+	}
+	.sidebar-content, .chat-messages, .versions-container, .sidebar {
+		-ms-overflow-style: none;
+		scrollbar-width: none;
+	}
+
+	/* Chat UI */
+	.chat-container {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		flex: 1;
+	}
+	.chat-messages {
+		flex: 1;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4);
+		padding-bottom: var(--space-4);
+	}
+	.chat-message {
+		display: flex;
+		flex-direction: column;
+	}
+	.chat-message.user {
+		align-items: flex-end;
+	}
+	.chat-message.assistant {
+		align-items: flex-start;
+	}
+	.chat-bubble {
+		max-width: 85%;
+		padding: var(--space-3) var(--space-4);
+		border-radius: var(--radius-md);
+		font-size: 0.875rem;
+		line-height: 1.5;
+	}
+	.chat-message.user .chat-bubble {
+		background: var(--accent-200);
+		color: var(--bg-page);
+	}
+	.chat-message.assistant .chat-bubble {
+		background: var(--bg-panel);
+		border: 1px solid var(--border-default);
+		color: var(--text-primary);
+	}
+	.chat-tools {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		margin-bottom: var(--space-2);
+	}
+	.chat-tool-indicator {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		font-size: 0.75rem;
+		padding: var(--space-1) var(--space-2);
+		background: rgba(255, 255, 255, 0.05);
+		border-radius: var(--radius-sm);
+		border: 1px dashed var(--border-default);
+		color: var(--text-secondary);
+	}
+	.tool-name {
+		font-weight: 500;
+		color: var(--accent-300);
+	}
+	.tool-details {
+		font-style: italic;
+		opacity: 0.8;
+	}
+	.chat-input-area {
+		display: flex;
+		gap: var(--space-2);
+		margin-top: auto;
+		padding-top: var(--space-4);
+		border-top: 1px solid var(--border-default);
+	}
+	.chat-input-area textarea {
+		flex: 1;
+		background: var(--bg-page);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-xs);
+		padding: var(--space-2) var(--space-3);
+		color: var(--text-primary);
+		outline: none;
+		resize: none;
+		font-family: inherit;
+		line-height: 1.4;
+		overflow-y: auto;
+	}
+	.chat-input-area textarea:focus {
+		border-color: var(--accent-200);
+	}
+
+	.loading-dots::after {
+		content: '...';
+		animation: blink 1.5s steps(4, end) infinite;
+	}
+	@keyframes blink {
+		0%, 20% { color: transparent; }
+		40% { color: inherit; }
+		100% { color: inherit; }
+	}
+
+	/* Version History UI */
+	.versions-container {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+	}
+	.history-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4);
+	}
+	.history-list li {
+		background: var(--bg-panel);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		padding: var(--space-3);
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+	}
+	.commit-header {
+		display: flex;
+		flex-direction: column;
+	}
+	.commit-header strong {
+		font-size: 0.875rem;
+		color: var(--text-primary);
+	}
+	.commit-date {
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+	}
+	.commit-actions {
+		display: flex;
+		gap: var(--space-2);
+		margin-top: var(--space-2);
+	}
+	.commit-actions button {
+		flex: 1;
+		font-size: 0.75rem;
+		padding: var(--space-1) 0;
 	}
 </style>

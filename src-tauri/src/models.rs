@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub role: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct PdfAnnotation {
     pub id: String,
     pub page: i32,
@@ -22,7 +35,6 @@ pub struct Backlink {
     pub target_block: Option<String>,
     pub context_excerpt: String,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +63,8 @@ pub struct ProviderStatus {
     pub available_providers: Vec<String>,
     pub healthy: bool,
     pub detail: String,
+    pub config: Option<crate::llama_server::WorkspaceLlamaConfig>,
+    pub resolved: Option<crate::llama_server::ResolvedLlamaConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -93,6 +107,8 @@ pub struct NoteDocument {
     pub backlinks: Vec<Backlink>,
     #[serde(default)]
     pub annotations: Vec<PdfAnnotation>,
+    #[serde(default)]
+    pub chat_history: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

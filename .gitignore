@@ -24,3 +24,11 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Temp/Local files
+.myelin/
+MiniCPM-V-4_6-Q8_0.gguf
+design-token.html
+scratch/
+src-tauri/test_rig.rs
+test_git.rs

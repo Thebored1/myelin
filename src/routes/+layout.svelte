@@ -3,6 +3,7 @@
 	import { onMount } from 'svelte';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 	import { sidebarOpen, showSidebarToggle } from '$lib/stores';
+	import { goto } from '$app/navigation';
 
 	let { children } = $props();
 
@@ -45,12 +46,25 @@
 			}
 		};
 
+		const handleGlobalContextMenu = (e: MouseEvent) => {
+			const target = e.target as HTMLElement;
+			const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+			const isContentEditable = target.isContentEditable;
+
+			// Disable the default browser right-click menu unless we're in a text input
+			if (!isInput && !isContentEditable) {
+				e.preventDefault();
+			}
+		};
+
 		if (typeof window !== 'undefined') {
 			window.addEventListener('keydown', handleGlobalKeydown, { passive: false });
 			window.addEventListener('wheel', handleGlobalWheel, { passive: false });
+			window.addEventListener('contextmenu', handleGlobalContextMenu, { passive: false });
 			return () => {
 				window.removeEventListener('keydown', handleGlobalKeydown);
 				window.removeEventListener('wheel', handleGlobalWheel);
+				window.removeEventListener('contextmenu', handleGlobalContextMenu);
 			};
 		}
 	});
@@ -123,6 +137,12 @@
 					</svg>
 				</button>
 			{/if}
+			<button class="control-btn settings" onclick={() => goto('/settings')} aria-label="Settings" title="Settings">
+				<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+					<circle cx="12" cy="12" r="3"></circle>
+					<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+				</svg>
+			</button>
 			<button class="control-btn minimize" onclick={minimize} aria-label="Minimize" title="Minimize">
 				<svg width="12" height="12" viewBox="0 0 12 12">
 					<line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
@@ -210,6 +230,7 @@
 		background: var(--bg-page);
 		color: var(--text-primary);
 		overflow: hidden;
+		font-size: 14px;
 	}
 
 	:global(body) {

@@ -1,3 +1,4 @@
+use crate::llama_server::{self, ManagedLlamaServer};
 use crate::models::{
     AppSnapshot, Backlink, IndexState, LibraryFacets, NoteDocument, NoteSummary, ProviderStatus,
     SearchResponse, SearchResult,
@@ -11,6 +12,8 @@ use lancedb::connection::Connection;
 use lancedb::{connect, Table};
 use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Mutex, RwLock};
+use reqwest::Client;
+use rig_core::completion::Chat;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -29,7 +32,7 @@ const TABLE_NAME: &str = "notes";
 
 #[derive(Clone)]
 pub struct AppState {
-    handle: AppHandle,
+    pub handle: AppHandle,
     inner: Arc<InnerState>,
 }
 
@@ -38,6 +41,8 @@ struct InnerState {
     runtime: RwLock<RuntimeState>,
     watcher: Mutex<Option<RecommendedWatcher>>,
     index_lock: AsyncMutex<()>,
+    llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
+    llama_client: Client,
 }
 
 #[derive(Default)]
@@ -104,6 +109,11 @@ impl AppState {
                 }),
                 watcher: Mutex::new(None),
                 index_lock: AsyncMutex::new(()),
+                llama_server: AsyncMutex::new(None),
+                llama_client: Client::builder()
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .context("failed to create llama HTTP client")?,
             }),
         })
     }
@@ -111,6 +121,7 @@ impl AppState {
     pub async fn bootstrap(&self) -> Result<AppSnapshot> {
         let workspace = self.inner.runtime.read().workspace_path.clone();
         if let Some(workspace) = workspace {
+            crate::git_history::init_repo(&workspace)?;
             self.start_watcher(&workspace)?;
             self.reindex_workspace(workspace).await?;
         }
@@ -121,6 +132,7 @@ impl AppState {
         let workspace = PathBuf::from(workspace_path);
         fs::create_dir_all(&workspace)
             .with_context(|| format!("failed to create workspace at {}", workspace.display()))?;
+        crate::git_history::init_repo(&workspace)?;
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -140,9 +152,21 @@ impl AppState {
         Ok(self.snapshot())
     }
 
+    pub async fn set_llama_model_path(&self, model_path: String) -> Result<()> {
+        let workspace = self.require_workspace()?;
+        crate::llama_server::set_workspace_model_path(&workspace, model_path)?;
+        Ok(())
+    }
+
+    pub async fn set_llama_executable_path(&self, executable_path: String) -> Result<()> {
+        let workspace = self.require_workspace()?;
+        crate::llama_server::set_workspace_executable_path(&workspace, executable_path)?;
+        Ok(())
+    }
+
     fn ensure_unique_title(&self, requested_title: &str, current_note_id: Option<&str>) -> String {
         let runtime = self.inner.runtime.read();
-        
+
         let base_title = if requested_title.trim().is_empty() {
             "Untitled note"
         } else {
@@ -151,32 +175,37 @@ impl AppState {
 
         let mut title = base_title.to_string();
         let mut counter = 1;
-        
+
         loop {
             let exists = runtime.notes.iter().any(|(id, note)| {
-                note.document.title.to_lowercase() == title.to_lowercase() && Some(id.as_str()) != current_note_id
+                note.document.title.to_lowercase() == title.to_lowercase()
+                    && Some(id.as_str()) != current_note_id
             });
-            
+
             if !exists {
                 return title;
             }
-            
+
             title = format!("{} {}", base_title, counter);
             counter += 1;
         }
     }
 
-    pub async fn create_note(&self, title: String, source_pdf: Option<String>) -> Result<NoteDocument> {
+    pub async fn create_note(
+        &self,
+        title: String,
+        source_pdf: Option<String>,
+    ) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let now = timestamp_now();
         let id = Uuid::new_v4().to_string();
-        
+
         let unique_title = self.ensure_unique_title(&title, None);
         let safe_slug = slugify(&unique_title);
         let file_name = format!("{safe_slug}--{}.md", &id[..8]);
         let path = unique_note_path(&workspace, &file_name);
         let relative_path = relative_to_workspace(&workspace, &path);
-        
+
         let document = NoteDocument {
             id,
             title: unique_title,
@@ -188,6 +217,7 @@ impl AppState {
             source_pdf,
             annotations: Vec::new(),
             backlinks: Vec::new(),
+            chat_history: Vec::new(),
         };
 
         let vector = hashed_embedding(&format!(
@@ -199,14 +229,21 @@ impl AppState {
 
         {
             let mut runtime = self.inner.runtime.write();
-            runtime.notes.insert(document.id.clone(), IndexedNote {
-                document: document.clone(),
-                vector,
-            });
+            runtime.notes.insert(
+                document.id.clone(),
+                IndexedNote {
+                    document: document.clone(),
+                    vector,
+                },
+            );
         }
 
         write_note_file(&workspace, &path, &document)?;
-        
+        crate::git_history::commit_changes(
+            &workspace,
+            &format!("Create note: {}", document.title),
+        )?;
+
         let state = self.clone();
         let workspace_clone = workspace.clone();
         tauri::async_runtime::spawn(async move {
@@ -261,10 +298,11 @@ impl AppState {
             source_pdf,
             annotations: annotations.unwrap_or_default(),
             backlinks: existing.document.backlinks,
+            chat_history: existing.document.chat_history,
         };
 
         let path = workspace.join(&updated.relative_path);
-        
+
         let vector = hashed_embedding(&format!(
             "{}\n{}\n{}",
             updated.title,
@@ -274,14 +312,18 @@ impl AppState {
 
         {
             let mut runtime = self.inner.runtime.write();
-            runtime.notes.insert(note_id.clone(), IndexedNote {
-                document: updated.clone(),
-                vector,
-            });
+            runtime.notes.insert(
+                note_id.clone(),
+                IndexedNote {
+                    document: updated.clone(),
+                    vector,
+                },
+            );
         }
 
         write_note_file(&workspace, &path, &updated)?;
-        
+        crate::git_history::commit_changes(&workspace, &format!("Update note: {}", updated.title))?;
+
         let state = self.clone();
         let workspace_clone = workspace.clone();
         tauri::async_runtime::spawn(async move {
@@ -303,6 +345,7 @@ impl AppState {
         };
 
         fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+        crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))?;
         self.reindex_workspace(workspace).await?;
         Ok(self.snapshot())
     }
@@ -339,9 +382,14 @@ impl AppState {
             source_pdf: source.document.source_pdf.clone(),
             annotations: source.document.annotations.clone(),
             backlinks: source.document.backlinks,
+            chat_history: source.document.chat_history.clone(),
         };
 
         write_note_file(&workspace, &path, &document)?;
+        crate::git_history::commit_changes(
+            &workspace,
+            &format!("Duplicate note: {}", document.title),
+        )?;
         self.reindex_workspace(workspace).await?;
         self.load_note(duplicate_id).await
     }
@@ -374,6 +422,10 @@ impl AppState {
                 target_path.display()
             )
         })?;
+        crate::git_history::commit_changes(
+            &workspace,
+            &format!("Move note: {}", source.document.title),
+        )?;
 
         self.reindex_workspace(workspace).await?;
         self.load_note(note_id).await
@@ -489,7 +541,10 @@ impl AppState {
         fs::read(path).map_err(|e| anyhow!("failed to read PDF: {}", e))
     }
 
-    pub async fn get_note_history(&self, note_id: String) -> Result<Vec<crate::git_history::GitCommit>> {
+    pub async fn get_note_history(
+        &self,
+        note_id: String,
+    ) -> Result<Vec<crate::git_history::GitCommit>> {
         let workspace = self.require_workspace()?;
         let path = {
             let runtime = self.inner.runtime.read();
@@ -499,7 +554,25 @@ impl AppState {
                 .ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
-        crate::git_history::get_file_history(&workspace, path.to_str().unwrap())
+        let path_str = path.to_str().unwrap();
+        let history = crate::git_history::get_file_history(&workspace, path_str)?;
+        
+        let mut filtered = Vec::new();
+        for commit in history {
+            if let Ok(content) = crate::git_history::get_file_at_commit(&workspace, &commit.hash, path_str) {
+                let mut body = content.as_str();
+                if body.starts_with("---\n") {
+                    if let Some(end_idx) = body[4..].find("\n---\n") {
+                        body = &body[end_idx + 9..];
+                    }
+                }
+                if !body.trim().is_empty() {
+                    filtered.push(commit);
+                }
+            }
+        }
+        
+        Ok(filtered)
     }
 
     pub async fn get_note_version(&self, note_id: String, commit_hash: String) -> Result<String> {
@@ -515,7 +588,158 @@ impl AppState {
         crate::git_history::get_file_at_commit(&workspace, &commit_hash, path.to_str().unwrap())
     }
     pub async fn provider_status(&self) -> Result<ProviderStatus> {
-        Ok(default_provider_status())
+        let workspace = match self.require_workspace() {
+            Ok(workspace) => workspace,
+            Err(_) => return Ok(default_provider_status(None)),
+        };
+
+        let info = llama_server::inspect_provider(&workspace)?;
+        let healthy = if let Some(config) = &info.resolved {
+            let server = self.inner.llama_server.lock().await;
+            if let Some(server) = server.as_ref() {
+                if server.config.matches_runtime(config) {
+                    llama_server::health_check(&self.inner.llama_client, &server.config).await
+                } else {
+                    info.healthy
+                }
+            } else {
+                info.healthy
+            }
+        } else {
+            false
+        };
+
+        Ok(ProviderStatus {
+            active_provider: "llama.cpp".into(),
+            available_providers: vec!["llama.cpp".into()],
+            healthy,
+            detail: info.detail,
+            config: Some(info.config),
+            resolved: info.resolved,
+        })
+    }
+
+    pub async fn summarise_note(&self, note_id: String) -> Result<String> {
+        let note = self.load_note(note_id).await?;
+        let prompt = format!(
+            "Summarise this note in concise plain language.\n\nTitle: {}\n\nTags: {}\n\nBody:\n{}",
+            note.title,
+            if note.tags.is_empty() {
+                "(none)".to_string()
+            } else {
+                note.tags.join(", ")
+            },
+            note.body
+        );
+
+        self.run_llama_prompt(
+            "You summarise the user's note faithfully. Keep the response concise, practical, and grounded only in the provided note.",
+            &prompt,
+        )
+        .await
+    }
+
+    pub async fn ask_ai(&self, note_id: String, question: String) -> Result<String> {
+        let note = self.load_note(note_id).await?;
+        let mut history_text = String::new();
+        for msg in &note.chat_history {
+            history_text.push_str(&format!("{}: {}\n", msg.role, msg.content));
+        }
+        
+        let prompt = format!(
+            "Answer the user's question using the note as primary context.\n\nTitle: {}\n\nTags: {}\n\nBody:\n{}\n\nChat History:\n{}\n\nQuestion:\n{}",
+            note.title,
+            if note.tags.is_empty() { "(none)".to_string() } else { note.tags.join(", ") },
+            note.body,
+            history_text,
+            question
+        );
+
+        self.run_llama_prompt(
+            "You are a helpful AI agent. You answer the user's message directly. Use the tools available to you to read, write, or search notes if needed.",
+            &prompt,
+        )
+        .await
+    }
+
+    pub async fn ask_ai_stream(
+        &self,
+        note_id: String,
+        question: String,
+        request_id: String,
+    ) -> Result<()> {
+        let note = self.load_note(note_id).await?;
+        let mut history_text = String::new();
+        for msg in &note.chat_history {
+            history_text.push_str(&format!("{}: {}\n", msg.role, msg.content));
+        }
+
+        let prompt = format!(
+            "Answer the user's question using the note as primary context.\n\nTitle: {}\n\nTags: {}\n\nBody:\n{}\n\nChat History:\n{}\n\nQuestion:\n{}",
+            note.title,
+            if note.tags.is_empty() { "(none)".to_string() } else { note.tags.join(", ") },
+            note.body,
+            history_text,
+            question
+        );
+
+        let workspace = self.require_workspace()?;
+        let config = llama_server::resolve_config(&workspace)?;
+        self.ensure_llama_server(&config).await?;
+
+        let request_id_for_done = request_id.clone();
+        
+        let agent = crate::agent::build_myelin_agent(
+            self.clone(),
+            &format!("{}/v1", config.base_url()),
+            &config.model_name(),
+            "You are a helpful AI agent. You answer the user's message directly. Use tools if necessary to explore other notes or create new ones."
+        );
+
+        // Use standard chat which handles the tool loop automatically.
+        let mut history = vec![];
+        let response = agent.chat(&prompt, &mut history).await.map_err(|e| anyhow::anyhow!("Agent error: {}", e))?;
+
+        // Emit as a single chunk since rig's tool-streaming loop is complex to intercept natively
+        self.handle.emit(
+            "ai://chat_chunk",
+            serde_json::json!({
+                "requestId": request_id,
+                "delta": response
+            }),
+        )?;
+
+        self.handle.emit(
+            "ai://chat_done",
+            serde_json::json!({ "requestId": request_id_for_done }),
+        )?;
+
+        Ok(())
+    }
+
+    pub async fn save_chat_history(&self, note_id: String, chat_history: Vec<crate::models::ChatMessage>) -> Result<()> {
+        let workspace = self.require_workspace()?;
+        let mut document = {
+            let runtime = self.inner.runtime.read();
+            runtime.notes.get(&note_id).cloned().map(|n| n.document).ok_or_else(|| anyhow!("note not found"))?
+        };
+        
+        document.chat_history = chat_history;
+        
+        let chats_dir = workspace.join(".myelin").join("chats");
+        fs::create_dir_all(&chats_dir)?;
+        let chats_path = chats_dir.join(format!("{}.chat.json", document.id));
+        let tmp_chat_path = chats_dir.join(format!("{}.chat.tmp", document.id));
+        fs::write(&tmp_chat_path, serde_json::to_string(&document.chat_history)?)?;
+        fs::rename(&tmp_chat_path, &chats_path)?;
+
+        {
+            let mut runtime = self.inner.runtime.write();
+            if let Some(note) = runtime.notes.get_mut(&note_id) {
+                note.document.chat_history = document.chat_history;
+            }
+        }
+        Ok(())
     }
 
     pub async fn rebuild_index(&self) -> Result<AppSnapshot> {
@@ -542,7 +766,7 @@ impl AppState {
             notes,
             custom_note_order,
             library_facets: build_library_facets(runtime.notes.values().map(|note| &note.document)),
-            provider_status: default_provider_status(),
+            provider_status: default_provider_status(runtime.workspace_path.as_deref()),
             index_state: runtime.index_state.clone(),
         }
     }
@@ -612,29 +836,39 @@ impl AppState {
         }
 
         self.handle.emit("index://status", "started")?;
-        
+
         let workspace_clone = workspace.clone();
-        let mut notes = tauri::async_runtime::spawn_blocking(move || {
-            read_workspace_notes(&workspace_clone)
-        }).await.map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
-        
+        let mut notes =
+            tauri::async_runtime::spawn_blocking(move || read_workspace_notes(&workspace_clone))
+                .await
+                .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
+
         let mut backlinks_map: HashMap<String, Vec<Backlink>> = HashMap::new();
         for note in &notes {
             let links = extract_links(&note.document.body);
             for link in links {
-                let target_note = notes.iter().find(|n| n.document.title == link.target || n.document.id == link.target);
+                let target_note = notes
+                    .iter()
+                    .find(|n| n.document.title == link.target || n.document.id == link.target);
                 if let Some(target) = target_note {
                     let backlink = Backlink {
                         source_id: note.document.id.clone(),
                         source_title: note.document.title.clone(),
                         target_block: link.block.clone(),
-                        context_excerpt: excerpt_around(&note.document.body, link.start_index, link.end_index),
+                        context_excerpt: excerpt_around(
+                            &note.document.body,
+                            link.start_index,
+                            link.end_index,
+                        ),
                     };
-                    backlinks_map.entry(target.document.id.clone()).or_default().push(backlink);
+                    backlinks_map
+                        .entry(target.document.id.clone())
+                        .or_default()
+                        .push(backlink);
                 }
             }
         }
-        
+
         for note in &mut notes {
             if let Some(links) = backlinks_map.remove(&note.document.id) {
                 note.document.backlinks = links;
@@ -683,6 +917,41 @@ impl AppState {
                 custom_note_order: runtime.custom_note_order.clone(),
             },
         )
+    }
+
+    async fn run_llama_prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+        let workspace = self.require_workspace()?;
+        let config = llama_server::resolve_config(&workspace)?;
+        self.ensure_llama_server(&config).await?;
+        
+        let agent = crate::agent::build_myelin_agent(
+            self.clone(),
+            &format!("{}/v1", config.base_url()),
+            &config.model_name(),
+            system_prompt
+        );
+        
+        let mut history = vec![];
+        agent.chat(user_prompt, &mut history).await.map_err(|e| anyhow::anyhow!("Agent error: {}", e))
+    }
+
+    async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
+        let mut guard = self.inner.llama_server.lock().await;
+
+        if let Some(server) = guard.as_mut() {
+            if server.config.matches_runtime(config)
+                && llama_server::health_check(&self.inner.llama_client, &server.config).await
+            {
+                return Ok(());
+            }
+
+            llama_server::stop_server(server).await;
+            *guard = None;
+        }
+
+        let server = llama_server::start_server(&self.inner.llama_client, config).await?;
+        *guard = Some(server);
+        Ok(())
     }
 }
 
@@ -750,7 +1019,10 @@ fn parse_pdf_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
     let id = stable_id_from_path(path);
 
     let annotations = {
-        let annotations_path = workspace.join(".myelin").join("annotations").join(format!("{}.annotations.json", id));
+        let annotations_path = workspace
+            .join(".myelin")
+            .join("annotations")
+            .join(format!("{}.annotations.json", id));
         if annotations_path.exists() {
             fs::read_to_string(&annotations_path)
                 .ok()
@@ -761,7 +1033,7 @@ fn parse_pdf_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
     };
 
     Ok(NoteDocument {
-        id,
+        id: id.clone(),
         title,
         tags: Vec::new(),
         body: String::new(),
@@ -771,6 +1043,10 @@ fn parse_pdf_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
         source_pdf: None,
         annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
+        chat_history: {
+            let chats_path = workspace.join(".myelin").join("chats").join(format!("{}.chat.json", id));
+            fs::read_to_string(&chats_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        },
     })
 }
 
@@ -791,7 +1067,10 @@ fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
     let id = metadata.id.unwrap_or_else(|| stable_id_from_path(path));
 
     let annotations = {
-        let annotations_path = workspace.join(".myelin").join("annotations").join(format!("{}.annotations.json", id));
+        let annotations_path = workspace
+            .join(".myelin")
+            .join("annotations")
+            .join(format!("{}.annotations.json", id));
         if annotations_path.exists() {
             fs::read_to_string(&annotations_path)
                 .ok()
@@ -802,7 +1081,7 @@ fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
     };
 
     Ok(NoteDocument {
-        id,
+        id: id.clone(),
         title,
         tags: metadata.tags.unwrap_or_default(),
         body,
@@ -812,6 +1091,10 @@ fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
         source_pdf: metadata.source_pdf,
         annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
+        chat_history: {
+            let chats_path = workspace.join(".myelin").join("chats").join(format!("{}.chat.json", id));
+            fs::read_to_string(&chats_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        },
     })
 }
 
@@ -831,7 +1114,21 @@ fn write_note_file(workspace: &Path, path: &Path, document: &NoteDocument) -> Re
         fs::rename(&tmp_ann_path, &annotations_path)?;
     }
 
-    if path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()) == Some("pdf".to_string()) {
+    if !document.chat_history.is_empty() {
+        let chats_dir = workspace.join(".myelin").join("chats");
+        fs::create_dir_all(&chats_dir)?;
+        let chats_path = chats_dir.join(format!("{}.chat.json", document.id));
+        let tmp_chat_path = chats_dir.join(format!("{}.chat.tmp", document.id));
+        fs::write(&tmp_chat_path, serde_json::to_string(&document.chat_history)?)?;
+        fs::rename(&tmp_chat_path, &chats_path)?;
+    }
+
+    if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        == Some("pdf".to_string())
+    {
         return Ok(());
     }
 
@@ -1084,8 +1381,8 @@ fn timestamp_now() -> String {
 
 fn excerpt(body: &str) -> String {
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.len() > 180 {
-        format!("{}...", &flat[..180])
+    if flat.len() > 400 {
+        format!("{}...", &flat[..400])
     } else {
         flat
     }
@@ -1213,7 +1510,9 @@ fn unique_note_path(workspace: &Path, file_name: &str) -> PathBuf {
 fn is_note_file(path: &Path) -> bool {
     path.extension()
         .and_then(std::ffi::OsStr::to_str)
-        .map(|extension| extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("pdf"))
+        .map(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("pdf")
+        })
         .unwrap_or(false)
 }
 
@@ -1232,14 +1531,17 @@ struct ParsedLink {
 
 fn extract_links(body: &str) -> Vec<ParsedLink> {
     let mut links = Vec::new();
-    
+
     // Parse [[Wikilinks]]
     if let Ok(re) = regex::Regex::new(r"\[\[([^\]]+)\]\]") {
         for cap in re.captures_iter(body) {
             if let Some(m) = cap.get(0) {
                 let inner = cap.get(1).unwrap().as_str().to_string();
                 let (target, block) = if let Some(idx) = inner.find('#') {
-                    (inner[..idx].trim().to_string(), Some(inner[idx+1..].trim().to_string()))
+                    (
+                        inner[..idx].trim().to_string(),
+                        Some(inner[idx + 1..].trim().to_string()),
+                    )
                 } else {
                     (inner.trim().to_string(), None)
                 };
@@ -1259,18 +1561,18 @@ fn extract_links(body: &str) -> Vec<ParsedLink> {
         for cap in re.captures_iter(body) {
             if let Some(m) = cap.get(0) {
                 let inner = cap.get(1).unwrap().as_str().to_string();
-                
+
                 let (url_part, block) = if let Some(idx) = inner.find('#') {
-                    (&inner[..idx], Some(inner[idx+1..].trim().to_string()))
+                    (&inner[..idx], Some(inner[idx + 1..].trim().to_string()))
                 } else {
                     (inner.as_str(), None)
                 };
-                
+
                 let url_part = url_part.trim();
-                
+
                 // Extract the last segment (e.g., UUID from /notes/uuid or http://.../notes/uuid)
                 let target = if let Some(idx) = url_part.rfind('/') {
-                    url_part[idx+1..].to_string()
+                    url_part[idx + 1..].to_string()
                 } else if url_part.starts_with("note:") {
                     url_part[5..].to_string()
                 } else {
@@ -1286,7 +1588,7 @@ fn extract_links(body: &str) -> Vec<ParsedLink> {
             }
         }
     }
-    
+
     links
 }
 
@@ -1294,7 +1596,7 @@ fn excerpt_around(body: &str, start: usize, end: usize) -> String {
     let context_chars = 40;
     let pre_start = start.saturating_sub(context_chars);
     let post_end = std::cmp::min(body.len(), end + context_chars);
-    
+
     let mut excerpt = String::new();
     if pre_start > 0 {
         excerpt.push_str("...");
@@ -1306,12 +1608,27 @@ fn excerpt_around(body: &str, start: usize, end: usize) -> String {
     excerpt
 }
 
-fn default_provider_status() -> ProviderStatus {
+fn default_provider_status(workspace: Option<&Path>) -> ProviderStatus {
+    if let Some(workspace) = workspace {
+        if let Ok(info) = llama_server::inspect_provider(workspace) {
+            return ProviderStatus {
+                active_provider: "llama.cpp".into(),
+                available_providers: vec!["llama.cpp".into()],
+                healthy: info.healthy,
+                detail: info.detail,
+                config: Some(info.config),
+                resolved: info.resolved,
+            };
+        }
+    }
+
     ProviderStatus {
-        active_provider: "portable-local-hash".into(),
-        available_providers: vec!["portable-local-hash".into(), "future-ollama".into(), "future-openai".into()],
-        healthy: true,
-        detail: "Provider surface is ready. Semantic indexing currently uses a portable local embedding fallback until a real provider is configured.".into(),
+        active_provider: "llama.cpp".into(),
+        available_providers: vec!["llama.cpp".into()],
+        healthy: false,
+        detail: "Select a workspace, then provide a .gguf model and a llama-server executable via PATH, environment variables, or .myelin/llama-server.json.".into(),
+        config: None,
+        resolved: None,
     }
 }
 

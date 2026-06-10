@@ -1,6 +1,7 @@
+pub mod git_history;
+mod llama_server;
 mod models;
 mod state;
-pub mod git_history;
 
 use models::{AppSnapshot, NoteDocument, ProviderStatus, SearchResponse};
 use state::AppState;
@@ -23,7 +24,33 @@ async fn set_workspace(
 }
 
 #[tauri::command]
-async fn create_note(state: State<'_, AppState>, title: String, source_pdf: Option<String>) -> Result<NoteDocument, String> {
+async fn set_llama_model_path(
+    state: State<'_, AppState>,
+    model_path: String,
+) -> Result<(), String> {
+    state
+        .set_llama_model_path(model_path)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_llama_executable_path(
+    state: State<'_, AppState>,
+    executable_path: String,
+) -> Result<(), String> {
+    state
+        .set_llama_executable_path(executable_path)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn create_note(
+    state: State<'_, AppState>,
+    title: String,
+    source_pdf: Option<String>,
+) -> Result<NoteDocument, String> {
     state
         .create_note(title, source_pdf)
         .await
@@ -149,20 +176,48 @@ async fn read_pdf_binary(state: State<'_, AppState>, note_id: String) -> Result<
 }
 
 #[tauri::command]
-async fn summarise_note(
-    _state: State<'_, AppState>,
-    _note_id: String,
-) -> Result<String, String> {
-    Ok("Mocked summary of the note...".into())
+async fn summarise_note(state: State<'_, AppState>, note_id: String) -> Result<String, String> {
+    state
+        .summarise_note(note_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 async fn ask_ai(
-    _state: State<'_, AppState>,
-    _note_id: String,
-    _question: String,
+    state: State<'_, AppState>,
+    note_id: String,
+    question: String,
 ) -> Result<String, String> {
-    Ok("Mocked AI response to your question...".into())
+    state
+        .ask_ai(note_id, question)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn ask_ai_stream(
+    state: State<'_, AppState>,
+    note_id: String,
+    question: String,
+    request_id: String,
+) -> Result<(), String> {
+    state
+        .ask_ai_stream(note_id, question, request_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_chat_history(
+    state: State<'_, AppState>,
+    note_id: String,
+    chat_history: Vec<crate::models::ChatMessage>,
+) -> Result<(), String> {
+    state
+        .save_chat_history(note_id, chat_history)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -211,6 +266,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             set_workspace,
+            set_llama_model_path,
+            set_llama_executable_path,
             create_note,
             load_note,
             save_note,
@@ -227,9 +284,12 @@ pub fn run() {
             read_pdf_binary,
             summarise_note,
             ask_ai,
+            ask_ai_stream,
+            save_chat_history,
             get_note_history,
             get_note_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+pub mod agent;

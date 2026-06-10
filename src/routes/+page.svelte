@@ -26,6 +26,15 @@
 	let pendingCreateCount = 0;
 	let createLoopRunning = false;
 	let sidebarOpen = $state(false);
+	let activeMenuId = $state<string | null>(null);
+	let deleteDialog: HTMLDialogElement | undefined = $state();
+	let noteToDelete = $state<string | null>(null);
+
+	$effect(() => {
+		if (typeof window !== 'undefined') {
+			localStorage.setItem('viewMode', viewMode);
+		}
+	});
 
 	let commonplaces = $derived.by(() => {
 		if (!app?.notes) return [];
@@ -119,7 +128,7 @@
 
 	function excerptFromBody(body: string) {
 		const flat = body.trim().replace(/\s+/g, ' ');
-		return flat.length > 180 ? `${flat.slice(0, 180)}...` : flat;
+		return flat.length > 400 ? `${flat.slice(0, 400)}...` : flat;
 	}
 
 	function upsertNoteIntoLibrary(note: NoteDocument) {
@@ -225,7 +234,35 @@
 		await goto(resolve(`/notes/${encodeURIComponent(noteId)}`));
 	}
 
+	function requestDeleteNote(e: MouseEvent, noteId: string) {
+		e.stopPropagation();
+		activeMenuId = null;
+		noteToDelete = noteId;
+		deleteDialog?.showModal();
+	}
+
+	async function confirmDelete() {
+		if (!noteToDelete) return;
+		isBusy = true;
+		try {
+			app = await invoke<AppSnapshot>('delete_note', { noteId: noteToDelete });
+		} catch (e) {
+			console.error(e);
+		} finally {
+			isBusy = false;
+			deleteDialog?.close();
+			noteToDelete = null;
+		}
+	}
+
 	onMount(() => {
+		if (typeof window !== 'undefined') {
+			const savedViewMode = localStorage.getItem('viewMode');
+			if (savedViewMode === 'list' || savedViewMode === 'grid') {
+				viewMode = savedViewMode;
+			}
+		}
+
 		if (window.innerWidth > 1100) {
 			sidebarOpen = true;
 		}
@@ -257,6 +294,20 @@
 <svelte:head>
 	<title>myelin</title>
 </svelte:head>
+
+<svelte:window onclick={() => { activeMenuId = null; }} />
+
+<dialog bind:this={deleteDialog} class="link-dialog" onclose={() => { noteToDelete = null; }}>
+	<div class="dialog-content">
+		<h3>Delete Note</h3>
+		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Are you sure you want to delete this note? This action cannot be undone.</p>
+		
+		<div class="dialog-actions">
+			<button class="secondary" onclick={() => deleteDialog?.close()}>Cancel</button>
+			<button class="secondary" onclick={confirmDelete} disabled={isBusy}>Delete</button>
+		</div>
+	</div>
+</dialog>
 
 <div class="shell">
 	{#if sidebarOpen}
@@ -412,15 +463,33 @@
 
 			<div class:notes-grid={viewMode === 'grid'} class="notes-list">
 				{#each visibleNotes as note (note.id)}
-					<button class="note-card" onclick={() => openNote(note.id)}>
-						<strong>{note.title}</strong>
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<div class="note-card" onclick={() => openNote(note.id)}>
+						<div class="note-card-header">
+							<strong>{note.title}</strong>
+							<div class="menu-container">
+								<button class="menu-trigger" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Note options">
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+										<circle cx="12" cy="12" r="1"></circle>
+										<circle cx="12" cy="5" r="1"></circle>
+										<circle cx="12" cy="19" r="1"></circle>
+									</svg>
+								</button>
+								{#if activeMenuId === note.id}
+									<div class="menu-dropdown">
+										<button class="delete-btn" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
+									</div>
+								{/if}
+							</div>
+						</div>
 						<p>{note.excerpt || 'Empty note'}</p>
 						<div class="meta">
 							<span>{note.folder}</span>
 							<span>{formatDate(note.updatedAt)}</span>
 							<span>{note.tags.join(' · ')}</span>
 						</div>
-					</button>
+					</div>
 				{/each}
 			</div>
 		</section>
@@ -504,7 +573,8 @@
 	button {
 		border: none;
 		border-radius: var(--radius-sm);
-		padding: 0.875rem 1rem;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.875rem;
 		cursor: pointer;
 		transition:
 			background var(--duration-fast) var(--ease-standard),
@@ -603,7 +673,8 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-xs);
 		background: var(--bg-panel);
-		padding: 0.875rem 1rem;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.875rem;
 		color: var(--text-primary);
 		outline: none;
 	}
@@ -613,7 +684,8 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-xs);
 		background: var(--bg-panel);
-		padding: 0.875rem 2.5rem 0.875rem 1rem;
+		padding: 0.5rem 2rem 0.5rem 0.75rem;
+		font-size: 0.875rem;
 		color: var(--text-primary);
 		outline: none;
 		appearance: none;
@@ -731,6 +803,7 @@
 		transition: all var(--duration-fast) var(--ease-standard);
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
+		/*! autoprefixer: ignore next */
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 		text-align: left;
@@ -793,6 +866,85 @@
 		padding: var(--space-3);
 		border: 1px solid transparent;
 		color: var(--text-primary);
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		cursor: pointer;
+		border-radius: var(--radius-sm);
+		transition: border-color var(--duration-fast), background var(--duration-fast);
+	}
+
+	.note-card-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: var(--space-2);
+		width: 100%;
+	}
+
+	.note-card-header strong {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		display: block;
+		flex: 1;
+	}
+
+	.menu-container {
+		position: relative;
+	}
+
+	.menu-trigger {
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		padding: 4px;
+		border-radius: var(--radius-xs);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		opacity: 0;
+		transition: opacity var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+	}
+
+	.note-card:hover .menu-trigger,
+	.menu-trigger:focus-visible {
+		opacity: 1;
+	}
+
+	.menu-trigger:hover {
+		background: rgba(255, 255, 255, 0.1);
+		color: var(--text-primary);
+	}
+
+	.menu-dropdown {
+		position: absolute;
+		top: 100%;
+		right: 0;
+		background: var(--bg-panel);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		padding: var(--space-1);
+		z-index: 10;
+		min-width: 120px;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+	}
+
+	.delete-btn {
+		width: 100%;
+		text-align: left;
+		padding: var(--space-2) var(--space-3);
+		background: transparent;
+		color: #e81123;
+		border: none;
+		border-radius: var(--radius-xs);
+		font-size: 0.875rem;
+		cursor: pointer;
+		transition: background var(--duration-fast);
+	}
+
+	.delete-btn:hover {
+		background: rgba(232, 17, 35, 0.1);
 	}
 
 	.note-card:hover {
@@ -805,8 +957,9 @@
 		color: var(--text-secondary);
 		line-height: 1.4;
 		display: -webkit-box;
-		line-clamp: 3;
-		-webkit-line-clamp: 3;
+		line-clamp: 2;
+		-webkit-line-clamp: 2;
+		/*! autoprefixer: ignore next */
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}
@@ -816,6 +969,7 @@
 		justify-content: space-between;
 		flex-wrap: wrap;
 		gap: var(--space-2);
+		margin-top: auto;
 	}
 
 	@keyframes fade-in {
@@ -885,5 +1039,48 @@
 			display: grid;
 			grid-template-columns: 320px 1fr;
 		}
+	}
+
+	.link-dialog {
+		padding: 0 !important;
+		border: 1px solid var(--border-default) !important;
+		border-radius: var(--radius-sm) !important;
+		background: var(--bg-panel) !important;
+		color: var(--text-primary) !important;
+		max-width: 32rem !important;
+		width: 100% !important;
+		backdrop-filter: blur(var(--blur-md)) !important;
+		outline: none !important;
+		box-shadow: none !important;
+	}
+
+	.link-dialog:focus,
+	.link-dialog:focus-visible {
+		outline: none !important;
+		box-shadow: none !important;
+	}
+
+	.link-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.6) !important;
+		backdrop-filter: blur(var(--blur-sm)) !important;
+	}
+
+	.dialog-content {
+		padding: var(--space-6);
+		display: flex;
+		flex-direction: column;
+	}
+
+	.dialog-content h3 {
+		margin: 0 0 var(--space-2) 0;
+		font-size: 1.25rem;
+		color: var(--text-hero);
+	}
+
+	.dialog-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--space-2);
+		margin-top: var(--space-4);
 	}
 </style>
