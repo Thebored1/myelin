@@ -37,6 +37,46 @@
 	let regularNotes = $derived(visibleNotes.filter((n) => !n.relativePath.endsWith('.pdf')));
 	let pdfNotes = $derived(visibleNotes.filter((n) => n.relativePath.endsWith('.pdf')));
 
+	// Rail details — always based on the full library, unaffected by the rail search
+	let allNotesSorted = $derived.by(() =>
+		[...(app?.notes ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+	);
+	let dashNotes = $derived(allNotesSorted.filter((n) => !n.relativePath.endsWith('.pdf')));
+	let dashPdfs = $derived(allNotesSorted.filter((n) => n.relativePath.endsWith('.pdf')));
+	let totalLinks = $derived((app?.notes ?? []).reduce((sum, n) => sum + n.backlinks.length, 0));
+	let tagCounts = $derived.by(() => {
+		const counts = new Map<string, number>();
+		app?.notes.forEach((n) =>
+			n.tags.forEach((t) => {
+				const tag = t.trim();
+				if (tag) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+			})
+		);
+		return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+	});
+
+	let folderStats = $derived.by(() => {
+		const stats = new Map<string, { notes: number; pdfs: number }>();
+		app?.notes.forEach((n) => {
+			const entry = stats.get(n.folder) ?? { notes: 0, pdfs: 0 };
+			if (n.relativePath.endsWith('.pdf')) entry.pdfs += 1;
+			else entry.notes += 1;
+			stats.set(n.folder, entry);
+		});
+		return [...stats.entries()].sort(
+			(a, b) => b[1].notes + b[1].pdfs - (a[1].notes + a[1].pdfs)
+		);
+	});
+
+	function searchTag(tag: string) {
+		query = tag;
+		void runSearch();
+	}
+
+	function scrollToSection(id: string) {
+		document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	}
+
 	let commonplaces = $derived.by(() => {
 		if (!app?.notes) return [];
 		const graph = new Map<string, Set<string>>();
@@ -164,6 +204,11 @@
 		return `${Math.floor(days / 7)}w`;
 	}
 
+	function agoLabel(value: string) {
+		const t = timeAgo(value);
+		return t === 'now' ? 'just now' : `${t} ago`;
+	}
+
 	async function openNote(noteId: string) {
 		await goto(resolve(`/notes/${encodeURIComponent(noteId)}`));
 	}
@@ -224,23 +269,20 @@
 	<aside class="rail">
 		<div class="rail-top">
 			<span class="wordmark">myelin</span>
-			<button class="btn-new" onclick={createNote} disabled={isBusy || !app?.workspacePath} title="New note">
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-				New Note
-			</button>
 		</div>
 
 		<div class="rail-search">
-			<svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+			<svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
 			<input bind:value={query} oninput={runSearch} placeholder="Search…" class="search-input" />
 		</div>
 
 		<div class="rail-list">
 			{#if !app?.workspacePath}
 				<p class="rail-empty">No workspace selected.</p>
-			{:else if regularNotes.length === 0 && pdfNotes.length === 0}
-				<p class="rail-empty">No notes yet.</p>
-			{:else}
+			{:else if query.trim()}
+				{#if regularNotes.length === 0 && pdfNotes.length === 0}
+					<p class="rail-empty">No results for “{query}”.</p>
+				{/if}
 				{#if regularNotes.length > 0}
 					<div class="section-label">
 						<span>Notes</span>
@@ -294,6 +336,94 @@
 						</div>
 					{/each}
 				{/if}
+			{:else}
+				<!-- Details panel — the page handles browsing, the rail shows workspace vitals -->
+				<div class="section-label">
+					<span>Navigate</span>
+				</div>
+				<div class="ov-group">
+					<button class="ov-row ov-clickable" onclick={() => scrollToSection('sec-areas')}>
+						<span class="ov-key"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>work areas</span>
+					</button>
+					<button class="ov-row ov-clickable" onclick={() => scrollToSection('sec-tasks')}>
+						<span class="ov-key"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>tasks</span>
+					</button>
+					<button class="ov-row ov-clickable" onclick={() => scrollToSection('sec-contents')}>
+						<span class="ov-key"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>contents</span>
+					</button>
+					<button class="ov-row ov-clickable" onclick={() => scrollToSection('sec-tracker')}>
+						<span class="ov-key"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>day tracker</span>
+					</button>
+					<button class="ov-row ov-clickable" onclick={() => scrollToSection('sec-library')}>
+						<span class="ov-key"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>library</span>
+					</button>
+					<button class="ov-row ov-clickable" onclick={() => goto(resolve('/settings'))}>
+						<span class="ov-key"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>settings</span>
+					</button>
+				</div>
+
+				<div class="section-label" style="margin-top: var(--space-4);">
+					<span>Overview</span>
+				</div>
+				<div class="ov-group">
+					<div class="ov-row"><span class="ov-key">notes</span><span class="ov-val">{dashNotes.length}</span></div>
+					<div class="ov-row"><span class="ov-key">pdfs</span><span class="ov-val">{dashPdfs.length}</span></div>
+					<div class="ov-row"><span class="ov-key">tags</span><span class="ov-val">{tagCounts.length}</span></div>
+					<div class="ov-row"><span class="ov-key">links</span><span class="ov-val">{totalLinks}</span></div>
+					<div class="ov-row"><span class="ov-key">clusters</span><span class="ov-val">{commonplaces.length}</span></div>
+				</div>
+
+				<div class="section-label" style="margin-top: var(--space-4);">
+					<span>Folders</span>
+					<span class="section-count">{folderStats.length}</span>
+				</div>
+				{#if folderStats.length > 0}
+					<div class="ov-group">
+						{#each folderStats as [folder, s] (folder)}
+							<div class="ov-row">
+								<span class="ov-key ov-ellipsis" title={folder}>
+									<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+									{folder.toLowerCase()}
+								</span>
+								<span class="ov-val">{s.notes + s.pdfs}</span>
+							</div>
+						{/each}
+					</div>
+				{:else}
+					<p class="rail-empty">Nothing here yet.</p>
+				{/if}
+
+				<div class="section-label" style="margin-top: var(--space-4);">
+					<span>Tags</span>
+					<span class="section-count">{tagCounts.length}</span>
+				</div>
+				{#if tagCounts.length > 0}
+					<div class="ov-group">
+						{#each tagCounts.slice(0, 12) as [tag, count] (tag)}
+							<button class="ov-row ov-clickable" onclick={() => searchTag(tag)} title="Search “{tag}”">
+								<span class="ov-key ov-ellipsis">#{tag}</span>
+								<span class="ov-val">{count}</span>
+							</button>
+						{/each}
+					</div>
+				{:else}
+					<p class="rail-empty">No tags yet.</p>
+				{/if}
+
+				<div class="section-label" style="margin-top: var(--space-4);">
+					<span>System</span>
+				</div>
+				<div class="ov-group">
+					<div class="ov-row"><span class="ov-key">index</span><span class="ov-val">{app?.indexState.backend ?? '—'}</span></div>
+					<div class="ov-row">
+						<span class="ov-key">indexed</span>
+						<span class="ov-val">{app?.indexState.lastIndexedAt ? agoLabel(app.indexState.lastIndexedAt) : '—'}</span>
+					</div>
+					<div class="ov-row">
+						<span class="ov-key">provider</span>
+						<span class="ov-val" class:ov-ok={provider?.healthy}>{provider?.activeProvider || 'none'}</span>
+					</div>
+				</div>
 			{/if}
 		</div>
 
@@ -322,35 +452,9 @@
 				<button class="btn-primary" onclick={pickWorkspace} disabled={isBusy}>Choose workspace</button>
 			</div>
 		{:else}
-			<div class="workspace-inner">
+			<div class="workspace-empty">
 				{#if message}<p class="ws-status-line">{message}</p>{/if}
-				{#if commonplaces.length > 0}
-					<div class="commonplace-section">
-						<div class="section-label flat">
-							<span>Commonplace</span>
-							<span class="section-count">{commonplaces.length}</span>
-						</div>
-						<div class="clusters-grid">
-							{#each commonplaces as cluster, i}
-								<div class="cluster-card">
-									<div class="cluster-head">
-										<span class="cluster-label">Cluster {i + 1}</span>
-										<span class="cluster-count">{cluster.length} notes</span>
-									</div>
-									<div class="cluster-pills">
-										{#each cluster as note}
-											<button class="pill" onclick={() => openNote(note.id)}>{note.title}</button>
-										{/each}
-									</div>
-								</div>
-							{/each}
-						</div>
-					</div>
-				{:else}
-					<div class="workspace-empty">
-						<p>Select a note to open it, or create a new one.</p>
-					</div>
-				{/if}
+				<p>Select a note to open it, or create a new one.</p>
 			</div>
 		{/if}
 	</main>
@@ -360,7 +464,7 @@
 	/* ── Layout ── */
 	.shell {
 		display: grid;
-		grid-template-columns: 300px 1fr;
+		grid-template-columns: 360px 1fr;
 		height: calc(100vh - 32px);
 		overflow: hidden;
 		animation: fade-in 0.2s ease-out;
@@ -386,48 +490,30 @@
 	}
 
 	.wordmark {
-		font-size: 1.05rem;
+		font-size: 1.35rem;
 		font-weight: 700;
 		letter-spacing: -0.03em;
 		color: var(--text-hero);
 	}
 
-	.btn-new {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		padding: 6px 13px;
-		font-size: 0.8rem;
-		font-family: var(--font-mono);
-		background: var(--accent-200);
-		color: #fff;
-		border: none;
-		border-radius: var(--radius-sm);
-		cursor: pointer;
-		transition: background 0.15s;
-		white-space: nowrap;
-	}
-	.btn-new:hover:not(:disabled) { background: var(--accent-100); }
-	.btn-new:disabled { opacity: 0.5; cursor: not-allowed; }
-
 	.rail-search {
 		position: relative;
-		padding: 0 var(--space-4) var(--space-4);
+		margin: 0 var(--space-4) var(--space-4);
 		flex-shrink: 0;
 	}
 	.search-icon {
 		position: absolute;
-		left: calc(var(--space-4) + 11px);
+		left: 12px;
 		top: 50%;
-		transform: translateY(-60%);
+		transform: translateY(-50%);
 		color: var(--text-secondary);
 		pointer-events: none;
 	}
 	.search-input {
 		width: 100%;
 		box-sizing: border-box;
-		padding: 8px 12px 8px 32px;
-		font-size: 0.82rem;
+		padding: 10px 12px 10px 36px;
+		font-size: 1rem;
 		font-family: var(--font-mono);
 		background: var(--bg-page);
 		border: 1px solid var(--border-default);
@@ -447,7 +533,7 @@
 	.rail-list::-webkit-scrollbar { display: none; }
 
 	.rail-empty {
-		font-size: 0.82rem;
+		font-size: 1rem;
 		color: var(--text-secondary);
 		padding: var(--space-4) var(--space-3);
 		margin: 0;
@@ -458,16 +544,15 @@
 		justify-content: space-between;
 		align-items: center;
 		padding: var(--space-3) var(--space-3);
-		font-size: 0.68rem;
+		font-size: 0.82rem;
 		font-weight: 700;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: var(--neutral-500);
 		user-select: none;
 	}
-	.section-label.flat { padding: var(--space-2) 0; }
 	.section-count {
-		font-size: 0.68rem;
+		font-size: 0.82rem;
 		color: var(--neutral-700);
 		font-weight: 400;
 	}
@@ -497,7 +582,7 @@
 
 	.row-title {
 		flex: 1;
-		font-size: 0.875rem;
+		font-size: 1.05rem;
 		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
@@ -507,7 +592,7 @@
 
 	.row-time {
 		flex-shrink: 0;
-		font-size: 0.72rem;
+		font-size: 0.85rem;
 		color: var(--neutral-600);
 		font-family: var(--font-mono);
 	}
@@ -546,7 +631,7 @@
 		width: 100%;
 		text-align: left;
 		padding: var(--space-2) var(--space-3);
-		font-size: 0.82rem;
+		font-size: 0.9rem;
 		font-family: var(--font-mono);
 		background: transparent;
 		color: #e05555;
@@ -555,6 +640,50 @@
 		cursor: pointer;
 	}
 	.row-delete:hover { background: rgba(224,85,85,0.1); }
+
+	/* ── Rail details panel ── */
+	.ov-group {
+		display: flex;
+		flex-direction: column;
+		padding: 0 var(--space-3);
+	}
+	.ov-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3);
+		width: 100%;
+		box-sizing: border-box;
+		padding: 8px 0;
+		font-size: 1rem;
+		font-family: var(--font-mono);
+		background: transparent;
+		border: none;
+		border-bottom: 1px solid var(--neutral-1000);
+		color: var(--text-secondary);
+		text-align: left;
+	}
+	.ov-group .ov-row:last-child { border-bottom: none; }
+	.ov-key {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		min-width: 0;
+	}
+	.ov-key svg { flex-shrink: 0; color: var(--neutral-600); }
+	.ov-ellipsis {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.ov-val {
+		flex-shrink: 0;
+		color: var(--text-primary);
+		font-size: 0.95rem;
+	}
+	.ov-val.ov-ok { color: #4caf50; }
+	.ov-clickable { cursor: pointer; }
+	.ov-clickable:hover .ov-key { color: var(--text-primary); }
 
 	.rail-footer {
 		flex-shrink: 0;
@@ -570,7 +699,7 @@
 		align-items: center;
 		gap: 6px;
 		padding: 8px var(--space-3);
-		font-size: 0.8rem;
+		font-size: 0.95rem;
 		font-family: var(--font-mono);
 		background: transparent;
 		border: 1px solid transparent;
@@ -601,7 +730,10 @@
 	/* ── Workspace panel ── */
 	.workspace {
 		overflow-y: auto;
-		background: var(--bg-page);
+		background-color: var(--bg-page);
+		/* Faint dot grid over the page background */
+		background-image: radial-gradient(rgba(246, 241, 231, 0.045) 1px, transparent 1.5px);
+		background-size: 24px 24px;
 	}
 
 	.landing {
@@ -651,81 +783,25 @@
 	.btn-primary:hover:not(:disabled) { background: var(--accent-100); }
 	.btn-primary:disabled { opacity: 0.5; }
 
-	.workspace-inner {
-		padding: var(--space-10) var(--space-10);
+	.workspace-empty {
+		height: 100%;
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-6);
-		font-family: var(--font-mono);
-		max-width: 800px;
-		height: 100%;
-	}
-	.ws-status-line {
-		margin: 0;
-		font-size: 0.7rem;
-		color: var(--neutral-500);
-	}
-	.workspace-empty {
-		flex: 1;
-		display: flex;
 		align-items: center;
 		justify-content: center;
+		gap: var(--space-3);
+		font-family: var(--font-mono);
 	}
 	.workspace-empty p {
-		font-size: 0.9rem;
+		font-size: 1rem;
 		color: var(--neutral-600);
 		margin: 0;
 	}
-
-	/* Commonplace */
-	.commonplace-section {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-4);
+	.ws-status-line {
+		margin: 0;
+		font-size: 0.8rem;
+		color: var(--neutral-500);
 	}
-	.clusters-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-		gap: var(--space-3);
-	}
-	.cluster-card {
-		background: var(--bg-panel);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm);
-		padding: var(--space-4);
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-	.cluster-head {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-	}
-	.cluster-label { font-size: 0.72rem; color: var(--text-primary); font-weight: 600; }
-	.cluster-count { font-size: 0.65rem; color: var(--neutral-600); }
-	.cluster-pills {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-	}
-	.pill {
-		font-size: 0.68rem;
-		font-family: var(--font-mono);
-		padding: 3px 8px;
-		background: transparent;
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xs);
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: border-color 0.1s, color 0.1s;
-		text-align: left;
-		max-width: 100%;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.pill:hover { border-color: var(--accent-200); color: var(--text-primary); }
 
 	/* Dialog */
 	.confirm-dialog {

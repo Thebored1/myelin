@@ -1104,7 +1104,7 @@
 				title: snapshot.draftTitle,
 				tags: snapshot.draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
 				body: snapshot.noteBody,
-				sourcePdf: note.source_pdf ?? null,
+				sourcePdf: note.sourcePdf ?? null,
 				annotations: note.annotations
 			});
 			await invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
@@ -1367,7 +1367,7 @@
 			filters: [{ name: 'PDF', extensions: ['pdf'] }]
 		});
 		if (!selected) return;
-		const filePath = typeof selected === 'string' ? selected : selected.path;
+		const filePath = selected;
 		attachPdfDialog?.close();
 		isBusy = true;
 		try {
@@ -2327,7 +2327,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		z-index: 100;
+		/* Above the vditor toolbar (30) but below the sidebar (100) and its backdrop (90) */
+		z-index: 40;
 	}
 
 	.toolbar-close-note-container {
@@ -2337,7 +2338,8 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		z-index: 101;
+		/* Above the vditor toolbar (30) but below the sidebar (100) and its backdrop (90) */
+		z-index: 40;
 	}
 
 	.toolbar-close-note-btn {
