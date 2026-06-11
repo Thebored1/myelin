@@ -2123,7 +2123,7 @@
 
 <style>
 	.editor-shell {
-		height: 100vh;
+		height: 100%;
 		display: grid;
 		grid-template-rows: auto 1fr;
 		animation: fade-in var(--duration-page) var(--ease-out);
@@ -2285,6 +2285,8 @@
 		background: var(--bg-page);
 		align-items: stretch;
 		min-height: 0;
+		overflow-y: auto; /* Make main pane the scroll container */
+		overflow-x: hidden;
 	}
 
 	.danger {
@@ -2330,13 +2332,12 @@
 
 	.toolbar-close-note-container {
 		position: absolute;
-		top: 0;
-		height: 48px;
+		top: 6px;
+		height: 32px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		z-index: 101;
-		pointer-events: none;
 	}
 
 	.toolbar-close-note-btn {
@@ -2457,16 +2458,12 @@
 		box-sizing: border-box !important;
 		flex: 1 !important;
 		min-height: 0 !important;
-		overflow-y: auto !important;
+		overflow-y: visible !important; /* Move scrollbar to .main-pane */
 	}
 
-	/* Fixed reading column for IR mode. Symmetric padding centers a stable 680px
-	   content column, so the text line length is identical at every pane/sidebar
-	   width (the sidebar clamp keeps the pane >= this column + padding). The padding
-	   sits inside the scroll container, so the scrollbar stays pinned to the far
-	   right; the 40px floor keeps the −29px heading gutter markers from clipping. */
+	/* Clear padding from the scroll container so its scrollbar is pinned to the far right edge */
 	:global(.vditor-ir) {
-		padding-inline: max(40px, calc((100% - 680px) / 2)) !important;
+		padding: 0 !important;
 	}
 
 	/* Hide the middle scrollbar in Split View (left pane) */
@@ -2480,15 +2477,15 @@
 		-ms-overflow-style: none !important;
 	}
 
+	/* Fixed A4 width for the text container, centered horizontally.
+	   This makes the width strictly static across screen sizes. */
 	:global(.vditor-reset) {
-		padding-left: max(var(--space-6), calc(50% - 105mm)) !important;
-		padding-right: max(var(--space-6), calc(50% - 105mm)) !important;
-	}
-
-	/* A4-width centering for the IR edit area — only when not in PDF split view */
-	:global(.vditor-wrapper:not(.has-pdf-note) .vditor-ir) {
-		padding-left: max(var(--space-6), calc(50% - 105mm)) !important;
-		padding-right: max(var(--space-6), calc(50% - 105mm)) !important;
+		width: 210mm !important;
+		max-width: none !important; /* STRICTLY fixed width */
+		margin: 0 auto !important;
+		padding-left: 2rem !important;
+		padding-right: 2rem !important;
+		overflow: visible !important;
 	}
 
 	:global(.vditor-preview__action) {
