@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatTool {
+    pub name: String,
+    pub details: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -11,6 +18,8 @@ pub struct ChatMessage {
     pub is_streaming: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ChatTool>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

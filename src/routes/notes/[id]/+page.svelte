@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+	import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 	import { goto, beforeNavigate } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import type { NoteDocument, SearchResponse, NoteSummary, PdfAnnotation, GitCommit, ChatMessage } from '$lib/types';
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { sidebarOpen, showSidebarToggle } from '$lib/stores';
 	import Vditor from 'vditor';
 	import 'vditor/dist/index.css';
@@ -25,9 +26,12 @@
 	let versionPreviewContent = $state<string | null>(null);
 	let versionPreviewHash = $state<string | null>(null);
 	let versionPreviewDialog: HTMLDialogElement | undefined = $state();
+	type NoteSnapshot = { noteBody: string; draftTitle: string; draftTags: string; chatLength: number; };
+	let snapshots = $state(new Map<string, NoteSnapshot>());
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
 	let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
+	let chatMessagesEl: HTMLDivElement | undefined = $state();
 
 	let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
 	
@@ -35,6 +39,7 @@
 	let vditorContainer: HTMLElement | undefined = $state();
 	let vditorInstance: Vditor | null = null;
 	let fullscreenShortcut = $state('Esc');
+	let noteAnimationTimer: ReturnType<typeof setTimeout> | undefined;
 	let savedEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
 
@@ -48,6 +53,7 @@
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
 
+	const NOTE_MIN_WIDTH = 760;
 	let sidebarWidth = $state(320);
 	let isSidebarResizing = $state(false);
 
@@ -69,7 +75,10 @@
 			}
 		} else if (isSidebarResizing) {
 			const newWidth = window.innerWidth - e.clientX;
-			sidebarWidth = Math.max(320, Math.min(newWidth, window.innerWidth * 0.8));
+			// Never let the sidebar grow past the point where the note would drop
+			// below its protected minimum width — keeps it on-screen and the editor stable.
+			const maxSidebar = Math.max(320, window.innerWidth - NOTE_MIN_WIDTH);
+			sidebarWidth = Math.max(320, Math.min(newWidth, maxSidebar));
 		}
 	}
 
@@ -103,6 +112,22 @@
 			focusEditor();
 		}, 0);
 	}
+
+	function scrollChatToBottom() {
+		if (!chatMessagesEl) return;
+		chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+	}
+
+	$effect(() => {
+		if (activeSidebarTab !== 'chat') return;
+		const chatScrollKey = chatMessages
+			.map((msg) => `${msg.role}:${msg.content.length}:${msg.isStreaming ? 1 : 0}:${msg.tools?.length ?? 0}:${msg.error ? 1 : 0}`)
+			.join('|');
+		void chatScrollKey;
+		void tick().then(() => {
+			scrollChatToBottom();
+		});
+	});
 
 	function getSelectionTextOffset(editorEl: HTMLElement): number | null {
 		const selection = window.getSelection();
@@ -222,6 +247,17 @@
 	let navigationWarningDialog: HTMLDialogElement | undefined = $state();
 	let deleteAttachedNoteDialog: HTMLDialogElement | undefined = $state();
 	let pendingNavigationUrl = $state('');
+
+	let attachPdfDialog: HTMLDialogElement | undefined = $state();
+	let detachPdfDialog: HTMLDialogElement | undefined = $state();
+	let pdfSearchQuery = $state('');
+	let pdfNotesList = $state<NoteDocument[]>([]);
+	let pdfSelectedIndex = $state(0);
+	let filteredPdfs = $derived(
+		pdfSearchQuery.trim()
+			? pdfNotesList.filter(p => p.title.toLowerCase().includes(pdfSearchQuery.toLowerCase()))
+			: pdfNotesList
+	);
 	let shouldRenderEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
 	let shouldInitEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
 	let loadedRouteNoteId = $state('');
@@ -617,6 +653,7 @@
 		activePdfBytes = null;
 		activePdfId = null;
 		showAttachedNote = false;
+		snapshots = new Map();
 		note = await invoke<NoteDocument>('load_note', { noteId });
 		const loadedNote = note;
 		chatMessages = loadedNote.chatHistory || [];
@@ -659,6 +696,48 @@
 		message = '';
 		void fetchRelatedNotes();
 		
+	}
+
+	async function refreshCurrentNoteFromBackend(skipEditorUpdate = false) {
+		if (!note) return;
+		const refreshed = await invoke<NoteDocument>('load_note', { noteId: note.id });
+		note = {
+			...refreshed,
+			chatHistory: chatMessages
+		};
+		if (!isMainNotePdf) {
+			draftTitle = refreshed.title;
+			draftBody = refreshed.body;
+			draftTags = refreshed.tags.join(', ');
+			if (!skipEditorUpdate && vditorInstance && vditorInstance.getValue() !== refreshed.body) {
+				vditorInstance.setValue(refreshed.body);
+			}
+		}
+		void fetchRelatedNotes();
+	}
+
+	function startNoteStreamAnimation(newContent: string, mode: 'write' | 'append') {
+		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
+		noteAnimationTimer = undefined;
+		const baseContent = mode === 'append' && vditorInstance
+			? (vditorInstance.getValue().trimEnd() + '\n\n')
+			: '';
+		const finalContent = baseContent + newContent;
+		if (note) note = { ...note, body: finalContent };
+		draftBody = finalContent;
+		if (!newContent) return;
+		let i = 0;
+		const chunkSize = 8;
+		function step() {
+			i = Math.min(i + chunkSize, newContent.length);
+			if (vditorInstance) vditorInstance.setValue(baseContent + newContent.slice(0, i));
+			if (i < newContent.length) {
+				noteAnimationTimer = setTimeout(step, 20);
+			} else {
+				noteAnimationTimer = undefined;
+			}
+		}
+		noteAnimationTimer = setTimeout(step, 20);
 	}
 
 	function initVditor() {
@@ -915,8 +994,13 @@
 					.filter(Boolean),
 				body: draftBody,
 				sourcePdf: activePdfId,
-				annotations: note.annotations
+				// For PDF main notes, annotations belong to the PDF note, not the scratchpad
+				annotations: isMainNotePdf ? [] : note.annotations
 			});
+
+			if (isMainNotePdf && note.annotations.length > 0) {
+				await invoke('save_pdf_annotations', { noteId: note.id, annotations: note.annotations });
+			}
 
 			if (!isMainNotePdf) {
 				note = saved;
@@ -968,28 +1052,115 @@
 		const userText = chatInput.trim();
 		chatInput = '';
 		if (chatTextareaEl) chatTextareaEl.style.height = 'auto';
-		chatMessages = [...chatMessages, { role: 'user', content: userText }];
+		await sendChatText(userText);
+	}
+
+	async function sendChatText(userText: string) {
+		if (!note) return;
+		const requestId = Date.now().toString();
+		const snapshot: NoteSnapshot = {
+			noteBody: draftBody,
+			draftTitle: draftTitle,
+			draftTags: draftTags,
+			chatLength: chatMessages.length,
+		};
+		snapshots = new Map(snapshots).set(requestId, snapshot);
+		chatMessages = [...chatMessages, { role: 'user', content: userText, snapshotId: requestId }];
 		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true }];
-		
 		try {
-			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId: Date.now().toString() });
+			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId });
 		} catch (e) {
 			console.error("AI Error:", e);
-			failStreamingChatMessage();
+			failStreamingChatMessage(extractChatErrorMessage(e));
 		}
 	}
 
-	function finishStreamingChatMessage() {
+	async function rewindToSnapshot(snapshotId: string, fillInput?: string) {
+		const snapshot = snapshots.get(snapshotId);
+		if (!snapshot || !note) return;
+		if (noteAnimationTimer) { clearTimeout(noteAnimationTimer); noteAnimationTimer = undefined; }
+		chatMessages = chatMessages.slice(0, snapshot.chatLength);
+		draftBody = snapshot.noteBody;
+		draftTitle = snapshot.draftTitle;
+		draftTags = snapshot.draftTags;
+		if (note) note = { ...note, body: snapshot.noteBody, title: snapshot.draftTitle };
+		if (vditorInstance) vditorInstance.setValue(snapshot.noteBody);
+		if (fillInput !== undefined) {
+			chatInput = fillInput;
+			await tick();
+			if (chatTextareaEl) {
+				chatTextareaEl.style.height = 'auto';
+				chatTextareaEl.style.height = `${Math.min(chatTextareaEl.scrollHeight, 200)}px`;
+				chatTextareaEl.focus();
+			}
+		}
+		const updated = new Map(snapshots);
+		updated.delete(snapshotId);
+		snapshots = updated;
+		isBusy = true;
+		try {
+			await invoke('save_note', {
+				noteId: note.id,
+				title: snapshot.draftTitle,
+				tags: snapshot.draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+				body: snapshot.noteBody,
+				sourcePdf: note.source_pdf ?? null,
+				annotations: note.annotations
+			});
+			await invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+		} catch (err) {
+			console.error('Failed to rewind:', err);
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function retryMessage(snapshotId: string, userText: string) {
+		await rewindToSnapshot(snapshotId);
+		await sendChatText(userText);
+	}
+
+	function mergeChatTools(existing: { name: string; details: string }[] = [], incoming: { name: string; details: string }[] = []) {
+		const merged = [...existing];
+		for (const tool of incoming) {
+			if (!merged.some((entry) => entry.name === tool.name && entry.details === tool.details)) {
+				merged.push(tool);
+			}
+		}
+		return merged;
+	}
+
+	function wroteToCurrentNote(tools: { name: string; details: string }[] = []) {
+		if (!note) return false;
+		const currentTitle = note.title.trim().toLowerCase();
+		return tools.some((tool) =>
+			(tool.name === 'Write Note' || tool.name === 'Append Note') &&
+			tool.details.trim().toLowerCase() === currentTitle
+		);
+	}
+
+	function finishStreamingChatMessage(tools: { name: string; details: string }[] = []) {
 		chatMessages = chatMessages.map(m => {
-			if (m.isStreaming) return { ...m, isStreaming: false };
+			if (m.isStreaming) return { ...m, isStreaming: false, tools: mergeChatTools(m.tools, tools) };
 			return m;
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+		if (wroteToCurrentNote(tools)) {
+			void refreshCurrentNoteFromBackend(noteAnimationTimer !== undefined);
+		}
 	}
 
-	function failStreamingChatMessage() {
+	function extractChatErrorMessage(error: unknown): string {
+		if (typeof error === 'string' && error.trim()) return error;
+		if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message.trim()) {
+			return error.message;
+		}
+		return 'Failed to generate response.';
+	}
+
+	function failStreamingChatMessage(errorMessage = 'Failed to generate response.', tools: { name: string; details: string }[] = []) {
 		chatMessages = chatMessages.map(m => {
-			if (m.isStreaming) return { ...m, isStreaming: false, error: true, content: 'Failed to generate response.' };
+			if (m.isStreaming) return { ...m, isStreaming: false, error: true, content: errorMessage, tools: mergeChatTools(m.tools, tools) };
 			return m;
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
@@ -1109,6 +1280,116 @@
 
 	function cancelDeleteAttachedNote() {
 		deleteAttachedNoteDialog?.close();
+	}
+
+	async function openAttachPdfDialog() {
+		pdfSearchQuery = '';
+		pdfSelectedIndex = 0;
+		isBusy = true;
+		try {
+			const allDocs = await invoke<NoteDocument[]>('get_all_note_documents');
+			pdfNotesList = allDocs.filter(d => d.relativePath.toLowerCase().endsWith('.pdf'));
+		} catch (err) {
+			message = `Failed to load PDFs: ${err}`;
+		} finally {
+			isBusy = false;
+		}
+		attachPdfDialog?.showModal();
+		setTimeout(() => {
+			const input = attachPdfDialog?.querySelector('.link-search-input') as HTMLInputElement | null;
+			input?.focus();
+		}, 50);
+	}
+
+	async function attachPdf(pdfNote: NoteDocument) {
+		if (!note) return;
+		attachPdfDialog?.close();
+		isBusy = true;
+		try {
+			const saved = await invoke<NoteDocument>('save_note', {
+				noteId: note.id,
+				title: draftTitle,
+				tags: draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+				body: draftBody,
+				sourcePdf: pdfNote.id,
+				annotations: note.annotations
+			});
+			note = saved;
+			activePdfId = pdfNote.id;
+			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: pdfNote.id });
+			activePdfBytes = new Uint8Array(bytes);
+			showAttachedNote = true;
+			saveStatus = 'saved';
+			destroyEditorInstance();
+			await tick();
+			initVditor();
+		} catch (err) {
+			message = `Failed to attach PDF: ${err}`;
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	function requestDetachPdf() {
+		detachPdfDialog?.showModal();
+	}
+
+	async function confirmDetachPdf() {
+		detachPdfDialog?.close();
+		if (!note) return;
+		isBusy = true;
+		try {
+			const saved = await invoke<NoteDocument>('save_note', {
+				noteId: note.id,
+				title: draftTitle,
+				tags: draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+				body: draftBody,
+				sourcePdf: null,
+				annotations: note.annotations
+			});
+			note = saved;
+			activePdfId = null;
+			activePdfBytes = null;
+			saveStatus = 'saved';
+			destroyEditorInstance();
+			await tick();
+			initVditor();
+		} catch (err) {
+			message = `Failed to detach PDF: ${err}`;
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function browseAndAttachPdf() {
+		const selected = await openFileDialog({
+			multiple: false,
+			filters: [{ name: 'PDF', extensions: ['pdf'] }]
+		});
+		if (!selected) return;
+		const filePath = typeof selected === 'string' ? selected : selected.path;
+		attachPdfDialog?.close();
+		isBusy = true;
+		try {
+			const pdfNote = await invoke<NoteDocument>('import_pdf_file', { filePath });
+			await attachPdf(pdfNote);
+		} catch (err) {
+			message = `Failed to import PDF: ${err}`;
+			isBusy = false;
+		}
+	}
+
+	function handlePdfSearchKeydown(e: KeyboardEvent) {
+		if (e.key === 'ArrowDown') {
+			e.preventDefault();
+			pdfSelectedIndex = Math.min(filteredPdfs.length - 1, pdfSelectedIndex + 1);
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault();
+			pdfSelectedIndex = Math.max(0, pdfSelectedIndex - 1);
+		} else if (e.key === 'Enter') {
+			e.preventDefault();
+			if (filteredPdfs.length > 0) attachPdf(filteredPdfs[pdfSelectedIndex]);
+		}
 	}
 
 	function buildPreviewExpandHref() {
@@ -1265,8 +1546,15 @@
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
 
 		let unlistenTool: () => void;
+		let unlistenNoteWritten: UnlistenFn;
 
 		// Setup AI Streaming listeners
+		listen<{ noteId: string; content: string; mode: 'write' | 'append' }>('ai://note_written', (event) => {
+			const { noteId, content, mode } = event.payload;
+			if (!note || note.id !== noteId) return;
+			startNoteStreamAnimation(content, mode);
+		}).then(fn => unlistenNoteWritten = fn);
+
 		listen<{ tool: string, details: string }>('ai://chat_tool', (event) => {
 			chatMessages = chatMessages.map(m => {
 				if (m.isStreaming) {
@@ -1284,12 +1572,12 @@
 			});
 		}).then(fn => unlistenChunk = fn);
 
-		listen('ai://chat_done', () => {
-			finishStreamingChatMessage();
+		listen<{ requestId: string; tools?: { name: string; details: string }[] }>('ai://chat_done', (event) => {
+			finishStreamingChatMessage(event.payload.tools || []);
 		}).then(fn => unlistenDone = fn);
 
-		listen('ai://chat_error', () => {
-			failStreamingChatMessage();
+		listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>('ai://chat_error', (event) => {
+			failStreamingChatMessage(event.payload.message, event.payload.tools || []);
 		}).then(fn => unlistenError = fn);
 
 		window.addEventListener('mousemove', handleGlobalMouseMove);
@@ -1308,10 +1596,12 @@
 			if (unlistenDone) unlistenDone();
 			if (unlistenError) unlistenError();
 			if (unlistenTool) unlistenTool();
+			if (unlistenNoteWritten) unlistenNoteWritten();
 		};
 	});
 
 	onDestroy(() => {
+		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
 		if (vditorInstance) vditorInstance.destroy();
 		if (typeof document !== 'undefined') {
@@ -1396,11 +1686,34 @@
 			<div class="content-area" style="position: relative;">
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} class:has-pdf-note={!!activePdfBytes} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onkeyupcapture={handleVditorKeyupCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
+				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} class:has-pdf-note={!!activePdfBytes || (!isMainNotePdf && !!note)} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onkeyupcapture={handleVditorKeyupCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
 				<div class="fullscreen-indicator">
 					Press <span>{fullscreenShortcut}</span> to toggle
 				</div>
-				{#if activePdfBytes}
+				{#if !isMainNotePdf && note}
+					<div class="toolbar-close-note-container" style={toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}>
+						{#if activePdfBytes}
+							<button
+								class="toolbar-close-note-btn"
+								onclick={requestDetachPdf}
+								disabled={isBusy}
+								title="Detach PDF from this note"
+							>
+								Close PDF
+							</button>
+						{:else}
+							<button
+								class="toolbar-attach-pdf-btn"
+								onclick={openAttachPdfDialog}
+								disabled={isBusy}
+								title="Attach a PDF to this note"
+							>
+								<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+								Attach PDF
+							</button>
+						{/if}
+					</div>
+				{:else if isMainNotePdf && activePdfBytes}
 					<div class="toolbar-close-note-container" style={toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}>
 						<button
 							class="toolbar-close-note-btn"
@@ -1493,18 +1806,18 @@
 
 				{:else if activeSidebarTab === 'chat'}
 					<div class="chat-container">
-						<div class="chat-messages">
+						<div class="chat-messages" bind:this={chatMessagesEl}>
 							{#if chatMessages.length === 0}
 								<p class="empty-state">Ask me anything about this note or your library!</p>
 							{:else}
 								{#each chatMessages as msg, i}
 									<div class="chat-message {msg.role}">
-										<div class="chat-bubble">
+										<div class="chat-bubble" class:error={msg.error}>
 											{#if msg.tools && msg.tools.length > 0}
-												<div class="chat-tools">
+												<div class="chat-tools" class:streaming={msg.isStreaming}>
 													{#each msg.tools as tool}
 														<div class="chat-tool-indicator">
-															<span class="tool-icon">⚡</span> 
+															<span class="tool-icon">⚡</span>
 															<span class="tool-name">{tool.name}</span>
 															{#if tool.details}
 																<span class="tool-details">{tool.details.substring(0, 30)}{tool.details.length > 30 ? '...' : ''}</span>
@@ -1513,8 +1826,20 @@
 													{/each}
 												</div>
 											{/if}
-											{@html msg.content || (msg.isStreaming && (!msg.tools || msg.tools.length === 0) ? '<span class="loading-dots"></span>' : '')}
+											{#if msg.error}
+												<span class="chat-error-text">{msg.content || 'Failed to generate response.'}</span>
+											{:else if msg.content}
+												{@html msg.content}
+											{:else if msg.isStreaming && (!msg.tools || msg.tools.length === 0)}
+												<span class="loading-dots"></span>
+											{/if}
 										</div>
+										{#if msg.role === 'user' && msg.snapshotId && snapshots.has(msg.snapshotId)}
+											<div class="chat-msg-actions">
+												<button class="rewind-btn" onclick={() => rewindToSnapshot(msg.snapshotId!, msg.content)} title="Undo — restore note and put prompt back in input">↩</button>
+												<button class="rewind-btn retry" onclick={() => retryMessage(msg.snapshotId!, msg.content)} title="Retry — rewind and resend this prompt">↻</button>
+											</div>
+										{/if}
 									</div>
 								{/each}
 							{/if}
@@ -1752,6 +2077,50 @@
 	</div>
 </dialog>
 
+<dialog bind:this={detachPdfDialog} class="dialog math-dialog">
+	<div class="dialog-content">
+		<h3 style="margin-top: 0;">Close PDF</h3>
+		<p style="color: var(--text-secondary); margin-bottom: var(--space-6);">
+			The PDF will be detached from this note. You can re-attach it at any time.
+		</p>
+		<div class="dialog-actions">
+			<button class="secondary" onclick={() => detachPdfDialog?.close()}>Cancel</button>
+			<button class="danger" onclick={confirmDetachPdf} disabled={isBusy}>Close PDF</button>
+		</div>
+	</div>
+</dialog>
+
+<dialog bind:this={attachPdfDialog} class="link-dialog" onkeydown={handlePdfSearchKeydown} onclose={() => { pdfSearchQuery = ''; pdfSelectedIndex = 0; }}>
+	<div class="dialog-content">
+		<h3>Attach PDF</h3>
+		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search and select a PDF from your library to display alongside this note.</p>
+		<input class="link-search-input" bind:value={pdfSearchQuery} oninput={() => pdfSelectedIndex = 0} placeholder="Search PDFs..." />
+		<div class="link-results-container">
+			{#if filteredPdfs.length > 0}
+				<ul class="link-results-list">
+					{#each filteredPdfs as pdf, i (pdf.id)}
+						<li>
+							<button class="link-result-btn" class:selected={i === pdfSelectedIndex} onclick={() => attachPdf(pdf)}>
+								<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+								<strong>{pdf.title}</strong>
+								<span class="folder-badge">{pdf.relativePath.split('/').slice(0, -1).join('/') || 'Root'}</span>
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{:else if isBusy}
+				<p class="empty-state">Loading PDFs...</p>
+			{:else}
+				<p class="empty-state">No PDFs found in your workspace.</p>
+			{/if}
+		</div>
+		<div class="dialog-actions">
+				<button class="secondary" onclick={browseAndAttachPdf} disabled={isBusy}>Browse Files...</button>
+				<button class="secondary" onclick={() => attachPdfDialog?.close()}>Cancel</button>
+			</div>
+		</div>
+</dialog>
+
 <style>
 	.editor-shell {
 		height: 100vh;
@@ -1869,9 +2238,8 @@
 		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
 
-	.pdf-pane,
-	.main-pane {
-		min-width: 18rem;
+	.pdf-pane {
+		min-width: 26rem;
 	}
 
 	.resizer {
@@ -1911,6 +2279,7 @@
 	/* Main Pane */
 	.main-pane {
 		flex: 1;
+		min-width: 520px;
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-page);
@@ -1987,6 +2356,31 @@
 	.toolbar-close-note-btn:hover:not(:disabled) {
 		background: rgba(239, 68, 68, 0.18);
 		color: #fee2e2;
+	}
+
+
+	.toolbar-attach-pdf-btn {
+		pointer-events: auto;
+		display: flex;
+		align-items: center;
+		gap: 0.375rem;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-panel);
+		color: var(--text-secondary);
+		border-radius: var(--radius-sm);
+		padding: 0.4rem 0.75rem;
+		height: 32px;
+		font-size: 0.82rem;
+		font-family: var(--font-mono);
+		line-height: 1;
+		white-space: nowrap;
+		cursor: pointer;
+		transition: all var(--duration-fast);
+	}
+
+	.toolbar-attach-pdf-btn:hover:not(:disabled) {
+		border-color: var(--accent-200);
+		color: var(--accent-100);
 	}
 
 	.toolbar-overlay-toggle {
@@ -2066,6 +2460,15 @@
 		overflow-y: auto !important;
 	}
 
+	/* Fixed reading column for IR mode. Symmetric padding centers a stable 680px
+	   content column, so the text line length is identical at every pane/sidebar
+	   width (the sidebar clamp keeps the pane >= this column + padding). The padding
+	   sits inside the scroll container, so the scrollbar stays pinned to the far
+	   right; the 40px floor keeps the −29px heading gutter markers from clipping. */
+	:global(.vditor-ir) {
+		padding-inline: max(40px, calc((100% - 680px) / 2)) !important;
+	}
+
 	/* Hide the middle scrollbar in Split View (left pane) */
 	:global(.vditor-sv)::-webkit-scrollbar {
 		display: none !important;
@@ -2078,7 +2481,12 @@
 	}
 
 	:global(.vditor-reset) {
-		/* Centering content while keeping scrollbar at the edge */
+		padding-left: max(var(--space-6), calc(50% - 105mm)) !important;
+		padding-right: max(var(--space-6), calc(50% - 105mm)) !important;
+	}
+
+	/* A4-width centering for the IR edit area — only when not in PDF split view */
+	:global(.vditor-wrapper:not(.has-pdf-note) .vditor-ir) {
 		padding-left: max(var(--space-6), calc(50% - 105mm)) !important;
 		padding-right: max(var(--space-6), calc(50% - 105mm)) !important;
 	}
@@ -2153,6 +2561,7 @@
 		border-left: 1px solid var(--border-default);
 		border-radius: 0 !important;
 		box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
+		font-family: var(--font-mono);
 	}
 
 	.sidebar.open {
@@ -2168,12 +2577,14 @@
 		animation: fade-in var(--duration-fast) ease-out;
 	}
 
-	/* Large Screen Styles (Side-by-side docked mode) */
+	/* Large Screen — sidebar docks side by side with the editor */
 	@media (min-width: 1201px) {
 		.sidebar {
 			position: relative;
 			transform: none;
 			margin-right: calc(var(--sidebar-width, 20rem) * -1);
+			/* Hard cap: the note keeps at least NOTE_MIN_WIDTH (760px) no matter what. */
+			max-width: calc(100vw - 760px);
 			box-shadow: none;
 			flex-shrink: 0;
 		}
@@ -2697,6 +3108,9 @@
 		border-radius: var(--radius-md);
 		font-size: 0.875rem;
 		line-height: 1.5;
+		min-width: 0;
+		word-break: break-word;
+		overflow-wrap: anywhere;
 	}
 	.chat-message.user .chat-bubble {
 		background: var(--accent-200);
@@ -2704,14 +3118,26 @@
 	}
 	.chat-message.assistant .chat-bubble {
 		background: var(--bg-panel);
-		border: 1px solid var(--border-default);
 		color: var(--text-primary);
+	}
+	.chat-bubble.error {
+		background: color-mix(in srgb, var(--bg-panel) 82%, var(--accent-200));
+	}
+	.chat-error-text {
+		font-weight: 600;
 	}
 	.chat-tools {
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
 		margin-bottom: var(--space-2);
+	}
+	.chat-tools.streaming {
+		position: sticky;
+		top: 0;
+		z-index: 1;
+		background: inherit;
+		padding-bottom: var(--space-2);
 	}
 	.chat-tool-indicator {
 		display: flex;
@@ -2751,6 +3177,11 @@
 		font-family: inherit;
 		line-height: 1.4;
 		overflow-y: auto;
+		-ms-overflow-style: none;
+		scrollbar-width: none;
+	}
+	.chat-input-area textarea::-webkit-scrollbar {
+		display: none;
 	}
 	.chat-input-area textarea:focus {
 		border-color: var(--accent-200);
@@ -2764,6 +3195,31 @@
 		0%, 20% { color: transparent; }
 		40% { color: inherit; }
 		100% { color: inherit; }
+	}
+
+	.chat-msg-actions {
+		display: flex;
+		gap: var(--space-1);
+		margin-top: 3px;
+		justify-content: flex-end;
+	}
+	.rewind-btn {
+		padding: 1px 6px;
+		font-size: 13px;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		color: color-mix(in srgb, var(--text-tertiary) 50%, transparent);
+		cursor: pointer;
+		transition: color 0.15s, border-color 0.15s;
+		line-height: 1.6;
+	}
+	.rewind-btn:hover {
+		color: var(--text-secondary);
+		border-color: var(--border-color);
+	}
+	.rewind-btn.retry:hover {
+		color: var(--accent);
 	}
 
 	/* Version History UI */

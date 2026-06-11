@@ -5,6 +5,7 @@ export type ChatMessage = {
 	isStreaming?: boolean;
 	error?: boolean;
 	tools?: { name: string; details: string }[];
+	snapshotId?: string;
 };
 
 export type GitCommit = {

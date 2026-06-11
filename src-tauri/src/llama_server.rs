@@ -1,18 +1,16 @@
 use anyhow::{anyhow, bail, Context, Result};
-use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::env;
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-const CONFIG_FILE_PATH: &str = ".myelin/llama-server.json";
+const CONFIG_FILE_NAME: &str = "llama-server.json";
 const DEFAULT_HOST: &str = "127.0.0.1";
+const DEFAULT_PORT: u16 = 39281;
 const STARTUP_ATTEMPTS: usize = 60;
 const STARTUP_DELAY_MS: u64 = 500;
 
@@ -87,10 +85,9 @@ pub struct LlamaProviderInfo {
     pub detail: String,
 }
 
-
-pub fn inspect_provider(workspace: &Path) -> Result<LlamaProviderInfo> {
-    let workspace_config = load_workspace_config(workspace).unwrap_or_default();
-    match resolve_config(workspace) {
+pub fn inspect_provider(app_data_dir: &Path) -> Result<LlamaProviderInfo> {
+    let app_config = load_config(app_data_dir).unwrap_or_default();
+    match resolve_config(app_data_dir) {
         Ok(config) => Ok(LlamaProviderInfo {
             detail: format!(
                 "Ready to use {} with model {}.",
@@ -98,40 +95,40 @@ pub fn inspect_provider(workspace: &Path) -> Result<LlamaProviderInfo> {
                 config.model_path.display()
             ),
             resolved: Some(config),
-            config: workspace_config,
+            config: app_config,
             healthy: true,
         }),
         Err(error) => Ok(LlamaProviderInfo {
             detail: error.to_string(),
             resolved: None,
-            config: workspace_config,
+            config: app_config,
             healthy: false,
         }),
     }
 }
 
-pub fn resolve_config(workspace: &Path) -> Result<ResolvedLlamaConfig> {
-    let workspace_config = load_workspace_config(workspace)?;
-    let host = workspace_config
+pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
+    let app_config = load_config(app_data_dir)?;
+    let host = app_config
         .host
         .clone()
         .unwrap_or_else(|| DEFAULT_HOST.to_string());
-    let port = workspace_config.port.unwrap_or_else(find_free_port);
-    let executable_path = resolve_executable_path(workspace, &workspace_config)?;
-    let model_path = resolve_model_path(workspace, &workspace_config)?;
+    let port = app_config.port.unwrap_or(DEFAULT_PORT);
+    let executable_path = resolve_executable_path(app_data_dir, &app_config)?;
+    let model_path = resolve_model_path(app_data_dir, &app_config)?;
 
     Ok(ResolvedLlamaConfig {
         executable_path,
         model_path,
         host,
         port,
-        context_size: workspace_config.context_size.unwrap_or(4096),
-        gpu_layers: workspace_config.gpu_layers,
-        threads: workspace_config.threads,
-        temperature: workspace_config.temperature.unwrap_or(0.2),
-        top_p: workspace_config.top_p.unwrap_or(0.95),
-        chat_format: workspace_config.chat_format.clone(),
-        extra_args: workspace_config.extra_args.clone(),
+        context_size: app_config.context_size.unwrap_or(4096),
+        gpu_layers: app_config.gpu_layers,
+        threads: app_config.threads,
+        temperature: app_config.temperature.unwrap_or(0.2),
+        top_p: app_config.top_p.unwrap_or(0.95),
+        chat_format: app_config.chat_format.clone(),
+        extra_args: app_config.extra_args.clone(),
     })
 }
 
@@ -203,9 +200,12 @@ pub async fn stop_server(server: &mut ManagedLlamaServer) {
     let _ = server.child.wait();
 }
 
+fn config_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(CONFIG_FILE_NAME)
+}
 
-fn load_workspace_config(workspace: &Path) -> Result<WorkspaceLlamaConfig> {
-    let path = workspace.join(CONFIG_FILE_PATH);
+fn load_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
+    let path = config_path(app_data_dir);
     if !path.exists() {
         return Ok(WorkspaceLlamaConfig::default());
     }
@@ -215,54 +215,48 @@ fn load_workspace_config(workspace: &Path) -> Result<WorkspaceLlamaConfig> {
     serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-pub fn set_workspace_model_path(workspace: &Path, model_path: String) -> Result<()> {
-    let mut config = load_workspace_config(workspace).unwrap_or_default();
+pub fn set_model_path(app_data_dir: &Path, model_path: String) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
     config.model_path = Some(model_path);
-    
-    let path = workspace.join(CONFIG_FILE_PATH);
+
+    let path = config_path(app_data_dir);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    
+
     let raw = serde_json::to_string_pretty(&config)?;
     fs::write(&path, raw)?;
     Ok(())
 }
 
-pub fn set_workspace_executable_path(workspace: &Path, executable_path: String) -> Result<()> {
-    let mut config = load_workspace_config(workspace).unwrap_or_default();
+pub fn set_executable_path(app_data_dir: &Path, executable_path: String) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
     config.executable_path = Some(executable_path);
-    
-    let path = workspace.join(CONFIG_FILE_PATH);
+
+    let path = config_path(app_data_dir);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    
+
     let raw = serde_json::to_string_pretty(&config)?;
     fs::write(&path, raw)?;
     Ok(())
 }
 
 fn resolve_executable_path(
-    workspace: &Path,
+    app_data_dir: &Path,
     workspace_config: &WorkspaceLlamaConfig,
 ) -> Result<PathBuf> {
     if let Ok(path) = env::var("MYELIN_LLAMA_SERVER_PATH") {
-        return validate_existing_file(resolve_input_path(workspace, &path), "llama-server");
+        return validate_existing_file(resolve_input_path(app_data_dir, &path), "llama-server");
     }
 
     if let Some(path) = &workspace_config.executable_path {
-        return validate_existing_file(resolve_input_path(workspace, path), "llama-server");
+        return validate_existing_file(resolve_input_path(app_data_dir, path), "llama-server");
     }
 
-    let workspace_candidates = [
-        workspace
-            .join(".myelin")
-            .join("bin")
-            .join(executable_name()),
-        workspace.join("bin").join(executable_name()),
-    ];
-    for candidate in workspace_candidates {
+    let app_candidates = [app_data_dir.join("bin").join(executable_name())];
+    for candidate in app_candidates {
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -273,29 +267,27 @@ fn resolve_executable_path(
     }
 
     bail!(
-        "llama-server not found. Set MYELIN_LLAMA_SERVER_PATH, add executablePath to {}, or put {} on PATH.",
-        CONFIG_FILE_PATH,
+        "llama-server not found. Set MYELIN_LLAMA_SERVER_PATH, add executablePath in app settings, or put {} on PATH.",
         executable_name()
     )
 }
 
 fn resolve_model_path(
-    workspace: &Path,
+    app_data_dir: &Path,
     workspace_config: &WorkspaceLlamaConfig,
 ) -> Result<PathBuf> {
     if let Ok(path) = env::var("MYELIN_LLAMA_MODEL_PATH") {
-        return validate_existing_model(resolve_input_path(workspace, &path));
+        return validate_existing_model(resolve_input_path(app_data_dir, &path));
     }
 
     if let Some(path) = &workspace_config.model_path {
-        return validate_existing_model(resolve_input_path(workspace, path));
+        return validate_existing_model(resolve_input_path(app_data_dir, path));
     }
 
-    let models = discover_gguf_models(workspace)?;
+    let models = discover_gguf_models(app_data_dir)?;
     match models.as_slice() {
         [] => bail!(
-            "no .gguf model found. Set MYELIN_LLAMA_MODEL_PATH, add modelPath to {}, or place a single .gguf file in the workspace.",
-            CONFIG_FILE_PATH
+            "no .gguf model found. Set MYELIN_LLAMA_MODEL_PATH, choose a model in Settings, or place a single .gguf file in the app data directory."
         ),
         [model] => Ok(model.clone()),
         _ => {
@@ -310,8 +302,7 @@ fn resolve_model_path(
 
             preferred.ok_or_else(|| {
                 anyhow!(
-                    "multiple .gguf models found. Add modelPath to {} to choose one explicitly.",
-                    CONFIG_FILE_PATH
+                    "multiple .gguf models found. Choose one explicitly in Settings."
                 )
             })
         }
@@ -396,11 +387,4 @@ fn find_on_path(binary_name: &str) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn find_free_port() -> u16 {
-    TcpListener::bind((DEFAULT_HOST, 0))
-        .ok()
-        .and_then(|listener| listener.local_addr().ok().map(|address| address.port()))
-        .unwrap_or(39281)
 }

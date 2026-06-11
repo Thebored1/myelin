@@ -16,29 +16,29 @@
 	let app = $state<AppSnapshot | null>(null);
 	let provider = $state<ProviderStatus | null>(null);
 	let query = $state('');
-	let sortMode = $state<'updated' | 'created' | 'title' | 'custom'>('updated');
-	let viewMode = $state<'list' | 'grid'>('list');
-	let filterFolder = $state('all');
-	let filterTag = $state('all');
 	let isBusy = $state(false);
-	let message = $state('Booting local-first workspace...');
+	let message = $state('');
 	let searchResults = $state<SearchResponse | null>(null);
 	let pendingCreateCount = 0;
 	let createLoopRunning = false;
-	let sidebarOpen = $state(false);
 	let activeMenuId = $state<string | null>(null);
 	let deleteDialog: HTMLDialogElement | undefined = $state();
 	let noteToDelete = $state<string | null>(null);
 
-	$effect(() => {
-		if (typeof window !== 'undefined') {
-			localStorage.setItem('viewMode', viewMode);
-		}
+	let visibleNotes = $derived.by(() => {
+		const base = (
+			query && searchResults
+				? searchResults.results.map((r) => r.note)
+				: (app?.notes ?? [])
+		) as NoteSummary[];
+		return [...base].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 	});
+
+	let regularNotes = $derived(visibleNotes.filter((n) => !n.relativePath.endsWith('.pdf')));
+	let pdfNotes = $derived(visibleNotes.filter((n) => n.relativePath.endsWith('.pdf')));
 
 	let commonplaces = $derived.by(() => {
 		if (!app?.notes) return [];
-		
 		const graph = new Map<string, Set<string>>();
 		app.notes.forEach((note) => {
 			if (!graph.has(note.id)) graph.set(note.id, new Set());
@@ -48,67 +48,28 @@
 				graph.get(link.sourceId)!.add(note.id);
 			});
 		});
-
 		const visited = new Set<string>();
 		const clusters: NoteSummary[][] = [];
 		const noteMap = new Map(app.notes.map((n) => [n.id, n]));
-
 		app.notes.forEach((note) => {
 			if (!visited.has(note.id)) {
 				const cluster: string[] = [];
 				const queue = [note.id];
 				visited.add(note.id);
-				
 				while (queue.length > 0) {
 					const curr = queue.shift()!;
 					cluster.push(curr);
-					
 					graph.get(curr)?.forEach((neighbor) => {
-						if (!visited.has(neighbor)) {
-							visited.add(neighbor);
-							queue.push(neighbor);
-						}
+						if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor); }
 					});
 				}
-				
 				if (cluster.length > 1) {
 					const mapped = cluster.map((id) => noteMap.get(id)).filter((n): n is NoteSummary => !!n);
-					if (mapped.length > 1) {
-						clusters.push(mapped);
-					}
+					if (mapped.length > 1) clusters.push(mapped);
 				}
 			}
 		});
-		
 		return clusters.sort((a, b) => b.length - a.length);
-	});
-	let visibleNotes = $derived.by(() => {
-		const baseNotes = (
-			query && searchResults
-				? searchResults.results.map((result) => result.note)
-				: (app?.notes ?? [])
-		) as NoteSummary[];
-		const filtered = baseNotes.filter((note) => {
-			const folderMatch = filterFolder === 'all' || note.folder === filterFolder;
-			const tagMatch = filterTag === 'all' || note.tags.includes(filterTag);
-			return folderMatch && tagMatch;
-		});
-		const sorted = [...filtered];
-		if (sortMode === 'title') {
-			sorted.sort((left, right) => left.title.localeCompare(right.title));
-		} else if (sortMode === 'created') {
-			sorted.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-		} else if (sortMode === 'custom') {
-			const orderMap = new Map((app?.customNoteOrder ?? []).map((id, index) => [id, index]));
-			sorted.sort((left, right) => {
-				const leftIndex = orderMap.get(left.id) ?? Number.MAX_SAFE_INTEGER;
-				const rightIndex = orderMap.get(right.id) ?? Number.MAX_SAFE_INTEGER;
-				return leftIndex - rightIndex || right.updatedAt.localeCompare(left.updatedAt);
-			});
-		} else {
-			sorted.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-		}
-		return sorted;
 	});
 
 	async function refreshApp() {
@@ -133,101 +94,74 @@
 
 	function upsertNoteIntoLibrary(note: NoteDocument) {
 		if (!app) return;
-
 		const summary: NoteSummary = {
-			id: note.id,
-			title: note.title,
-			tags: note.tags,
+			id: note.id, title: note.title, tags: note.tags,
 			folder: folderFromRelativePath(note.relativePath),
 			excerpt: excerptFromBody(note.body),
 			relativePath: note.relativePath,
-			createdAt: note.createdAt,
-			updatedAt: note.updatedAt,
-			backlinks: note.backlinks
+			createdAt: note.createdAt, updatedAt: note.updatedAt, backlinks: note.backlinks
 		};
-
-		const existingIndex = app.notes.findIndex((entry) => entry.id === note.id);
-		if (existingIndex >= 0) {
-			app.notes[existingIndex] = summary;
-		} else {
-			app.notes = [summary, ...app.notes];
-		}
-
-		if (!app.customNoteOrder.includes(note.id)) {
-			app.customNoteOrder = [...app.customNoteOrder, note.id];
-		}
-
-		if (!app.libraryFacets.folders.includes(summary.folder)) {
-			app.libraryFacets.folders = [...app.libraryFacets.folders, summary.folder].sort();
-		}
-
+		const existingIndex = app.notes.findIndex((e) => e.id === note.id);
+		if (existingIndex >= 0) { app.notes[existingIndex] = summary; }
+		else { app.notes = [summary, ...app.notes]; }
+		if (!app.customNoteOrder.includes(note.id)) app.customNoteOrder = [...app.customNoteOrder, note.id];
+		if (!app.libraryFacets.folders.includes(summary.folder)) app.libraryFacets.folders = [...app.libraryFacets.folders, summary.folder].sort();
 		const mergedTags = new Set([...app.libraryFacets.tags, ...summary.tags]);
 		app.libraryFacets.tags = [...mergedTags].sort();
 	}
 
 	async function pickWorkspace() {
-		const picked = await open({
-			directory: true,
-			multiple: false,
-			title: 'Choose your markdown workspace'
-		});
-
+		const picked = await open({ directory: true, multiple: false, title: 'Choose your markdown workspace' });
 		if (typeof picked === 'string') {
 			isBusy = true;
 			try {
 				app = await invoke<AppSnapshot>('set_workspace', { workspacePath: picked });
-				message = 'Workspace connected and indexed.';
-			} finally {
-				isBusy = false;
-			}
+				message = 'Workspace connected.';
+			} finally { isBusy = false; }
 		}
 	}
 
 	async function createNote() {
 		pendingCreateCount += 1;
 		if (createLoopRunning) return;
-
 		createLoopRunning = true;
 		isBusy = true;
-		let createdCount = 0;
-
 		try {
 			while (pendingCreateCount > 0) {
 				pendingCreateCount -= 1;
 				const note = await invoke<NoteDocument>('create_note', { title: 'New note' });
 				upsertNoteIntoLibrary(note);
-				createdCount += 1;
 			}
-
 			await refreshApp();
-			message = createdCount === 1 ? '1 note created.' : `${createdCount} notes created.`;
-		} finally {
-			isBusy = false;
-			createLoopRunning = false;
-		}
+		} finally { isBusy = false; createLoopRunning = false; }
 	}
 
 	async function runSearch() {
-		searchResults = await invoke<SearchResponse>('search_notes', { query });
+		if (query.trim()) {
+			searchResults = await invoke<SearchResponse>('search_notes', { query });
+		} else {
+			searchResults = null;
+		}
 	}
 
 	async function rebuild() {
 		isBusy = true;
 		try {
 			app = await invoke<AppSnapshot>('rebuild_index');
-			message = 'Manual reindex finished.';
-		} finally {
-			isBusy = false;
-		}
+			message = 'Index rebuilt.';
+		} finally { isBusy = false; }
 	}
 
-	function formatDate(value: string) {
-		return new Intl.DateTimeFormat(undefined, {
-			month: 'short',
-			day: 'numeric',
-			hour: 'numeric',
-			minute: '2-digit'
-		}).format(new Date(value));
+	function timeAgo(value: string) {
+		const diff = Date.now() - new Date(value).getTime();
+		const mins = Math.floor(diff / 60000);
+		if (mins < 1) return 'now';
+		if (mins < 60) return `${mins}m`;
+		const hrs = Math.floor(mins / 60);
+		if (hrs < 24) return `${hrs}h`;
+		const days = Math.floor(hrs / 24);
+		if (days < 7) return `${days}d`;
+		return `${Math.floor(days / 7)}w`;
 	}
 
 	async function openNote(noteId: string) {
@@ -246,841 +180,609 @@
 		isBusy = true;
 		try {
 			app = await invoke<AppSnapshot>('delete_note', { noteId: noteToDelete });
-		} catch (e) {
-			console.error(e);
-		} finally {
-			isBusy = false;
-			deleteDialog?.close();
-			noteToDelete = null;
-		}
+		} catch (e) { console.error(e); }
+		finally { isBusy = false; deleteDialog?.close(); noteToDelete = null; }
+	}
+
+	function workspaceLabel(path: string) {
+		const parts = path.replace(/\\/g, '/').split('/');
+		return parts[parts.length - 1] || path;
 	}
 
 	onMount(() => {
-		if (typeof window !== 'undefined') {
-			const savedViewMode = localStorage.getItem('viewMode');
-			if (savedViewMode === 'list' || savedViewMode === 'grid') {
-				viewMode = savedViewMode;
-			}
-		}
-
-		if (window.innerWidth > 1100) {
-			sidebarOpen = true;
-		}
-
 		let unlistenChanged = () => {};
 		let unlistenStatus = () => {};
-
 		void (async () => {
 			app = await invoke<AppSnapshot>('bootstrap');
 			await refreshApp();
-			unlistenChanged = await listen('index://changed', () => {
-				message = 'Filesystem change detected. Reindexing...';
-			});
+			unlistenChanged = await listen('index://changed', () => { message = 'Reindexing…'; });
 			unlistenStatus = await listen<string>('index://status', (event) => {
-				message = event.payload === 'started' ? 'Indexing workspace...' : 'Workspace ready.';
-				if (event.payload === 'completed') {
-					void refreshApp();
-				}
+				if (event.payload === 'started') message = 'Indexing…';
+				else if (event.payload === 'completed') { message = ''; void refreshApp(); }
 			});
 		})();
-
-		return () => {
-			unlistenChanged();
-			unlistenStatus();
-		};
+		return () => { unlistenChanged(); unlistenStatus(); };
 	});
 </script>
 
-<svelte:head>
-	<title>myelin</title>
-</svelte:head>
-
+<svelte:head><title>myelin</title></svelte:head>
 <svelte:window onclick={() => { activeMenuId = null; }} />
 
-<dialog bind:this={deleteDialog} class="link-dialog" onclose={() => { noteToDelete = null; }}>
+<dialog bind:this={deleteDialog} class="confirm-dialog" onclose={() => { noteToDelete = null; }}>
 	<div class="dialog-content">
-		<h3>Delete Note</h3>
-		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Are you sure you want to delete this note? This action cannot be undone.</p>
-		
+		<h3>Delete note?</h3>
+		<p>This cannot be undone.</p>
 		<div class="dialog-actions">
-			<button class="secondary" onclick={() => deleteDialog?.close()}>Cancel</button>
-			<button class="secondary" onclick={confirmDelete} disabled={isBusy}>Delete</button>
+			<button class="btn-ghost" onclick={() => deleteDialog?.close()}>Cancel</button>
+			<button class="btn-danger" onclick={confirmDelete} disabled={isBusy}>Delete</button>
 		</div>
 	</div>
 </dialog>
 
 <div class="shell">
-	{#if sidebarOpen}
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="sidebar-backdrop" onclick={() => sidebarOpen = false}></div>
-	{/if}
-	<aside class="rail" class:open={sidebarOpen}>
-		<div>
-			<p class="eyebrow">Cross-platform local notes</p>
-			<h1>myelin</h1>
-			<p class="copy">
-				Browse the library here. Opening a note now takes you to a dedicated editor screen.
-			</p>
-		</div>
-
-		<div class="stack">
-			<button class="primary" onclick={pickWorkspace} disabled={isBusy}>Choose workspace</button>
-			<button class="secondary" onclick={createNote} disabled={isBusy || !app?.workspacePath}>
-				New note
-			</button>
-			<button class="secondary" onclick={rebuild} disabled={isBusy || !app?.workspacePath}>
-				Rebuild index
+	<!-- ── Left rail: library ─────────────────────────────── -->
+	<aside class="rail">
+		<div class="rail-top">
+			<span class="wordmark">myelin</span>
+			<button class="btn-new" onclick={createNote} disabled={isBusy || !app?.workspacePath} title="New note">
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+				New Note
 			</button>
 		</div>
 
-		<div class="panel">
-			<div class="panel-header">
-				<span>Workspace</span>
-				<strong>{app?.workspacePath ?? 'Not selected'}</strong>
-			</div>
-			<div class="panel-header">
-				<span>Index</span>
-				<strong>{app?.indexState.backend ?? 'lancedb'}</strong>
-			</div>
-			<div class="panel-header">
-				<span>Provider</span>
-				<strong>{provider?.activeProvider ?? 'loading'}</strong>
-			</div>
+		<div class="rail-search">
+			<svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+			<input bind:value={query} oninput={runSearch} placeholder="Search…" class="search-input" />
 		</div>
-	</aside>
 
-	<section class="content">
-		<header class="topbar">
-			<div style="display: flex; gap: var(--space-4); align-items: flex-start;">
-				<button class="secondary sidebar-toggle-btn" onclick={() => sidebarOpen = !sidebarOpen} aria-label="Toggle sidebar">
-					<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-						<line x1="3" y1="12" x2="21" y2="12"></line>
-						<line x1="3" y1="6" x2="21" y2="6"></line>
-						<line x1="3" y1="18" x2="21" y2="18"></line>
-					</svg>
-				</button>
-				<div>
-					<p class="status">{message}</p>
-					<h2>
-						{app?.workspacePath
-							? `${app.notes.length} notes indexed`
-							: 'Connect a markdown workspace'}
-					</h2>
-				</div>
-			</div>
-
-			<label class="search">
-				<input
-					bind:value={query}
-					oninput={runSearch}
-					placeholder="Search titles, tags, or meaning..."
-				/>
-			</label>
-		</header>
-
-		<section class="commonplace-section">
-			<div class="commonplace-header">
-				<h3>Commonplace</h3>
-				<span>{commonplaces.length}</span>
-			</div>
-			
-			{#if commonplaces.length === 0}
-				<div class="commonplace-empty-state">
-					<p>No interconnected notes found yet. Link notes together to form Commonplaces.</p>
-				</div>
+		<div class="rail-list">
+			{#if !app?.workspacePath}
+				<p class="rail-empty">No workspace selected.</p>
+			{:else if regularNotes.length === 0 && pdfNotes.length === 0}
+				<p class="rail-empty">No notes yet.</p>
 			{:else}
-				<div class="commonplaces-grid">
-					{#each commonplaces as cluster, i}
-						<div class="commonplace-card">
-							<div class="commonplace-card-header">
-								<h4>Cluster {i + 1}</h4>
-								<span>{cluster.length} connected notes</span>
-							</div>
-							<div class="commonplace-notes">
-								{#each cluster as note}
-									<button class="note-pill" onclick={() => openNote(note.id)}>
-										{note.title}
-									</button>
-								{/each}
-							</div>
-						</div>
-					{/each}
-				</div>
-			{/if}
-		</section>
-
-		<section class="notes">
-			<div class="notes-header">
-				<h3>Notes Library</h3>
-				<span>{searchResults?.results.length ?? app?.notes.length ?? 0}</span>
-			</div>
-
-			<div class="library-controls">
-				<select bind:value={sortMode}>
-					<option value="updated">Last edited</option>
-					<option value="created">Created</option>
-					<option value="title">Title</option>
-					<option value="custom">Custom order</option>
-				</select>
-				<select bind:value={filterFolder}>
-					<option value="all">All folders</option>
-					{#each app?.libraryFacets.folders ?? [] as folder (folder)}
-						<option value={folder}>{folder}</option>
-					{/each}
-				</select>
-				<select bind:value={filterTag}>
-					<option value="all">All tags</option>
-					{#each app?.libraryFacets.tags ?? [] as tag (tag)}
-						<option value={tag}>{tag}</option>
-					{/each}
-				</select>
-			</div>
-
-			<div class="library-actions">
-				<div class="view-toggle">
-					<button
-						class:active-toggle={viewMode === 'list'}
-						class="secondary"
-						onclick={() => (viewMode = 'list')}
-						type="button"
-					>
-						List
-					</button>
-					<button
-						class:active-toggle={viewMode === 'grid'}
-						class="secondary"
-						onclick={() => (viewMode = 'grid')}
-						type="button"
-					>
-						Grid
-					</button>
-				</div>
-				<button class="secondary" onclick={createNote} disabled={isBusy || !app?.workspacePath}>
-					Create note
-				</button>
-			</div>
-
-			<div class:notes-grid={viewMode === 'grid'} class="notes-list">
-				{#each visibleNotes as note (note.id)}
-					<!-- svelte-ignore a11y_click_events_have_key_events -->
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<div class="note-card" onclick={() => openNote(note.id)}>
-						<div class="note-card-header">
-							<strong>{note.title}</strong>
-							<div class="menu-container">
-								<button class="menu-trigger" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Note options">
-									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-										<circle cx="12" cy="12" r="1"></circle>
-										<circle cx="12" cy="5" r="1"></circle>
-										<circle cx="12" cy="19" r="1"></circle>
-									</svg>
+				{#if regularNotes.length > 0}
+					<div class="section-label">
+						<span>Notes</span>
+						<span class="section-count">{regularNotes.length}</span>
+					</div>
+					{#each regularNotes as note (note.id)}
+						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+						<div
+							class="note-row"
+							onclick={() => openNote(note.id)}
+							oncontextmenu={(e) => { e.preventDefault(); activeMenuId = activeMenuId === note.id ? null : note.id; }}
+						>
+							<svg class="row-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+							<span class="row-title">{note.title}</span>
+							<span class="row-time">{timeAgo(note.updatedAt)}</span>
+							<div class="row-menu-wrap">
+								<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
+									<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
 								</button>
 								{#if activeMenuId === note.id}
-									<div class="menu-dropdown">
-										<button class="delete-btn" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
+									<div class="row-dropdown">
+										<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
 									</div>
 								{/if}
 							</div>
 						</div>
-						<p>{note.excerpt || 'Empty note'}</p>
-						<div class="meta">
-							<span>{note.folder}</span>
-							<span>{formatDate(note.updatedAt)}</span>
-							<span>{note.tags.join(' · ')}</span>
+					{/each}
+				{/if}
+
+				{#if pdfNotes.length > 0}
+					<div class="section-label" style="margin-top: var(--space-4);">
+						<span>PDFs</span>
+						<span class="section-count">{pdfNotes.length}</span>
+					</div>
+					{#each pdfNotes as note (note.id)}
+						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+						<div class="note-row" onclick={() => openNote(note.id)}>
+							<svg class="row-icon pdf-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="11" y2="17"/></svg>
+							<span class="row-title">{note.title}</span>
+							<span class="row-time">{timeAgo(note.updatedAt)}</span>
+							<div class="row-menu-wrap">
+								<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
+									<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+								</button>
+								{#if activeMenuId === note.id}
+									<div class="row-dropdown">
+										<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
+									</div>
+								{/if}
+							</div>
+						</div>
+					{/each}
+				{/if}
+			{/if}
+		</div>
+
+		<div class="rail-footer">
+			<button class="footer-change-btn" onclick={pickWorkspace} disabled={isBusy} title={app?.workspacePath ?? 'Choose workspace'}>
+				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+				{#if app?.workspacePath}
+					{workspaceLabel(app.workspacePath)}
+				{:else}
+					Connect workspace
+				{/if}
+			</button>
+			{#if app?.workspacePath}
+				<span class="footer-dot" class:dot-ok={provider?.activeProvider} title={provider?.activeProvider ?? 'No provider'}></span>
+			{/if}
+		</div>
+	</aside>
+
+	<!-- ── Right: workspace panel ─────────────────────────── -->
+	<main class="workspace">
+		{#if !app?.workspacePath}
+			<div class="landing">
+				<p class="eyebrow">Cross-platform local notes</p>
+				<h1>myelin</h1>
+				<p class="landing-copy">A local-first markdown workspace. Connect a folder to get started.</p>
+				<button class="btn-primary" onclick={pickWorkspace} disabled={isBusy}>Choose workspace</button>
+			</div>
+		{:else}
+			<div class="workspace-inner">
+				{#if message}<p class="ws-status-line">{message}</p>{/if}
+				{#if commonplaces.length > 0}
+					<div class="commonplace-section">
+						<div class="section-label flat">
+							<span>Commonplace</span>
+							<span class="section-count">{commonplaces.length}</span>
+						</div>
+						<div class="clusters-grid">
+							{#each commonplaces as cluster, i}
+								<div class="cluster-card">
+									<div class="cluster-head">
+										<span class="cluster-label">Cluster {i + 1}</span>
+										<span class="cluster-count">{cluster.length} notes</span>
+									</div>
+									<div class="cluster-pills">
+										{#each cluster as note}
+											<button class="pill" onclick={() => openNote(note.id)}>{note.title}</button>
+										{/each}
+									</div>
+								</div>
+							{/each}
 						</div>
 					</div>
-				{/each}
+				{:else}
+					<div class="workspace-empty">
+						<p>Select a note to open it, or create a new one.</p>
+					</div>
+				{/if}
 			</div>
-		</section>
-	</section>
+		{/if}
+	</main>
 </div>
 
 <style>
+	/* ── Layout ── */
 	.shell {
-		display: flex;
+		display: grid;
+		grid-template-columns: 300px 1fr;
 		height: calc(100vh - 32px);
-		max-height: calc(100vh - 32px);
-		position: relative;
 		overflow: hidden;
-		animation: fade-in var(--duration-page) var(--ease-out);
+		animation: fade-in 0.2s ease-out;
 	}
 
-	.sidebar-toggle-btn {
-		display: none;
-		align-items: center;
-		justify-content: center;
-		padding: 0.5rem;
-		height: fit-content;
-	}
-
-	.sidebar-backdrop {
-		display: none;
-	}
-
+	/* ── Rail ── */
 	.rail {
-		padding: var(--space-8) var(--space-6);
-		background: rgba(16, 16, 16, 0.94);
-		color: var(--text-primary);
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-6);
 		border-right: 1px solid var(--border-default);
-		backdrop-filter: blur(var(--blur-md));
-		overflow-y: auto;
-		min-height: 0;
-	}
-
-	.eyebrow {
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
-		font-size: 0.75rem;
-		font-weight: 600;
-		color: var(--text-secondary);
-	}
-
-	h1,
-	h2,
-	h3 {
-		letter-spacing: -0.025em;
-	}
-
-	h1 {
-		margin: 0;
-		font-size: 2.25rem;
-		line-height: 1.2;
-		color: var(--text-hero);
-	}
-
-	.copy {
-		line-height: 1.625;
-		color: var(--text-secondary);
-		max-width: 22rem;
-	}
-
-	.stack {
-		display: grid;
-		gap: var(--space-3);
-	}
-
-	button,
-	select,
-	input {
-		font: inherit;
+		background: var(--bg-panel);
+		overflow: hidden;
 		font-family: var(--font-mono);
 	}
 
-	button {
+	.rail-top {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: var(--space-5) var(--space-5) var(--space-4);
+		gap: var(--space-3);
+		flex-shrink: 0;
+	}
+
+	.wordmark {
+		font-size: 1.05rem;
+		font-weight: 700;
+		letter-spacing: -0.03em;
+		color: var(--text-hero);
+	}
+
+	.btn-new {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		padding: 6px 13px;
+		font-size: 0.8rem;
+		font-family: var(--font-mono);
+		background: var(--accent-200);
+		color: #fff;
 		border: none;
 		border-radius: var(--radius-sm);
-		padding: 0.5rem 0.75rem;
-		font-size: 0.875rem;
 		cursor: pointer;
-		transition:
-			background var(--duration-fast) var(--ease-standard),
-			border-color var(--duration-fast) var(--ease-standard),
-			color var(--duration-fast) var(--ease-standard),
-			transform var(--duration-fast) var(--ease-standard);
+		transition: background 0.15s;
+		white-space: nowrap;
 	}
+	.btn-new:hover:not(:disabled) { background: var(--accent-100); }
+	.btn-new:disabled { opacity: 0.5; cursor: not-allowed; }
 
-	button:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
+	.rail-search {
+		position: relative;
+		padding: 0 var(--space-4) var(--space-4);
+		flex-shrink: 0;
 	}
-
-	.primary {
-		background: var(--accent-200);
-		color: var(--text-inverse);
-	}
-
-	.secondary {
-		background: var(--bg-panel);
-		color: var(--text-primary);
-		border: 1px solid var(--border-default);
-	}
-
-	button:hover:not(:disabled) {
-		transform: translateY(-1px);
-	}
-
-	.primary:hover:not(:disabled) {
-		background: var(--accent-100);
-	}
-
-	.secondary:hover:not(:disabled) {
-		border-color: var(--neutral-600);
-	}
-
-	.panel {
-		padding: var(--space-4);
-		border-radius: var(--radius-xs);
-		background: var(--bg-panel);
-		border: 1px solid var(--border-default);
-		display: grid;
-		gap: var(--space-3);
-	}
-
-	.panel-header {
-		display: grid;
-		gap: 0.25rem;
-	}
-
-	.panel-header span,
-	.status {
-		font-size: 0.75rem;
-		text-transform: uppercase;
-		letter-spacing: 0.08em;
+	.search-icon {
+		position: absolute;
+		left: calc(var(--space-4) + 11px);
+		top: 50%;
+		transform: translateY(-60%);
 		color: var(--text-secondary);
+		pointer-events: none;
 	}
-
-	.panel-header strong {
-		font-family: var(--font-mono);
-		font-size: 0.75rem;
-		font-weight: 500;
-		color: var(--neutral-300);
-		word-break: break-word;
-	}
-
-	.content {
-		padding: var(--space-8);
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-6);
-		flex: 1;
-		overflow: hidden;
-		min-height: 0;
-	}
-
-	.topbar {
-		display: flex;
-		justify-content: space-between;
-		gap: var(--space-4);
-		align-items: end;
-	}
-
-	h2 {
-		margin: 0;
-		font-size: 1.875rem;
-		color: var(--text-hero);
-	}
-
-	.search {
-		min-width: 20rem;
-	}
-
-	.search input {
+	.search-input {
 		width: 100%;
+		box-sizing: border-box;
+		padding: 8px 12px 8px 32px;
+		font-size: 0.82rem;
+		font-family: var(--font-mono);
+		background: var(--bg-page);
 		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xs);
-		background: var(--bg-panel);
-		padding: 0.5rem 0.75rem;
-		font-size: 0.875rem;
+		border-radius: var(--radius-sm);
 		color: var(--text-primary);
 		outline: none;
 	}
+	.search-input::placeholder { color: var(--neutral-600); }
+	.search-input:focus { border-color: var(--neutral-600); }
 
-	select {
-		width: 100%;
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xs);
-		background: var(--bg-panel);
-		padding: 0.5rem 2rem 0.5rem 0.75rem;
-		font-size: 0.875rem;
-		color: var(--text-primary);
-		outline: none;
-		appearance: none;
-		-webkit-appearance: none;
-		-moz-appearance: none;
-		background-image: url("data:image/svg+xml;utf8,<svg fill='%23a49d9a' height='24' viewBox='0 0 24 24' width='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 10l5 5 5-5z'/><path d='M0 0h24v24H0z' fill='none'/></svg>");
-		background-repeat: no-repeat;
-		background-position: right 12px center;
-		background-size: 20px;
-		cursor: pointer;
-	}
-
-	select option {
-		background: var(--bg-panel);
-		color: var(--text-primary);
-	}
-
-	input::placeholder {
-		color: var(--neutral-500);
-	}
-
-	.notes {
-		background: linear-gradient(180deg, rgba(18, 18, 18, 0.96), rgba(10, 10, 10, 0.98));
-		backdrop-filter: blur(var(--blur-sm));
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--border-default);
-		padding: var(--space-4);
-		display: flex;
-		flex-direction: column;
-		flex: 1;
-		min-height: 0;
-	}
-
-	.commonplace-section {
-		margin-bottom: var(--space-8);
-	}
-
-	.commonplace-empty-state {
-		padding: var(--space-6) 0;
-		text-align: center;
-		color: var(--text-secondary);
-		font-size: 0.875rem;
-		border: 1px dashed var(--border-subtle);
-		border-radius: var(--radius-md);
-		margin-top: var(--space-4);
-	}
-
-	.notes-header,
-	.commonplace-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding-bottom: var(--space-3);
-		border-bottom: 1px solid var(--border-subtle);
-		margin-bottom: var(--space-3);
-	}
-
-	.notes-header span,
-	.commonplace-header span,
-	.meta {
-		font-family: var(--font-mono);
-		font-size: 0.75rem;
-		color: var(--text-secondary);
-	}
-
-	.commonplaces-grid {
-		column-width: 18rem;
-		column-gap: var(--space-4);
-		margin-top: var(--space-4);
-	}
-
-	.commonplace-card {
-		break-inside: avoid;
-		margin-bottom: var(--space-4);
-		background: rgba(20, 20, 20, 0.4);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm);
-		padding: var(--space-4);
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	.commonplace-card-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-	}
-
-	.commonplace-card-header h4 {
-		margin: 0;
-		font-size: 1rem;
-		color: var(--text-primary);
-	}
-
-	.commonplace-card-header span {
-		font-family: var(--font-mono);
-		font-size: 0.75rem;
-		color: var(--text-secondary);
-	}
-
-	.commonplace-notes {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--space-2);
-	}
-
-	.note-pill {
-		background: var(--bg-panel);
-		border: 1px solid var(--border-subtle);
-		border-radius: var(--radius-sm);
-		padding: 0.35rem 0.75rem;
-		font-size: 0.75rem;
-		color: var(--text-secondary);
-		transition: all var(--duration-fast) var(--ease-standard);
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		/*! autoprefixer: ignore next */
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-		text-align: left;
-		line-height: 1.4;
-		max-width: 100%;
-	}
-
-	.note-pill:hover {
-		border-color: var(--accent-200);
-		color: var(--text-primary);
-		transform: translateY(-1px);
-	}
-
-	.library-controls,
-	.library-actions {
-		display: grid;
-		gap: var(--space-2);
-		margin-bottom: var(--space-3);
-	}
-
-	.library-controls {
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-	}
-
-	.library-actions {
-		grid-template-columns: auto auto;
-		justify-content: space-between;
-		align-items: center;
-	}
-
-	.view-toggle {
-		display: flex;
-		gap: var(--space-2);
-		flex-wrap: wrap;
-	}
-
-	.active-toggle {
-		border-color: var(--accent-200);
-		background: rgba(238, 96, 24, 0.08);
-	}
-
-	.notes-list {
-		display: grid;
-		gap: var(--space-2);
+	.rail-list {
 		flex: 1;
 		overflow-y: auto;
-		min-height: 0;
-		padding-top: 2px;
-		padding-right: var(--space-2);
+		padding: 0 var(--space-3) var(--space-4);
+		scrollbar-width: none;
+	}
+	.rail-list::-webkit-scrollbar { display: none; }
+
+	.rail-empty {
+		font-size: 0.82rem;
+		color: var(--text-secondary);
+		padding: var(--space-4) var(--space-3);
+		margin: 0;
 	}
 
-	.notes-grid {
-		grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
-		align-content: start;
-	}
-
-	.note-card {
-		text-align: left;
-		background: transparent;
-		padding: var(--space-3);
-		border: 1px solid transparent;
-		color: var(--text-primary);
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		cursor: pointer;
-		border-radius: var(--radius-sm);
-		transition: border-color var(--duration-fast), background var(--duration-fast);
-	}
-
-	.note-card-header {
+	.section-label {
 		display: flex;
 		justify-content: space-between;
-		align-items: flex-start;
-		gap: var(--space-2);
-		width: 100%;
+		align-items: center;
+		padding: var(--space-3) var(--space-3);
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--neutral-500);
+		user-select: none;
+	}
+	.section-label.flat { padding: var(--space-2) 0; }
+	.section-count {
+		font-size: 0.68rem;
+		color: var(--neutral-700);
+		font-weight: 400;
 	}
 
-	.note-card-header strong {
+	.note-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		padding: 8px var(--space-3);
+		border-radius: var(--radius-xs);
+		cursor: pointer;
+		position: relative;
+		border: 1px solid transparent;
+		transition: background 0.1s, border-color 0.1s;
+	}
+	.note-row:hover {
+		background: rgba(255,255,255,0.04);
+		border-color: var(--border-default);
+	}
+	.note-row:hover .row-menu-btn { opacity: 1; }
+
+	.row-icon {
+		flex-shrink: 0;
+		color: var(--neutral-600);
+	}
+	.row-icon.pdf-icon { color: var(--accent-300); }
+
+	.row-title {
+		flex: 1;
+		font-size: 0.875rem;
+		color: var(--text-primary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		display: block;
-		flex: 1;
+		line-height: 1.3;
 	}
 
-	.menu-container {
+	.row-time {
+		flex-shrink: 0;
+		font-size: 0.72rem;
+		color: var(--neutral-600);
+		font-family: var(--font-mono);
+	}
+
+	.row-menu-wrap {
 		position: relative;
+		flex-shrink: 0;
 	}
-
-	.menu-trigger {
+	.row-menu-btn {
 		background: transparent;
 		border: none;
-		color: var(--text-secondary);
-		padding: 4px;
+		padding: 2px 3px;
+		color: var(--neutral-500);
+		cursor: pointer;
 		border-radius: var(--radius-xs);
 		display: flex;
 		align-items: center;
-		justify-content: center;
 		opacity: 0;
-		transition: opacity var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+		transition: opacity 0.1s, background 0.1s;
 	}
+	.row-menu-btn:hover { background: rgba(255,255,255,0.08); color: var(--text-primary); }
 
-	.note-card:hover .menu-trigger,
-	.menu-trigger:focus-visible {
-		opacity: 1;
-	}
-
-	.menu-trigger:hover {
-		background: rgba(255, 255, 255, 0.1);
-		color: var(--text-primary);
-	}
-
-	.menu-dropdown {
+	.row-dropdown {
 		position: absolute;
-		top: 100%;
 		right: 0;
+		top: 100%;
+		z-index: 20;
 		background: var(--bg-panel);
-		border: 1px solid var(--border-subtle);
+		border: 1px solid var(--border-default);
 		border-radius: var(--radius-sm);
 		padding: var(--space-1);
-		z-index: 10;
-		min-width: 120px;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+		min-width: 100px;
+		box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 	}
-
-	.delete-btn {
+	.row-delete {
 		width: 100%;
 		text-align: left;
 		padding: var(--space-2) var(--space-3);
+		font-size: 0.82rem;
+		font-family: var(--font-mono);
 		background: transparent;
-		color: #e81123;
+		color: #e05555;
 		border: none;
 		border-radius: var(--radius-xs);
-		font-size: 0.875rem;
 		cursor: pointer;
-		transition: background var(--duration-fast);
 	}
+	.row-delete:hover { background: rgba(224,85,85,0.1); }
 
-	.delete-btn:hover {
-		background: rgba(232, 17, 35, 0.1);
+	.rail-footer {
+		flex-shrink: 0;
+		padding: var(--space-3) var(--space-4);
+		border-top: 1px solid var(--border-default);
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
 	}
-
-	.note-card:hover {
-		border-color: var(--accent-200);
-		background: rgba(238, 96, 24, 0.08);
-	}
-
-	.note-card p {
-		margin: var(--space-2) 0;
-		color: var(--text-secondary);
-		line-height: 1.4;
-		display: -webkit-box;
-		line-clamp: 2;
-		-webkit-line-clamp: 2;
-		/*! autoprefixer: ignore next */
-		-webkit-box-orient: vertical;
+	.footer-change-btn {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 8px var(--space-3);
+		font-size: 0.8rem;
+		font-family: var(--font-mono);
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: var(--radius-xs);
+		color: var(--neutral-500);
+		cursor: pointer;
+		text-align: left;
+		white-space: nowrap;
 		overflow: hidden;
+		text-overflow: ellipsis;
+		transition: color 0.1s, border-color 0.1s, background 0.1s;
+	}
+	.footer-change-btn:hover:not(:disabled) {
+		color: var(--text-primary);
+		border-color: var(--border-default);
+		background: rgba(255,255,255,0.04);
+	}
+	.footer-change-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.footer-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--neutral-700);
+		flex-shrink: 0;
+	}
+	.footer-dot.dot-ok { background: #4caf50; }
+
+	/* ── Workspace panel ── */
+	.workspace {
+		overflow-y: auto;
+		background: var(--bg-page);
 	}
 
-	.meta {
+	.landing {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		justify-content: center;
+		height: 100%;
+		padding: 4rem 5rem;
+		gap: var(--space-6);
+		font-family: var(--font-mono);
+	}
+	.eyebrow {
+		font-size: 0.75rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--text-secondary);
+		margin: 0;
+	}
+	h1 {
+		font-size: 4rem;
+		font-weight: 800;
+		letter-spacing: -0.04em;
+		color: var(--text-hero);
+		margin: 0;
+		line-height: 1;
+	}
+	.landing-copy {
+		color: var(--text-secondary);
+		font-size: 1rem;
+		line-height: 1.6;
+		max-width: 28rem;
+		margin: 0;
+	}
+	.btn-primary {
+		padding: 12px 24px;
+		font-family: var(--font-mono);
+		font-size: 0.925rem;
+		background: var(--accent-200);
+		color: #fff;
+		border: none;
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		transition: background 0.15s;
+	}
+	.btn-primary:hover:not(:disabled) { background: var(--accent-100); }
+	.btn-primary:disabled { opacity: 0.5; }
+
+	.workspace-inner {
+		padding: var(--space-10) var(--space-10);
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-6);
+		font-family: var(--font-mono);
+		max-width: 800px;
+		height: 100%;
+	}
+	.ws-status-line {
+		margin: 0;
+		font-size: 0.7rem;
+		color: var(--neutral-500);
+	}
+	.workspace-empty {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.workspace-empty p {
+		font-size: 0.9rem;
+		color: var(--neutral-600);
+		margin: 0;
+	}
+
+	/* Commonplace */
+	.commonplace-section {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-4);
+	}
+	.clusters-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+		gap: var(--space-3);
+	}
+	.cluster-card {
+		background: var(--bg-panel);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		padding: var(--space-4);
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+	}
+	.cluster-head {
 		display: flex;
 		justify-content: space-between;
+		align-items: center;
+	}
+	.cluster-label { font-size: 0.72rem; color: var(--text-primary); font-weight: 600; }
+	.cluster-count { font-size: 0.65rem; color: var(--neutral-600); }
+	.cluster-pills {
+		display: flex;
 		flex-wrap: wrap;
 		gap: var(--space-2);
-		margin-top: auto;
 	}
-
-	@keyframes fade-in {
-		from {
-			opacity: 0;
-			transform: translateY(8px);
-		}
-
-		to {
-			opacity: 1;
-			transform: translateY(0);
-		}
+	.pill {
+		font-size: 0.68rem;
+		font-family: var(--font-mono);
+		padding: 3px 8px;
+		background: transparent;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-xs);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: border-color 0.1s, color 0.1s;
+		text-align: left;
+		max-width: 100%;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
+	.pill:hover { border-color: var(--accent-200); color: var(--text-primary); }
 
-	@media (max-width: 1100px) {
-		.sidebar-toggle-btn {
-			display: flex;
-		}
-
-		.sidebar-backdrop {
-			display: block;
-			position: fixed;
-			inset: 0;
-			background: rgba(0, 0, 0, 0.4);
-			backdrop-filter: blur(var(--blur-sm));
-			z-index: 90;
-			animation: fade-in var(--duration-fast) ease-out;
-		}
-
-		.rail {
-			position: absolute;
-			top: 0; left: 0; bottom: 0;
-			width: 320px;
-			max-width: 85vw;
-			z-index: 100;
-			transform: translateX(-100%);
-			transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-			box-shadow: 4px 0 24px rgba(0, 0, 0, 0.4);
-		}
-		
-		.rail.open {
-			transform: translateX(0);
-		}
-
-		.library-controls,
-		.library-actions {
-			grid-template-columns: 1fr;
-		}
-
-		.topbar {
-			flex-direction: column;
-			align-items: stretch;
-		}
-
-		.content {
-			padding: var(--space-4);
-			width: 100%;
-		}
-
-		.search {
-			min-width: 0;
-		}
-	}
-
-	@media (min-width: 1101px) {
-		.shell {
-			display: grid;
-			grid-template-columns: 320px 1fr;
-		}
-	}
-
-	.link-dialog {
+	/* Dialog */
+	.confirm-dialog {
 		padding: 0 !important;
 		border: 1px solid var(--border-default) !important;
 		border-radius: var(--radius-sm) !important;
 		background: var(--bg-panel) !important;
 		color: var(--text-primary) !important;
-		max-width: 32rem !important;
+		max-width: 20rem !important;
 		width: 100% !important;
-		backdrop-filter: blur(var(--blur-md)) !important;
-		outline: none !important;
-		box-shadow: none !important;
+		box-shadow: 0 8px 32px rgba(0,0,0,0.4) !important;
 	}
-
-	.link-dialog:focus,
-	.link-dialog:focus-visible {
-		outline: none !important;
-		box-shadow: none !important;
+	.confirm-dialog::backdrop {
+		background: rgba(0,0,0,0.5) !important;
+		backdrop-filter: blur(4px) !important;
 	}
-
-	.link-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6) !important;
-		backdrop-filter: blur(var(--blur-sm)) !important;
-	}
-
 	.dialog-content {
 		padding: var(--space-6);
 		display: flex;
 		flex-direction: column;
+		gap: var(--space-3);
+		font-family: var(--font-mono);
+	}
+	.dialog-content h3 { margin: 0; font-size: 0.95rem; color: var(--text-hero); }
+	.dialog-content p { margin: 0; font-size: 0.75rem; color: var(--text-secondary); }
+	.dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+	.btn-ghost {
+		padding: 6px 14px;
+		font-size: 0.75rem;
+		font-family: var(--font-mono);
+		background: transparent;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		cursor: pointer;
+	}
+	.btn-ghost:hover { color: var(--text-primary); }
+	.btn-danger {
+		padding: 6px 14px;
+		font-size: 0.75rem;
+		font-family: var(--font-mono);
+		background: transparent;
+		border: 1px solid #e05555;
+		border-radius: var(--radius-sm);
+		color: #e05555;
+		cursor: pointer;
+	}
+	.btn-danger:hover:not(:disabled) { background: rgba(224,85,85,0.1); }
+	.btn-danger:disabled { opacity: 0.4; }
+
+	@keyframes fade-in {
+		from { opacity: 0; transform: translateY(4px); }
+		to { opacity: 1; transform: translateY(0); }
 	}
 
-	.dialog-content h3 {
-		margin: 0 0 var(--space-2) 0;
-		font-size: 1.25rem;
-		color: var(--text-hero);
-	}
-
-	.dialog-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: var(--space-2);
-		margin-top: var(--space-4);
+	@media (max-width: 700px) {
+		.shell { grid-template-columns: 1fr; }
+		.workspace { display: none; }
 	}
 </style>

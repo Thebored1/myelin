@@ -1,19 +1,23 @@
 use crate::llama_server::{self, ManagedLlamaServer};
 use crate::models::{
-    AppSnapshot, Backlink, IndexState, LibraryFacets, NoteDocument, NoteSummary, ProviderStatus,
-    SearchResponse, SearchResult,
+    AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
+    ProviderStatus, SearchResponse, SearchResult,
 };
 use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::Utc;
+use futures_util::StreamExt;
 use lancedb::connection::Connection;
 use lancedb::{connect, Table};
 use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
-use rig_core::completion::Chat;
+use rig_core::agent::MultiTurnStreamItem;
+use rig_core::completion::{CompletionError, Prompt, PromptError};
+use rig_core::message::Text;
+use rig_core::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -27,8 +31,50 @@ use uuid::Uuid;
 
 const EMBEDDING_DIM: i32 = 64;
 const INDEX_DIR_NAME: &str = "index";
+const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
+const NOTE_BODY_PROMPT_LIMIT: usize = 400;
+const RIG_MAX_TURNS: usize = 4;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
+
+fn describe_completion_error(error: &CompletionError) -> String {
+    match error {
+        CompletionError::HttpError(inner) => {
+            format!("Could not reach the local llama server: {inner}")
+        }
+        CompletionError::ResponseError(message) => {
+            format!("The local model returned an invalid response: {message}")
+        }
+        CompletionError::ProviderError(message) => {
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("context length") || lower.contains("context_length_exceeded") {
+                format!("The note and chat history exceeded the model context window. {message}")
+            } else {
+                format!("The local model rejected the request: {message}")
+            }
+        }
+        _ => error.to_string(),
+    }
+}
+
+fn describe_prompt_error(error: &PromptError) -> String {
+    match error {
+        PromptError::CompletionError(inner) => describe_completion_error(inner),
+        PromptError::ToolError(inner) => format!("A note tool failed while answering: {inner}"),
+        PromptError::ToolServerError(inner) => {
+            format!("The tool server failed while answering: {inner}")
+        }
+        PromptError::MaxTurnsError { max_turns, .. } => format!(
+            "The model kept calling tools without finishing after {max_turns} turns. Try asking a narrower question."
+        ),
+        PromptError::PromptCancelled { reason, .. } => {
+            format!("The AI request was cancelled: {reason}")
+        }
+        PromptError::UnknownToolCall { tool_name, .. } => format!(
+            "The model tried to call an unsupported tool: {tool_name}"
+        ),
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -43,6 +89,8 @@ struct InnerState {
     index_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
     llama_client: Client,
+    chat_tools: Mutex<Vec<ChatTool>>,
+    latest_chat_question: Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -114,8 +162,58 @@ impl AppState {
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
                     .context("failed to create llama HTTP client")?,
+                chat_tools: Mutex::new(Vec::new()),
+                latest_chat_question: Mutex::new(None),
             }),
         })
+    }
+
+    pub fn reset_chat_tools(&self) {
+        self.inner.chat_tools.lock().clear();
+    }
+
+    pub fn record_chat_tool(&self, name: impl Into<String>, details: impl Into<String>) {
+        self.inner.chat_tools.lock().push(ChatTool {
+            name: name.into(),
+            details: details.into(),
+        });
+    }
+
+    pub fn take_chat_tools(&self) -> Vec<ChatTool> {
+        std::mem::take(&mut *self.inner.chat_tools.lock())
+    }
+
+    pub fn set_latest_chat_question(&self, question: impl Into<String>) {
+        *self.inner.latest_chat_question.lock() = Some(question.into());
+    }
+
+    pub fn clear_latest_chat_question(&self) {
+        *self.inner.latest_chat_question.lock() = None;
+    }
+
+    pub fn latest_chat_allows_note_mutation(&self) -> bool {
+        let Some(question) = self.inner.latest_chat_question.lock().clone() else {
+            return false;
+        };
+        let normalized = question.to_ascii_lowercase();
+        // Block obvious informational questions — everything else allows note writes.
+        // "can you" / "could you" are NOT blocked — they're polite imperatives ("could you add
+        // headings", "can you rewrite this"), not information requests.
+        let is_question = normalized.starts_with("what ")
+            || normalized.starts_with("who ")
+            || normalized.starts_with("when ")
+            || normalized.starts_with("where ")
+            || normalized.starts_with("why ")
+            || normalized.starts_with("how ")
+            || normalized.starts_with("is ")
+            || normalized.starts_with("are ")
+            || normalized.starts_with("does ")
+            || normalized.starts_with("do ")
+            || normalized.starts_with("tell me about")
+            || normalized.starts_with("explain ")
+            || normalized.starts_with("describe ")
+            || normalized.starts_with("define ");
+        !is_question
     }
 
     pub async fn bootstrap(&self) -> Result<AppSnapshot> {
@@ -153,14 +251,12 @@ impl AppState {
     }
 
     pub async fn set_llama_model_path(&self, model_path: String) -> Result<()> {
-        let workspace = self.require_workspace()?;
-        crate::llama_server::set_workspace_model_path(&workspace, model_path)?;
+        crate::llama_server::set_model_path(&self.inner.app_data_dir, model_path)?;
         Ok(())
     }
 
     pub async fn set_llama_executable_path(&self, executable_path: String) -> Result<()> {
-        let workspace = self.require_workspace()?;
-        crate::llama_server::set_workspace_executable_path(&workspace, executable_path)?;
+        crate::llama_server::set_executable_path(&self.inner.app_data_dir, executable_path)?;
         Ok(())
     }
 
@@ -238,7 +334,12 @@ impl AppState {
             );
         }
 
-        write_note_file(&workspace, &path, &document)?;
+        write_note_file(
+            &workspace,
+            &self.workspace_data_dir(&workspace),
+            &path,
+            &document,
+        )?;
         crate::git_history::commit_changes(
             &workspace,
             &format!("Create note: {}", document.title),
@@ -260,6 +361,20 @@ impl AppState {
             .get(&note_id)
             .map(|note| note.document.clone())
             .ok_or_else(|| anyhow!("note not found"))
+    }
+
+    pub fn find_note_by_exact_title(&self, title: &str) -> Option<NoteDocument> {
+        let normalized = title.trim().to_lowercase();
+        if normalized.is_empty() {
+            return None;
+        }
+
+        let runtime = self.inner.runtime.read();
+        runtime
+            .notes
+            .values()
+            .find(|note| note.document.title.trim().to_lowercase() == normalized)
+            .map(|note| note.document.clone())
     }
 
     pub async fn save_note(
@@ -321,7 +436,12 @@ impl AppState {
             );
         }
 
-        write_note_file(&workspace, &path, &updated)?;
+        write_note_file(
+            &workspace,
+            &self.workspace_data_dir(&workspace),
+            &path,
+            &updated,
+        )?;
         crate::git_history::commit_changes(&workspace, &format!("Update note: {}", updated.title))?;
 
         let state = self.clone();
@@ -385,7 +505,12 @@ impl AppState {
             chat_history: source.document.chat_history.clone(),
         };
 
-        write_note_file(&workspace, &path, &document)?;
+        write_note_file(
+            &workspace,
+            &self.workspace_data_dir(&workspace),
+            &path,
+            &document,
+        )?;
         crate::git_history::commit_changes(
             &workspace,
             &format!("Duplicate note: {}", document.title),
@@ -556,10 +681,12 @@ impl AppState {
         };
         let path_str = path.to_str().unwrap();
         let history = crate::git_history::get_file_history(&workspace, path_str)?;
-        
+
         let mut filtered = Vec::new();
         for commit in history {
-            if let Ok(content) = crate::git_history::get_file_at_commit(&workspace, &commit.hash, path_str) {
+            if let Ok(content) =
+                crate::git_history::get_file_at_commit(&workspace, &commit.hash, path_str)
+            {
                 let mut body = content.as_str();
                 if body.starts_with("---\n") {
                     if let Some(end_idx) = body[4..].find("\n---\n") {
@@ -571,7 +698,7 @@ impl AppState {
                 }
             }
         }
-        
+
         Ok(filtered)
     }
 
@@ -588,12 +715,7 @@ impl AppState {
         crate::git_history::get_file_at_commit(&workspace, &commit_hash, path.to_str().unwrap())
     }
     pub async fn provider_status(&self) -> Result<ProviderStatus> {
-        let workspace = match self.require_workspace() {
-            Ok(workspace) => workspace,
-            Err(_) => return Ok(default_provider_status(None)),
-        };
-
-        let info = llama_server::inspect_provider(&workspace)?;
+        let info = llama_server::inspect_provider(&self.inner.app_data_dir)?;
         let healthy = if let Some(config) = &info.resolved {
             let server = self.inner.llama_server.lock().await;
             if let Some(server) = server.as_ref() {
@@ -641,13 +763,13 @@ impl AppState {
 
     pub async fn ask_ai(&self, note_id: String, question: String) -> Result<String> {
         let note = self.load_note(note_id).await?;
-        let mut history_text = String::new();
-        for msg in &note.chat_history {
-            history_text.push_str(&format!("{}: {}\n", msg.role, msg.content));
+        if is_simple_greeting(&question) {
+            return Ok("Hello. What would you like to work on?".to_string());
         }
-        
+        let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
+
         let prompt = format!(
-            "Answer the user's question using the note as primary context.\n\nTitle: {}\n\nTags: {}\n\nBody:\n{}\n\nChat History:\n{}\n\nQuestion:\n{}",
+            "Answer the user's latest question directly. Use the open note only if it is relevant to that question.\n\nOpen Note Context:\nTitle: {}\nTags: {}\nBody:\n{}\n\nRecent Chat History for background only:\n{}\n\nLatest Question:\n{}",
             note.title,
             if note.tags.is_empty() { "(none)".to_string() } else { note.tags.join(", ") },
             note.body,
@@ -656,7 +778,7 @@ impl AppState {
         );
 
         self.run_llama_prompt(
-            "You are a helpful AI agent. You answer the user's message directly. Use the tools available to you to read, write, or search notes if needed.",
+            "You are a helpful AI agent. Answer the latest question directly. Ignore the open note and recent chat history unless they are relevant or explicitly referenced.",
             &prompt,
         )
         .await
@@ -668,69 +790,133 @@ impl AppState {
         question: String,
         request_id: String,
     ) -> Result<()> {
-        let note = self.load_note(note_id).await?;
-        let mut history_text = String::new();
-        for msg in &note.chat_history {
-            history_text.push_str(&format!("{}: {}\n", msg.role, msg.content));
+        self.reset_chat_tools();
+        self.set_latest_chat_question(question.clone());
+        let result: Result<()> = async {
+            let note = self.load_note(note_id).await?;
+            let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
+
+            let note_body_excerpt = if note.body.len() > NOTE_BODY_PROMPT_LIMIT {
+                format!("{}…", &note.body[..NOTE_BODY_PROMPT_LIMIT])
+            } else {
+                note.body.clone()
+            };
+            let prompt = format!(
+                "Open Note: \"{}\"\nNote body (excerpt): {}\n\nChat History (for context only):\n{}\n\n### USER REQUEST ###\n{}\n### END REQUEST ###",
+                note.title,
+                if note_body_excerpt.trim().is_empty() { "(empty)".to_string() } else { note_body_excerpt },
+                history_text,
+                question
+            );
+
+            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+            self.ensure_llama_server(&config).await?;
+
+            let agent = crate::agent::build_myelin_agent(
+                self.clone(),
+                &format!("{}/v1", config.base_url()),
+                &config.model_name(),
+                "/no_think\nYou are a helpful AI note assistant. Act on the USER REQUEST immediately — never ask clarifying questions, never present numbered options, never say 'would you like me to'. Just do it.\n\nWRITE TO NOTE — when the user asks you to produce, create, compose, draft, generate, write, add, edit, format, rewrite, update, modify, change, restructure, or improve any content (poems, stories, essays, code, lists, summaries, articles, headings, formatting, etc.), call write_note or append_note immediately. Do NOT read or search the note first — call the tool directly.\n\nANSWER IN CHAT — when the user asks a pure information question (what, who, when, where, why, how, explain, tell me about, define, etc.) with no instruction to change the note, answer in chat text only.\n\nRULES:\n- Never ask for clarification. Act on the request as given.\n- You cannot create new notes. Only write to or append to the open note.\n- Always use the exact note title shown in 'Open Note:' as the write_note/append_note title.\n- Use write_note to replace/rewrite note content. Use append_note to add/continue/extend.\n- The content field must be the actual text — never a description of what you did.\n- Never start content with 'I have', 'I've', 'Here is', or any meta-sentence.\n- After calling a tool, your chat reply must be ONE short sentence at most. Do NOT explain your reasoning, restate the request, or describe what you did.\n- For URLs use fetch_web_page. Use search_notes only for other local notes."
+            );
+
+            let mut response_stream = agent.stream_prompt(&prompt).multi_turn(RIG_MAX_TURNS).await;
+            let mut streamed_response = String::new();
+            let mut final_response = String::new();
+
+            while let Some(chunk) = response_stream.next().await {
+                match chunk {
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::Text(Text { text, .. }),
+                    )) => {
+                        streamed_response.push_str(&text);
+                        self.handle.emit(
+                            "ai://chat_chunk",
+                            serde_json::json!({
+                                "requestId": request_id,
+                                "delta": text
+                            }),
+                        )?;
+                    }
+                    Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                        final_response = response.response().to_string();
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(anyhow!(error.to_string())),
+                }
+            }
+
+            if streamed_response.is_empty() && !final_response.is_empty() {
+                self.handle.emit(
+                    "ai://chat_chunk",
+                    serde_json::json!({
+                        "requestId": request_id,
+                        "delta": final_response
+                    }),
+                )?;
+            }
+
+            Ok(())
         }
+        .await;
 
-        let prompt = format!(
-            "Answer the user's question using the note as primary context.\n\nTitle: {}\n\nTags: {}\n\nBody:\n{}\n\nChat History:\n{}\n\nQuestion:\n{}",
-            note.title,
-            if note.tags.is_empty() { "(none)".to_string() } else { note.tags.join(", ") },
-            note.body,
-            history_text,
-            question
-        );
+        self.clear_latest_chat_question();
 
-        let workspace = self.require_workspace()?;
-        let config = llama_server::resolve_config(&workspace)?;
-        self.ensure_llama_server(&config).await?;
+        match result {
+            Ok(()) => {
+                let tools = self.take_chat_tools();
+                self.handle.emit(
+                    "ai://chat_done",
+                    serde_json::json!({
+                        "requestId": request_id,
+                        "tools": tools
+                    }),
+                )?;
 
-        let request_id_for_done = request_id.clone();
-        
-        let agent = crate::agent::build_myelin_agent(
-            self.clone(),
-            &format!("{}/v1", config.base_url()),
-            &config.model_name(),
-            "You are a helpful AI agent. You answer the user's message directly. Use tools if necessary to explore other notes or create new ones."
-        );
-
-        // Use standard chat which handles the tool loop automatically.
-        let mut history = vec![];
-        let response = agent.chat(&prompt, &mut history).await.map_err(|e| anyhow::anyhow!("Agent error: {}", e))?;
-
-        // Emit as a single chunk since rig's tool-streaming loop is complex to intercept natively
-        self.handle.emit(
-            "ai://chat_chunk",
-            serde_json::json!({
-                "requestId": request_id,
-                "delta": response
-            }),
-        )?;
-
-        self.handle.emit(
-            "ai://chat_done",
-            serde_json::json!({ "requestId": request_id_for_done }),
-        )?;
-
-        Ok(())
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let tools = self.take_chat_tools();
+                log::error!("AI chat failed: {message}");
+                let _ = self.handle.emit(
+                    "ai://chat_error",
+                    serde_json::json!({
+                        "requestId": request_id,
+                        "message": message,
+                        "tools": tools
+                    }),
+                );
+                Err(error)
+            }
+        }
     }
 
-    pub async fn save_chat_history(&self, note_id: String, chat_history: Vec<crate::models::ChatMessage>) -> Result<()> {
+    pub async fn save_chat_history(
+        &self,
+        note_id: String,
+        chat_history: Vec<crate::models::ChatMessage>,
+    ) -> Result<()> {
         let workspace = self.require_workspace()?;
         let mut document = {
             let runtime = self.inner.runtime.read();
-            runtime.notes.get(&note_id).cloned().map(|n| n.document).ok_or_else(|| anyhow!("note not found"))?
+            runtime
+                .notes
+                .get(&note_id)
+                .cloned()
+                .map(|n| n.document)
+                .ok_or_else(|| anyhow!("note not found"))?
         };
-        
+
         document.chat_history = chat_history;
-        
-        let chats_dir = workspace.join(".myelin").join("chats");
+
+        let chats_dir = self.workspace_data_dir(&workspace).join("chats");
         fs::create_dir_all(&chats_dir)?;
         let chats_path = chats_dir.join(format!("{}.chat.json", document.id));
         let tmp_chat_path = chats_dir.join(format!("{}.chat.tmp", document.id));
-        fs::write(&tmp_chat_path, serde_json::to_string(&document.chat_history)?)?;
+        fs::write(
+            &tmp_chat_path,
+            serde_json::to_string(&document.chat_history)?,
+        )?;
         fs::rename(&tmp_chat_path, &chats_path)?;
 
         {
@@ -746,6 +932,66 @@ impl AppState {
         let workspace = self.require_workspace()?;
         self.reindex_workspace(workspace).await?;
         Ok(self.snapshot())
+    }
+
+    pub async fn save_pdf_annotations(
+        &self,
+        note_id: String,
+        annotations: Vec<crate::models::PdfAnnotation>,
+    ) -> Result<()> {
+        let workspace = self.require_workspace()?;
+        let workspace_data_dir = self.workspace_data_dir(&workspace);
+        let annotations_dir = workspace_data_dir.join("annotations");
+        fs::create_dir_all(&annotations_dir)?;
+        let annotations_path = annotations_dir.join(format!("{}.annotations.json", note_id));
+        if annotations.is_empty() {
+            let _ = fs::remove_file(&annotations_path);
+        } else {
+            let tmp_path = annotations_dir.join(format!("{}.annotations.tmp", note_id));
+            fs::write(&tmp_path, serde_json::to_string(&annotations)?)?;
+            fs::rename(&tmp_path, &annotations_path)?;
+        }
+        {
+            let mut runtime = self.inner.runtime.write();
+            if let Some(note) = runtime.notes.get_mut(&note_id) {
+                note.document.annotations = annotations;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn import_pdf_file(&self, file_path: String) -> Result<NoteDocument> {
+        let workspace = self.require_workspace()?;
+        let src = PathBuf::from(&file_path);
+
+        if !src.exists() {
+            return Err(anyhow!("file not found: {}", file_path));
+        }
+
+        let dest = if src.starts_with(&workspace) {
+            src.clone()
+        } else {
+            let file_name = src
+                .file_name()
+                .ok_or_else(|| anyhow!("invalid file path: no filename"))?;
+            let dest = workspace.join(file_name);
+            if !dest.exists() {
+                fs::copy(&src, &dest)
+                    .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
+            }
+            dest
+        };
+
+        self.reindex_workspace(workspace.clone()).await?;
+
+        let rel_path = relative_to_workspace(&workspace, &dest);
+        let runtime = self.inner.runtime.read();
+        runtime
+            .notes
+            .values()
+            .find(|n| n.document.relative_path == rel_path)
+            .map(|n| n.document.clone())
+            .ok_or_else(|| anyhow!("PDF not found in index after import"))
     }
 
     pub fn snapshot(&self) -> AppSnapshot {
@@ -766,7 +1012,7 @@ impl AppState {
             notes,
             custom_note_order,
             library_facets: build_library_facets(runtime.notes.values().map(|note| &note.document)),
-            provider_status: default_provider_status(runtime.workspace_path.as_deref()),
+            provider_status: default_provider_status(&self.inner.app_data_dir),
             index_state: runtime.index_state.clone(),
         }
     }
@@ -838,10 +1084,12 @@ impl AppState {
         self.handle.emit("index://status", "started")?;
 
         let workspace_clone = workspace.clone();
-        let mut notes =
-            tauri::async_runtime::spawn_blocking(move || read_workspace_notes(&workspace_clone))
-                .await
-                .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
+        let workspace_data_dir = self.workspace_data_dir(&workspace);
+        let mut notes = tauri::async_runtime::spawn_blocking(move || {
+            read_workspace_notes(&workspace_clone, &workspace_data_dir)
+        })
+        .await
+        .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
 
         let mut backlinks_map: HashMap<String, Vec<Backlink>> = HashMap::new();
         for note in &notes {
@@ -905,6 +1153,13 @@ impl AppState {
         self.inner.app_data_dir.join(INDEX_DIR_NAME)
     }
 
+    fn workspace_data_dir(&self, workspace: &Path) -> PathBuf {
+        self.inner
+            .app_data_dir
+            .join("workspaces")
+            .join(workspace_storage_key(workspace))
+    }
+
     fn persist_runtime_settings(&self) -> Result<()> {
         let runtime = self.inner.runtime.read();
         save_settings(
@@ -920,19 +1175,22 @@ impl AppState {
     }
 
     async fn run_llama_prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let workspace = self.require_workspace()?;
-        let config = llama_server::resolve_config(&workspace)?;
+        let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
         self.ensure_llama_server(&config).await?;
-        
+
+        let full_prompt = format!("/no_think\n{}", system_prompt);
         let agent = crate::agent::build_myelin_agent(
             self.clone(),
             &format!("{}/v1", config.base_url()),
             &config.model_name(),
-            system_prompt
+            &full_prompt,
         );
-        
-        let mut history = vec![];
-        agent.chat(user_prompt, &mut history).await.map_err(|e| anyhow::anyhow!("Agent error: {}", e))
+
+        agent
+            .prompt(user_prompt)
+            .max_turns(RIG_MAX_TURNS)
+            .await
+            .map_err(|error| anyhow!(describe_prompt_error(&error)))
     }
 
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
@@ -973,6 +1231,44 @@ fn save_settings(app_data_dir: &Path, settings: &PersistedSettings) -> Result<()
         .with_context(|| format!("failed to write settings at {}", settings_path.display()))
 }
 
+fn format_chat_history_for_prompt(
+    chat_history: &[crate::models::ChatMessage],
+    _latest_question: &str,
+) -> String {
+    let mut messages = chat_history
+        .iter()
+        .filter(|message| !message.content.trim().is_empty())
+        .filter(|message| message.error != Some(true))
+        .rev()
+        .take(MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT)
+        .map(|message| {
+            let content = message.content.trim().replace('\n', " ");
+            let content: String = content.chars().take(800).collect();
+            format!("{}: {}", message.role, content)
+        })
+        .collect::<Vec<_>>();
+
+    messages.reverse();
+
+    if messages.is_empty() {
+        "(none)".to_string()
+    } else {
+        messages.join("\n")
+    }
+}
+
+fn is_simple_greeting(question: &str) -> bool {
+    let normalized = question
+        .trim()
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "hi" | "hello" | "hey" | "yo" | "sup" | "hiya" | "howdy"
+    )
+}
+
 fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     if entry.depth() > 0 && name.starts_with('.') {
@@ -981,7 +1277,7 @@ fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     name == "node_modules" || name == "target" || name == "dist" || name == "build"
 }
 
-fn read_workspace_notes(workspace: &Path) -> Result<Vec<IndexedNote>> {
+fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) -> Result<Vec<IndexedNote>> {
     let mut notes = Vec::new();
     for entry in walkdir::WalkDir::new(workspace)
         .into_iter()
@@ -991,9 +1287,9 @@ fn read_workspace_notes(workspace: &Path) -> Result<Vec<IndexedNote>> {
         if entry.file_type().is_file() && is_note_file(entry.path()) {
             if let Some(extension) = entry.path().extension().and_then(std::ffi::OsStr::to_str) {
                 let doc_result = if extension.eq_ignore_ascii_case("pdf") {
-                    parse_pdf_file(workspace, entry.path())
+                    parse_pdf_file(workspace, workspace_data_dir, entry.path())
                 } else {
-                    parse_note_file(workspace, entry.path())
+                    parse_note_file(workspace, workspace_data_dir, entry.path())
                 };
 
                 if let Ok(document) = doc_result {
@@ -1013,16 +1309,22 @@ fn read_workspace_notes(workspace: &Path) -> Result<Vec<IndexedNote>> {
     Ok(notes)
 }
 
-fn parse_pdf_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
+fn parse_pdf_file(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+) -> Result<NoteDocument> {
     let title = default_title_from_path(path);
     let now = timestamp_now();
     let id = stable_id_from_path(path);
 
     let annotations = {
-        let annotations_path = workspace
-            .join(".myelin")
-            .join("annotations")
-            .join(format!("{}.annotations.json", id));
+        let annotations_path = sidecar_path(
+            workspace,
+            workspace_data_dir,
+            "annotations",
+            &format!("{}.annotations.json", id),
+        );
         if annotations_path.exists() {
             fs::read_to_string(&annotations_path)
                 .ok()
@@ -1044,13 +1346,25 @@ fn parse_pdf_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
         annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
         chat_history: {
-            let chats_path = workspace.join(".myelin").join("chats").join(format!("{}.chat.json", id));
-            fs::read_to_string(&chats_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+            let chats_path = sidecar_path(
+                workspace,
+                workspace_data_dir,
+                "chats",
+                &format!("{}.chat.json", id),
+            );
+            fs::read_to_string(&chats_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
         },
     })
 }
 
-fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
+fn parse_note_file(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+) -> Result<NoteDocument> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let (frontmatter, body) = split_frontmatter(&raw);
@@ -1067,10 +1381,12 @@ fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
     let id = metadata.id.unwrap_or_else(|| stable_id_from_path(path));
 
     let annotations = {
-        let annotations_path = workspace
-            .join(".myelin")
-            .join("annotations")
-            .join(format!("{}.annotations.json", id));
+        let annotations_path = sidecar_path(
+            workspace,
+            workspace_data_dir,
+            "annotations",
+            &format!("{}.annotations.json", id),
+        );
         if annotations_path.exists() {
             fs::read_to_string(&annotations_path)
                 .ok()
@@ -1092,13 +1408,26 @@ fn parse_note_file(workspace: &Path, path: &Path) -> Result<NoteDocument> {
         annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
         chat_history: {
-            let chats_path = workspace.join(".myelin").join("chats").join(format!("{}.chat.json", id));
-            fs::read_to_string(&chats_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+            let chats_path = sidecar_path(
+                workspace,
+                workspace_data_dir,
+                "chats",
+                &format!("{}.chat.json", id),
+            );
+            fs::read_to_string(&chats_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
         },
     })
 }
 
-fn write_note_file(workspace: &Path, path: &Path, document: &NoteDocument) -> Result<()> {
+fn write_note_file(
+    _workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+    document: &NoteDocument,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
@@ -1106,7 +1435,7 @@ fn write_note_file(workspace: &Path, path: &Path, document: &NoteDocument) -> Re
 
     if !document.annotations.is_empty() {
         let annotations = &document.annotations;
-        let annotations_dir = workspace.join(".myelin").join("annotations");
+        let annotations_dir = workspace_data_dir.join("annotations");
         fs::create_dir_all(&annotations_dir)?;
         let annotations_path = annotations_dir.join(format!("{}.annotations.json", document.id));
         let tmp_ann_path = annotations_dir.join(format!("{}.annotations.tmp", document.id));
@@ -1115,11 +1444,14 @@ fn write_note_file(workspace: &Path, path: &Path, document: &NoteDocument) -> Re
     }
 
     if !document.chat_history.is_empty() {
-        let chats_dir = workspace.join(".myelin").join("chats");
+        let chats_dir = workspace_data_dir.join("chats");
         fs::create_dir_all(&chats_dir)?;
         let chats_path = chats_dir.join(format!("{}.chat.json", document.id));
         let tmp_chat_path = chats_dir.join(format!("{}.chat.tmp", document.id));
-        fs::write(&tmp_chat_path, serde_json::to_string(&document.chat_history)?)?;
+        fs::write(
+            &tmp_chat_path,
+            serde_json::to_string(&document.chat_history)?,
+        )?;
         fs::rename(&tmp_chat_path, &chats_path)?;
     }
 
@@ -1608,25 +1940,41 @@ fn excerpt_around(body: &str, start: usize, end: usize) -> String {
     excerpt
 }
 
-fn default_provider_status(workspace: Option<&Path>) -> ProviderStatus {
-    if let Some(workspace) = workspace {
-        if let Ok(info) = llama_server::inspect_provider(workspace) {
-            return ProviderStatus {
-                active_provider: "llama.cpp".into(),
-                available_providers: vec!["llama.cpp".into()],
-                healthy: info.healthy,
-                detail: info.detail,
-                config: Some(info.config),
-                resolved: info.resolved,
-            };
-        }
+fn sidecar_path(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    kind: &str,
+    file_name: &str,
+) -> PathBuf {
+    let app_path = workspace_data_dir.join(kind).join(file_name);
+    if app_path.exists() {
+        return app_path;
+    }
+
+    workspace.join(".myelin").join(kind).join(file_name)
+}
+
+fn workspace_storage_key(workspace: &Path) -> String {
+    slugify(&workspace.to_string_lossy())
+}
+
+fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
+    if let Ok(info) = llama_server::inspect_provider(app_data_dir) {
+        return ProviderStatus {
+            active_provider: "llama.cpp".into(),
+            available_providers: vec!["llama.cpp".into()],
+            healthy: info.healthy,
+            detail: info.detail,
+            config: Some(info.config),
+            resolved: info.resolved,
+        };
     }
 
     ProviderStatus {
         active_provider: "llama.cpp".into(),
         available_providers: vec!["llama.cpp".into()],
         healthy: false,
-        detail: "Select a workspace, then provide a .gguf model and a llama-server executable via PATH, environment variables, or .myelin/llama-server.json.".into(),
+        detail: "Choose a .gguf model and llama-server executable in Settings.".into(),
         config: None,
         resolved: None,
     }

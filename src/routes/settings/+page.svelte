@@ -3,16 +3,28 @@
     import { invoke } from '@tauri-apps/api/core';
     import { open } from '@tauri-apps/plugin-dialog';
     import { goto } from '$app/navigation';
-    import type { ProviderStatus } from '$lib/types';
+    import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
 
     let currentModelPath = $state('');
     let currentExecutablePath = $state('');
+    let activeWorkspacePath = $state('');
+    let indexState = $state<IndexState | null>(null);
+    let activeProvider = $state('');
     let isSaving = $state(false);
+    let isRebuilding = $state(false);
     let saved = $state(false);
+
+    async function refreshSnapshot() {
+        const snapshot = await invoke<AppSnapshot>('get_snapshot');
+        activeWorkspacePath = snapshot.workspacePath || '';
+        indexState = snapshot.indexState ?? null;
+    }
 
     onMount(async () => {
         try {
+            await refreshSnapshot();
             const status = await invoke<ProviderStatus>('get_provider_status');
+            activeProvider = status.activeProvider || '';
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
                 currentExecutablePath = status.config?.executablePath || status.resolved.executablePath || '';
@@ -24,6 +36,24 @@
             console.error('Failed to load provider status:', e);
         }
     });
+
+    async function changeWorkspace() {
+        const picked = await open({ directory: true, multiple: false, title: 'Choose your markdown workspace' });
+        if (typeof picked === 'string') {
+            await invoke('set_workspace', { workspacePath: picked });
+            await refreshSnapshot();
+        }
+    }
+
+    async function rebuildIndex() {
+        isRebuilding = true;
+        try {
+            const snapshot = await invoke<AppSnapshot>('rebuild_index');
+            indexState = snapshot.indexState ?? null;
+        } finally {
+            isRebuilding = false;
+        }
+    }
 
     async function selectModel() {
         try {
@@ -116,9 +146,33 @@
 
     <div class="settings-content">
         <section class="settings-section">
+            <h2>Workspace</h2>
+            <div class="info-grid">
+                <div class="info-card">
+                    <span class="info-label">Path</span>
+                    <span class="info-value">{activeWorkspacePath || '—'}</span>
+                </div>
+                <div class="info-card">
+                    <span class="info-label">Index</span>
+                    <span class="info-value">{indexState ? `${indexState.backend}:${indexState.noteCount} notes` : '—'}</span>
+                </div>
+                <div class="info-card">
+                    <span class="info-label">Provider</span>
+                    <span class="info-value">{activeProvider || '—'}</span>
+                </div>
+            </div>
+            <div class="ws-actions">
+                <button class="browse-btn" onclick={changeWorkspace}>Change workspace</button>
+                <button class="browse-btn" onclick={rebuildIndex} disabled={isRebuilding}>
+                    {isRebuilding ? 'Rebuilding…' : 'Rebuild index'}
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
             <h2>Local AI Model Configuration</h2>
             <p class="description">
-                Select a <code>.gguf</code> model to use for local AI features. This model will run completely offline on your device.
+                Select a <code>.gguf</code> model to use for local AI features. This model will run completely offline on your device and is saved in app settings, not inside the notes workspace.
             </p>
 
             <div class="model-picker">
@@ -203,6 +257,42 @@
         max-width: 800px;
         width: 100%;
         margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-6);
+    }
+
+    .info-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: var(--space-3);
+    }
+    .info-card {
+        padding: var(--space-4);
+        background: var(--bg-page);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-1);
+    }
+    .info-label {
+        font-size: 0.6rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        color: var(--neutral-600);
+        font-family: var(--font-mono);
+    }
+    .info-value {
+        font-size: 0.75rem;
+        color: var(--neutral-300);
+        word-break: break-all;
+        font-family: var(--font-mono);
+    }
+    .ws-actions {
+        display: flex;
+        gap: var(--space-3);
     }
 
     .settings-section {
@@ -229,7 +319,7 @@
         color: var(--text-secondary);
         line-height: 1.5;
     }
-    
+
     code {
         font-family: var(--font-mono);
         background: rgba(255, 255, 255, 0.1);

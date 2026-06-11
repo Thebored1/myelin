@@ -57,6 +57,9 @@
 	let activeDrawingPage = $state<number | null>(null);
 	let selectionRects = $state<[number, number, number, number][]>([]);
 	let errorMessage = $state('');
+	let pdfControlsEl: HTMLElement | undefined = $state();
+	let pdfCompact = $state(false);
+	let showMoreMenu = $state(false);
 
 	async function loadPdf() {
 		try {
@@ -77,17 +80,12 @@
 
 	function fitToScreen() {
 		if (!defaultViewport || !pdfViewerDiv) return;
-		
 		if (spreadMode !== 'none') {
-			const targetWidth = pdfViewerDiv.clientWidth - 96; // 64px padding + 32px gap
-			if (targetWidth > 0) {
-				scale = targetWidth / (defaultViewport.width * 2);
-			}
+			const targetWidth = pdfViewerDiv.clientWidth - 96;
+			if (targetWidth > 0) scale = targetWidth / (defaultViewport.width * 2);
 		} else {
-			const targetWidth = pdfViewerDiv.clientWidth - 64; 
-			if (targetWidth > 0) {
-				scale = targetWidth / defaultViewport.width;
-			}
+			const targetWidth = pdfViewerDiv.clientWidth - 64;
+			if (targetWidth > 0) scale = targetWidth / defaultViewport.width;
 		}
 	}
 
@@ -308,12 +306,24 @@
 		}
 	});
 
+	$effect(() => {
+		if (!pdfControlsEl) return;
+		const observer = new ResizeObserver(() => {
+			pdfCompact = (pdfControlsEl?.clientWidth ?? 999) < 520;
+		});
+		observer.observe(pdfControlsEl);
+		return () => observer.disconnect();
+	});
+
 	onMount(() => {
 		document.addEventListener('selectionchange', handleSelection);
 		handleDocumentClick = (e: MouseEvent) => {
 			const target = e.target as HTMLElement;
 			if (!target.closest('.display-menu-container')) {
 				showDisplayMenu = false;
+			}
+			if (!target.closest('.more-menu-container')) {
+				showMoreMenu = false;
 			}
 		};
 		document.addEventListener('click', handleDocumentClick);
@@ -328,85 +338,145 @@
 </script>
 
 <div class="pdf-wrapper" bind:this={containerDiv}>
-	<div class="pdf-controls">
-		{#if showAttachButton && onAttachNote}
+	<div class="pdf-controls" bind:this={pdfControlsEl}>
+		{#if showAttachButton && onAttachNote && !pdfCompact}
 			<button class="attach-note-btn" onclick={onAttachNote} title="Attach Note">
 				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
 				<span style="margin-left: 4px;">Attach Note</span>
 			</button>
 			<div class="vertical-divider"></div>
 		{/if}
-		
-		<div class="display-menu-container">
-			<button class="display-btn" onclick={(e) => { e.stopPropagation(); showDisplayMenu = !showDisplayMenu; }} title="Layout Options">
-				<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" style="margin-right: 4px;"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><line x1="4" y1="12" x2="20" y2="12"></line></svg>
-				Layout
-			</button>
-			{#if showDisplayMenu}
-				<div class="display-menu dropdown">
-					<div class="menu-group">
-						<button class:active={scrollMode === 'page' && spreadMode === 'none'} onclick={() => { scrollMode = 'page'; spreadMode = 'none'; showDisplayMenu = false; }}>
-							<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M7 8h10M7 16h10"></path></svg>
-							Page Scrolling
-						</button>
-						<button class:active={scrollMode === 'vertical'} onclick={() => { scrollMode = 'vertical'; showDisplayMenu = false; }}>
-							<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M12 3v18"></path></svg>
-							Vertical Scrolling
-						</button>
-						<button class:active={scrollMode === 'horizontal'} onclick={() => { scrollMode = 'horizontal'; showDisplayMenu = false; }}>
-							<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="7" width="18" height="10" rx="2"></rect><path d="M3 12h18"></path></svg>
-							Horizontal Scrolling
-						</button>
-						<button class:active={scrollMode === 'wrapped'} onclick={() => { scrollMode = 'wrapped'; showDisplayMenu = false; }}>
-							<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
-							Wrapped Scrolling
-						</button>
-					</div>
-					<div class="menu-divider"></div>
-					<div class="menu-group">
-						<button class:active={spreadMode === 'none'} onclick={() => { spreadMode = 'none'; scrollMode = scrollMode === 'page' ? 'vertical' : scrollMode; showDisplayMenu = false; }}>
-							<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect></svg>
-							No Spreads
-						</button>
-						<button class:active={spreadMode === 'odd'} onclick={() => { spreadMode = 'odd'; scrollMode = 'vertical'; showDisplayMenu = false; }}>
-							<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="8" height="18" rx="1"></rect><rect x="13" y="3" width="8" height="18" rx="1"></rect></svg>
-							Odd Spreads
-						</button>
-						<button class:active={spreadMode === 'even'} onclick={() => { spreadMode = 'even'; scrollMode = 'vertical'; showDisplayMenu = false; }}>
-							<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="8" height="18" rx="1"></rect><rect x="13" y="3" width="8" height="18" rx="1"></rect></svg>
-							Even Spreads
-						</button>
-					</div>
-				</div>
-			{/if}
-		</div>
 
-		<span style="white-space: nowrap; margin-left: auto;">{numPages} Pages</span>
-		<div class="spacer"></div>
-		
-		<!-- Annotation Tools -->
-		<div class="tools-group">
-			<button class:active={toolMode === 'select'} onclick={() => toolMode = 'select'} title="Select Text">
-				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"></path><path d="M13 13l6 6"></path></svg>
-			</button>
-			<button class:active={toolMode === 'pen'} onclick={() => toolMode = 'pen'} title="Draw">
-				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path><path d="M2 2l7.586 7.586"></path><circle cx="11" cy="11" r="2"></circle></svg>
-			</button>
-			<button class:active={toolMode === 'eraser'} onclick={() => toolMode = 'eraser'} title="Eraser">
-				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20H7L3 16C2.5 15.5 2.5 14.5 3 14L13 4C13.5 3.5 14.5 3.5 15 4L20 9C20.5 9.5 20.5 10.5 20 11L11 20H20"></path></svg>
-			</button>
-			<button class:active={toolMode === 'marquee'} onclick={() => toolMode = 'marquee'} title="Marquee / Crop">
-				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" stroke-dasharray="4 4"></rect></svg>
-			</button>
-		</div>
-
-		<div class="spacer"></div>
 		<button onclick={fitToScreen} title="Fit to Screen">
 			<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path></svg>
 		</button>
+
+		<span style="white-space: nowrap; margin-left: auto;">{numPages} Pages</span>
+
+		{#if !pdfCompact}
+			<div class="spacer"></div>
+			<!-- Annotation Tools -->
+			<div class="tools-group">
+				<button class:active={toolMode === 'select'} onclick={() => toolMode = 'select'} title="Select Text">
+					<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"></path><path d="M13 13l6 6"></path></svg>
+				</button>
+				<button class:active={toolMode === 'pen'} onclick={() => toolMode = 'pen'} title="Draw">
+					<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path><path d="M2 2l7.586 7.586"></path><circle cx="11" cy="11" r="2"></circle></svg>
+				</button>
+				<button class:active={toolMode === 'eraser'} onclick={() => toolMode = 'eraser'} title="Eraser">
+					<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20H7L3 16C2.5 15.5 2.5 14.5 3 14L13 4C13.5 3.5 14.5 3.5 15 4L20 9C20.5 9.5 20.5 10.5 20 11L11 20H20"></path></svg>
+				</button>
+				<button class:active={toolMode === 'marquee'} onclick={() => toolMode = 'marquee'} title="Marquee / Crop">
+					<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" stroke-dasharray="4 4"></rect></svg>
+				</button>
+			</div>
+			<div class="spacer"></div>
+			<div class="display-menu-container">
+				<button class="display-btn" onclick={(e) => { e.stopPropagation(); showDisplayMenu = !showDisplayMenu; }} title="Layout Options">
+					<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" style="margin-right: 4px;"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><line x1="4" y1="12" x2="20" y2="12"></line></svg>
+					Layout
+				</button>
+				{#if showDisplayMenu}
+					<div class="display-menu dropdown">
+						<div class="menu-group">
+							<button class:active={scrollMode === 'page' && spreadMode === 'none'} onclick={() => { scrollMode = 'page'; spreadMode = 'none'; showDisplayMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M7 8h10M7 16h10"></path></svg>
+								Page Scrolling
+							</button>
+							<button class:active={scrollMode === 'vertical'} onclick={() => { scrollMode = 'vertical'; showDisplayMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M12 3v18"></path></svg>
+								Vertical Scrolling
+							</button>
+							<button class:active={scrollMode === 'horizontal'} onclick={() => { scrollMode = 'horizontal'; showDisplayMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="7" width="18" height="10" rx="2"></rect><path d="M3 12h18"></path></svg>
+								Horizontal Scrolling
+							</button>
+							<button class:active={scrollMode === 'wrapped'} onclick={() => { scrollMode = 'wrapped'; showDisplayMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+								Wrapped Scrolling
+							</button>
+						</div>
+						<div class="menu-divider"></div>
+						<div class="menu-group">
+							<button class:active={spreadMode === 'none'} onclick={() => { spreadMode = 'none'; scrollMode = scrollMode === 'page' ? 'vertical' : scrollMode; showDisplayMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect></svg>
+								No Spreads
+							</button>
+							<button class:active={spreadMode === 'odd'} onclick={() => { spreadMode = 'odd'; scrollMode = 'vertical'; showDisplayMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="8" height="18" rx="1"></rect><rect x="13" y="3" width="8" height="18" rx="1"></rect></svg>
+								Odd Spreads
+							</button>
+							<button class:active={spreadMode === 'even'} onclick={() => { spreadMode = 'even'; scrollMode = 'vertical'; showDisplayMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="8" height="18" rx="1"></rect><rect x="13" y="3" width="8" height="18" rx="1"></rect></svg>
+								Even Spreads
+							</button>
+						</div>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
 		<button onclick={zoomOut}>-</button>
 		<span style="white-space: nowrap; width: 40px; text-align: center;">{Math.round(scale * 100)}%</span>
 		<button onclick={zoomIn}>+</button>
+
+		{#if pdfCompact}
+			<div class="more-menu-container">
+				<button class="more-btn" class:has-active-tool={toolMode !== 'select'} onclick={(e) => { e.stopPropagation(); showMoreMenu = !showMoreMenu; }} title="More Tools">
+					<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" stroke="none" xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="12" r="1.5"></circle><circle cx="12" cy="12" r="1.5"></circle><circle cx="19" cy="12" r="1.5"></circle></svg>
+				</button>
+				{#if showMoreMenu}
+					<div class="dropdown more-dropdown">
+						{#if showAttachButton && onAttachNote}
+							<div class="menu-group">
+								<button class="attach-btn-inline" onclick={() => { onAttachNote!(); showMoreMenu = false; }}>
+									<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+									Attach Note
+								</button>
+							</div>
+							<div class="menu-divider"></div>
+						{/if}
+						<div class="menu-group">
+							<button class:active={toolMode === 'select'} onclick={() => { toolMode = 'select'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"></path><path d="M13 13l6 6"></path></svg>
+								Select
+							</button>
+							<button class:active={toolMode === 'pen'} onclick={() => { toolMode = 'pen'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 19l7-7 3 3-7 7-3-3z"></path><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path><path d="M2 2l7.586 7.586"></path><circle cx="11" cy="11" r="2"></circle></svg>
+								Draw
+							</button>
+							<button class:active={toolMode === 'eraser'} onclick={() => { toolMode = 'eraser'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20H7L3 16C2.5 15.5 2.5 14.5 3 14L13 4C13.5 3.5 14.5 3.5 15 4L20 9C20.5 9.5 20.5 10.5 20 11L11 20H20"></path></svg>
+								Eraser
+							</button>
+							<button class:active={toolMode === 'marquee'} onclick={() => { toolMode = 'marquee'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" stroke-dasharray="4 4"></rect></svg>
+								Marquee
+							</button>
+						</div>
+						<div class="menu-divider"></div>
+						<div class="menu-group">
+							<button class:active={scrollMode === 'page' && spreadMode === 'none'} onclick={() => { scrollMode = 'page'; spreadMode = 'none'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M7 8h10M7 16h10"></path></svg>
+								Page Scrolling
+							</button>
+							<button class:active={scrollMode === 'vertical'} onclick={() => { scrollMode = 'vertical'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M12 3v18"></path></svg>
+								Vertical Scrolling
+							</button>
+							<button class:active={scrollMode === 'horizontal'} onclick={() => { scrollMode = 'horizontal'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="7" width="18" height="10" rx="2"></rect><path d="M3 12h18"></path></svg>
+								Horizontal Scrolling
+							</button>
+							<button class:active={scrollMode === 'wrapped'} onclick={() => { scrollMode = 'wrapped'; showMoreMenu = false; }}>
+								<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+								Wrapped Scrolling
+							</button>
+						</div>
+					</div>
+				{/if}
+			</div>
+		{/if}
 	</div>
 
 	<div class="pdf-viewer-scroll-area" bind:this={pdfViewerDiv}>
@@ -571,6 +641,7 @@
 		margin: 0 0.25rem;
 	}
 
+
 	.tools-group {
 		display: flex;
 		gap: 0.25rem;
@@ -682,4 +753,45 @@
 		cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
 	}
 	.action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+	/* More-tools dropdown */
+	.more-menu-container {
+		position: relative;
+	}
+
+	.more-btn {
+		padding: 0.35rem 0.5rem !important;
+		color: var(--text-secondary);
+	}
+
+	.more-btn.has-active-tool {
+		color: var(--accent-100);
+		border-color: var(--accent-200) !important;
+	}
+
+	.more-dropdown {
+		right: 0;
+		left: auto;
+		min-width: 160px;
+	}
+
+	.attach-btn-inline {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		justify-content: flex-start !important;
+		background: color-mix(in srgb, var(--accent-100) 15%, transparent) !important;
+		color: var(--accent-100) !important;
+		border: 1px solid color-mix(in srgb, var(--accent-200) 40%, transparent) !important;
+		font-weight: 600;
+		width: 100%;
+		padding: 0.35rem 0.5rem;
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		font-size: 0.85rem;
+	}
+
+	.attach-btn-inline:hover {
+		background: color-mix(in srgb, var(--accent-100) 25%, transparent) !important;
+	}
 </style>

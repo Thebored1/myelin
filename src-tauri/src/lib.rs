@@ -149,6 +149,29 @@ async fn rebuild_index(state: State<'_, AppState>) -> Result<AppSnapshot, String
 }
 
 #[tauri::command]
+async fn import_pdf_file(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<NoteDocument, String> {
+    state
+        .import_pdf_file(file_path)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_pdf_annotations(
+    state: State<'_, AppState>,
+    note_id: String,
+    annotations: Vec<crate::models::PdfAnnotation>,
+) -> Result<(), String> {
+    state
+        .save_pdf_annotations(note_id, annotations)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     Ok(state.snapshot())
 }
@@ -287,7 +310,9 @@ pub fn run() {
             ask_ai_stream,
             save_chat_history,
             get_note_history,
-            get_note_version
+            get_note_version,
+            import_pdf_file,
+            save_pdf_annotations
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
