@@ -9,6 +9,19 @@
 
 	let appWindow: any = null;
 
+	let windowWidth = $state(1024);
+	let wasSmallScreen = $state(false);
+
+	$effect(() => {
+		const isSmallScreen = windowWidth < 1200;
+		if (isSmallScreen && !wasSmallScreen) {
+			$sidebarOpen = false;
+		} else if (!isSmallScreen && wasSmallScreen) {
+			$sidebarOpen = true;
+		}
+		wasSmallScreen = isSmallScreen;
+	});
+
 	onMount(() => {
 		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
 			appWindow = getCurrentWindow();
@@ -94,6 +107,8 @@
 	}
 </script>
 
+<svelte:window bind:innerWidth={windowWidth} />
+
 <svelte:head>
 	<link rel="icon" href={favicon} />
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -127,16 +142,15 @@
 		<div class="titlebar-drag-region" data-tauri-drag-region>
 			<img src={favicon} alt="myelin" class="titlebar-logo" data-tauri-drag-region />
 			<span class="titlebar-title" data-tauri-drag-region>myelin</span>
+			<button class="control-btn sidebar-toggle" style="margin-left: 8px; width: 32px;" onclick={() => $sidebarOpen = !$sidebarOpen} aria-label="Toggle sidebar" title="Toggle sidebar">
+				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+					<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+					<line x1="9" y1="3" x2="9" y2="21"></line>
+				</svg>
+			</button>
 		</div>
 		<div class="titlebar-controls">
-			{#if $showSidebarToggle}
-				<button class="control-btn sidebar-toggle" onclick={() => $sidebarOpen = !$sidebarOpen} aria-label="Toggle sidebar" title="Toggle sidebar">
-					<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
-						<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-						<line x1="15" y1="3" x2="15" y2="21"></line>
-					</svg>
-				</button>
-			{/if}
+
 			<button class="control-btn settings" onclick={() => goto('/settings')} aria-label="Settings" title="Settings">
 				<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
 					<circle cx="12" cy="12" r="3"></circle>

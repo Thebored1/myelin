@@ -1097,7 +1097,10 @@ impl AppState {
             for link in links {
                 let target_note = notes
                     .iter()
-                    .find(|n| n.document.title == link.target || n.document.id == link.target);
+                    .find(|n| (n.document.title == link.target || n.document.id == link.target) && n.document.id != note.document.id)
+                    .or_else(|| {
+                        notes.iter().find(|n| n.document.title == link.target || n.document.id == link.target)
+                    });
                 if let Some(target) = target_note {
                     let backlink = Backlink {
                         source_id: note.document.id.clone(),
