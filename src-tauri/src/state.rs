@@ -1017,6 +1017,22 @@ impl AppState {
         }
     }
 
+    pub async fn compile_latex(&self, note_id: String) -> Result<Vec<u8>> {
+        let workspace = self.require_workspace()?;
+        let path = {
+            let runtime = self.inner.runtime.read();
+            let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
+            workspace.join(&note.document.relative_path)
+        };
+        
+        let tex_content = fs::read_to_string(&path)?;
+        
+        let pdf_data = tectonic::latex_to_pdf(tex_content)
+            .map_err(|e| anyhow!("Failed to compile LaTeX using Tectonic: {}", e))?;
+            
+        Ok(pdf_data)
+    }
+
     pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {
         let runtime = self.inner.runtime.read();
         runtime.notes.values().map(|n| n.document.clone()).collect()

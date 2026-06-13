@@ -21,7 +21,7 @@
 	}: { 
 		pdfBytes: Uint8Array, 
 		annotations?: PdfAnnotation[], 
-		onQuote?: (quote: string, pageNum: number, rects: {x:number, y:number, width:number, height:number}[]) => void,
+		onQuote?: (quote: string, pageNum: number, rects?: {x:number, y:number, width:number, height:number}[]) => void,
 		onAnnotationsChange?: (annots: PdfAnnotation[]) => void,
 		onImageExtract?: (base64: string) => void,
 		onAttachNote?: () => void,

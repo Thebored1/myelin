@@ -40,3 +40,18 @@ uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2.5"
 rig-core = "0.38.2"
 schemars = { version = "1.2.1", features = ["derive"] }
+tempfile = "3.27.0"
+tectonic = "0.16.9"
+
+[package.metadata.vcpkg]
+git = "https://github.com/microsoft/vcpkg"
+rev = "master"
+
+[package.metadata.vcpkg.dependencies]
+fontconfig = ""
+freetype = ""
+harfbuzz = { default-features = false, features = ["graphite2"] }
+icu = ""
+libpng = ""
+zlib = ""
+openssl = ""

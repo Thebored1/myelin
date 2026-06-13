@@ -13,6 +13,8 @@
     let isSaving = $state(false);
     let isRebuilding = $state(false);
     let saved = $state(false);
+    
+    let enableJupyterExecution = $state(false);
 
     async function refreshSnapshot() {
         const snapshot = await invoke<AppSnapshot>('get_snapshot');
@@ -32,6 +34,8 @@
                 currentModelPath = status.config.modelPath || '';
                 currentExecutablePath = status.config.executablePath || '';
             }
+            
+            enableJupyterExecution = localStorage.getItem('myelin_jupyter_exec') === 'true';
         } catch (e) {
             console.error('Failed to load provider status:', e);
         }
@@ -130,6 +134,11 @@
             isSaving = false;
         }
     }
+
+    function toggleJupyterExecution() {
+        enableJupyterExecution = !enableJupyterExecution;
+        localStorage.setItem('myelin_jupyter_exec', enableJupyterExecution.toString());
+    }
 </script>
 
 <div class="settings-container">
@@ -202,6 +211,19 @@
             {#if saved}
                 <div class="success-message">Settings saved successfully!</div>
             {/if}
+        </section>
+
+        <section class="settings-section">
+            <h2>Features</h2>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">Jupyter Code Execution</h3>
+                    <p class="description" style="margin-top: 4px;">Allow execution of Python code cells within `.ipynb` notebooks using your local Python installation.</p>
+                </div>
+                <button class="browse-btn" onclick={toggleJupyterExecution}>
+                    {enableJupyterExecution ? 'Enabled' : 'Disabled'}
+                </button>
+            </div>
         </section>
     </div>
 </div>

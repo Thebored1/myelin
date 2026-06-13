@@ -20,6 +20,10 @@
 	import 'mathlive';
 	import 'mathlive/fonts.css';
 	import PdfViewer from '$lib/components/PdfViewer.svelte';
+	import EpubViewer from '$lib/components/EpubViewer.svelte';
+	import HtmlViewer from '$lib/components/HtmlViewer.svelte';
+	import TexEditor from '$lib/components/TexEditor.svelte';
+	import IpynbEditor from '$lib/components/IpynbEditor.svelte';
 
 	let note = $state<NoteDocument | null>(null);
 	let draftBody = $state('');
@@ -55,9 +59,11 @@
 	let savedEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
 
-	let isMainNotePdf = $state(false);
-	let activePdfId = $state<string | null>(null);
-	let activePdfBytes = $state<Uint8Array | null>(null);
+	let isSourceMaterial = $state(false);
+	let sourceMaterialType = $state<'pdf' | 'epub' | 'html' | null>(null);
+	let workingDocType = $state<'md' | 'tex' | 'ipynb'>('md');
+	let activeSourceId = $state<string | null>(null);
+	let activeSourceBytes = $state<Uint8Array | null>(null);
 	let scratchpadSavedId = $state<string | null>(null);
 	let showAttachedNote = $state(false);
 
@@ -287,8 +293,8 @@
 			? pdfNotesList.filter((p) => p.title.toLowerCase().includes(pdfSearchQuery.toLowerCase()))
 			: pdfNotesList
 	);
-	let shouldRenderEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
-	let shouldInitEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
+	let shouldRenderEditor = $derived(note !== null && (!isSourceMaterial || showAttachedNote));
+	let shouldInitEditor = $derived(note !== null && (!isSourceMaterial || showAttachedNote));
 	let loadedRouteNoteId = $state('');
 
 	function appendToNoteBody(content: string) {
@@ -687,8 +693,8 @@
 
 	async function loadCurrentNote(noteId: string) {
 		destroyEditorInstance();
-		activePdfBytes = null;
-		activePdfId = null;
+		activeSourceBytes = null;
+		activeSourceId = null;
 		showAttachedNote = false;
 		snapshots = new Map();
 		note = await invoke<NoteDocument>('load_note', { noteId });
@@ -698,8 +704,13 @@
 		versionPreviewContent = null;
 		activeSidebarTab = 'info';
 
-		isMainNotePdf = loadedNote.relativePath.toLowerCase().endsWith('.pdf');
-		if (isMainNotePdf) {
+		const relLower = loadedNote.relativePath.toLowerCase();
+		isSourceMaterial = relLower.endsWith('.pdf') || relLower.endsWith('.epub') || relLower.endsWith('.html');
+		
+		if (isSourceMaterial) {
+			sourceMaterialType = relLower.endsWith('.pdf') ? 'pdf' : relLower.endsWith('.epub') ? 'epub' : 'html';
+			workingDocType = 'md';
+			
 			const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
 			const existingScratchpad =
 				allNotes
@@ -708,24 +719,37 @@
 			draftTitle = loadedNote.title;
 			draftBody = existingScratchpad?.body ?? '';
 			draftTags = loadedNote.tags.join(', ');
-			activePdfId = loadedNote.id;
-			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.id });
-			activePdfBytes = new Uint8Array(bytes);
+			activeSourceId = loadedNote.id;
+			const bytes = await invoke<number[]>('read_file_binary', { noteId: loadedNote.id });
+			activeSourceBytes = new Uint8Array(bytes);
 			scratchpadSavedId = existingScratchpad?.id ?? null;
 			showAttachedNote = draftBody.trim().length > 0;
 		} else {
+			workingDocType = relLower.endsWith('.tex') ? 'tex' : relLower.endsWith('.ipynb') ? 'ipynb' : 'md';
+			
 			draftTitle = loadedNote.title;
 			draftBody = loadedNote.body;
 			draftTags = loadedNote.tags.join(', ');
 
 			if (loadedNote.sourcePdf) {
-				activePdfId = loadedNote.sourcePdf;
-				const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
-				activePdfBytes = new Uint8Array(bytes);
+				activeSourceId = loadedNote.sourcePdf;
+				const bytes = await invoke<number[]>('read_file_binary', { noteId: loadedNote.sourcePdf });
+				activeSourceBytes = new Uint8Array(bytes);
 				showAttachedNote = draftBody.trim().length > 0;
+				// If a working document has a sourcePdf, we need to know its type. 
+				// We'll query it or assume it's PDF for now unless we know otherwise.
+				// (We can load it to find out)
+				try {
+					const sourceDoc = await invoke<NoteDocument>('load_note', { noteId: loadedNote.sourcePdf });
+					const sRel = sourceDoc.relativePath.toLowerCase();
+					sourceMaterialType = sRel.endsWith('.pdf') ? 'pdf' : sRel.endsWith('.epub') ? 'epub' : 'html';
+				} catch (e) {
+					sourceMaterialType = 'pdf'; // fallback
+				}
 			} else {
-				activePdfId = null;
-				activePdfBytes = null;
+				activeSourceId = null;
+				activeSourceBytes = null;
+				sourceMaterialType = null;
 				showAttachedNote = true;
 			}
 		}
@@ -741,13 +765,17 @@
 			...refreshed,
 			chatHistory: chatMessages
 		};
-		if (!isMainNotePdf) {
+		if (!isSourceMaterial && workingDocType === 'md') {
 			draftTitle = refreshed.title;
 			draftBody = refreshed.body;
 			draftTags = refreshed.tags.join(', ');
 			if (!skipEditorUpdate && vditorInstance && vditorInstance.getValue() !== refreshed.body) {
 				vditorInstance.setValue(refreshed.body);
 			}
+		} else if (!isSourceMaterial) {
+			draftTitle = refreshed.title;
+			draftBody = refreshed.body;
+			draftTags = refreshed.tags.join(', ');
 		}
 		void fetchRelatedNotes();
 	}
@@ -781,7 +809,7 @@
 		try {
 			vditorInstance = new Vditor(vditorContainer, {
 				value: draftBody,
-				placeholder: isMainNotePdf ? 'Scratchpad for PDF notes...' : 'Start typing here...',
+				placeholder: isSourceMaterial ? 'Scratchpad for notes...' : 'Start typing here...',
 				mode: 'ir',
 				theme: 'dark',
 				icon: 'material',
@@ -1064,11 +1092,11 @@
 		saveStatus = 'saving';
 		try {
 			let targetId = note.id;
-			if (isMainNotePdf) {
+			if (isSourceMaterial) {
 				if (!scratchpadSavedId) {
 					const newNote = await invoke<NoteDocument>('create_note', {
 						title: draftTitle,
-						sourcePdf: activePdfId
+						sourcePdf: activeSourceId
 					});
 					scratchpadSavedId = newNote.id;
 				}
@@ -1084,16 +1112,16 @@
 					.map((tag) => tag.trim())
 					.filter(Boolean),
 				body: draftBody,
-				sourcePdf: activePdfId,
-				// For PDF main notes, annotations belong to the PDF note, not the scratchpad
-				annotations: isMainNotePdf ? [] : note.annotations
+				sourcePdf: activeSourceId,
+				// For Source Material main notes, annotations belong to the source note, not the scratchpad
+				annotations: isSourceMaterial ? [] : note.annotations
 			});
 
-			if (isMainNotePdf && note.annotations.length > 0) {
+			if (isSourceMaterial && note.annotations.length > 0) {
 				await invoke('save_pdf_annotations', { noteId: note.id, annotations: note.annotations });
 			}
 
-			if (!isMainNotePdf) {
+			if (!isSourceMaterial) {
 				note = saved;
 			}
 
@@ -1368,16 +1396,16 @@
 
 	async function confirmDeleteAttachedNote() {
 		deleteAttachedNoteDialog?.close();
-		const targetId = isMainNotePdf ? scratchpadSavedId : note?.sourcePdf ? note.id : null;
-		const sourcePdfId = isMainNotePdf ? activePdfId : (note?.sourcePdf ?? activePdfId);
+		const targetId = isSourceMaterial ? scratchpadSavedId : note?.sourcePdf ? note.id : null;
+		const sourceId = isSourceMaterial ? activeSourceId : (note?.sourcePdf ?? activeSourceId);
 		isBusy = true;
 		try {
 			if (targetId) {
 				await invoke('delete_note', { noteId: targetId });
 			}
-			if (!isMainNotePdf && sourcePdfId) {
+			if (!isSourceMaterial && sourceId) {
 				isProgrammaticNavigation = true;
-				await goto(`/notes/${encodeURIComponent(sourcePdfId)}`);
+				await goto(`/notes/${encodeURIComponent(sourceId)}`);
 				return;
 			}
 			if (saveTimer) {
@@ -1435,9 +1463,9 @@
 				annotations: note.annotations
 			});
 			note = saved;
-			activePdfId = pdfNote.id;
-			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: pdfNote.id });
-			activePdfBytes = new Uint8Array(bytes);
+			activeSourceId = pdfNote.id;
+			const bytes = await invoke<number[]>('read_file_binary', { noteId: pdfNote.id });
+			activeSourceBytes = new Uint8Array(bytes);
 			showAttachedNote = true;
 			saveStatus = 'saved';
 			destroyEditorInstance();
@@ -1471,8 +1499,8 @@
 				annotations: note.annotations
 			});
 			note = saved;
-			activePdfId = null;
-			activePdfBytes = null;
+			activeSourceId = null;
+			activeSourceBytes = null;
 			saveStatus = 'saved';
 			destroyEditorInstance();
 			await tick();
@@ -1773,7 +1801,7 @@
 
 <div
 	class="editor-shell"
-	class:has-attached-file={!!note?.sourcePdf || (isMainNotePdf && !!activePdfBytes)}
+	class:has-attached-file={!!note?.sourcePdf || (isSourceMaterial && !!activeSourceBytes)}
 >
 	<header class="editor-header">
 		<div class="header-copy">
@@ -1841,24 +1869,36 @@
 
 	<div
 		class="main-layout"
-		class:split-layout={activePdfBytes !== null && showAttachedNote}
+		class:split-layout={activeSourceBytes !== null && showAttachedNote}
 		bind:this={mainLayoutEl}
 	>
-		{#if activePdfBytes}
+		{#if activeSourceBytes}
 			<section class="pdf-pane" style="width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
-				<PdfViewer
-					pdfBytes={activePdfBytes}
-					annotations={note?.annotations || []}
-					onQuote={handlePdfQuote}
-					onAnnotationsChange={handleAnnotationsChange}
-					onImageExtract={handleImageExtract}
-					onClosePdf={(activePdfBytes !== null && showAttachedNote) ? requestDetachPdf : undefined}
-					onAttachNote={() => {
-						showAttachedNote = true;
-						setTimeout(() => initVditor(), 100);
-					}}
-					showAttachButton={!showAttachedNote}
-				/>
+				{#if sourceMaterialType === 'pdf'}
+					<PdfViewer
+						pdfBytes={activeSourceBytes}
+						annotations={note?.annotations || []}
+						onQuote={handlePdfQuote}
+						onAnnotationsChange={handleAnnotationsChange}
+						onImageExtract={handleImageExtract}
+						onClosePdf={(activeSourceBytes !== null && showAttachedNote) ? requestDetachPdf : undefined}
+						onAttachNote={() => {
+							showAttachedNote = true;
+							setTimeout(() => initVditor(), 100);
+						}}
+						showAttachButton={!showAttachedNote}
+					/>
+				{:else if sourceMaterialType === 'epub'}
+					<EpubViewer epubBytes={activeSourceBytes} />
+					{#if !showAttachedNote}
+						<button style="position: absolute; top: 10px; right: 10px;" class="primary" onclick={() => { showAttachedNote = true; setTimeout(() => initVditor(), 100); }}>Attach Note</button>
+					{/if}
+				{:else if sourceMaterialType === 'html'}
+					<HtmlViewer htmlBytes={activeSourceBytes} />
+					{#if !showAttachedNote}
+						<button style="position: absolute; top: 10px; right: 10px;" class="primary" onclick={() => { showAttachedNote = true; setTimeout(() => initVditor(), 100); }}>Attach Note</button>
+					{/if}
+				{/if}
 			</section>
 			{#if showAttachedNote}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1868,29 +1908,61 @@
 
 		<!-- Main Content Area -->
 		{#if shouldRenderEditor}
-			<section class="main-pane" style={activePdfBytes ? `width: ${100 - splitRatio}%` : ''}>
+			<section class="main-pane" style={activeSourceBytes ? `width: ${100 - splitRatio}%` : ''}>
 				<div class="content-area" style="position: relative;">
-					<!-- svelte-ignore a11y_click_events_have_key_events -->
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<div
-						bind:this={vditorContainer}
-						class="vditor-wrapper"
-						class:toolbar-expanded={toolbarExpanded}
-						class:has-pdf-note={!!activePdfBytes || (!isMainNotePdf && !!note)}
-						onclickcapture={handleVditorClick}
-						onkeydowncapture={handleVditorKeydownCapture}
-						onkeyupcapture={handleVditorKeyupCapture}
-						onwheelcapture={(e) => {
-							if (e.ctrlKey || e.metaKey) {
-								e.preventDefault();
-								e.stopPropagation();
-							}
-						}}
-					></div>
-					<div class="fullscreen-indicator">
-						Press <span>{fullscreenShortcut}</span> to toggle
-					</div>
-					{#if isMainNotePdf && activePdfBytes && showAttachedNote}
+					{#if workingDocType === 'md'}
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<div
+							bind:this={vditorContainer}
+							class="vditor-wrapper"
+							class:toolbar-expanded={toolbarExpanded}
+							class:has-pdf-note={!!activeSourceBytes || (!isSourceMaterial && !!note)}
+							onclickcapture={handleVditorClick}
+							onkeydowncapture={handleVditorKeydownCapture}
+							onkeyupcapture={handleVditorKeyupCapture}
+							onwheelcapture={(e) => {
+								if (e.ctrlKey || e.metaKey) {
+									e.preventDefault();
+									e.stopPropagation();
+								}
+							}}
+						></div>
+						<div class="fullscreen-indicator">
+							Press <span>{fullscreenShortcut}</span> to toggle
+						</div>
+					{:else if workingDocType === 'tex'}
+						<div style="height: 100%; display: flex; flex-direction: column;">
+							<div style="padding: 4px; background: var(--bg-body); border-bottom: 1px solid var(--border-default); display: flex; justify-content: flex-end;">
+								<button class="primary" onclick={async () => {
+									isBusy = true;
+									await saveNote();
+									try {
+										const pdfBytes = await invoke<number[]>('compile_latex', { noteId: note?.id });
+										activeSourceBytes = new Uint8Array(pdfBytes);
+										sourceMaterialType = 'pdf';
+									} catch(e) {
+										message = `Compile error: ${e}`;
+									} finally {
+										isBusy = false;
+									}
+								}}>Compile to PDF</button>
+							</div>
+							<div style="flex: 1;">
+								<TexEditor
+									value={draftBody}
+									onInput={(val) => { draftBody = val; triggerAutoSave(); }}
+								/>
+							</div>
+						</div>
+					{:else if workingDocType === 'ipynb'}
+						<IpynbEditor
+							value={draftBody}
+							onInput={(val) => { draftBody = val; triggerAutoSave(); }}
+						/>
+					{/if}
+
+					{#if isSourceMaterial && activeSourceBytes && showAttachedNote}
 						<div
 							class="toolbar-close-note-container"
 							style={toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}
@@ -1927,7 +1999,7 @@
 								</svg>
 							</button>
 						{/if}
-						{#if activePdfBytes !== null && showAttachedNote}
+						{#if activeSourceBytes !== null && showAttachedNote}
 							<button
 								class="toolbar-overlay-toggle"
 								onclick={requestDeleteMainNote}

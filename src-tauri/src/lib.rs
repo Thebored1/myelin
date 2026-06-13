@@ -266,6 +266,14 @@ async fn get_note_version(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn compile_latex(state: State<'_, AppState>, note_id: String) -> Result<Vec<u8>, String> {
+    state
+        .compile_latex(note_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -312,7 +320,8 @@ pub fn run() {
             get_note_history,
             get_note_version,
             import_pdf_file,
-            save_pdf_annotations
+            save_pdf_annotations,
+            compile_latex
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
