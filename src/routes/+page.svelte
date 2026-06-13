@@ -73,10 +73,6 @@
 	let isClusterDialogOpen = $state(false);
 	let selectedCluster = $state<NoteSummary[]>([]);
 	
-	let timelineNotes = $derived(dashNotes.filter(n => new Date(n.updatedAt).toDateString() === new Date().toDateString()));
-	let pinnedNotes = $derived(
-		dashNotes.filter(n => pinnedNoteIds.includes(n.id))
-	);
 
 	function togglePin(id: string) {
 		if (pinnedNoteIds.includes(id)) {
@@ -111,18 +107,24 @@
 				? searchResults.results.map((r) => r.note)
 				: (app?.notes ?? [])
 		) as NoteSummary[];
-		return [...base].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+		return [...base].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 	});
 
-	let regularNotes = $derived(visibleNotes.filter((n) => !n.relativePath.endsWith('.pdf')));
-	let pdfNotes = $derived(visibleNotes.filter((n) => n.relativePath.endsWith('.pdf')));
+	let regularNotes = $derived(visibleNotes.filter((n) => !n.relativePath.toLowerCase().endsWith('.pdf')));
+	let pdfNotes = $derived(visibleNotes.filter((n) => n.relativePath.toLowerCase().endsWith('.pdf')));
 
 	// Rail details — always based on the full library, unaffected by the rail search
 	let allNotesSorted = $derived.by(() =>
-		[...(app?.notes ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+		[...(app?.notes ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 	);
-	let dashNotes = $derived(allNotesSorted.filter((n) => !n.relativePath.endsWith('.pdf')));
-	let dashPdfs = $derived(allNotesSorted.filter((n) => n.relativePath.endsWith('.pdf')));
+	let dashNotes = $derived(allNotesSorted);
+	let dashPdfs = $derived(allNotesSorted.filter((n) => n.relativePath.toLowerCase().endsWith('.pdf')));
+
+	let timelineNotes = $derived(dashNotes.filter(n => new Date(n.createdAt).toDateString() === new Date().toDateString()));
+	let pinnedNotes = $derived(
+		dashNotes.filter(n => pinnedNoteIds.includes(n.id))
+	);
+
 	let totalLinks = $derived((app?.notes ?? []).reduce((sum, n) => sum + n.backlinks.length, 0));
 	let tagCounts = $derived.by(() => {
 		const counts = new Map<string, number>();
@@ -139,7 +141,7 @@
 		const stats = new Map<string, { notes: number; pdfs: number }>();
 		app?.notes.forEach((n) => {
 			const entry = stats.get(n.folder) ?? { notes: 0, pdfs: 0 };
-			if (n.relativePath.endsWith('.pdf')) entry.pdfs += 1;
+			if (n.relativePath.toLowerCase().endsWith('.pdf')) entry.pdfs += 1;
 			else entry.notes += 1;
 			stats.set(n.folder, entry);
 		});
@@ -424,11 +426,6 @@
 			<span class="wordmark">myelin</span>
 		</div>
 
-		<div class="rail-search">
-			<svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-			<input bind:value={query} oninput={runSearch} placeholder="Search…" class="search-input" />
-		</div>
-
 		<div class="rail-list">
 			{#if !app?.workspacePath}
 				<p class="rail-empty">No workspace selected.</p>
@@ -450,7 +447,16 @@
 						>
 							<svg class="row-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
 							<span class="row-title">{note.title}</span>
-							<span class="row-time">{timeAgo(note.updatedAt)}</span>
+							<div class="row-badge">
+								{#if note.relativePath.toLowerCase().endsWith('.pdf')}
+									pdf
+								{:else if note.sourcePdf}
+									note + pdf
+								{:else}
+									note
+								{/if}
+							</div>
+							<span class="row-time">{timeAgo(note.createdAt)}</span>
 							<div class="row-menu-wrap">
 								<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
 									<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
@@ -475,7 +481,16 @@
 						<div class="note-row" onclick={() => openNote(note.id)}>
 							<svg class="row-icon pdf-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="11" y2="17"/></svg>
 							<span class="row-title">{note.title}</span>
-							<span class="row-time">{timeAgo(note.updatedAt)}</span>
+							<div class="row-badge">
+								{#if note.relativePath.toLowerCase().endsWith('.pdf')}
+									pdf
+								{:else if note.sourcePdf}
+									note + pdf
+								{:else}
+									note
+								{/if}
+							</div>
+							<span class="row-time">{timeAgo(note.createdAt)}</span>
 							<div class="row-menu-wrap">
 								<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
 									<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
@@ -657,7 +672,18 @@
 										<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 										<div class="kanban-card" onclick={() => openNote(note.id)}>
 											<div class="kc-header-row">
-												<div class="kc-title">{note.title}</div>
+												<div style="display: flex; align-items: flex-start; gap: 8px;">
+													<div class="kc-title">{note.title}</div>
+													<div class="row-badge">
+														{#if note.relativePath.toLowerCase().endsWith('.pdf')}
+															pdf
+														{:else if note.sourcePdf}
+															note + pdf
+														{:else}
+															note
+														{/if}
+													</div>
+												</div>
 												<div class="row-menu-wrap">
 													<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
 														<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
@@ -703,11 +729,11 @@
 									<div class="pinned-item" onclick={() => openNote(note.id)}>
 										<div class="pi-title">{note.title}</div>
 										<div class="pi-date">
-											{new Date(note.updatedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} 
-											{new Date(note.updatedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
+											{new Date(note.createdAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} 
+											{new Date(note.createdAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
 										</div>
 										<div class="pi-badge">
-											{#if note.relativePath.endsWith('.pdf')}
+											{#if note.relativePath.toLowerCase().endsWith('.pdf')}
 												pdf
 											{:else if note.sourcePdf}
 												note + pdf
@@ -739,7 +765,7 @@
 									{#each timelineNotes as note, i}
 										<div class="tl-item {i === 0 ? 'is-active' : ''}">
 											<div class="tl-time-side">
-												{new Date(note.updatedAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', hour12: false})}
+												{new Date(note.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', hour12: false})}
 											</div>
 											<div class="tl-node">
 												<div class="tl-circle">
@@ -967,6 +993,18 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		line-height: 1.3;
+	}
+
+	.row-badge {
+		border: 1px solid var(--border-default);
+		border-radius: 4px;
+		padding: 2px 6px;
+		font-size: 0.65rem;
+		color: var(--neutral-400);
+		font-family: var(--font-mono);
+		background: rgba(255, 255, 255, 0.02);
+		flex-shrink: 0;
+		white-space: nowrap;
 	}
 
 	.row-time {

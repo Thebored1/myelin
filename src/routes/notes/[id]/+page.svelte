@@ -5,9 +5,16 @@
 	import { goto, beforeNavigate } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import type { NoteDocument, SearchResponse, NoteSummary, PdfAnnotation, GitCommit, ChatMessage } from '$lib/types';
+	import type {
+		NoteDocument,
+		SearchResponse,
+		NoteSummary,
+		PdfAnnotation,
+		GitCommit,
+		ChatMessage
+	} from '$lib/types';
 	import { onMount, onDestroy, tick } from 'svelte';
-	import { sidebarOpen, showSidebarToggle } from '$lib/stores';
+	import { showSidebarToggle, noteSidebarOpen } from '$lib/stores';
 	import Vditor from 'vditor';
 	import 'vditor/dist/index.css';
 	import 'mathlive';
@@ -20,13 +27,18 @@
 	let draftTags = $state('');
 	let isBusy = $state(false);
 	let message = $state('');
-	
-	let activeSidebarTab = $state<'info'|'chat'|'versions'>('info');
+
+	let activeSidebarTab = $state<'info' | 'chat' | 'versions'>('info');
 	let noteHistory = $state<GitCommit[]>([]);
 	let versionPreviewContent = $state<string | null>(null);
 	let versionPreviewHash = $state<string | null>(null);
 	let versionPreviewDialog: HTMLDialogElement | undefined = $state();
-	type NoteSnapshot = { noteBody: string; draftTitle: string; draftTags: string; chatLength: number; };
+	type NoteSnapshot = {
+		noteBody: string;
+		draftTitle: string;
+		draftTags: string;
+		chatLength: number;
+	};
 	let snapshots = $state(new Map<string, NoteSnapshot>());
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
@@ -34,7 +46,7 @@
 	let chatMessagesEl: HTMLDivElement | undefined = $state();
 
 	let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
-	
+
 	let relatedNotes = $state<NoteSummary[]>([]);
 	let vditorContainer: HTMLElement | undefined = $state();
 	let vditorInstance: Vditor | null = null;
@@ -48,7 +60,7 @@
 	let activePdfBytes = $state<Uint8Array | null>(null);
 	let scratchpadSavedId = $state<string | null>(null);
 	let showAttachedNote = $state(false);
-	
+
 	let splitRatio = $state(50);
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
@@ -121,7 +133,10 @@
 	$effect(() => {
 		if (activeSidebarTab !== 'chat') return;
 		const chatScrollKey = chatMessages
-			.map((msg) => `${msg.role}:${msg.content.length}:${msg.isStreaming ? 1 : 0}:${msg.tools?.length ?? 0}:${msg.error ? 1 : 0}`)
+			.map(
+				(msg) =>
+					`${msg.role}:${msg.content.length}:${msg.isStreaming ? 1 : 0}:${msg.tools?.length ?? 0}:${msg.error ? 1 : 0}`
+			)
 			.join('|');
 		void chatScrollKey;
 		void tick().then(() => {
@@ -173,7 +188,7 @@
 
 		editorEl.focus();
 	}
-	
+
 	function saveCursorPosition() {
 		if (!vditorInstance || !vditorContainer) return;
 		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
@@ -185,12 +200,12 @@
 
 		savedEditorRange = range.cloneRange();
 	}
-	
+
 	function insertAtSavedCursor(linkText: string) {
 		if (!vditorInstance || !vditorContainer) return;
 		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		if (!editorEl) return;
-		
+
 		focusEditor();
 
 		const selection = window.getSelection();
@@ -203,13 +218,13 @@
 		if (!inserted) {
 			vditorInstance.insertValue(linkText, true);
 		}
-		
+
 		savedEditorRange = null;
 		focusEditor();
 		draftBody = vditorInstance.getValue();
 		triggerAutoSave();
 	}
-	
+
 	let mathDialog: HTMLDialogElement | undefined = $state();
 	let mathValue = $state('');
 
@@ -217,45 +232,59 @@
 	let linkSearchQuery = $state('');
 	let linkSearchResults = $state<NoteSummary[]>([]);
 	let linkSelectedIndex = $state(0);
-	
+
 	let linkDialogMode = $state<'notes' | 'blocks'>('notes');
 	let selectedNoteForBlocks = $state<NoteDocument | null>(null);
-	
-	type BlockItem = { text: string, id: string | null, original: string, isFullNote?: boolean, sourceNoteId?: string, sourceNoteTitle?: string };
+
+	type BlockItem = {
+		text: string;
+		id: string | null;
+		original: string;
+		isFullNote?: boolean;
+		sourceNoteId?: string;
+		sourceNoteTitle?: string;
+	};
 	let allNoteBlocks = $state<BlockItem[]>([]);
 	let filteredBlocks = $derived(
 		linkDialogMode === 'blocks'
-			? (linkSearchQuery.trim() 
-				? allNoteBlocks.filter(b => b.isFullNote || b.text.toLowerCase().includes(linkSearchQuery.toLowerCase())) 
-				: [...allNoteBlocks])
+			? linkSearchQuery.trim()
+				? allNoteBlocks.filter(
+						(b) => b.isFullNote || b.text.toLowerCase().includes(linkSearchQuery.toLowerCase())
+					)
+				: [...allNoteBlocks]
 			: []
 	);
-	
+
 	let previewNoteDialog: HTMLDialogElement | undefined = $state();
 	let previewNoteTarget = $state<NoteDocument | null>(null);
 	let previewNoteContainer: HTMLDivElement | undefined = $state();
-	
+
 	let blockCache: Record<string, string> = {};
 	let transclusionObserver: MutationObserver | null = null;
-	
+
 	let toolbarExpanded = $state(false);
 	let toolbarNeedsToggle = $state(false);
 	let toolbarResizeObserver: ResizeObserver | null = null;
-	
+
 	let saveStatus = $state<'saved' | 'saving' | 'unsaved'>('saved');
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
 	let navigationWarningDialog: HTMLDialogElement | undefined = $state();
 	let deleteAttachedNoteDialog: HTMLDialogElement | undefined = $state();
+	let deleteMainNoteDialog: HTMLDialogElement | undefined = $state();
+	let detachPdfDialog: HTMLDialogElement | undefined = $state();
+
+	function requestDeleteMainNote() {
+		deleteMainNoteDialog?.showModal();
+	}
 	let pendingNavigationUrl = $state('');
 
 	let attachPdfDialog: HTMLDialogElement | undefined = $state();
-	let detachPdfDialog: HTMLDialogElement | undefined = $state();
 	let pdfSearchQuery = $state('');
 	let pdfNotesList = $state<NoteDocument[]>([]);
 	let pdfSelectedIndex = $state(0);
 	let filteredPdfs = $derived(
 		pdfSearchQuery.trim()
-			? pdfNotesList.filter(p => p.title.toLowerCase().includes(pdfSearchQuery.toLowerCase()))
+			? pdfNotesList.filter((p) => p.title.toLowerCase().includes(pdfSearchQuery.toLowerCase()))
 			: pdfNotesList
 	);
 	let shouldRenderEditor = $derived(note !== null && (!isMainNotePdf || showAttachedNote));
@@ -278,7 +307,7 @@
 		try {
 			vditorInstance.destroy();
 		} catch (e) {
-			console.warn("Vditor destroy error:", e);
+			console.warn('Vditor destroy error:', e);
 		}
 		vditorInstance = null;
 	}
@@ -304,8 +333,8 @@
 		const query = linkSearchQuery;
 		if (linkDialogMode === 'notes') {
 			if (query.trim()) {
-				invoke<SearchResponse>('search_notes', { query }).then(res => {
-					linkSearchResults = res.results.map(r => r.note);
+				invoke<SearchResponse>('search_notes', { query }).then((res) => {
+					linkSearchResults = res.results.map((r) => r.note);
 				});
 			} else {
 				linkSearchResults = [];
@@ -328,8 +357,8 @@
 				}
 			}, 50);
 		} catch (err) {
-			console.error("Failed to load preview note", err);
-			alert("Could not load preview.");
+			console.error('Failed to load preview note', err);
+			alert('Could not load preview.');
 		} finally {
 			isBusy = false;
 		}
@@ -337,9 +366,9 @@
 
 	async function handleVditorClick(e: MouseEvent) {
 		const target = e.target as HTMLElement;
-		
+
 		let href = '';
-		
+
 		// 1. Standard HTML links (WYSIWYG or preview modes)
 		const link = target.closest('a');
 		if (link) {
@@ -360,7 +389,7 @@
 		}
 
 		if (!href) return;
-		
+
 		if (href.startsWith('/notes/')) {
 			e.preventDefault();
 			e.stopPropagation();
@@ -372,7 +401,7 @@
 
 	function handleVditorKeydownCapture(e: KeyboardEvent) {
 		// Prevent WYSIWYG mode shortcut (Cmd/Ctrl + Alt + 7)
-		if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.code === "Digit7") {
+		if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.code === 'Digit7') {
 			e.preventDefault();
 			e.stopPropagation();
 		}
@@ -398,9 +427,9 @@
 		}
 	}
 
-
 	function handleLinkSearchKeydown(e: KeyboardEvent) {
-		const targetListLength = linkDialogMode === 'notes' ? linkSearchResults.length : filteredBlocks.length;
+		const targetListLength =
+			linkDialogMode === 'notes' ? linkSearchResults.length : filteredBlocks.length;
 		if (e.key === 'ArrowDown') {
 			e.preventDefault();
 			linkSelectedIndex = Math.min(targetListLength - 1, linkSelectedIndex + 1);
@@ -418,30 +447,32 @@
 			}
 		}
 	}
-	
+
 	function autofocus(node: HTMLElement) {
 		node.focus();
 	}
 
 	function parseBlocks(markdown: string): BlockItem[] {
 		const chunks = markdown.split(/\n+/);
-		return chunks.map(chunk => {
-			const text = chunk.trim();
-			if (!text) return null;
-			const idMatch = text.match(/\(\(([a-fA-F0-9]{6})\)\)$/);
-			
-			let cleanDisplay = text.replace(/\s*\(\([a-fA-F0-9]{6}\)\)$/, '');
-			cleanDisplay = cleanDisplay.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-			cleanDisplay = cleanDisplay.replace(/(\*\*|__)(.*?)\1/g, '$2');
-			cleanDisplay = cleanDisplay.replace(/(\*|_)(.*?)\1/g, '$2');
-			cleanDisplay = cleanDisplay.replace(/^#+\s+/g, '');
-			
-			return {
-				text: cleanDisplay,
-				id: idMatch ? idMatch[1] : null,
-				original: text
-			};
-		}).filter(Boolean) as BlockItem[];
+		return chunks
+			.map((chunk) => {
+				const text = chunk.trim();
+				if (!text) return null;
+				const idMatch = text.match(/\(\(([a-fA-F0-9]{6})\)\)$/);
+
+				let cleanDisplay = text.replace(/\s*\(\([a-fA-F0-9]{6}\)\)$/, '');
+				cleanDisplay = cleanDisplay.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+				cleanDisplay = cleanDisplay.replace(/(\*\*|__)(.*?)\1/g, '$2');
+				cleanDisplay = cleanDisplay.replace(/(\*|_)(.*?)\1/g, '$2');
+				cleanDisplay = cleanDisplay.replace(/^#+\s+/g, '');
+
+				return {
+					text: cleanDisplay,
+					id: idMatch ? idMatch[1] : null,
+					original: text
+				};
+			})
+			.filter(Boolean) as BlockItem[];
 	}
 
 	async function selectNoteForBlocks(target: NoteSummary) {
@@ -456,7 +487,7 @@
 			linkDialogMode = 'blocks';
 			linkSelectedIndex = 0;
 		} catch (e) {
-			console.error("Failed to load note for blocks", e);
+			console.error('Failed to load note for blocks', e);
 		} finally {
 			isBusy = false;
 		}
@@ -464,7 +495,7 @@
 
 	async function insertBlockLink(block: BlockItem) {
 		if (!selectedNoteForBlocks) return;
-		
+
 		if (block.isFullNote) {
 			shouldRefocusEditor = true;
 			linkNoteDialog?.close();
@@ -473,7 +504,7 @@
 			refocusEditorSoon();
 			return;
 		}
-		
+
 		let blockId = block.id;
 		if (!blockId) {
 			blockId = Math.random().toString(16).substring(2, 8);
@@ -487,7 +518,7 @@
 				sourcePdf: selectedNoteForBlocks.sourcePdf,
 				annotations: selectedNoteForBlocks.annotations
 			});
-			
+
 			if (selectedNoteForBlocks.id === note?.id) {
 				setTimeout(() => {
 					if (vditorInstance) {
@@ -506,15 +537,18 @@
 						if (selectionOffset !== null) {
 							setTimeout(() => {
 								focusEditor();
-								const refreshedEditorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-								if (refreshedEditorEl) restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
+								const refreshedEditorEl = vditorContainer?.querySelector(
+									'.vditor-ir'
+								) as HTMLElement | null;
+								if (refreshedEditorEl)
+									restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
 							}, 0);
 						}
 					}
 				}, 50);
 			}
 		}
-		
+
 		shouldRefocusEditor = true;
 		linkNoteDialog?.close();
 		const linkText = `[((${blockId}))](/notes/${selectedNoteForBlocks!.id}#${blockId}) `;
@@ -525,11 +559,11 @@
 	let globalSearchDialog: HTMLDialogElement | undefined = $state();
 	let globalSearchQuery = $state('');
 	let globalSelectedIndex = $state(0);
-	
+
 	let globalBlocks = $state<BlockItem[]>([]);
 	let filteredGlobalBlocks = $derived(
 		globalSearchQuery.trim()
-			? globalBlocks.filter(b => b.text.toLowerCase().includes(globalSearchQuery.toLowerCase()))
+			? globalBlocks.filter((b) => b.text.toLowerCase().includes(globalSearchQuery.toLowerCase()))
 			: globalBlocks.slice(0, 50)
 	);
 
@@ -542,7 +576,7 @@
 			const input = globalSearchDialog?.querySelector('.link-search-input') as HTMLInputElement;
 			if (input) input.focus();
 		}, 50);
-		
+
 		isBusy = true;
 		try {
 			const docs = await invoke<NoteDocument[]>('get_all_note_documents');
@@ -557,7 +591,7 @@
 			}
 			globalBlocks = allBlocks;
 		} catch (err) {
-			console.error("Failed to load global blocks", err);
+			console.error('Failed to load global blocks', err);
 		} finally {
 			isBusy = false;
 		}
@@ -581,13 +615,13 @@
 
 	async function insertGlobalBlockLink(block: BlockItem) {
 		if (!block.sourceNoteId || !block.sourceNoteTitle) return;
-		
+
 		let blockId = block.id;
 		const isNewBlock = !blockId;
 		if (isNewBlock) {
 			blockId = Math.random().toString(16).substring(2, 8);
 		}
-		
+
 		shouldRefocusEditor = true;
 		globalSearchDialog?.close();
 		const linkText = `[((${blockId}))](/notes/${block.sourceNoteId}#${blockId}) `;
@@ -625,8 +659,11 @@
 							if (selectionOffset !== null) {
 								setTimeout(() => {
 									focusEditor();
-									const refreshedEditorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-									if (refreshedEditorEl) restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
+									const refreshedEditorEl = vditorContainer?.querySelector(
+										'.vditor-ir'
+									) as HTMLElement | null;
+									if (refreshedEditorEl)
+										restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
 								}, 0);
 							}
 						}
@@ -635,9 +672,9 @@
 
 				insertAtSavedCursor(linkText);
 			} catch (err) {
-				console.error("Failed to append block ID to source note", err);
-				message = "Failed to update source note.";
-				setTimeout(() => message = '', 3000);
+				console.error('Failed to append block ID to source note', err);
+				message = 'Failed to update source note.';
+				setTimeout(() => (message = ''), 3000);
 			} finally {
 				isBusy = false;
 				refocusEditorSoon();
@@ -669,7 +706,7 @@
 					.filter((candidate) => candidate.sourcePdf === loadedNote.id)
 					.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
 			draftTitle = loadedNote.title;
-			draftBody = existingScratchpad?.body ?? "";
+			draftBody = existingScratchpad?.body ?? '';
 			draftTags = loadedNote.tags.join(', ');
 			activePdfId = loadedNote.id;
 			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.id });
@@ -680,7 +717,7 @@
 			draftTitle = loadedNote.title;
 			draftBody = loadedNote.body;
 			draftTags = loadedNote.tags.join(', ');
-			
+
 			if (loadedNote.sourcePdf) {
 				activePdfId = loadedNote.sourcePdf;
 				const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
@@ -695,7 +732,6 @@
 
 		message = '';
 		void fetchRelatedNotes();
-		
 	}
 
 	async function refreshCurrentNoteFromBackend(skipEditorUpdate = false) {
@@ -719,9 +755,8 @@
 	function startNoteStreamAnimation(newContent: string, mode: 'write' | 'append') {
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		noteAnimationTimer = undefined;
-		const baseContent = mode === 'append' && vditorInstance
-			? (vditorInstance.getValue().trimEnd() + '\n\n')
-			: '';
+		const baseContent =
+			mode === 'append' && vditorInstance ? vditorInstance.getValue().trimEnd() + '\n\n' : '';
 		const finalContent = baseContent + newContent;
 		if (note) note = { ...note, body: finalContent };
 		draftBody = finalContent;
@@ -742,123 +777,164 @@
 
 	function initVditor() {
 		if (!vditorContainer || vditorInstance) return;
-		
+
 		try {
 			vditorInstance = new Vditor(vditorContainer, {
-			value: draftBody,
-			placeholder: isMainNotePdf ? "Scratchpad for PDF notes..." : "Start typing here...",
-			mode: 'ir',
-			theme: 'dark',
-			icon: 'material',
-			lang: 'en_US',
-			tab: '\t',
-			cache: { enable: false },
-			toolbarConfig: { pin: true },
-			toolbar: [
-				"emoji", "headings", "bold", "italic", "strike", "link", "|",
-				"list", "ordered-list", "check", "outdent", "indent", "|",
-				"quote", "line", "code", "inline-code", "insert-before", "insert-after", "|",
-				{
-					name: 'mathlive',
-					tipPosition: 'n',
-					tip: 'MathLive Editor',
-					icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"></path></svg>',
-					click: () => {
-						mathValue = '';
-						mathDialog?.showModal();
+				value: draftBody,
+				placeholder: isMainNotePdf ? 'Scratchpad for PDF notes...' : 'Start typing here...',
+				mode: 'ir',
+				theme: 'dark',
+				icon: 'material',
+				lang: 'en_US',
+				tab: '\t',
+				cache: { enable: false },
+				toolbarConfig: { pin: true },
+				toolbar: [
+					{
+						name: 'attach-pdf',
+						tipPosition: 'n',
+						tip: 'Attach PDF',
+						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
+						click: () => {
+							openAttachPdfDialog();
+						}
+					},
+					'|',
+					'emoji',
+					'headings',
+					'bold',
+					'italic',
+					'strike',
+					'link',
+					'|',
+					'list',
+					'ordered-list',
+					'check',
+					'outdent',
+					'indent',
+					'|',
+					'quote',
+					'line',
+					'code',
+					'inline-code',
+					'insert-before',
+					'insert-after',
+					'|',
+					{
+						name: 'mathlive',
+						tipPosition: 'n',
+						tip: 'MathLive Editor',
+						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"></path></svg>',
+						click: () => {
+							mathValue = '';
+							mathDialog?.showModal();
+						}
+					},
+					{
+						name: 'link-note',
+						tipPosition: 'n',
+						tip: 'Link to Note',
+						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
+						click: () => {
+							saveCursorPosition();
+							linkSearchQuery = '';
+							linkSearchResults = [];
+							linkNoteDialog?.showModal();
+							setTimeout(() => {
+								const input = linkNoteDialog?.querySelector(
+									'.link-search-input'
+								) as HTMLInputElement;
+								if (input) input.focus();
+							}, 50);
+						}
+					},
+					{
+						name: 'search-blocks',
+						tipPosition: 'n',
+						tip: 'Search Global Blocks',
+						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
+						click: () => {
+							openGlobalBlockSearch();
+						}
+					},
+					'|',
+					'upload',
+					'record',
+					'table',
+					'|',
+					'undo',
+					'redo',
+					'|',
+					'fullscreen',
+					'edit-mode',
+					{
+						name: 'more',
+						toolbar: ['both', 'code-theme', 'content-theme', 'outline', 'devtools', 'info', 'help']
 					}
-				},
-				{
-					name: 'link-note',
-					tipPosition: 'n',
-					tip: 'Link to Note',
-					icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
-					click: () => {
-						saveCursorPosition();
-						linkSearchQuery = '';
-						linkSearchResults = [];
-						linkNoteDialog?.showModal();
-						setTimeout(() => {
-							const input = linkNoteDialog?.querySelector('.link-search-input') as HTMLInputElement;
-							if (input) input.focus();
-						}, 50);
-					}
-				},
-				{
-					name: 'search-blocks',
-					tipPosition: 'n',
-					tip: 'Search Global Blocks',
-					icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
-					click: () => {
-						openGlobalBlockSearch();
-					}
-				},
-				"|",
-				"upload", "record", "table", "|", "undo", "redo", "|", "fullscreen", "edit-mode",
-				{
-					name: "more",
-					toolbar: [
-						"both", "code-theme", "content-theme", "outline", "devtools", "info", "help"
-					]
-				}
-			],
-			after: () => {
-				const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
-				if (toolbar) {
-					toolbarResizeObserver = new ResizeObserver(() => {
+				],
+				after: () => {
+					const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
+					if (toolbar) {
+						toolbarResizeObserver = new ResizeObserver(() => {
+							if (toolbar.scrollHeight > 55) {
+								toolbarNeedsToggle = true;
+							} else {
+								toolbarNeedsToggle = false;
+								toolbarExpanded = false;
+							}
+							updateToolbarOverflow();
+						});
+						toolbarResizeObserver.observe(toolbar);
 						if (toolbar.scrollHeight > 55) {
 							toolbarNeedsToggle = true;
-						} else {
-							toolbarNeedsToggle = false;
-							toolbarExpanded = false;
 						}
 						updateToolbarOverflow();
-					});
-					toolbarResizeObserver.observe(toolbar);
-					if (toolbar.scrollHeight > 55) {
-						toolbarNeedsToggle = true;
-					}
-					updateToolbarOverflow();
-					
-					const fsBtn = toolbar.querySelector('button[data-type="fullscreen"]');
-					if (fsBtn) {
-						const label = fsBtn.getAttribute('aria-label') || '';
-						const match = label.match(/<([^>]+)>/);
-						if (match) {
-							fullscreenShortcut = match[1];
+
+						const fsBtn = toolbar.querySelector('button[data-type="fullscreen"]');
+						if (fsBtn) {
+							const label = fsBtn.getAttribute('aria-label') || '';
+							const match = label.match(/<([^>]+)>/);
+							if (match) {
+								fullscreenShortcut = match[1];
+							}
 						}
 					}
-				}
-				setTimeout(() => {
-					scanForTransclusions();
-				}, 100);
-				setupTransclusionObserver();
-			},
-			keydown: (e: KeyboardEvent) => {
-				if ((e.ctrlKey || e.metaKey) && e.code === 'Comma') {
-					e.preventDefault();
-					if (e.shiftKey) {
-						const globalSearchBtn = vditorContainer?.querySelector('button[data-type="search-blocks"]') as HTMLButtonElement | null;
-						if (globalSearchBtn) globalSearchBtn.click();
-					} else {
-						const linkBtn = vditorContainer?.querySelector('button[data-type="link-note"]') as HTMLButtonElement | null;
-						if (linkBtn) linkBtn.click();
+					setTimeout(() => {
+						scanForTransclusions();
+					}, 100);
+					setupTransclusionObserver();
+				},
+				keydown: (e: KeyboardEvent) => {
+					if ((e.ctrlKey || e.metaKey) && e.code === 'Comma') {
+						e.preventDefault();
+						if (e.shiftKey) {
+							const globalSearchBtn = vditorContainer?.querySelector(
+								'button[data-type="search-blocks"]'
+							) as HTMLButtonElement | null;
+							if (globalSearchBtn) globalSearchBtn.click();
+						} else {
+							const linkBtn = vditorContainer?.querySelector(
+								'button[data-type="link-note"]'
+							) as HTMLButtonElement | null;
+							if (linkBtn) linkBtn.click();
+						}
+						return;
 					}
-					return;
+					if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
+						e.preventDefault();
+						const redoBtn = vditorContainer?.querySelector(
+							'button[data-type="redo"]'
+						) as HTMLButtonElement | null;
+						if (redoBtn) redoBtn.click();
+					}
+				},
+				input: (value) => {
+					draftBody = value;
+					triggerAutoSave();
 				}
-				if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
-					e.preventDefault();
-					const redoBtn = vditorContainer?.querySelector('button[data-type="redo"]') as HTMLButtonElement | null;
-					if (redoBtn) redoBtn.click();
-				}
-			},
-			input: (value) => {
-				draftBody = value;
-				triggerAutoSave();
-			}
-		});
+			});
 		} catch (e: any) {
-			message = "Vditor Error: " + (e?.message || String(e));
+			message = 'Vditor Error: ' + (e?.message || String(e));
 		}
 	}
 
@@ -872,9 +948,15 @@
 		if (!context) return '';
 		let html = context;
 		// Strip markdown links but keep text and make it look like a link
-		html = html.replace(/\[([^\]]+)\]\([^)]+\)/g, '<span style="color: var(--accent-200); font-weight: 500;">$1</span>');
+		html = html.replace(
+			/\[([^\]]+)\]\([^)]+\)/g,
+			'<span style="color: var(--accent-200); font-weight: 500;">$1</span>'
+		);
 		// Strip transclusion syntax
-		html = html.replace(/\(\([a-fA-F0-9]{6}\)\)/g, '<span style="color: var(--text-secondary);">(Block Link)</span>');
+		html = html.replace(
+			/\(\([a-fA-F0-9]{6}\)\)/g,
+			'<span style="color: var(--text-secondary);">(Block Link)</span>'
+		);
 		// Bold and italic
 		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 		html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
@@ -884,21 +966,21 @@
 	function scanForTransclusions() {
 		if (!vditorContainer) return;
 		const links = vditorContainer.querySelectorAll('[data-type="a"]:not(.transclusion-wrapper)');
-		links.forEach(linkWrapper => {
+		links.forEach((linkWrapper) => {
 			const irLink = linkWrapper.querySelector('.vditor-ir__link');
 			if (!irLink) return;
 			const text = irLink.textContent || '';
 			const blockMatch = text.match(/^\(\(([a-fA-F0-9]{6})\)\)$/);
 			if (!blockMatch) return;
-			
+
 			const blockId = blockMatch[1];
 			const fullText = linkWrapper.textContent || '';
 			const urlMatch = fullText.match(/\]\(\/notes\/([^#]+)#([a-fA-F0-9]{6})\)$/);
 			if (!urlMatch) return;
-			
+
 			const targetNoteId = urlMatch[1];
 			linkWrapper.classList.add('transclusion-wrapper');
-			
+
 			// Load block content for the tooltip and CSS rendering — no DOM injection
 			const cacheKey = `${targetNoteId}#${blockId}`;
 			if (blockCache[cacheKey]) {
@@ -906,22 +988,27 @@
 				(linkWrapper as HTMLElement).title = plainText;
 				(linkWrapper as HTMLElement).setAttribute('data-block-content', plainText);
 			} else {
-				invoke<NoteDocument>('load_note', { noteId: targetNoteId }).then(n => {
-					const blocks = parseBlocks(n.body);
-					const targetBlock = blocks.find(b => b.id === blockId);
-					if (targetBlock) {
-						const rawMd = targetBlock.original.replace(/\s*\(\([a-fA-F0-9]+\)\)$/, '').trim();
-						let htmlText = rawMd;
-						htmlText = htmlText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="mock-link">$1</span>');
-						htmlText = htmlText.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-						htmlText = htmlText.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-						blockCache[cacheKey] = htmlText;
-						// Set plain-text tooltip and data attribute
-						const plainText = htmlText.replace(/<[^>]+>/g, '');
-						(linkWrapper as HTMLElement).title = plainText;
-						(linkWrapper as HTMLElement).setAttribute('data-block-content', plainText);
-					}
-				}).catch(() => {});
+				invoke<NoteDocument>('load_note', { noteId: targetNoteId })
+					.then((n) => {
+						const blocks = parseBlocks(n.body);
+						const targetBlock = blocks.find((b) => b.id === blockId);
+						if (targetBlock) {
+							const rawMd = targetBlock.original.replace(/\s*\(\([a-fA-F0-9]+\)\)$/, '').trim();
+							let htmlText = rawMd;
+							htmlText = htmlText.replace(
+								/\[([^\]]+)\]\(([^)]+)\)/g,
+								'<span class="mock-link">$1</span>'
+							);
+							htmlText = htmlText.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+							htmlText = htmlText.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+							blockCache[cacheKey] = htmlText;
+							// Set plain-text tooltip and data attribute
+							const plainText = htmlText.replace(/<[^>]+>/g, '');
+							(linkWrapper as HTMLElement).title = plainText;
+							(linkWrapper as HTMLElement).setAttribute('data-block-content', plainText);
+						}
+					})
+					.catch(() => {});
 			}
 		});
 	}
@@ -929,12 +1016,16 @@
 	function setupTransclusionObserver() {
 		if (!vditorContainer) return;
 		if (transclusionObserver) transclusionObserver.disconnect();
-		
+
 		transclusionObserver = new MutationObserver(() => {
 			scanForTransclusions();
 		});
-		
-		transclusionObserver.observe(vditorContainer, { childList: true, subtree: true, characterData: true });
+
+		transclusionObserver.observe(vditorContainer, {
+			childList: true,
+			subtree: true,
+			characterData: true
+		});
 	}
 
 	async function fetchRelatedNotes() {
@@ -947,8 +1038,8 @@
 			if (query) {
 				const res = await invoke<SearchResponse>('search_notes', { query });
 				relatedNotes = res.results
-					.map(r => r.note)
-					.filter(n => n.id !== note?.id)
+					.map((r) => r.note)
+					.filter((n) => n.id !== note?.id)
 					.slice(0, 5);
 			}
 		} catch (e) {
@@ -975,7 +1066,7 @@
 			let targetId = note.id;
 			if (isMainNotePdf) {
 				if (!scratchpadSavedId) {
-					const newNote = await invoke<NoteDocument>('create_note', { 
+					const newNote = await invoke<NoteDocument>('create_note', {
 						title: draftTitle,
 						sourcePdf: activePdfId
 					});
@@ -1005,18 +1096,18 @@
 			if (!isMainNotePdf) {
 				note = saved;
 			}
-			
+
 			if (draftTitle === sentTitle) {
 				draftTitle = saved.title;
 			}
-			
+
 			saveStatus = 'saved';
 			void fetchRelatedNotes();
 			if (activeSidebarTab === 'versions') {
 				void fetchNoteHistory();
 			}
 		} catch (err) {
-			console.error("Save error:", err);
+			console.error('Save error:', err);
 			saveStatus = 'unsaved';
 			message = `Save failed: ${err}`;
 		} finally {
@@ -1062,7 +1153,7 @@
 			noteBody: draftBody,
 			draftTitle: draftTitle,
 			draftTags: draftTags,
-			chatLength: chatMessages.length,
+			chatLength: chatMessages.length
 		};
 		snapshots = new Map(snapshots).set(requestId, snapshot);
 		chatMessages = [...chatMessages, { role: 'user', content: userText, snapshotId: requestId }];
@@ -1070,7 +1161,7 @@
 		try {
 			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId });
 		} catch (e) {
-			console.error("AI Error:", e);
+			console.error('AI Error:', e);
 			failStreamingChatMessage(extractChatErrorMessage(e));
 		}
 	}
@@ -1078,7 +1169,10 @@
 	async function rewindToSnapshot(snapshotId: string, fillInput?: string) {
 		const snapshot = snapshots.get(snapshotId);
 		if (!snapshot || !note) return;
-		if (noteAnimationTimer) { clearTimeout(noteAnimationTimer); noteAnimationTimer = undefined; }
+		if (noteAnimationTimer) {
+			clearTimeout(noteAnimationTimer);
+			noteAnimationTimer = undefined;
+		}
 		chatMessages = chatMessages.slice(0, snapshot.chatLength);
 		draftBody = snapshot.noteBody;
 		draftTitle = snapshot.draftTitle;
@@ -1102,7 +1196,10 @@
 			await invoke('save_note', {
 				noteId: note.id,
 				title: snapshot.draftTitle,
-				tags: snapshot.draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+				tags: snapshot.draftTags
+					.split(',')
+					.map((t: string) => t.trim())
+					.filter(Boolean),
 				body: snapshot.noteBody,
 				sourcePdf: note.sourcePdf ?? null,
 				annotations: note.annotations
@@ -1120,7 +1217,10 @@
 		await sendChatText(userText);
 	}
 
-	function mergeChatTools(existing: { name: string; details: string }[] = [], incoming: { name: string; details: string }[] = []) {
+	function mergeChatTools(
+		existing: { name: string; details: string }[] = [],
+		incoming: { name: string; details: string }[] = []
+	) {
 		const merged = [...existing];
 		for (const tool of incoming) {
 			if (!merged.some((entry) => entry.name === tool.name && entry.details === tool.details)) {
@@ -1133,14 +1233,15 @@
 	function wroteToCurrentNote(tools: { name: string; details: string }[] = []) {
 		if (!note) return false;
 		const currentTitle = note.title.trim().toLowerCase();
-		return tools.some((tool) =>
-			(tool.name === 'Write Note' || tool.name === 'Append Note') &&
-			tool.details.trim().toLowerCase() === currentTitle
+		return tools.some(
+			(tool) =>
+				(tool.name === 'Write Note' || tool.name === 'Append Note') &&
+				tool.details.trim().toLowerCase() === currentTitle
 		);
 	}
 
 	function finishStreamingChatMessage(tools: { name: string; details: string }[] = []) {
-		chatMessages = chatMessages.map(m => {
+		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming) return { ...m, isStreaming: false, tools: mergeChatTools(m.tools, tools) };
 			return m;
 		});
@@ -1152,15 +1253,31 @@
 
 	function extractChatErrorMessage(error: unknown): string {
 		if (typeof error === 'string' && error.trim()) return error;
-		if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message.trim()) {
+		if (
+			error &&
+			typeof error === 'object' &&
+			'message' in error &&
+			typeof error.message === 'string' &&
+			error.message.trim()
+		) {
 			return error.message;
 		}
 		return 'Failed to generate response.';
 	}
 
-	function failStreamingChatMessage(errorMessage = 'Failed to generate response.', tools: { name: string; details: string }[] = []) {
-		chatMessages = chatMessages.map(m => {
-			if (m.isStreaming) return { ...m, isStreaming: false, error: true, content: errorMessage, tools: mergeChatTools(m.tools, tools) };
+	function failStreamingChatMessage(
+		errorMessage = 'Failed to generate response.',
+		tools: { name: string; details: string }[] = []
+	) {
+		chatMessages = chatMessages.map((m) => {
+			if (m.isStreaming)
+				return {
+					...m,
+					isStreaming: false,
+					error: true,
+					content: errorMessage,
+					tools: mergeChatTools(m.tools, tools)
+				};
 			return m;
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
@@ -1172,10 +1289,10 @@
 		try {
 			const history = await invoke<GitCommit[]>('get_note_history', { noteId: note.id });
 			noteHistory = history
-				.filter(c => c.message && c.message.trim() !== '')
+				.filter((c) => c.message && c.message.trim() !== '')
 				.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 		} catch (e) {
-			console.error("Failed to fetch history:", e);
+			console.error('Failed to fetch history:', e);
 		} finally {
 			isBusy = false;
 		}
@@ -1198,7 +1315,7 @@
 				versionPreviewDialog.showModal();
 			}
 		} catch (e) {
-			console.error("Failed to fetch version:", e);
+			console.error('Failed to fetch version:', e);
 		} finally {
 			isBusy = false;
 		}
@@ -1227,7 +1344,7 @@
 			triggerAutoSave();
 			activeSidebarTab = 'info';
 		} catch (e) {
-			console.error("Failed to restore version:", e);
+			console.error('Failed to restore version:', e);
 		} finally {
 			isBusy = false;
 		}
@@ -1288,7 +1405,7 @@
 		isBusy = true;
 		try {
 			const allDocs = await invoke<NoteDocument[]>('get_all_note_documents');
-			pdfNotesList = allDocs.filter(d => d.relativePath.toLowerCase().endsWith('.pdf'));
+			pdfNotesList = allDocs.filter((d) => d.relativePath.toLowerCase().endsWith('.pdf'));
 		} catch (err) {
 			message = `Failed to load PDFs: ${err}`;
 		} finally {
@@ -1309,7 +1426,10 @@
 			const saved = await invoke<NoteDocument>('save_note', {
 				noteId: note.id,
 				title: draftTitle,
-				tags: draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+				tags: draftTags
+					.split(',')
+					.map((t: string) => t.trim())
+					.filter(Boolean),
 				body: draftBody,
 				sourcePdf: pdfNote.id,
 				annotations: note.annotations
@@ -1342,7 +1462,10 @@
 			const saved = await invoke<NoteDocument>('save_note', {
 				noteId: note.id,
 				title: draftTitle,
-				tags: draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+				tags: draftTags
+					.split(',')
+					.map((t: string) => t.trim())
+					.filter(Boolean),
 				body: draftBody,
 				sourcePdf: null,
 				annotations: note.annotations
@@ -1446,7 +1569,10 @@
 		isBusy = true;
 		try {
 			message = 'Extracting from paste...';
-			const res = await invoke<string>('extract_from_paste', { noteId: note.id, pasteContent: draftBody });
+			const res = await invoke<string>('extract_from_paste', {
+				noteId: note.id,
+				pasteContent: draftBody
+			});
 			const append = `\n\n> AI Extraction:\n${res}`;
 			vditorInstance.insertValue(append);
 			message = 'Extraction appended.';
@@ -1506,9 +1632,9 @@
 	function handleGlobalSelectionChange() {
 		if (!vditorContainer) return;
 		const sel = window.getSelection();
-		
+
 		// Clean up previous expansion
-		vditorContainer.querySelectorAll('.force-expand').forEach(el => {
+		vditorContainer.querySelectorAll('.force-expand').forEach((el) => {
 			el.classList.remove('force-expand');
 		});
 
@@ -1517,7 +1643,7 @@
 
 		// Expand links that intersect the current selection
 		const links = vditorContainer.querySelectorAll('[data-type="a"]');
-		links.forEach(link => {
+		links.forEach((link) => {
 			if (sel.containsNode(link, true)) {
 				link.classList.add('force-expand');
 			}
@@ -1531,15 +1657,15 @@
 
 		$showSidebarToggle = true;
 		if (window.innerWidth > 1200) {
-			$sidebarOpen = true;
+			$noteSidebarOpen = true;
 		}
 
 		const mql = window.matchMedia('(max-width: 1200px)');
 		const handleMediaChange = (e: MediaQueryListEvent) => {
 			if (e.matches) {
-				$sidebarOpen = false;
+				$noteSidebarOpen = false;
 			} else {
-				$sidebarOpen = true;
+				$noteSidebarOpen = true;
 			}
 		};
 		mql.addEventListener('change', handleMediaChange);
@@ -1549,36 +1675,48 @@
 		let unlistenNoteWritten: UnlistenFn;
 
 		// Setup AI Streaming listeners
-		listen<{ noteId: string; content: string; mode: 'write' | 'append' }>('ai://note_written', (event) => {
-			const { noteId, content, mode } = event.payload;
-			if (!note || note.id !== noteId) return;
-			startNoteStreamAnimation(content, mode);
-		}).then(fn => unlistenNoteWritten = fn);
+		listen<{ noteId: string; content: string; mode: 'write' | 'append' }>(
+			'ai://note_written',
+			(event) => {
+				const { noteId, content, mode } = event.payload;
+				if (!note || note.id !== noteId) return;
+				startNoteStreamAnimation(content, mode);
+			}
+		).then((fn) => (unlistenNoteWritten = fn));
 
-		listen<{ tool: string, details: string }>('ai://chat_tool', (event) => {
-			chatMessages = chatMessages.map(m => {
+		listen<{ tool: string; details: string }>('ai://chat_tool', (event) => {
+			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) {
 					const tools = m.tools || [];
-					return { ...m, tools: [...tools, { name: event.payload.tool, details: event.payload.details }] };
+					return {
+						...m,
+						tools: [...tools, { name: event.payload.tool, details: event.payload.details }]
+					};
 				}
 				return m;
 			});
-		}).then(fn => unlistenTool = fn);
+		}).then((fn) => (unlistenTool = fn));
 
-		listen<{ delta: string, requestId: string }>('ai://chat_chunk', (event) => {
-			chatMessages = chatMessages.map(m => {
+		listen<{ delta: string; requestId: string }>('ai://chat_chunk', (event) => {
+			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) return { ...m, content: m.content + event.payload.delta };
 				return m;
 			});
-		}).then(fn => unlistenChunk = fn);
+		}).then((fn) => (unlistenChunk = fn));
 
-		listen<{ requestId: string; tools?: { name: string; details: string }[] }>('ai://chat_done', (event) => {
-			finishStreamingChatMessage(event.payload.tools || []);
-		}).then(fn => unlistenDone = fn);
+		listen<{ requestId: string; tools?: { name: string; details: string }[] }>(
+			'ai://chat_done',
+			(event) => {
+				finishStreamingChatMessage(event.payload.tools || []);
+			}
+		).then((fn) => (unlistenDone = fn));
 
-		listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>('ai://chat_error', (event) => {
-			failStreamingChatMessage(event.payload.message, event.payload.tools || []);
-		}).then(fn => unlistenError = fn);
+		listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>(
+			'ai://chat_error',
+			(event) => {
+				failStreamingChatMessage(event.payload.message, event.payload.tools || []);
+			}
+		).then((fn) => (unlistenError = fn));
 
 		window.addEventListener('mousemove', handleGlobalMouseMove);
 		window.addEventListener('mouseup', stopResizing);
@@ -1633,11 +1771,28 @@
 	</style>
 </svelte:head>
 
-<div class="editor-shell">
+<div
+	class="editor-shell"
+	class:has-attached-file={!!note?.sourcePdf || (isMainNotePdf && !!activePdfBytes)}
+>
 	<header class="editor-header">
 		<div class="header-copy">
-			<button class="back-link" onclick={() => safeNavigate(backUrl)} aria-label="Go back" title="Go back">
-				<svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+			<button
+				class="back-link"
+				onclick={() => safeNavigate(backUrl)}
+				aria-label="Go back"
+				title="Go back"
+			>
+				<svg
+					viewBox="0 0 24 24"
+					width="20"
+					height="20"
+					stroke="currentColor"
+					stroke-width="2"
+					fill="none"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
 					<line x1="19" y1="12" x2="5" y2="12"></line>
 					<polyline points="12 19 5 12 12 5"></polyline>
 				</svg>
@@ -1645,28 +1800,59 @@
 			{#if message}
 				<p class="status">{message}</p>
 			{/if}
-			<input class="title-input" bind:value={draftTitle} oninput={triggerAutoSave} placeholder="Note title" />
+			<input
+				class="title-input"
+				bind:value={draftTitle}
+				oninput={triggerAutoSave}
+				placeholder="Note title"
+			/>
+
 			<div class="save-indicator" class:saving={saveStatus === 'saving'}>
 				{#if saveStatus === 'saving'}
-					<svg class="spinner" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg> Saving
+					<svg
+						class="spinner"
+						viewBox="0 0 24 24"
+						width="14"
+						height="14"
+						stroke="currentColor"
+						stroke-width="2"
+						fill="none"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg
+					> Saving
 				{:else if saveStatus === 'unsaved'}
 					<span class="dot"></span> Unsaved
 				{:else}
-					<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Saved
+					<svg
+						viewBox="0 0 24 24"
+						width="14"
+						height="14"
+						stroke="currentColor"
+						stroke-width="2"
+						fill="none"
+						stroke-linecap="round"
+						stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg
+					> Saved
 				{/if}
 			</div>
 		</div>
 	</header>
 
-	<div class="main-layout" class:split-layout={activePdfBytes !== null && showAttachedNote} bind:this={mainLayoutEl}>
+	<div
+		class="main-layout"
+		class:split-layout={activePdfBytes !== null && showAttachedNote}
+		bind:this={mainLayoutEl}
+	>
 		{#if activePdfBytes}
 			<section class="pdf-pane" style="width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
-				<PdfViewer 
-					pdfBytes={activePdfBytes} 
+				<PdfViewer
+					pdfBytes={activePdfBytes}
 					annotations={note?.annotations || []}
-					onQuote={handlePdfQuote} 
+					onQuote={handlePdfQuote}
 					onAnnotationsChange={handleAnnotationsChange}
 					onImageExtract={handleImageExtract}
+					onClosePdf={(activePdfBytes !== null && showAttachedNote) ? requestDetachPdf : undefined}
 					onAttachNote={() => {
 						showAttachedNote = true;
 						setTimeout(() => initVditor(), 100);
@@ -1682,243 +1868,336 @@
 
 		<!-- Main Content Area -->
 		{#if shouldRenderEditor}
-		<section class="main-pane" style={activePdfBytes ? `width: ${100 - splitRatio}%` : ''}>
-			<div class="content-area" style="position: relative;">
-				<!-- svelte-ignore a11y_click_events_have_key_events -->
-				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div bind:this={vditorContainer} class="vditor-wrapper" class:toolbar-expanded={toolbarExpanded} class:has-pdf-note={!!activePdfBytes || (!isMainNotePdf && !!note)} onclickcapture={handleVditorClick} onkeydowncapture={handleVditorKeydownCapture} onkeyupcapture={handleVditorKeyupCapture} onwheelcapture={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); e.stopPropagation(); } }}></div>
-				<div class="fullscreen-indicator">
-					Press <span>{fullscreenShortcut}</span> to toggle
-				</div>
-				{#if !isMainNotePdf && note}
-					<div class="toolbar-close-note-container" style={toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}>
-						{#if activePdfBytes}
+			<section class="main-pane" style={activePdfBytes ? `width: ${100 - splitRatio}%` : ''}>
+				<div class="content-area" style="position: relative;">
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<div
+						bind:this={vditorContainer}
+						class="vditor-wrapper"
+						class:toolbar-expanded={toolbarExpanded}
+						class:has-pdf-note={!!activePdfBytes || (!isMainNotePdf && !!note)}
+						onclickcapture={handleVditorClick}
+						onkeydowncapture={handleVditorKeydownCapture}
+						onkeyupcapture={handleVditorKeyupCapture}
+						onwheelcapture={(e) => {
+							if (e.ctrlKey || e.metaKey) {
+								e.preventDefault();
+								e.stopPropagation();
+							}
+						}}
+					></div>
+					<div class="fullscreen-indicator">
+						Press <span>{fullscreenShortcut}</span> to toggle
+					</div>
+					{#if isMainNotePdf && activePdfBytes && showAttachedNote}
+						<div
+							class="toolbar-close-note-container"
+							style={toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}
+						>
 							<button
 								class="toolbar-close-note-btn"
-								onclick={requestDetachPdf}
+								onclick={requestDeleteAttachedNote}
 								disabled={isBusy}
-								title="Detach PDF from this note"
+								title="Delete attached note and close pane"
 							>
-								Close PDF
+								Close Note
 							</button>
-						{:else}
-							<button
-								class="toolbar-attach-pdf-btn"
-								onclick={openAttachPdfDialog}
-								disabled={isBusy}
-								title="Attach a PDF to this note"
-							>
-								<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-								Attach PDF
-							</button>
-						{/if}
-					</div>
-				{:else if isMainNotePdf && activePdfBytes}
-					<div class="toolbar-close-note-container" style={toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}>
-						<button
-							class="toolbar-close-note-btn"
-							onclick={requestDeleteAttachedNote}
-							disabled={isBusy}
-							title="Delete attached note and close pane"
-						>
-							Close Note
-						</button>
-					</div>
-				{/if}
-				{#if toolbarNeedsToggle}
-					<div class="toolbar-overlay-toggle-container">
-						<button class="toolbar-overlay-toggle" class:expanded={toolbarExpanded} onclick={() => toolbarExpanded = !toolbarExpanded} aria-label="Toggle toolbar">
-							<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-								<polyline points="6 9 12 15 18 9"></polyline>
-							</svg>
-						</button>
-					</div>
-				{/if}
-			</div>
-		</section>
-
-		<!-- Right Sidebar -->
-		{#if $sidebarOpen}
-			<!-- svelte-ignore a11y_click_events_have_key_events -->
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="sidebar-backdrop" onclick={() => $sidebarOpen = false}></div>
-		{/if}
-		<aside class="sidebar" class:open={$sidebarOpen} style="--sidebar-width: {sidebarWidth}px;">
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="sidebar-resizer" onmousedown={startSidebarResizing} class:resizing={isSidebarResizing}></div>
-			<div class="sidebar-tabs">
-				<button class:active={activeSidebarTab === 'info'} onclick={() => activeSidebarTab = 'info'}>Info</button>
-				<button class:active={activeSidebarTab === 'chat'} onclick={() => activeSidebarTab = 'chat'}>Chat</button>
-				<button class:active={activeSidebarTab === 'versions'} onclick={() => { activeSidebarTab = 'versions'; fetchNoteHistory(); }}>History</button>
-			</div>
-
-			<div class="sidebar-content">
-				{#if activeSidebarTab === 'info'}
-					<div class="sidebar-section">
-						<h3>Tags</h3>
-						<input class="tag-input" bind:value={draftTags} oninput={triggerAutoSave} placeholder="comma,separated,tags" onblur={fetchRelatedNotes} />
-					</div>
-
-					<div class="sidebar-section">
-						<h3>AI Actions</h3>
-						<div class="ai-actions">
-							<button class="secondary" onclick={runExtract} disabled={isBusy || !note}>✨ Extract from paste</button>
-							<button class="secondary" onclick={runSummarise} disabled={isBusy || !note}>✨ Summarise</button>
-							<button class="secondary" onclick={runAskAI} disabled={isBusy || !note}>✨ Ask AI about this note</button>
 						</div>
-					</div>
-
-					<div class="sidebar-section">
-						<h3>Related Notes</h3>
-						{#if relatedNotes.length > 0}
-							<ul class="related-list">
-								{#each relatedNotes as rel, i (rel.id + '_' + i)}
-									<li><a href="/notes/{encodeURIComponent(rel.id)}">{rel.title}</a></li>
-								{/each}
-							</ul>
-						{:else}
-							<p class="empty-state">No related notes found.</p>
+					{/if}
+					<div class="toolbar-note-actions-container">
+						{#if toolbarNeedsToggle}
+							<button
+								class="toolbar-overlay-toggle"
+								class:expanded={toolbarExpanded}
+								onclick={() => (toolbarExpanded = !toolbarExpanded)}
+								aria-label="Toggle toolbar"
+							>
+								<svg
+									viewBox="0 0 24 24"
+									width="16"
+									height="16"
+									stroke="currentColor"
+									stroke-width="2"
+									fill="none"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<polyline points="6 9 12 15 18 9"></polyline>
+								</svg>
+							</button>
+						{/if}
+						{#if activePdfBytes !== null && showAttachedNote}
+							<button
+								class="toolbar-overlay-toggle"
+								onclick={requestDeleteMainNote}
+								aria-label="Delete Note"
+								title="Delete Note"
+							>
+								<svg
+									viewBox="0 0 24 24"
+									width="14"
+									height="14"
+									stroke="var(--danger, #ef4444)"
+									stroke-width="2"
+									fill="none"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<line x1="18" y1="6" x2="6" y2="18"></line>
+									<line x1="6" y1="6" x2="18" y2="18"></line>
+								</svg>
+							</button>
 						{/if}
 					</div>
+				</div>
+			</section>
 
-					<div class="sidebar-section">
-						<h3>Backlinks</h3>
-						{#if note && note.backlinks && note.backlinks.length > 0}
-							<ul class="related-list">
-								{#each note.backlinks as link, i (link.sourceId + '_' + (link.targetBlock || '') + '_' + i)}
-									<li>
-										<a href="/notes/{encodeURIComponent(link.sourceId)}">
-											<strong>{link.sourceTitle}</strong>
-											{#if link.targetBlock}
-												<span style="opacity: 0.7; font-size: 0.8em;">#{link.targetBlock}</span>
-											{/if}
-										</a>
-										<p class="context-excerpt" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.4;">
-											{@html parseBacklinkContext(link.contextExcerpt)}
-										</p>
-									</li>
-								{/each}
-							</ul>
-						{:else}
-							<p class="empty-state">No backlinks yet.</p>
-						{/if}
-					</div>
+			<!-- Right Sidebar -->
+			{#if $noteSidebarOpen}
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div class="sidebar-backdrop" onclick={() => ($noteSidebarOpen = false)}></div>
+			{/if}
+			<aside
+				class="sidebar"
+				class:open={$noteSidebarOpen}
+				style="--sidebar-width: {sidebarWidth}px;"
+			>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div
+					class="sidebar-resizer"
+					onmousedown={startSidebarResizing}
+					class:resizing={isSidebarResizing}
+				></div>
+				<div class="sidebar-tabs">
+					<button
+						class:active={activeSidebarTab === 'info'}
+						onclick={() => (activeSidebarTab = 'info')}>Info</button
+					>
+					<button
+						class:active={activeSidebarTab === 'chat'}
+						onclick={() => (activeSidebarTab = 'chat')}>Chat</button
+					>
+					<button
+						class:active={activeSidebarTab === 'versions'}
+						onclick={() => {
+							activeSidebarTab = 'versions';
+							fetchNoteHistory();
+						}}>History</button
+					>
+				</div>
 
-				{:else if activeSidebarTab === 'chat'}
-					<div class="chat-container">
-						<div class="chat-messages" bind:this={chatMessagesEl}>
-							{#if chatMessages.length === 0}
-								<p class="empty-state">Ask me anything about this note or your library!</p>
+				<div class="sidebar-content">
+					{#if activeSidebarTab === 'info'}
+						<div class="sidebar-section">
+							<h3>Tags</h3>
+							<input
+								class="tag-input"
+								bind:value={draftTags}
+								oninput={triggerAutoSave}
+								placeholder="comma,separated,tags"
+								onblur={fetchRelatedNotes}
+							/>
+						</div>
+
+						<div class="sidebar-section">
+							<h3>AI Actions</h3>
+							<div class="ai-actions">
+								<button class="secondary" onclick={runExtract} disabled={isBusy || !note}
+									>✨ Extract from paste</button
+								>
+								<button class="secondary" onclick={runSummarise} disabled={isBusy || !note}
+									>✨ Summarise</button
+								>
+								<button class="secondary" onclick={runAskAI} disabled={isBusy || !note}
+									>✨ Ask AI about this note</button
+								>
+							</div>
+						</div>
+
+						<div class="sidebar-section">
+							<h3>Related Notes</h3>
+							{#if relatedNotes.length > 0}
+								<ul class="related-list">
+									{#each relatedNotes as rel, i (rel.id + '_' + i)}
+										<li><a href="/notes/{encodeURIComponent(rel.id)}">{rel.title}</a></li>
+									{/each}
+								</ul>
 							{:else}
-								{#each chatMessages as msg, i}
-									<div class="chat-message {msg.role}">
-										<div class="chat-bubble" class:error={msg.error}>
-											{#if msg.tools && msg.tools.length > 0}
-												<div class="chat-tools" class:streaming={msg.isStreaming}>
-													{#each msg.tools as tool}
-														<div class="chat-tool-indicator">
-															<span class="tool-icon">⚡</span>
-															<span class="tool-name">{tool.name}</span>
-															{#if tool.details}
-																<span class="tool-details">{tool.details.substring(0, 30)}{tool.details.length > 30 ? '...' : ''}</span>
-															{/if}
-														</div>
-													{/each}
-												</div>
-											{/if}
-											{#if msg.error}
-												<span class="chat-error-text">{msg.content || 'Failed to generate response.'}</span>
-											{:else if msg.content}
-												{@html msg.content}
-											{:else if msg.isStreaming && (!msg.tools || msg.tools.length === 0)}
-												<span class="loading-dots"></span>
-											{/if}
-										</div>
-										{#if msg.role === 'user' && msg.snapshotId && snapshots.has(msg.snapshotId)}
-											<div class="chat-msg-actions">
-												<button class="rewind-btn" onclick={() => rewindToSnapshot(msg.snapshotId!, msg.content)} title="Undo — restore note and put prompt back in input">↩</button>
-												<button class="rewind-btn retry" onclick={() => retryMessage(msg.snapshotId!, msg.content)} title="Retry — rewind and resend this prompt">↻</button>
-											</div>
-										{/if}
-									</div>
-								{/each}
+								<p class="empty-state">No related notes found.</p>
 							{/if}
 						</div>
-						<div class="chat-input-area">
-							<textarea 
-								bind:this={chatTextareaEl}
-								bind:value={chatInput}  
-								onkeydown={(e) => {
-									if (e.key === 'Enter' && !e.shiftKey) {
-										e.preventDefault();
-										if (chatInput.trim()) sendChatMessage();
-									}
-								}} 
-								oninput={(e) => {
-									const target = e.target as HTMLTextAreaElement;
-									target.style.height = 'auto';
-									target.style.height = `${Math.min(target.scrollHeight, 200)}px`;
-								}}
-								placeholder="Ask AI..." 
-								rows="1"
-							></textarea>
-						</div>
-					</div>
 
-				{:else if activeSidebarTab === 'versions'}
-					<div class="versions-container">
-						{#if isBusy && noteHistory.length === 0}
-							<p class="empty-state">Loading history...</p>
-						{:else if noteHistory.length === 0}
-							<p class="empty-state">No history found.</p>
-						{:else}
-							<ul class="history-list">
-								{#each noteHistory as commit (commit.hash)}
-									<li>
-										<div class="commit-header">
-											<strong>{commit.message}</strong>
-											<span class="commit-date">{new Date(commit.timestamp).toLocaleString()}</span>
+						<div class="sidebar-section">
+							<h3>Backlinks</h3>
+							{#if note && note.backlinks && note.backlinks.length > 0}
+								<ul class="related-list">
+									{#each note.backlinks as link, i (link.sourceId + '_' + (link.targetBlock || '') + '_' + i)}
+										<li>
+											<a href="/notes/{encodeURIComponent(link.sourceId)}">
+												<strong>{link.sourceTitle}</strong>
+												{#if link.targetBlock}
+													<span style="opacity: 0.7; font-size: 0.8em;">#{link.targetBlock}</span>
+												{/if}
+											</a>
+											<p
+												class="context-excerpt"
+												style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.4;"
+											>
+												{@html parseBacklinkContext(link.contextExcerpt)}
+											</p>
+										</li>
+									{/each}
+								</ul>
+							{:else}
+								<p class="empty-state">No backlinks yet.</p>
+							{/if}
+						</div>
+					{:else if activeSidebarTab === 'chat'}
+						<div class="chat-container">
+							<div class="chat-messages" bind:this={chatMessagesEl}>
+								{#if chatMessages.length === 0}
+									<p class="empty-state">Ask me anything about this note or your library!</p>
+								{:else}
+									{#each chatMessages as msg, i}
+										<div class="chat-message {msg.role}">
+											<div class="chat-bubble" class:error={msg.error}>
+												{#if msg.tools && msg.tools.length > 0}
+													<div class="chat-tools" class:streaming={msg.isStreaming}>
+														{#each msg.tools as tool}
+															<div class="chat-tool-indicator">
+																<span class="tool-icon">⚡</span>
+																<span class="tool-name">{tool.name}</span>
+																{#if tool.details}
+																	<span class="tool-details"
+																		>{tool.details.substring(0, 30)}{tool.details.length > 30
+																			? '...'
+																			: ''}</span
+																	>
+																{/if}
+															</div>
+														{/each}
+													</div>
+												{/if}
+												{#if msg.error}
+													<span class="chat-error-text"
+														>{msg.content || 'Failed to generate response.'}</span
+													>
+												{:else if msg.content}
+													{@html msg.content}
+												{:else if msg.isStreaming && (!msg.tools || msg.tools.length === 0)}
+													<span class="loading-dots"></span>
+												{/if}
+											</div>
+											{#if msg.role === 'user' && msg.snapshotId && snapshots.has(msg.snapshotId)}
+												<div class="chat-msg-actions">
+													<button
+														class="rewind-btn"
+														onclick={() => rewindToSnapshot(msg.snapshotId!, msg.content)}
+														title="Undo — restore note and put prompt back in input">↩</button
+													>
+													<button
+														class="rewind-btn retry"
+														onclick={() => retryMessage(msg.snapshotId!, msg.content)}
+														title="Retry — rewind and resend this prompt">↻</button
+													>
+												</div>
+											{/if}
 										</div>
-										<div class="commit-actions">
-											<button class="secondary" onclick={() => previewVersion(commit.hash)}>Preview</button>
-											<button class="secondary" onclick={() => restoreVersion(commit.hash)}>Restore</button>
-										</div>
-									</li>
-								{/each}
-							</ul>
-						{/if}
-					</div>
-				{/if}
-			</div>
-		</aside>
+									{/each}
+								{/if}
+							</div>
+							<div class="chat-input-area">
+								<textarea
+									bind:this={chatTextareaEl}
+									bind:value={chatInput}
+									onkeydown={(e) => {
+										if (e.key === 'Enter' && !e.shiftKey) {
+											e.preventDefault();
+											if (chatInput.trim()) sendChatMessage();
+										}
+									}}
+									oninput={(e) => {
+										const target = e.target as HTMLTextAreaElement;
+										target.style.height = 'auto';
+										target.style.height = `${Math.min(target.scrollHeight, 200)}px`;
+									}}
+									placeholder="Ask AI..."
+									rows="1"
+								></textarea>
+							</div>
+						</div>
+					{:else if activeSidebarTab === 'versions'}
+						<div class="versions-container">
+							{#if isBusy && noteHistory.length === 0}
+								<p class="empty-state">Loading history...</p>
+							{:else if noteHistory.length === 0}
+								<p class="empty-state">No history found.</p>
+							{:else}
+								<ul class="history-list">
+									{#each noteHistory as commit (commit.hash)}
+										<li>
+											<div class="commit-header">
+												<strong>{commit.message}</strong>
+												<span class="commit-date"
+													>{new Date(commit.timestamp).toLocaleString()}</span
+												>
+											</div>
+											<div class="commit-actions">
+												<button class="secondary" onclick={() => previewVersion(commit.hash)}
+													>Preview</button
+												>
+												<button class="secondary" onclick={() => restoreVersion(commit.hash)}
+													>Restore</button
+												>
+											</div>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						</div>
+					{/if}
+				</div>
+			</aside>
 		{/if}
 	</div>
 </div>
 
-<dialog bind:this={versionPreviewDialog} class="version-preview-dialog" onclose={() => versionPreviewContent = null}>
+<dialog
+	bind:this={versionPreviewDialog}
+	class="version-preview-dialog"
+	onclose={() => (versionPreviewContent = null)}
+>
 	<div class="dialog-content" style="max-width: 800px; width: 90vw;">
 		<h3>Version Preview</h3>
-		<div class="preview-content" style="max-height: 60vh; overflow-y: auto; background: var(--bg-page); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-default); white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.875rem; margin: 1rem 0;">
+		<div
+			class="preview-content"
+			style="max-height: 60vh; overflow-y: auto; background: var(--bg-page); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-default); white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.875rem; margin: 1rem 0;"
+		>
 			{versionPreviewContent || 'Loading...'}
 		</div>
 		<div class="dialog-actions">
 			<button class="secondary" onclick={() => versionPreviewDialog?.close()}>Close</button>
 			{#if versionPreviewHash}
-				<button class="primary" onclick={() => restoreVersion(versionPreviewHash!)}>Restore This Version</button>
+				<button class="primary" onclick={() => restoreVersion(versionPreviewHash!)}
+					>Restore This Version</button
+				>
 			{/if}
 		</div>
 	</div>
 </dialog>
 
-<dialog bind:this={mathDialog} class="math-dialog" onclose={() => mathValue = ''}>
+<dialog bind:this={mathDialog} class="math-dialog" onclose={() => (mathValue = '')}>
 	<div class="dialog-content">
 		<h3>Insert Math</h3>
 		<div class="math-container">
 			<svelte:element
-				this={"math-field"}
+				this={'math-field'}
 				oninput={(e: any) => (mathValue = e.target.value)}
 				style="width: 100%; font-size: 1.5rem; padding: 0.5rem; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-xs);"
-			>{mathValue}</svelte:element>
+				>{mathValue}</svelte:element
+			>
 		</div>
 		<div class="dialog-actions">
 			<button class="secondary" onclick={() => mathDialog?.close()}>Cancel</button>
@@ -1927,45 +2206,85 @@
 	</div>
 </dialog>
 
-<dialog bind:this={linkNoteDialog} class="link-dialog" onkeydown={handleLinkSearchKeydown} onclose={() => { linkSearchQuery = ''; linkSearchResults = []; linkSelectedIndex = 0; linkDialogMode = 'notes'; if (shouldRefocusEditor) refocusEditorSoon(); }}>
+<dialog
+	bind:this={linkNoteDialog}
+	class="link-dialog"
+	onkeydown={handleLinkSearchKeydown}
+	onclose={() => {
+		linkSearchQuery = '';
+		linkSearchResults = [];
+		linkSelectedIndex = 0;
+		linkDialogMode = 'notes';
+		if (shouldRefocusEditor) refocusEditorSoon();
+	}}
+>
 	<div class="dialog-content">
 		{#if linkDialogMode === 'notes'}
 			<h3>Link to Note</h3>
-			<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search and select a note to link your highlighted text to.</p>
-			
-			<input class="link-search-input" bind:value={linkSearchQuery} oninput={() => linkSelectedIndex = 0} use:autofocus placeholder="Search notes..." />
-			
+			<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">
+				Search and select a note to link your highlighted text to.
+			</p>
+
+			<input
+				class="link-search-input"
+				bind:value={linkSearchQuery}
+				oninput={() => (linkSelectedIndex = 0)}
+				use:autofocus
+				placeholder="Search notes..."
+			/>
+
 			{#if linkSearchQuery.trim() || linkSearchResults.length > 0}
-			<div class="link-results-container">
-				{#if linkSearchResults.length > 0}
-					<ul class="link-results-list">
-						{#each linkSearchResults as res, i (res.id + '_' + i)}
-							<li>
-								<button class="link-result-btn" class:selected={i === linkSelectedIndex} onclick={() => selectNoteForBlocks(res)}>
-									<strong>{res.title}</strong>
-									<span class="folder-badge">{res.folder}</span>
-								</button>
-							</li>
-						{/each}
-					</ul>
-				{:else if linkSearchQuery.trim()}
-					<p class="empty-state">No notes found matching your search.</p>
-				{/if}
-			</div>
+				<div class="link-results-container">
+					{#if linkSearchResults.length > 0}
+						<ul class="link-results-list">
+							{#each linkSearchResults as res, i (res.id + '_' + i)}
+								<li>
+									<button
+										class="link-result-btn"
+										class:selected={i === linkSelectedIndex}
+										onclick={() => selectNoteForBlocks(res)}
+									>
+										<strong>{res.title}</strong>
+										<span class="folder-badge">{res.folder}</span>
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{:else if linkSearchQuery.trim()}
+						<p class="empty-state">No notes found matching your search.</p>
+					{/if}
+				</div>
 			{/if}
 		{:else}
 			<h3>Select Block to Reference</h3>
-			<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Select a specific block from <strong>{selectedNoteForBlocks?.title}</strong> or link the entire note.</p>
-			
-			<input class="link-search-input" bind:value={linkSearchQuery} oninput={() => linkSelectedIndex = 0} use:autofocus placeholder="Search blocks..." />
-			
+			<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">
+				Select a specific block from <strong>{selectedNoteForBlocks?.title}</strong> or link the entire
+				note.
+			</p>
+
+			<input
+				class="link-search-input"
+				bind:value={linkSearchQuery}
+				oninput={() => (linkSelectedIndex = 0)}
+				use:autofocus
+				placeholder="Search blocks..."
+			/>
+
 			<div class="link-results-container">
 				{#if filteredBlocks.length > 0}
 					<ul class="link-results-list">
 						{#each filteredBlocks as block, i}
 							<li>
-								<button class="link-result-btn" class:selected={i === linkSelectedIndex} onclick={() => insertBlockLink(block)}>
-									<span style={block.isFullNote ? 'font-weight: bold;' : 'font-size: 0.9em; opacity: 0.9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;'}>
+								<button
+									class="link-result-btn"
+									class:selected={i === linkSelectedIndex}
+									onclick={() => insertBlockLink(block)}
+								>
+									<span
+										style={block.isFullNote
+											? 'font-weight: bold;'
+											: 'font-size: 0.9em; opacity: 0.9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;'}
+									>
 										{block.text}
 									</span>
 								</button>
@@ -1977,34 +2296,67 @@
 				{/if}
 			</div>
 		{/if}
-		
+
 		<div class="dialog-actions">
 			{#if linkDialogMode === 'blocks'}
-				<button class="secondary" style="margin-right: auto;" onclick={() => { linkDialogMode = 'notes'; linkSearchQuery = ''; linkSelectedIndex = 0; }}>Back</button>
+				<button
+					class="secondary"
+					style="margin-right: auto;"
+					onclick={() => {
+						linkDialogMode = 'notes';
+						linkSearchQuery = '';
+						linkSelectedIndex = 0;
+					}}>Back</button
+				>
 			{/if}
 			<button class="secondary" onclick={() => linkNoteDialog?.close()}>Cancel</button>
 		</div>
 	</div>
 </dialog>
 
-<dialog bind:this={globalSearchDialog} class="link-dialog" onkeydown={handleGlobalSearchKeydown} onclose={() => { globalSearchQuery = ''; globalSelectedIndex = 0; globalBlocks = []; if (shouldRefocusEditor) refocusEditorSoon(); }}>
+<dialog
+	bind:this={globalSearchDialog}
+	class="link-dialog"
+	onkeydown={handleGlobalSearchKeydown}
+	onclose={() => {
+		globalSearchQuery = '';
+		globalSelectedIndex = 0;
+		globalBlocks = [];
+		if (shouldRefocusEditor) refocusEditorSoon();
+	}}
+>
 	<div class="dialog-content">
 		<h3>Search Global Blocks</h3>
-		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search blocks across all notes.</p>
-		
-		<input class="link-search-input" bind:value={globalSearchQuery} oninput={() => globalSelectedIndex = 0} placeholder="Search global blocks..." />
-		
+		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">
+			Search blocks across all notes.
+		</p>
+
+		<input
+			class="link-search-input"
+			bind:value={globalSearchQuery}
+			oninput={() => (globalSelectedIndex = 0)}
+			placeholder="Search global blocks..."
+		/>
+
 		<div class="link-results-container">
 			{#if filteredGlobalBlocks.length > 0}
 				<ul class="link-results-list">
 					{#each filteredGlobalBlocks as block, i}
 						<li>
-							<button class="link-result-btn" class:selected={i === globalSelectedIndex} onclick={() => insertGlobalBlockLink(block)}>
+							<button
+								class="link-result-btn"
+								class:selected={i === globalSelectedIndex}
+								onclick={() => insertGlobalBlockLink(block)}
+							>
 								<div>
-									<span style="font-size: 0.9em; opacity: 0.9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: left;">
+									<span
+										style="font-size: 0.9em; opacity: 0.9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: left;"
+									>
 										{block.text}
 									</span>
-									<span style="font-size: 0.7em; opacity: 0.6; display: block; margin-top: 2px; text-align: left;">
+									<span
+										style="font-size: 0.7em; opacity: 0.6; display: block; margin-top: 2px; text-align: left;"
+									>
 										From: {block.sourceNoteTitle}
 									</span>
 								</div>
@@ -2013,17 +2365,25 @@
 					{/each}
 				</ul>
 			{:else}
-				<p class="empty-state">{globalBlocks.length > 0 ? "No matching blocks found." : "Loading blocks..."}</p>
+				<p class="empty-state">
+					{globalBlocks.length > 0 ? 'No matching blocks found.' : 'Loading blocks...'}
+				</p>
 			{/if}
 		</div>
-		
+
 		<div class="dialog-actions">
 			<button class="secondary" onclick={() => globalSearchDialog?.close()}>Cancel</button>
 		</div>
 	</div>
 </dialog>
 
-<dialog bind:this={previewNoteDialog} class="preview-dialog" onclose={() => { previewNoteTarget = null; }}>
+<dialog
+	bind:this={previewNoteDialog}
+	class="preview-dialog"
+	onclose={() => {
+		previewNoteTarget = null;
+	}}
+>
 	{#if previewNoteTarget}
 		<div class="preview-layout">
 			<div class="preview-main">
@@ -2036,15 +2396,41 @@
 					</div>
 				</div>
 				<div class="preview-content-scroll">
-					<div bind:this={previewNoteContainer} class="vditor-reset" style="padding: 2rem; min-height: 100%;"></div>
+					<div
+						bind:this={previewNoteContainer}
+						class="vditor-reset"
+						style="padding: 2rem; min-height: 100%;"
+					></div>
 				</div>
 			</div>
 			<div class="preview-sidebar">
 				<button class="icon-btn" onclick={() => previewNoteDialog?.close()} title="Close Preview">
-					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+					<svg
+						viewBox="0 0 24 24"
+						width="24"
+						height="24"
+						stroke="currentColor"
+						stroke-width="2"
+						fill="none"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"
+						></line></svg
+					>
 				</button>
 				<button class="icon-btn" onclick={expandPreviewNoteDirect} title="Expand Note">
-					<svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"></path><path d="M9 21H3v-6"></path><path d="M21 3l-7 7"></path><path d="M3 21l7-7"></path></svg>
+					<svg
+						viewBox="0 0 24 24"
+						width="24"
+						height="24"
+						stroke="currentColor"
+						stroke-width="2"
+						fill="none"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						><path d="M15 3h6v6"></path><path d="M9 21H3v-6"></path><path d="M21 3l-7 7"
+						></path><path d="M3 21l7-7"></path></svg
+					>
 				</button>
 			</div>
 		</div>
@@ -2064,15 +2450,42 @@
 	</div>
 </dialog>
 
-<dialog bind:this={deleteAttachedNoteDialog} class="dialog math-dialog" onclose={cancelDeleteAttachedNote}>
+<dialog
+	bind:this={deleteAttachedNoteDialog}
+	class="dialog math-dialog"
+	onclose={cancelDeleteAttachedNote}
+>
 	<div class="dialog-content">
 		<h3 style="margin-top: 0;">Delete Attached Note</h3>
 		<p style="color: var(--text-secondary); margin-bottom: var(--space-6);">
-			All data in this attached note will be deleted permanently, and the note pane will be closed.
+			All data and annotations in this attached note will be deleted permanently, and the note pane
+			will be closed.
 		</p>
 		<div class="dialog-actions">
 			<button class="secondary" onclick={cancelDeleteAttachedNote}>Cancel</button>
-			<button class="danger" onclick={confirmDeleteAttachedNote} disabled={isBusy}>Delete Note</button>
+			<button class="danger" onclick={confirmDeleteAttachedNote} disabled={isBusy}
+				>Delete Note</button
+			>
+		</div>
+	</div>
+</dialog>
+
+<dialog bind:this={deleteMainNoteDialog} class="dialog math-dialog">
+	<div class="dialog-content">
+		<h3 style="margin-top: 0;">Delete Note</h3>
+		<p style="color: var(--text-secondary); margin-bottom: var(--space-6);">
+			This note will be permanently deleted. This action cannot be undone.
+		</p>
+		<div class="dialog-actions">
+			<button class="secondary" onclick={() => deleteMainNoteDialog?.close()}>Cancel</button>
+			<button
+				class="danger"
+				onclick={() => {
+					deleteMainNoteDialog?.close();
+					deleteNote();
+				}}
+				disabled={isBusy}>Delete Note</button
+			>
 		</div>
 	</div>
 </dialog>
@@ -2090,35 +2503,75 @@
 	</div>
 </dialog>
 
-<dialog bind:this={attachPdfDialog} class="link-dialog" onkeydown={handlePdfSearchKeydown} onclose={() => { pdfSearchQuery = ''; pdfSelectedIndex = 0; }}>
+<dialog
+	bind:this={attachPdfDialog}
+	class="pdf-attach-dialog"
+	onclose={() => {
+		pdfSearchQuery = '';
+		pdfSelectedIndex = 0;
+	}}
+>
 	<div class="dialog-content">
-		<h3>Attach PDF</h3>
-		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search and select a PDF from your library to display alongside this note.</p>
-		<input class="link-search-input" bind:value={pdfSearchQuery} oninput={() => pdfSelectedIndex = 0} placeholder="Search PDFs..." />
-		<div class="link-results-container">
-			{#if filteredPdfs.length > 0}
-				<ul class="link-results-list">
-					{#each filteredPdfs as pdf, i (pdf.id)}
-						<li>
-							<button class="link-result-btn" class:selected={i === pdfSelectedIndex} onclick={() => attachPdf(pdf)}>
-								<svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-								<strong>{pdf.title}</strong>
-								<span class="folder-badge">{pdf.relativePath.split('/').slice(0, -1).join('/') || 'Root'}</span>
-							</button>
-						</li>
-					{/each}
-				</ul>
-			{:else if isBusy}
-				<p class="empty-state">Loading PDFs...</p>
-			{:else}
-				<p class="empty-state">No PDFs found in your workspace.</p>
-			{/if}
+		<h3>Attach a file</h3>
+		<p class="dialog-subtitle">Select a PDF from your workspace or upload a new one.</p>
+
+		<input
+			class="link-search-input"
+			bind:value={pdfSearchQuery}
+			oninput={() => (pdfSelectedIndex = 0)}
+			placeholder="Search PDFs..."
+		/>
+
+		<div class="pdf-grid-container">
+			<button class="pdf-grid-upload-card" onclick={browseAndAttachPdf} disabled={isBusy}>
+				<div class="upload-icon-wrapper">
+					<svg
+						viewBox="0 0 24 24"
+						width="32"
+						height="32"
+						stroke="currentColor"
+						stroke-width="1.5"
+						fill="none"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline
+							points="17 8 12 3 7 8"
+						></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg
+					>
+				</div>
+				<span class="upload-text">Upload new file</span>
+				<span class="upload-subtext">Choose a PDF from your computer</span>
+			</button>
+
+			{#each filteredPdfs as pdf, i (pdf.id)}
+				<button class="pdf-grid-card" onclick={() => attachPdf(pdf)}>
+					<div class="pdf-card-icon">
+						<svg
+							viewBox="0 0 24 24"
+							width="24"
+							height="24"
+							stroke="var(--accent-300)"
+							stroke-width="1.5"
+							fill="none"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline
+								points="14 2 14 8 20 8"
+							></polyline></svg
+						>
+					</div>
+					<div class="pdf-card-info">
+						<strong>{pdf.title}</strong>
+						<span>{new Date(pdf.createdAt).toLocaleDateString()}</span>
+					</div>
+				</button>
+			{/each}
 		</div>
+
 		<div class="dialog-actions">
-				<button class="secondary" onclick={browseAndAttachPdf} disabled={isBusy}>Browse Files...</button>
-				<button class="secondary" onclick={() => attachPdfDialog?.close()}>Cancel</button>
-			</div>
+			<button class="secondary" onclick={() => attachPdfDialog?.close()}>Cancel</button>
 		</div>
+	</div>
 </dialog>
 
 <style>
@@ -2192,7 +2645,8 @@
 		flex: 1;
 		max-width: 30rem;
 	}
-	.title-input:hover, .title-input:focus {
+	.title-input:hover,
+	.title-input:focus {
 		border-color: var(--border-subtle);
 		background: var(--bg-panel);
 	}
@@ -2226,9 +2680,14 @@
 	}
 
 	@keyframes spin {
-		100% { transform: rotate(360deg); }
+		100% {
+			transform: rotate(360deg);
+		}
 	}
-	button:disabled { opacity: 0.6; cursor: not-allowed; }
+	button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
 
 	.main-layout {
 		min-height: 0;
@@ -2247,29 +2706,27 @@
 		flex: 0 0 10px;
 		cursor: col-resize;
 		position: relative;
-		background:
-			linear-gradient(
-				90deg,
-				transparent 0,
-				transparent 3px,
-				var(--border-subtle) 3px,
-				var(--border-subtle) 7px,
-				transparent 7px
-			);
+		background: linear-gradient(
+			90deg,
+			transparent 0,
+			transparent 3px,
+			var(--border-subtle) 3px,
+			var(--border-subtle) 7px,
+			transparent 7px
+		);
 		transition: background 0.2s ease;
 	}
 
 	.resizer:hover,
 	.resizer.resizing {
-		background:
-			linear-gradient(
-				90deg,
-				transparent 0,
-				transparent 2px,
-				var(--accent-100) 2px,
-				var(--accent-100) 8px,
-				transparent 8px
-			);
+		background: linear-gradient(
+			90deg,
+			transparent 0,
+			transparent 2px,
+			var(--accent-100) 2px,
+			var(--accent-100) 8px,
+			transparent 8px
+		);
 	}
 
 	.sidebar-backdrop {
@@ -2302,15 +2759,11 @@
 
 	.content-area {
 		width: 100%;
-		flex: 1;
 		display: flex;
 		flex-direction: column;
-		min-height: 0;
 	}
 
 	.vditor-wrapper {
-		flex: 1;
-		min-height: 0;
 		border: none !important;
 	}
 
@@ -2318,35 +2771,23 @@
 		padding-top: var(--space-6) !important;
 	}
 
-	.toolbar-overlay-toggle-container {
+	.toolbar-note-actions-container {
 		position: absolute;
 		top: 0;
-		right: 0;
+		right: var(--space-6);
 		height: 48px;
-		padding-right: var(--space-4);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		/* Above the vditor toolbar (30) but below the sidebar (100) and its backdrop (90) */
-		z-index: 40;
-	}
-
-	.toolbar-close-note-container {
-		position: absolute;
-		top: 6px;
-		height: 32px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		/* Above the vditor toolbar (30) but below the sidebar (100) and its backdrop (90) */
+		gap: var(--space-2);
 		z-index: 40;
 	}
 
 	.toolbar-close-note-btn {
 		pointer-events: auto;
-		border: 1px solid rgba(239, 68, 68, 0.35);
-		background: rgba(239, 68, 68, 0.12);
-		color: #fecaca;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-panel);
+		color: currentColor;
 		border-radius: var(--radius-sm);
 		padding: 0.4rem 0.75rem;
 		height: 32px;
@@ -2360,7 +2801,6 @@
 		background: rgba(239, 68, 68, 0.18);
 		color: #fee2e2;
 	}
-
 
 	.toolbar-attach-pdf-btn {
 		pointer-events: auto;
@@ -2387,14 +2827,14 @@
 	}
 
 	.toolbar-overlay-toggle {
-		width: 26px;
-		height: 26px;
+		width: 28px;
+		height: 28px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		background: transparent;
-		border: none;
-		border-radius: var(--radius-xs);
+		background: var(--bg-surface);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
 		color: var(--text-secondary);
 		cursor: pointer;
 		transition: all 0.2s;
@@ -2495,21 +2935,21 @@
 	}
 
 	@media (min-width: 1200px) {
-		:global(.vditor-content:has(.vditor-sv[style*="block"])) {
+		:global(.vditor-content:has(.vditor-sv[style*='block'])) {
 			flex-direction: row !important;
 			align-items: stretch !important;
 			justify-content: center !important;
 			gap: 0 !important;
 			padding: 0 !important;
 		}
-		
-		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-ir),
-		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-sv),
-		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-preview) {
+
+		:global(.vditor-content:has(.vditor-sv[style*='block']) .vditor-ir),
+		:global(.vditor-content:has(.vditor-sv[style*='block']) .vditor-sv),
+		:global(.vditor-content:has(.vditor-sv[style*='block']) .vditor-preview) {
 			margin: 0 !important;
 		}
 
-		:global(.vditor-content:has(.vditor-sv[style*="block"]) .vditor-reset) {
+		:global(.vditor-content:has(.vditor-sv[style*='block']) .vditor-reset) {
 			padding-left: var(--space-6) !important;
 			padding-right: var(--space-6) !important;
 		}
@@ -2519,26 +2959,24 @@
 	:global(.vditor-textarea) {
 		font-family: var(--font-mono) !important;
 	}
-	
+
 	:global(.vditor-ir),
 	:global(.vditor-reset) {
 		color: var(--text-primary) !important;
 	}
-	
+
 	:global(.vditor-toolbar) {
 		border-bottom: 1px solid var(--border-subtle) !important;
 		padding: var(--space-2) var(--space-4) !important;
-		padding-right: 48px !important;
+		padding-right: 120px !important;
 		transition: max-height 0.2s ease-out;
 		position: relative !important;
 		z-index: 30 !important;
 	}
 
 	:global(.vditor-wrapper.has-pdf-note .vditor-toolbar) {
-		padding-right: 160px !important;
+		padding-right: 120px !important;
 	}
-
-
 
 	/* Sidebar (Mobile / Overlay mode by default) */
 	.sidebar {
@@ -2556,7 +2994,9 @@
 		overflow-y: auto;
 		z-index: 100;
 		transform: translateX(100%);
-		transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+		transition:
+			transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+			margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 		border-left: 1px solid var(--border-default);
 		border-radius: 0 !important;
 		box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
@@ -2608,7 +3048,8 @@
 		z-index: 1000;
 		transition: background 0.2s ease;
 	}
-	.sidebar-resizer:hover, .sidebar-resizer.resizing {
+	.sidebar-resizer:hover,
+	.sidebar-resizer.resizing {
 		background: var(--accent-100);
 	}
 
@@ -2623,7 +3064,19 @@
 		font-size: 0.75rem;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: var(--text-secondary);
+		color: var(--text-primary);
+	}
+
+	.row-badge {
+		border: 1px solid var(--border-default);
+		border-radius: 4px;
+		padding: 2px 6px;
+		font-size: 0.65rem;
+		color: var(--neutral-400);
+		font-family: var(--font-mono);
+		background: rgba(255, 255, 255, 0.02);
+		flex-shrink: 0;
+		white-space: nowrap;
 	}
 
 	.tag-input {
@@ -2635,14 +3088,16 @@
 		color: var(--text-primary);
 		outline: none;
 	}
-	.tag-input:focus { border-color: var(--accent-200); }
+	.tag-input:focus {
+		border-color: var(--accent-200);
+	}
 
 	.ai-actions {
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
 	}
-	
+
 	.ai-actions button {
 		text-align: left;
 		background: var(--bg-page);
@@ -2690,19 +3145,27 @@
 	}
 
 	@keyframes fade-in {
-		from { opacity: 0; transform: translateY(8px); }
-		to { opacity: 1; transform: translateY(0); }
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	@media (max-width: 1024px) {
-		.editor-header { 
-			flex-wrap: wrap; 
-			gap: var(--space-4); 
+		.editor-header {
+			flex-wrap: wrap;
+			gap: var(--space-4);
 			position: sticky;
 			top: 0;
 			z-index: 10;
 		}
-		.title-input { max-width: 100%; }
+		.title-input {
+			max-width: 100%;
+		}
 	}
 
 	.math-dialog {
@@ -2752,7 +3215,7 @@
 		color: var(--text-inverse);
 		border-color: var(--accent-200);
 	}
-	
+
 	.link-dialog {
 		padding: 0;
 		border: 1px solid var(--border-default);
@@ -2782,8 +3245,10 @@
 		margin-bottom: var(--space-4);
 		transition: border-color 0.2s;
 	}
-	.link-search-input:focus { border-color: var(--accent-200); }
-	
+	.link-search-input:focus {
+		border-color: var(--accent-200);
+	}
+
 	.link-results-container {
 		max-height: 300px;
 		overflow-y: auto;
@@ -2792,7 +3257,7 @@
 		background: var(--bg-panel);
 		padding: var(--space-2);
 	}
-	
+
 	.link-results-list {
 		list-style: none;
 		margin: 0;
@@ -2801,7 +3266,7 @@
 		flex-direction: column;
 		gap: 2px;
 	}
-	
+
 	.link-result-btn {
 		width: 100%;
 		display: flex;
@@ -2820,7 +3285,7 @@
 	.link-result-btn.selected {
 		background: rgba(238, 96, 24, 0.12);
 	}
-	
+
 	.folder-badge {
 		font-size: 0.7rem;
 		color: var(--text-secondary);
@@ -2828,6 +3293,143 @@
 		padding: 0.125rem 0.375rem;
 		border-radius: 1rem;
 		border: 1px solid var(--border-subtle);
+	}
+
+	:global(.has-attached-file [data-type='attach-pdf']) {
+		opacity: 0.3 !important;
+		pointer-events: none !important;
+		cursor: not-allowed !important;
+	}
+
+	.pdf-attach-dialog {
+		width: 100%;
+		max-width: 800px;
+		background: var(--bg-modal);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-md);
+		color: var(--text-primary);
+		box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+	}
+	.pdf-attach-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.6);
+		backdrop-filter: blur(2px);
+	}
+	.pdf-attach-dialog .dialog-content {
+		padding: var(--space-6);
+	}
+	.pdf-attach-dialog h3 {
+		margin-top: 0;
+		font-size: 1.25rem;
+		font-weight: 500;
+	}
+	.dialog-subtitle {
+		font-size: 0.875rem;
+		color: var(--text-secondary);
+		margin-bottom: var(--space-4);
+	}
+
+	.pdf-grid-container {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+		gap: 16px;
+		margin-top: 12px;
+		margin-bottom: 24px;
+		max-height: 400px;
+		overflow-y: auto;
+		padding: 4px;
+		padding-right: 8px;
+	}
+
+	.pdf-grid-container::-webkit-scrollbar {
+		width: 6px;
+	}
+	.pdf-grid-container::-webkit-scrollbar-thumb {
+		background: var(--border-default);
+		border-radius: 4px;
+	}
+
+	.pdf-grid-upload-card {
+		background: rgba(255, 255, 255, 0.02);
+		border: 1px dashed var(--border-default);
+		border-radius: var(--radius-sm);
+		padding: 24px 16px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		color: var(--text-primary);
+		text-align: center;
+		font-family: inherit;
+	}
+	.pdf-grid-upload-card:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.05);
+		border-color: var(--accent-300);
+	}
+	.pdf-grid-upload-card:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.upload-icon-wrapper {
+		color: var(--accent-300);
+		margin-bottom: 4px;
+	}
+	.upload-text {
+		font-weight: 500;
+		font-size: 0.95rem;
+	}
+	.upload-subtext {
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+	}
+
+	.pdf-grid-card {
+		background: rgba(255, 255, 255, 0.03);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		padding: 16px;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 12px;
+		cursor: pointer;
+		transition: all 0.2s ease;
+		text-align: left;
+		font-family: inherit;
+		color: inherit;
+	}
+	.pdf-grid-card:hover {
+		background: rgba(255, 255, 255, 0.06);
+		border-color: var(--border-default);
+		transform: translateY(-2px);
+	}
+	.pdf-card-icon {
+		background: rgba(0, 0, 0, 0.2);
+		padding: 12px;
+		border-radius: 8px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.pdf-card-info {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		width: 100%;
+	}
+	.pdf-card-info strong {
+		font-size: 0.9rem;
+		font-weight: 500;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		width: 100%;
+	}
+	.pdf-card-info span {
+		font-size: 0.75rem;
+		color: var(--text-secondary);
 	}
 
 	.preview-dialog {
@@ -2860,7 +3462,7 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-		box-shadow: 0 12px 48px rgba(0,0,0,0.5);
+		box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
 	}
 	.preview-header {
 		padding: var(--space-6) var(--space-8);
@@ -2909,20 +3511,33 @@
 		background: var(--neutral-600);
 		color: var(--text-inverse);
 	}
-	
+
 	/* Base State (Collapsed): Hide the link text completely to make the transclusion look seamless */
-	:global(.transclusion-wrapper[data-block-content]:not([data-block-content=""]):not(.vditor-ir__node--expand):not(.force-expand) .vditor-ir__link) {
+	:global(
+		.transclusion-wrapper[data-block-content]:not([data-block-content='']):not(
+				.vditor-ir__node--expand
+			):not(.force-expand)
+			.vditor-ir__link
+	) {
 		display: none !important;
 	}
 	/* Strip the wrapper pill background when collapsed because we only want the ::after to show */
-	:global(.transclusion-wrapper[data-block-content]:not([data-block-content=""]):not(.vditor-ir__node--expand):not(.force-expand)) {
+	:global(
+		.transclusion-wrapper[data-block-content]:not([data-block-content='']):not(
+				.vditor-ir__node--expand
+			):not(.force-expand)
+	) {
 		padding: 0 !important;
 		background: transparent !important;
 		border: none !important;
 		display: block !important;
 	}
 	/* Ensure the ::after preview has no top margin since there's no text above it */
-	:global(.transclusion-wrapper[data-block-content]:not([data-block-content=""]):not(.vditor-ir__node--expand):not(.force-expand)::after) {
+	:global(
+		.transclusion-wrapper[data-block-content]:not([data-block-content='']):not(
+				.vditor-ir__node--expand
+			):not(.force-expand)::after
+	) {
 		margin-top: 0 !important;
 	}
 
@@ -2967,13 +3582,13 @@
 	}
 
 	/* Prevent Vditor from "truncating" (hiding) link markers ONLY when actively selected or edited */
-	:global(.vditor-ir__node[data-type="a"].force-expand .vditor-ir__marker),
-	:global(.vditor-ir__node[data-type="a"].vditor-ir__node--expand .vditor-ir__marker) {
+	:global(.vditor-ir__node[data-type='a'].force-expand .vditor-ir__marker),
+	:global(.vditor-ir__node[data-type='a'].vditor-ir__node--expand .vditor-ir__marker) {
 		display: inline !important;
 		opacity: 0.6;
 		font-family: var(--font-mono);
 	}
-	
+
 	/* Vditor link theme override */
 	:global(.vditor-reset a),
 	:global(.vditor-ir__link) {
@@ -3003,7 +3618,7 @@
 		border: 1px solid var(--border-default);
 		box-shadow: var(--shadow-lg);
 	}
-	
+
 	.fullscreen-indicator span {
 		background: var(--bg-panel);
 		color: var(--text-primary);
@@ -3021,7 +3636,7 @@
 		animation: fade-in 0.3s ease-out;
 	}
 
-	:global(.vditor-hint button[data-mode="wysiwyg"]) {
+	:global(.vditor-hint button[data-mode='wysiwyg']) {
 		display: none !important;
 	}
 
@@ -3071,7 +3686,10 @@
 	.sidebar::-webkit-scrollbar {
 		display: none;
 	}
-	.sidebar-content, .chat-messages, .versions-container, .sidebar {
+	.sidebar-content,
+	.chat-messages,
+	.versions-container,
+	.sidebar {
 		-ms-overflow-style: none;
 		scrollbar-width: none;
 	}
@@ -3191,9 +3809,16 @@
 		animation: blink 1.5s steps(4, end) infinite;
 	}
 	@keyframes blink {
-		0%, 20% { color: transparent; }
-		40% { color: inherit; }
-		100% { color: inherit; }
+		0%,
+		20% {
+			color: transparent;
+		}
+		40% {
+			color: inherit;
+		}
+		100% {
+			color: inherit;
+		}
 	}
 
 	.chat-msg-actions {
@@ -3210,7 +3835,9 @@
 		border-radius: var(--radius-sm);
 		color: color-mix(in srgb, var(--text-tertiary) 50%, transparent);
 		cursor: pointer;
-		transition: color 0.15s, border-color 0.15s;
+		transition:
+			color 0.15s,
+			border-color 0.15s;
 		line-height: 1.6;
 	}
 	.rewind-btn:hover {

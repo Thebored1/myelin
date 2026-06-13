@@ -2,8 +2,9 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { onMount } from 'svelte';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
-	import { sidebarOpen, showSidebarToggle } from '$lib/stores';
+	import { sidebarOpen, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 
 	let { children } = $props();
 
@@ -142,15 +143,24 @@
 		<div class="titlebar-drag-region" data-tauri-drag-region>
 			<img src={favicon} alt="myelin" class="titlebar-logo" data-tauri-drag-region />
 			<span class="titlebar-title" data-tauri-drag-region>myelin</span>
+			{#if !$page.url.pathname.startsWith('/notes/')}
 			<button class="control-btn sidebar-toggle" style="margin-left: 8px; width: 32px;" onclick={() => $sidebarOpen = !$sidebarOpen} aria-label="Toggle sidebar" title="Toggle sidebar">
 				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
 					<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
 					<line x1="9" y1="3" x2="9" y2="21"></line>
 				</svg>
 			</button>
+			{/if}
 		</div>
 		<div class="titlebar-controls">
-
+			{#if $page.url.pathname.startsWith('/notes/')}
+			<button class="control-btn sidebar-toggle" onclick={() => $noteSidebarOpen = !$noteSidebarOpen} aria-label="Toggle note sidebar" title="Toggle note sidebar">
+				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+					<rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+					<line x1="15" y1="3" x2="15" y2="21"></line>
+				</svg>
+			</button>
+			{/if}
 			<button class="control-btn settings" onclick={() => goto('/settings')} aria-label="Settings" title="Settings">
 				<svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
 					<circle cx="12" cy="12" r="3"></circle>
