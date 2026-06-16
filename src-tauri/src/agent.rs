@@ -4,7 +4,33 @@ use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::Emitter;
+
+async fn check_tool_approval(state: &AppState, tool_name: &str, title: &str, content_preview: &str) -> Result<(), String> {
+    if !state.is_tool_approval_required() {
+        return Ok(());
+    }
+    let req_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.register_pending_approval(req_id.clone(), tx);
+
+    let _ = state.handle.emit(
+        "ai://tool_approval_request",
+        serde_json::json!({
+            "id": req_id,
+            "tool": tool_name,
+            "title": title,
+            "content": content_preview
+        }),
+    );
+
+    match rx.await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("User rejected this action.".to_string()),
+        Err(_) => Err("Approval request cancelled.".to_string()),
+    }
+}
 
 const WEB_FETCH_LIMIT: usize = 12_000;
 
@@ -106,19 +132,23 @@ impl Tool for ReadNoteTool {
             "ai://chat_tool",
             serde_json::json!({ "tool": "Read Note", "details": args.note_id }),
         );
-        let note = self
-            .state
-            .load_note(args.note_id)
-            .await
-            .map_err(|e| ToolError {
-                message: e.to_string(),
-            })?;
+        let note = match self.state.load_note(args.note_id.clone()).await {
+            Ok(n) => n,
+            Err(_) => {
+                // Fallback: try finding by exact title
+                self.state.find_note_by_exact_title(&args.note_id)
+                    .map(|n| n.clone())
+                    .ok_or_else(|| ToolError {
+                        message: format!("Note '{}' not found. You may have used the title instead of the ID. Use search_notes to find the correct ID.", args.note_id),
+                    })?
+            }
+        };
         Ok(note.body)
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct WriteNoteArgs {
+pub struct RewriteNoteArgs {
     title: String,
     content: String,
     tags: Option<Vec<String>>,
@@ -131,22 +161,22 @@ pub struct AppendNoteArgs {
 }
 
 #[derive(Clone)]
-pub struct WriteNoteTool {
+pub struct RewriteNoteTool {
     pub state: AppState,
 }
 
-impl Tool for WriteNoteTool {
-    const NAME: &'static str = "write_note";
+impl Tool for RewriteNoteTool {
+    const NAME: &'static str = "rewrite_note";
 
     type Error = ToolError;
-    type Args = WriteNoteArgs;
+    type Args = RewriteNoteArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
-            name: "write_note".to_string(),
+            name: "rewrite_note".to_string(),
             description:
-                "Create a note if it does not exist, or fully replace the existing note when the title exactly matches an existing note title. Do not use this to add another paragraph or continue existing content; use append_note for that. The content must be the full final note body, never placeholder text."
+                "Fully replace the existing note content. Use this to rewrite the note, or to clear the note (by passing an empty string). Do not use this to add a paragraph; use append_note for that. The content must be the full final note body."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -161,27 +191,36 @@ impl Tool for WriteNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        self.state
-            .record_chat_tool("Write Note", args.title.clone());
-        let _ = self.state.handle.emit(
-            "ai://chat_tool",
-            serde_json::json!({ "tool": "Write Note", "details": args.title }),
-        );
         if !self.state.latest_chat_allows_note_mutation() {
             return Ok(
                 "Refused to write because the latest user message did not explicitly ask to modify a note."
                     .to_string(),
             );
         }
+
+        if let Err(msg) = check_tool_approval(&self.state, "Rewrite Note", &args.title, &args.content).await {
+            return Ok(msg);
+        }
+        let display_name = if args.content.trim().is_empty() {
+            "Clear Note"
+        } else {
+            "Rewrite Note"
+        };
+        self.state
+            .record_chat_tool(display_name, args.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": args.title }),
+        );
         if looks_like_placeholder(&args.content) {
             return Ok(
-                "Refused to save because write_note received placeholder text instead of the full final content. Call write_note again with the actual poem body."
+                "Refused to save because rewrite_note received placeholder text instead of the full final content. Call rewrite_note again with the actual poem body."
                     .to_string(),
             );
         }
         if looks_like_meta_status(&args.content) {
             return Ok(
-                "Refused to save because write_note received a status/update sentence instead of the actual note body. Call write_note again with only the final poem/content that should appear in the note."
+                "Refused to save because rewrite_note received a status/update sentence instead of the actual note body. Call rewrite_note again with only the final poem/content that should appear in the note."
                     .to_string(),
             );
         }
@@ -230,7 +269,7 @@ impl Tool for AppendNoteTool {
         ToolDefinition {
             name: "append_note".to_string(),
             description:
-                "Append additional content to the end of an existing note whose title exactly matches the given title. Use this when the user asks to add another paragraph, continue, extend, or append to an existing note."
+                "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use rewrite_note for that."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -244,18 +283,22 @@ impl Tool for AppendNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        self.state
-            .record_chat_tool("Append Note", args.title.clone());
-        let _ = self.state.handle.emit(
-            "ai://chat_tool",
-            serde_json::json!({ "tool": "Append Note", "details": args.title }),
-        );
         if !self.state.latest_chat_allows_note_mutation() {
             return Ok(
                 "Refused to append because the latest user message did not explicitly ask to modify a note."
                     .to_string(),
             );
         }
+
+        if let Err(msg) = check_tool_approval(&self.state, "Append Note", &args.title, &args.content).await {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool("Append Note", args.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Append Note", "details": args.title }),
+        );
         if looks_like_placeholder(&args.content) {
             return Ok(
                 "Refused to append because append_note received placeholder text instead of the final paragraph."
@@ -306,6 +349,107 @@ impl Tool for AppendNoteTool {
 
         Ok(format!(
             "Content successfully appended to note with ID: {}",
+            existing.id
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReplaceTextArgs {
+    title: String,
+    target_text: String,
+    replacement_text: String,
+}
+
+#[derive(Clone)]
+pub struct ReplaceTextTool {
+    pub state: AppState,
+}
+
+impl Tool for ReplaceTextTool {
+    const NAME: &'static str = "replace_text";
+
+    type Error = ToolError;
+    type Args = ReplaceTextArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "replace_text".to_string(),
+            description:
+                "Find exact text in the note and replace it with new text. Use an empty string for replacement_text to delete the target_text. Use this when the user asks to modify, replace, or remove a specific small portion of the note without rewriting everything."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "target_text": { "type": "string", "description": "The exact string of text to find and remove/replace. Must be an exact match of what is in the note." },
+                    "replacement_text": { "type": "string", "description": "The new text to insert instead. Use an empty string to delete the target_text." }
+                },
+                "required": ["title", "target_text", "replacement_text"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if !self.state.latest_chat_allows_note_mutation() {
+            return Ok(
+                "Refused to replace because the latest user message did not explicitly ask to modify a note."
+                    .to_string(),
+            );
+        }
+
+        if let Err(msg) = check_tool_approval(&self.state, "Replace Text", &args.title, &args.replacement_text).await {
+            return Ok(msg);
+        }
+
+        let display_name = if args.replacement_text.trim().is_empty() {
+            "Delete Text"
+        } else {
+            "Replace Text"
+        };
+
+        self.state
+            .record_chat_tool(display_name, args.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": args.title }),
+        );
+
+        let existing = self
+            .state
+            .find_note_by_exact_title(&args.title)
+            .ok_or_else(|| ToolError {
+                message: format!("No existing note found with exact title: {}", args.title),
+            })?;
+
+        if !existing.body.contains(&args.target_text) {
+            return Ok("Could not find the target_text in the note. Make sure to quote the exact text you want to replace or delete.".to_string());
+        }
+
+        let new_body = existing.body.replacen(&args.target_text, &args.replacement_text, 1);
+
+        self.state
+            .save_note(
+                existing.id.clone(),
+                existing.title,
+                existing.tags,
+                new_body.clone(),
+                existing.source_pdf,
+                Some(existing.annotations),
+            )
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+
+        let _ = self.state.handle.emit(
+            "ai://note_written",
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
+        );
+
+        Ok(format!(
+            "Text successfully replaced in note with ID: {}",
             existing.id
         ))
     }
@@ -403,7 +547,7 @@ impl Tool for SearchNotesTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "search_notes".to_string(),
-            description: "Search the workspace for notes containing specific keywords.".to_string(),
+            description: "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -462,7 +606,10 @@ pub fn build_myelin_agent(
         .tool(ReadNoteTool {
             state: state.clone(),
         })
-        .tool(WriteNoteTool {
+        .tool(RewriteNoteTool {
+            state: state.clone(),
+        })
+        .tool(ReplaceTextTool {
             state: state.clone(),
         })
         .tool(AppendNoteTool {

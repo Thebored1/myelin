@@ -6,6 +6,19 @@ export type ChatMessage = {
 	error?: boolean;
 	tools?: { name: string; details: string }[];
 	snapshotId?: string;
+	snapshot?: NoteSnapshot;
+	isApprovalRequest?: boolean;
+	approvalId?: string;
+	approvalTool?: string;
+	approvalDetails?: string;
+	approvalStatus?: 'pending' | 'approved' | 'rejected';
+};
+
+export type NoteSnapshot = {
+	noteBody: string;
+	draftTitle: string;
+	draftTags: string;
+	chatLength: number;
 };
 
 export type GitCommit = {

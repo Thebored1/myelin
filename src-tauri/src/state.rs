@@ -91,6 +91,8 @@ struct InnerState {
     llama_client: Client,
     chat_tools: Mutex<Vec<ChatTool>>,
     latest_chat_question: Mutex<Option<String>>,
+    require_tool_approval: std::sync::atomic::AtomicBool,
+    pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
 #[derive(Default)]
@@ -164,6 +166,8 @@ impl AppState {
                     .context("failed to create llama HTTP client")?,
                 chat_tools: Mutex::new(Vec::new()),
                 latest_chat_question: Mutex::new(None),
+                require_tool_approval: std::sync::atomic::AtomicBool::new(false),
+                pending_approvals: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -192,28 +196,26 @@ impl AppState {
     }
 
     pub fn latest_chat_allows_note_mutation(&self) -> bool {
-        let Some(question) = self.inner.latest_chat_question.lock().clone() else {
-            return false;
-        };
-        let normalized = question.to_ascii_lowercase();
-        // Block obvious informational questions — everything else allows note writes.
-        // "can you" / "could you" are NOT blocked — they're polite imperatives ("could you add
-        // headings", "can you rewrite this"), not information requests.
-        let is_question = normalized.starts_with("what ")
-            || normalized.starts_with("who ")
-            || normalized.starts_with("when ")
-            || normalized.starts_with("where ")
-            || normalized.starts_with("why ")
-            || normalized.starts_with("how ")
-            || normalized.starts_with("is ")
-            || normalized.starts_with("are ")
-            || normalized.starts_with("does ")
-            || normalized.starts_with("do ")
-            || normalized.starts_with("tell me about")
-            || normalized.starts_with("explain ")
-            || normalized.starts_with("describe ")
-            || normalized.starts_with("define ");
-        !is_question
+        // We now rely on the LLM's own intelligence to decide when to mutate the note.
+        true
+    }
+
+    pub fn is_tool_approval_required(&self) -> bool {
+        self.inner.require_tool_approval.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_require_tool_approval(&self, require: bool) {
+        self.inner.require_tool_approval.store(require, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn register_pending_approval(&self, id: String, tx: tokio::sync::oneshot::Sender<bool>) {
+        self.inner.pending_approvals.lock().insert(id, tx);
+    }
+
+    pub fn resolve_tool_approval(&self, id: &str, approved: bool) {
+        if let Some(tx) = self.inner.pending_approvals.lock().remove(id) {
+            let _ = tx.send(approved);
+        }
     }
 
     pub async fn bootstrap(&self) -> Result<AppSnapshot> {
@@ -818,7 +820,7 @@ impl AppState {
                 self.clone(),
                 &format!("{}/v1", config.base_url()),
                 &config.model_name(),
-                "/no_think\nYou are a helpful AI note assistant. Act on the USER REQUEST immediately — never ask clarifying questions, never present numbered options, never say 'would you like me to'. Just do it.\n\nWRITE TO NOTE — when the user asks you to produce, create, compose, draft, generate, write, add, edit, format, rewrite, update, modify, change, restructure, or improve any content (poems, stories, essays, code, lists, summaries, articles, headings, formatting, etc.), call write_note or append_note immediately. Do NOT read or search the note first — call the tool directly.\n\nANSWER IN CHAT — when the user asks a pure information question (what, who, when, where, why, how, explain, tell me about, define, etc.) with no instruction to change the note, answer in chat text only.\n\nRULES:\n- Never ask for clarification. Act on the request as given.\n- You cannot create new notes. Only write to or append to the open note.\n- Always use the exact note title shown in 'Open Note:' as the write_note/append_note title.\n- Use write_note to replace/rewrite note content. Use append_note to add/continue/extend.\n- The content field must be the actual text — never a description of what you did.\n- Never start content with 'I have', 'I've', 'Here is', or any meta-sentence.\n- After calling a tool, your chat reply must be ONE short sentence at most. Do NOT explain your reasoning, restate the request, or describe what you did.\n- For URLs use fetch_web_page. Use search_notes only for other local notes."
+                "/no_think\nYou are a helpful AI note assistant. Use your judgment to determine the best course of action based on the user's request.\n\nRULES:\n- If the user asks you to modify, rewrite, or append to the note, use the rewrite_note, append_note, or replace_text tool.\n- To clear or delete the note's content, use the rewrite_note tool with an empty string for the content.\n- To delete or replace only a specific snippet of text, use the replace_text tool.\n- If the user asks a question or wants to chat, answer directly in the chat.\n- If the request is ambiguous, use your best judgment to either answer in chat or modify the note.\n- Always use the exact note title shown in 'Open Note:' as the rewrite_note/append_note title. You already have the open note's contents, do not search for it.\n- The content field for write/append tools must be the actual text to insert — never a description of what you did.\n- For URLs use fetch_web_page. Use search_notes only to find other local notes, NOT the current one."
             );
 
             let mut response_stream = agent.stream_prompt(&prompt).multi_turn(RIG_MAX_TURNS).await;

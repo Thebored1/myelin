@@ -20,6 +20,17 @@ pub struct ChatMessage {
     pub error: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatTool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<NoteSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteSnapshot {
+    pub note_body: String,
+    pub draft_title: String,
+    pub draft_tags: String,
+    pub chat_length: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

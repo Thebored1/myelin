@@ -13,6 +13,16 @@ async fn bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+fn set_require_tool_approval(state: State<'_, AppState>, require: bool) {
+    state.set_require_tool_approval(require);
+}
+
+#[tauri::command]
+fn resolve_tool_approval(state: State<'_, AppState>, id: String, approved: bool) {
+    state.resolve_tool_approval(&id, approved);
+}
+
+#[tauri::command]
 async fn set_workspace(
     state: State<'_, AppState>,
     workspace_path: String,
@@ -322,7 +332,9 @@ pub fn run() {
             get_note_version,
             import_pdf_file,
             save_pdf_annotations,
-            compile_latex
+            compile_latex,
+            set_require_tool_approval,
+            resolve_tool_approval
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

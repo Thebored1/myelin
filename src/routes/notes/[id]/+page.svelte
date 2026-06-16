@@ -24,6 +24,10 @@
 	import HtmlViewer from '$lib/components/HtmlViewer.svelte';
 	import TexEditor from '$lib/components/TexEditor.svelte';
 	import IpynbEditor from '$lib/components/IpynbEditor.svelte';
+	import { marked } from 'marked';
+	import DOMPurify from 'dompurify';
+
+	let requireToolApproval = $state(false);
 
 	let note = $state<NoteDocument | null>(null);
 	let draftBody = $state('');
@@ -37,13 +41,8 @@
 	let versionPreviewContent = $state<string | null>(null);
 	let versionPreviewHash = $state<string | null>(null);
 	let versionPreviewDialog: HTMLDialogElement | undefined = $state();
-	type NoteSnapshot = {
-		noteBody: string;
-		draftTitle: string;
-		draftTags: string;
-		chatLength: number;
-	};
-	let snapshots = $state(new Map<string, NoteSnapshot>());
+	type NoteSnapshot = import('$lib/types').NoteSnapshot;
+
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
 	let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
@@ -699,7 +698,7 @@
 		activeSourceBytes = null;
 		activeSourceId = null;
 		showAttachedNote = false;
-		snapshots = new Map();
+
 		note = await invoke<NoteDocument>('load_note', { noteId });
 		const loadedNote = note;
 		chatMessages = loadedNote.chatHistory || [];
@@ -1186,8 +1185,7 @@
 			draftTags: draftTags,
 			chatLength: chatMessages.length
 		};
-		snapshots = new Map(snapshots).set(requestId, snapshot);
-		chatMessages = [...chatMessages, { role: 'user', content: userText, snapshotId: requestId }];
+		chatMessages = [...chatMessages, { role: 'user', content: userText, snapshotId: requestId, snapshot }];
 		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true }];
 		try {
 			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId });
@@ -1197,8 +1195,7 @@
 		}
 	}
 
-	async function rewindToSnapshot(snapshotId: string, fillInput?: string) {
-		const snapshot = snapshots.get(snapshotId);
+	async function rewindToSnapshot(snapshot?: NoteSnapshot, fillInput?: string) {
 		if (!snapshot || !note) return;
 		if (noteAnimationTimer) {
 			clearTimeout(noteAnimationTimer);
@@ -1219,9 +1216,7 @@
 				chatTextareaEl.focus();
 			}
 		}
-		const updated = new Map(snapshots);
-		updated.delete(snapshotId);
-		snapshots = updated;
+
 		isBusy = true;
 		try {
 			await invoke('save_note', {
@@ -1243,8 +1238,8 @@
 		}
 	}
 
-	async function retryMessage(snapshotId: string, userText: string) {
-		await rewindToSnapshot(snapshotId);
+	async function retryMessage(snapshot: NoteSnapshot, userText: string) {
+		await rewindToSnapshot(snapshot);
 		await sendChatText(userText);
 	}
 
@@ -1297,21 +1292,26 @@
 	}
 
 	function failStreamingChatMessage(
-		errorMessage = 'Failed to generate response.',
+		errorMsg: string,
 		tools: { name: string; details: string }[] = []
 	) {
 		chatMessages = chatMessages.map((m) => {
-			if (m.isStreaming)
-				return {
-					...m,
-					isStreaming: false,
-					error: true,
-					content: errorMessage,
-					tools: mergeChatTools(m.tools, tools)
-				};
+			if (m.isStreaming) {
+				return { ...m, isStreaming: false, error: true, content: m.content + '\n\n' + errorMsg, tools };
+			}
 			return m;
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+	}
+
+	async function resolveApproval(id: string, approved: boolean) {
+		chatMessages = chatMessages.map((m) => {
+			if (m.isApprovalRequest && m.approvalId === id) {
+				return { ...m, approvalStatus: approved ? 'approved' : 'rejected' };
+			}
+			return m;
+		});
+		await invoke('resolve_tool_approval', { id, approved });
 	}
 
 	async function fetchNoteHistory() {
@@ -1685,6 +1685,8 @@
 		let unlistenChunk: UnlistenFn;
 		let unlistenDone: UnlistenFn;
 		let unlistenError: UnlistenFn;
+		let unlistenApproval: UnlistenFn;
+		let unlistenNoteWritten: UnlistenFn;
 
 		$showSidebarToggle = true;
 		if (window.innerWidth > 1200) {
@@ -1703,7 +1705,6 @@
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
 
 		let unlistenTool: () => void;
-		let unlistenNoteWritten: UnlistenFn;
 
 		// Setup AI Streaming listeners
 		listen<{ noteId: string; content: string; mode: 'write' | 'append' }>(
@@ -1727,6 +1728,29 @@
 				return m;
 			});
 		}).then((fn) => (unlistenTool = fn));
+
+		listen<{ id: string; tool: string; title: string; content: string }>(
+			'ai://tool_approval_request',
+			(event) => {
+				chatMessages = [
+					...chatMessages,
+					{
+						role: 'assistant',
+						content: '',
+						isApprovalRequest: true,
+						approvalId: event.payload.id,
+						approvalTool: event.payload.tool,
+						approvalDetails: `Title: ${event.payload.title}\nContent:\n${event.payload.content}`,
+						approvalStatus: 'pending'
+					}
+				];
+				if (chatMessagesEl) {
+					setTimeout(() => {
+						if (chatMessagesEl) chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+					}, 100);
+				}
+			}
+		).then((fn) => (unlistenApproval = fn));
 
 		listen<{ delta: string; requestId: string }>('ai://chat_chunk', (event) => {
 			chatMessages = chatMessages.map((m) => {
@@ -1765,6 +1789,7 @@
 			if (unlistenDone) unlistenDone();
 			if (unlistenError) unlistenError();
 			if (unlistenTool) unlistenTool();
+			if (unlistenApproval) unlistenApproval();
 			if (unlistenNoteWritten) unlistenNoteWritten();
 		};
 	});
@@ -2157,25 +2182,40 @@
 													</div>
 												{/if}
 												{#if msg.error}
-													<span class="chat-error-text"
-														>{msg.content || 'Failed to generate response.'}</span
-													>
+													<span class="chat-error-text">
+														{msg.content || 'Failed to generate response.'}
+													</span>
+												{:else if msg.isApprovalRequest}
+													<div class="approval-card">
+														<p><strong>⚠️ The AI wants to use {msg.approvalTool}</strong></p>
+														<pre>{msg.approvalDetails}</pre>
+														{#if msg.approvalStatus === 'pending'}
+															<div class="approval-actions">
+																<button class="primary" onclick={() => resolveApproval(msg.approvalId!, true)}>Approve</button>
+																<button class="secondary" onclick={() => resolveApproval(msg.approvalId!, false)}>Reject</button>
+															</div>
+														{:else}
+															<p><em>{msg.approvalStatus === 'approved' ? '✅ Approved' : '❌ Rejected'}</em></p>
+														{/if}
+													</div>
+												{:else if msg.role === 'assistant'}
+													{@html DOMPurify.sanitize(marked.parse(msg.content) as string, { ADD_TAGS: ['think'] })}
 												{:else if msg.content}
-													{@html msg.content}
+													{msg.content}
 												{:else if msg.isStreaming && (!msg.tools || msg.tools.length === 0)}
 													<span class="loading-dots"></span>
 												{/if}
 											</div>
-											{#if msg.role === 'user' && msg.snapshotId && snapshots.has(msg.snapshotId)}
+											{#if msg.role === 'user' && msg.snapshot}
 												<div class="chat-msg-actions">
 													<button
 														class="rewind-btn"
-														onclick={() => rewindToSnapshot(msg.snapshotId!, msg.content)}
+														onclick={() => rewindToSnapshot(msg.snapshot, msg.content)}
 														title="Undo — restore note and put prompt back in input">↩</button
 													>
 													<button
 														class="rewind-btn retry"
-														onclick={() => retryMessage(msg.snapshotId!, msg.content)}
+														onclick={() => retryMessage(msg.snapshot!, msg.content)}
 														title="Retry — rewind and resend this prompt">↻</button
 													>
 												</div>
@@ -2202,6 +2242,16 @@
 									placeholder="Ask AI..."
 									rows="1"
 								></textarea>
+								<label class="full-permission-toggle">
+									<span class="toggle-label">Full-permission</span>
+									<div class="toggle-switch">
+										<input type="checkbox" checked={!requireToolApproval} onchange={(e) => {
+											requireToolApproval = !e.currentTarget.checked;
+											invoke('set_require_tool_approval', { require: requireToolApproval });
+										}} />
+										<span class="slider"></span>
+									</div>
+								</label>
 							</div>
 						</div>
 					{:else if activeSidebarTab === 'versions'}
@@ -2651,6 +2701,29 @@
 </dialog>
 
 <style>
+	:global(.chat-bubble think) {
+		display: block;
+		padding: 12px 14px;
+		margin: 8px 0;
+		border-left: 3px solid var(--accent, #f37021);
+		color: rgba(255, 255, 255, 0.6);
+		font-style: italic;
+		background: rgba(0, 0, 0, 0.2);
+		border-radius: 4px;
+		font-size: 0.9em;
+	}
+	:global(.chat-bubble think::before) {
+		content: '💭 Thinking Process';
+		display: block;
+		font-weight: 600;
+		font-style: normal;
+		margin-bottom: 6px;
+		color: rgba(255, 255, 255, 0.8);
+		font-size: 0.85rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
 	.editor-shell {
 		height: 100%;
 		display: grid;
@@ -3831,6 +3904,93 @@
 	.chat-bubble.error {
 		background: color-mix(in srgb, var(--bg-panel) 82%, var(--accent-200));
 	}
+	.chat-bubble.error {
+		border-left: 3px solid var(--error-color, #e53e3e);
+		background-color: var(--error-bg, rgba(229, 62, 62, 0.1));
+	}
+	
+	.approval-card {
+		background: rgba(0, 0, 0, 0.2);
+		border: 1px solid var(--accent);
+		border-radius: 6px;
+		padding: 12px;
+		margin: 8px 0;
+	}
+	
+	.approval-card p { margin: 0 0 8px 0; }
+	
+	.approval-card pre {
+		background: rgba(0, 0, 0, 0.3);
+		padding: 8px;
+		border-radius: 4px;
+		font-size: 0.85em;
+		white-space: pre-wrap;
+		word-break: break-word;
+		max-height: 150px;
+		overflow-y: auto;
+		margin-bottom: 12px;
+	}
+	
+	.approval-actions {
+		display: flex;
+		gap: 8px;
+	}
+	
+	.full-permission-toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 0.8rem;
+		color: var(--text-secondary);
+		margin-top: 6px;
+		cursor: pointer;
+	}
+
+	.toggle-switch {
+		position: relative;
+		display: inline-block;
+		width: 34px;
+		height: 20px;
+	}
+
+	.toggle-switch input {
+		opacity: 0;
+		width: 0;
+		height: 0;
+	}
+
+	.slider {
+		position: absolute;
+		cursor: pointer;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		background-color: rgba(255, 255, 255, 0.2);
+		transition: .4s;
+		border-radius: 20px;
+	}
+
+	.slider:before {
+		position: absolute;
+		content: "";
+		height: 14px;
+		width: 14px;
+		left: 3px;
+		bottom: 3px;
+		background-color: white;
+		transition: .4s;
+		border-radius: 50%;
+	}
+
+	input:checked + .slider {
+		background-color: var(--accent);
+	}
+
+	input:checked + .slider:before {
+		transform: translateX(14px);
+	}
+
 	.chat-error-text {
 		font-weight: 600;
 	}
@@ -3868,6 +4028,7 @@
 	}
 	.chat-input-area {
 		display: flex;
+		flex-direction: column;
 		gap: var(--space-2);
 		margin-top: auto;
 		padding-top: var(--space-4);
