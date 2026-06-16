@@ -291,6 +291,7 @@ impl AppState {
         &self,
         title: String,
         source_pdf: Option<String>,
+        extension: Option<String>,
     ) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let now = timestamp_now();
@@ -298,7 +299,8 @@ impl AppState {
 
         let unique_title = self.ensure_unique_title(&title, None);
         let safe_slug = slugify(&unique_title);
-        let file_name = format!("{safe_slug}--{}.md", &id[..8]);
+        let ext = extension.unwrap_or_else(|| "md".to_string());
+        let file_name = format!("{safe_slug}--{}.{ext}", &id[..8]);
         let path = unique_note_path(&workspace, &file_name);
         let relative_path = relative_to_workspace(&workspace, &path);
 
@@ -1024,8 +1026,11 @@ impl AppState {
             let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
+        let mut tex_content = fs::read_to_string(&path)?;
         
-        let tex_content = fs::read_to_string(&path)?;
+        if !tex_content.contains("\\documentclass") {
+            tex_content = format!("\\documentclass{{article}}\n\\usepackage{{amsmath}}\n\\begin{{document}}\n{}\n\\end{{document}}", tex_content);
+        }
         
         let pdf_data = tectonic::latex_to_pdf(tex_content)
             .map_err(|e| anyhow!("Failed to compile LaTeX using Tectonic: {}", e))?;
@@ -1305,7 +1310,7 @@ fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) -> Result<V
     {
         if entry.file_type().is_file() && is_note_file(entry.path()) {
             if let Some(extension) = entry.path().extension().and_then(std::ffi::OsStr::to_str) {
-                let doc_result = if extension.eq_ignore_ascii_case("pdf") {
+                let doc_result = if extension.eq_ignore_ascii_case("pdf") || extension.eq_ignore_ascii_case("epub") {
                     parse_pdf_file(workspace, workspace_data_dir, entry.path())
                 } else {
                     parse_note_file(workspace, workspace_data_dir, entry.path())
@@ -1334,7 +1339,7 @@ fn parse_pdf_file(
     path: &Path,
 ) -> Result<NoteDocument> {
     let title = default_title_from_path(path);
-    let now = timestamp_now();
+    let (created_at, updated_at) = get_file_timestamps(path);
     let id = stable_id_from_path(path);
 
     let annotations = {
@@ -1359,8 +1364,8 @@ fn parse_pdf_file(
         tags: Vec::new(),
         body: String::new(),
         relative_path: relative_to_workspace(workspace, path),
-        created_at: now.clone(),
-        updated_at: now,
+        created_at,
+        updated_at,
         source_pdf: None,
         annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
@@ -1395,8 +1400,10 @@ fn parse_note_file(
     let title = metadata
         .title
         .unwrap_or_else(|| first_heading(&body).unwrap_or_else(|| default_title_from_path(path)));
-    let created_at = metadata.created_at.unwrap_or_else(timestamp_now);
-    let updated_at = metadata.updated_at.unwrap_or_else(timestamp_now);
+    
+    let (file_created, file_updated) = get_file_timestamps(path);
+    let created_at = metadata.created_at.unwrap_or(file_created);
+    let updated_at = metadata.updated_at.unwrap_or(file_updated);
     let id = metadata.id.unwrap_or_else(|| stable_id_from_path(path));
 
     let annotations = {
@@ -1730,6 +1737,19 @@ fn timestamp_now() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn get_file_timestamps(path: &Path) -> (String, String) {
+    let fallback = timestamp_now();
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let created = metadata.created().unwrap_or_else(|_| std::time::SystemTime::now());
+        let modified = metadata.modified().unwrap_or_else(|_| std::time::SystemTime::now());
+        let created_dt: chrono::DateTime<Utc> = created.into();
+        let modified_dt: chrono::DateTime<Utc> = modified.into();
+        (created_dt.to_rfc3339(), modified_dt.to_rfc3339())
+    } else {
+        (fallback.clone(), fallback)
+    }
+}
+
 fn excerpt(body: &str) -> String {
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.len() > 400 {
@@ -1862,7 +1882,11 @@ fn is_note_file(path: &Path) -> bool {
     path.extension()
         .and_then(std::ffi::OsStr::to_str)
         .map(|extension| {
-            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("pdf")
+            extension.eq_ignore_ascii_case("md")
+                || extension.eq_ignore_ascii_case("pdf")
+                || extension.eq_ignore_ascii_case("epub")
+                || extension.eq_ignore_ascii_case("tex")
+                || extension.eq_ignore_ascii_case("ipynb")
         })
         .unwrap_or(false)
 }

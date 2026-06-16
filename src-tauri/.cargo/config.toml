@@ -3,3 +3,6 @@ TECTONIC_DEP_BACKEND = "vcpkg"
 VCPKGRS_TRIPLET = "x64-windows-static-release"
 VCPKG_ROOT = "C:\\Users\\Paper\\StudioProjects\\myelin\\src-tauri\\target\\vcpkg"
 CXXFLAGS = "/std:c++17"
+
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

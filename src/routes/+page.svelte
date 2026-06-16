@@ -59,6 +59,16 @@
 		}
 	});
 
+	function getNoteBadge(note: NoteSummary) {
+		const rel = note.relativePath.toLowerCase();
+		if (rel.endsWith('.pdf')) return 'pdf';
+		if (rel.endsWith('.epub')) return 'epub';
+		if (rel.endsWith('.tex')) return 'tex';
+		if (rel.endsWith('.ipynb')) return 'jupyter';
+		if (note.sourcePdf) return 'note + pdf';
+		return 'note';
+	}
+
 	$effect(() => {
 		const toSave = JSON.stringify(dashTasks);
 		if (currentWorkspaceForTasks) {
@@ -110,8 +120,7 @@
 		return [...base].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 	});
 
-	let regularNotes = $derived(visibleNotes.filter((n) => !n.relativePath.toLowerCase().endsWith('.pdf')));
-	let pdfNotes = $derived(visibleNotes.filter((n) => n.relativePath.toLowerCase().endsWith('.pdf')));
+
 
 	// Rail details — always based on the full library, unaffected by the rail search
 	let allNotesSorted = $derived.by(() =>
@@ -243,7 +252,7 @@
 		}
 	}
 
-	async function createNote() {
+	async function createNote(extension: string = 'md') {
 		pendingCreateCount += 1;
 		if (createLoopRunning) return;
 		createLoopRunning = true;
@@ -251,7 +260,11 @@
 		try {
 			while (pendingCreateCount > 0) {
 				pendingCreateCount -= 1;
-				const note = await invoke<NoteDocument>('create_note', { title: 'New note' });
+				const title = extension === 'md' ? 'New note' :
+				              extension === 'tex' ? 'New LaTeX Document' :
+				              extension === 'ipynb' ? 'New Jupyter Notebook' :
+				              extension === 'epub' ? 'New EPUB Book' : 'New note';
+				const note = await invoke<NoteDocument>('create_note', { title, extension });
 				upsertNoteIntoLibrary(note);
 			}
 			await refreshApp();
@@ -430,65 +443,25 @@
 			{#if !app?.workspacePath}
 				<p class="rail-empty">No workspace selected.</p>
 			{:else if query.trim()}
-				{#if regularNotes.length === 0 && pdfNotes.length === 0}
+				{#if visibleNotes.length === 0}
 					<p class="rail-empty">No results for “{query}”.</p>
 				{/if}
-				{#if regularNotes.length > 0}
+				{#if visibleNotes.length > 0}
 					<div class="section-label">
-						<span>Notes</span>
-						<span class="section-count">{regularNotes.length}</span>
+						<span>All Notes</span>
+						<span class="section-count">{visibleNotes.length}</span>
 					</div>
-					{#each regularNotes as note (note.id)}
+					{#each visibleNotes as note (note.id)}
 						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 						<div
 							class="note-row"
 							onclick={() => openNote(note.id)}
 							oncontextmenu={(e) => { e.preventDefault(); activeMenuId = activeMenuId === note.id ? null : note.id; }}
 						>
-							<svg class="row-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+							<svg class="row-icon {note.relativePath.toLowerCase().endsWith('.pdf') ? 'pdf-icon' : ''}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>{#if note.relativePath.toLowerCase().endsWith('.pdf')}<line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="11" y2="17"/>{/if}</svg>
 							<span class="row-title">{note.title}</span>
 							<div class="row-badge">
-								{#if note.relativePath.toLowerCase().endsWith('.pdf')}
-									pdf
-								{:else if note.sourcePdf}
-									note + pdf
-								{:else}
-									note
-								{/if}
-							</div>
-							<span class="row-time">{timeAgo(note.createdAt)}</span>
-							<div class="row-menu-wrap">
-								<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
-									<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
-								</button>
-								{#if activeMenuId === note.id}
-									<div class="row-dropdown">
-										<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
-									</div>
-								{/if}
-							</div>
-						</div>
-					{/each}
-				{/if}
-
-				{#if pdfNotes.length > 0}
-					<div class="section-label" style="margin-top: var(--space-4);">
-						<span>PDFs</span>
-						<span class="section-count">{pdfNotes.length}</span>
-					</div>
-					{#each pdfNotes as note (note.id)}
-						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-						<div class="note-row" onclick={() => openNote(note.id)}>
-							<svg class="row-icon pdf-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="11" y2="17"/></svg>
-							<span class="row-title">{note.title}</span>
-							<div class="row-badge">
-								{#if note.relativePath.toLowerCase().endsWith('.pdf')}
-									pdf
-								{:else if note.sourcePdf}
-									note + pdf
-								{:else}
-									note
-								{/if}
+								{getNoteBadge(note)}
 							</div>
 							<span class="row-time">{timeAgo(note.createdAt)}</span>
 							<div class="row-menu-wrap">
@@ -665,7 +638,18 @@
 							<section class="dash-section" id="sec-contents">
 								<div class="section-header-split">
 									<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>notes</h3>
-									<button class="btn-ghost" onclick={createNote} disabled={isBusy}>New note</button>
+									<div class="row-menu-wrap" style="position: relative;">
+										<button class="btn-ghost" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === 'new-note-menu' ? null : 'new-note-menu'; }} disabled={isBusy}>
+											New note ▾
+										</button>
+										{#if activeMenuId === 'new-note-menu'}
+											<div class="row-dropdown" style="top: 100%; right: 0; margin-top: 4px; z-index: 10;">
+												<button class="row-delete" onclick={(e) => { e.preventDefault(); createNote('md'); activeMenuId = null; }} style="color: var(--text-primary); text-align: left;">Markdown Note</button>
+												<button class="row-delete" onclick={(e) => { e.preventDefault(); createNote('tex'); activeMenuId = null; }} style="color: var(--text-primary); text-align: left;">LaTeX Document</button>
+												<button class="row-delete" onclick={(e) => { e.preventDefault(); createNote('ipynb'); activeMenuId = null; }} style="color: var(--text-primary); text-align: left;">Jupyter Notebook</button>
+											</div>
+										{/if}
+									</div>
 								</div>
 								<div class="contents-single-list">
 									{#each dashNotes as note}
@@ -675,13 +659,7 @@
 												<div style="display: flex; align-items: flex-start; gap: 8px;">
 													<div class="kc-title">{note.title}</div>
 													<div class="row-badge">
-														{#if note.relativePath.toLowerCase().endsWith('.pdf')}
-															pdf
-														{:else if note.sourcePdf}
-															note + pdf
-														{:else}
-															note
-														{/if}
+														{getNoteBadge(note)}
 													</div>
 												</div>
 												<div class="row-menu-wrap">
@@ -733,13 +711,7 @@
 											{new Date(note.createdAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
 										</div>
 										<div class="pi-badge">
-											{#if note.relativePath.toLowerCase().endsWith('.pdf')}
-												pdf
-											{:else if note.sourcePdf}
-												note + pdf
-											{:else}
-												note
-											{/if}
+											{getNoteBadge(note)}
 										</div>
 									</div>
 								{/each}
@@ -790,7 +762,7 @@
 					</div>
 					{/if}
 				</div>
-				<section class="dash-section notebook-section" style="margin-top: auto; padding-top: 2rem; max-height: 10vh; overflow-y: auto;">
+				<section class="dash-section notebook-section" style="margin-top: auto; padding-top: 2rem;">
 					<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>workspace</h3>
 					<div class="notebook-list">
 						<div class="nb-item">

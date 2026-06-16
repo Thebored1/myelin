@@ -87,7 +87,10 @@
 	function handleGlobalMouseMove(e: MouseEvent) {
 		if (isResizing && mainLayoutEl) {
 			const rect = mainLayoutEl.getBoundingClientRect();
-			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
+			let newRatio = ((e.clientX - rect.left) / rect.width) * 100;
+			if (workingDocType === 'tex') {
+				newRatio = 100 - newRatio;
+			}
 			if (newRatio > 20 && newRatio < 80) {
 				splitRatio = newRatio;
 			}
@@ -1515,7 +1518,7 @@
 	async function browseAndAttachPdf() {
 		const selected = await openFileDialog({
 			multiple: false,
-			filters: [{ name: 'PDF', extensions: ['pdf'] }]
+			filters: [{ name: 'Documents', extensions: ['pdf', 'epub', 'tex', 'ipynb', 'md'] }]
 		});
 		if (!selected) return;
 		const filePath = selected;
@@ -1870,6 +1873,7 @@
 	<div
 		class="main-layout"
 		class:split-layout={activeSourceBytes !== null && showAttachedNote}
+		class:reverse-split={workingDocType === 'tex'}
 		bind:this={mainLayoutEl}
 	>
 		{#if activeSourceBytes}
@@ -1932,7 +1936,7 @@
 							Press <span>{fullscreenShortcut}</span> to toggle
 						</div>
 					{:else if workingDocType === 'tex'}
-						<div style="height: 100%; display: flex; flex-direction: column;">
+						<div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
 							<div style="padding: 4px; background: var(--bg-body); border-bottom: 1px solid var(--border-default); display: flex; justify-content: flex-end;">
 								<button class="primary" onclick={async () => {
 									isBusy = true;
@@ -2769,6 +2773,19 @@
 		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
 
+	.main-layout.reverse-split .pdf-pane {
+		order: 2;
+	}
+	.main-layout.reverse-split .resizer {
+		order: 1;
+	}
+	.main-layout.reverse-split .main-pane {
+		order: 0;
+	}
+	.main-layout.reverse-split .sidebar {
+		order: 3;
+	}
+
 	.pdf-pane {
 		min-width: 26rem;
 	}
@@ -2833,6 +2850,8 @@
 		width: 100%;
 		display: flex;
 		flex-direction: column;
+		flex: 1;
+		min-height: 0;
 	}
 
 	.vditor-wrapper {

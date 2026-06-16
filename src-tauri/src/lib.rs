@@ -50,9 +50,10 @@ async fn create_note(
     state: State<'_, AppState>,
     title: String,
     source_pdf: Option<String>,
+    extension: Option<String>,
 ) -> Result<NoteDocument, String> {
     state
-        .create_note(title, source_pdf)
+        .create_note(title, source_pdf, extension)
         .await
         .map_err(|error| error.to_string())
 }
