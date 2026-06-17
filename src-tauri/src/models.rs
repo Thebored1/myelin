@@ -85,6 +85,22 @@ pub struct ProviderStatus {
     pub detail: String,
     pub config: Option<crate::llama_server::WorkspaceLlamaConfig>,
     pub resolved: Option<crate::llama_server::ResolvedLlamaConfig>,
+    /// Backend actually running ("cuda"/"vulkan"/"metal"/"cpu"), or the
+    /// preferred backend when no server is running yet.
+    #[serde(default)]
+    pub active_backend: Option<String>,
+    /// Whether an NVIDIA GPU was detected on this machine.
+    #[serde(default)]
+    pub nvidia_detected: bool,
+    /// Whether GPU acceleration is usable on this machine at all.
+    #[serde(default)]
+    pub gpu_available: bool,
+    /// GPU adapter names detected on this machine (for display).
+    #[serde(default)]
+    pub gpus: Vec<String>,
+    /// Backend builds installed ("cuda"/"vulkan"/"metal"/"cpu").
+    #[serde(default)]
+    pub installed_backends: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

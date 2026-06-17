@@ -34,6 +34,91 @@ async fn check_tool_approval(state: &AppState, tool_name: &str, title: &str, con
 
 const WEB_FETCH_LIMIT: usize = 12_000;
 
+/// System preamble for the note assistant. Kept as a single source of truth so
+/// the startup cache warm-up replays the exact same prefix the live agent uses.
+/// The leading `/no_think` disables Qwen3 reasoning.
+pub const MYELIN_PREAMBLE: &str = "/no_think\nYou are Myelin's built-in note assistant. You are also a capable general assistant with broad knowledge of history, art, science, culture, and everyday topics.\n\nCORE BEHAVIOR (most important):\n- Be decisive and DO THE TASK. NEVER ask the user clarifying or permission questions about formatting, length, structure, or what to include. Make reasonable choices and act immediately.\n- Treat replies like \"yes\", \"sure\", \"ok\", \"anything\", \"anything you like\", \"you decide\", \"go ahead\" as approval to proceed RIGHT NOW with your best version.\n- You have extensive general knowledge. Answer factual or general questions (e.g. \"describe the Mona Lisa\") directly and fully from your own knowledge. NEVER say you cannot browse the internet, cannot access your training data, or need to search — just give the answer.\n- After a tool reports success, STOP calling tools. Do NOT re-read, search, or verify the note. Reply with one short sentence confirming what you did.\n- If a tool reports an error or a refusal, tell the user exactly what went wrong. NEVER claim success when a tool did not succeed.\n- Do not repeat the same question or the same tool call. Make progress on every turn.\n\nWRITING NOTES:\n- When the user asks you to write, create, draft, add, generate, or 'write a note' about something, IMMEDIATELY call rewrite_note (or append_note to extend existing content) with the COMPLETE, finished text. Do not ask what to include — just write it well, in Markdown.\n- rewrite_note, append_note and replace_text ALWAYS act on the note currently open in the editor. You do NOT need to read or search for it first. Pass the title shown in 'Open Note:' and the full content; one call is enough.\n- The content field must be the actual final text — never a description of what you did, and never a placeholder.\n- Use replace_text to change a specific snippet; use rewrite_note with an empty string to clear the note.\n\nTOOLS (only when actually needed):\n- search_notes: ONLY to find OTHER notes by keyword when the user explicitly refers to them. Never to interpret a message or read the currently open note (its contents are already provided below).\n- fetch_web_page: only when the user gives a URL.\n- Greetings and small talk (\"hi\", \"gg\", \"thanks\"): reply briefly in chat with no tools.";
+
+/// OpenAI-format tool definitions mirroring the live agent's tools, in the same
+/// order they are registered in [`build_myelin_agent`]. Used only by the startup
+/// warm-up request so its cached system+tools prefix matches the live agent's.
+/// Keep name/description/parameters in sync with each `Tool::definition` below.
+pub fn tool_specs() -> Vec<Value> {
+    let spec = |name: &str, description: &str, parameters: Value| {
+        serde_json::json!({
+            "type": "function",
+            "function": { "name": name, "description": description, "parameters": parameters }
+        })
+    };
+    vec![
+        spec(
+            "read_note",
+            "Read the full markdown content of a note by its ID.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "note_id": { "type": "string", "description": "The ID of the note to read. Found via search." } },
+                "required": ["note_id"]
+            }),
+        ),
+        spec(
+            "rewrite_note",
+            "Fully replace the existing note content. Use this to rewrite the note, or to clear the note (by passing an empty string). Do not use this to add a paragraph; use append_note for that. The content must be the full final note body.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "content": { "type": "string", "description": "The complete final note body to save. Never use placeholders like [insert poem here]." },
+                    "tags": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["title", "content"]
+            }),
+        ),
+        spec(
+            "replace_text",
+            "Find exact text in the note and replace it with new text. Use an empty string for replacement_text to delete the target_text. Use this when the user asks to modify, replace, or remove a specific small portion of the note without rewriting everything.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "target_text": { "type": "string", "description": "The exact string of text to find and remove/replace. Must be an exact match of what is in the note." },
+                    "replacement_text": { "type": "string", "description": "The new text to insert instead. Use an empty string to delete the target_text." }
+                },
+                "required": ["title", "target_text", "replacement_text"]
+            }),
+        ),
+        spec(
+            "append_note",
+            "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use rewrite_note for that.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "content": { "type": "string", "description": "Only the new content to append to the existing note. Do not repeat the whole note body and do not use placeholders." }
+                },
+                "required": ["title", "content"]
+            }),
+        ),
+        spec(
+            "fetch_web_page",
+            "Fetch the text content of a public web page. Use this when the user asks to visit, open, fetch, or get details from a URL or domain.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string", "description": "The http(s) URL or domain to fetch." } },
+                "required": ["url"]
+            }),
+        ),
+        spec(
+            "search_notes",
+            "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string", "description": "The search keywords." } },
+                "required": ["query"]
+            }),
+        ),
+    ]
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadNoteArgs {
     note_id: String,
@@ -224,7 +309,7 @@ impl Tool for RewriteNoteTool {
                     .to_string(),
             );
         }
-        if let Some(existing) = self.state.find_note_by_exact_title(&args.title) {
+        if let Some(existing) = self.state.resolve_chat_target_note(&args.title) {
             let tags = args.tags.unwrap_or(existing.tags.clone());
             self.state
                 .save_note(
@@ -314,9 +399,9 @@ impl Tool for AppendNoteTool {
 
         let existing = self
             .state
-            .find_note_by_exact_title(&args.title)
+            .resolve_chat_target_note(&args.title)
             .ok_or_else(|| ToolError {
-                message: format!("No existing note found with exact title: {}", args.title),
+                message: "No note is currently open to append to.".to_string(),
             })?;
 
         let appended_body = if existing.body.trim().is_empty() {
@@ -418,9 +503,9 @@ impl Tool for ReplaceTextTool {
 
         let existing = self
             .state
-            .find_note_by_exact_title(&args.title)
+            .resolve_chat_target_note(&args.title)
             .ok_or_else(|| ToolError {
-                message: format!("No existing note found with exact title: {}", args.title),
+                message: "No note is currently open to edit.".to_string(),
             })?;
 
         if !existing.body.contains(&args.target_text) {
@@ -592,6 +677,8 @@ pub fn build_myelin_agent(
     base_url: &str,
     model_name: &str,
     preamble: &str,
+    temperature: f64,
+    max_turns: usize,
 ) -> rig_core::agent::Agent<impl rig_core::completion::CompletionModel> {
     let client = rig_core::providers::openai::Client::builder()
         .api_key("sk-fake")
@@ -602,7 +689,10 @@ pub fn build_myelin_agent(
     let model = client.completion_model(model_name);
     rig_core::agent::AgentBuilder::new(model)
         .preamble(preamble)
-        .default_max_turns(4)
+        // Low temperature keeps a small model decisive and on-task instead of
+        // rambling or asking the same clarifying question repeatedly.
+        .temperature(temperature)
+        .default_max_turns(max_turns)
         .tool(ReadNoteTool {
             state: state.clone(),
         })

@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
+    import { listen } from '@tauri-apps/api/event';
     import { open } from '@tauri-apps/plugin-dialog';
     import { goto } from '$app/navigation';
     import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
@@ -12,10 +13,52 @@
     let threads = $state<number | null>(null);
     let temperature = $state<number | null>(null);
     let topP = $state<number | null>(null);
+    let maxTurns = $state<number | null>(null);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
     let activeProvider = $state('');
+    let backendPreference = $state<'auto' | 'gpu' | 'cpu'>('auto');
+    let activeBackend = $state<string | null>(null);
+    let nvidiaDetected = $state(false);
+    let gpuAvailable = $state(true);
+    let gpus = $state<string[]>([]);
+    let installedBackends = $state<string[]>([]);
+    let backendFellBack = $state(false);
+    let providerHealthy = $state(true);
+    let providerDetail = $state('');
+
+    // Proactive validation of the chosen compute device against this machine.
+    const gpuIssue = $derived.by((): { level: 'error' | 'warn'; message: string } | null => {
+        if (backendPreference === 'cpu') return null;
+
+        if (!gpuAvailable) {
+            // Only a hard error when the user explicitly forces GPU.
+            if (backendPreference === 'gpu') {
+                return {
+                    level: 'error',
+                    message:
+                        'No GPU was detected on this system' +
+                        (gpus.length ? ` (${gpus.join(', ')})` : '') +
+                        '. GPU mode is unavailable here — switch to Auto or CPU.'
+                };
+            }
+            return null; // Auto on a GPU-less machine correctly uses CPU.
+        }
+
+        const hasGpuBuild =
+            installedBackends.includes('cuda') ||
+            installedBackends.includes('vulkan') ||
+            installedBackends.includes('metal');
+        if (!hasGpuBuild) {
+            const which = nvidiaDetected ? 'CUDA (bin/cuda/)' : 'Vulkan (bin/vulkan/)';
+            return {
+                level: 'warn',
+                message: `A GPU was detected (${gpus.join(', ') || 'unknown'}), but no GPU build is installed. Add a ${which} build — see docs/llama-backends.md — otherwise the app falls back to CPU.`
+            };
+        }
+        return null;
+    });
     let isSaving = $state(false);
     let isRebuilding = $state(false);
     let saved = $state(false);
@@ -33,6 +76,14 @@
             await refreshSnapshot();
             const status = await invoke<ProviderStatus>('get_provider_status');
             activeProvider = status.activeProvider || '';
+            activeBackend = status.activeBackend ?? status.resolved?.backend ?? null;
+            nvidiaDetected = status.nvidiaDetected ?? false;
+            gpuAvailable = status.gpuAvailable ?? true;
+            gpus = status.gpus ?? [];
+            installedBackends = status.installedBackends ?? [];
+            providerHealthy = status.healthy ?? true;
+            providerDetail = status.detail ?? '';
+            backendPreference = (status.config?.backendPreference as 'auto' | 'gpu' | 'cpu') ?? 'auto';
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
                 currentExecutablePath = status.config?.executablePath || status.resolved.executablePath || '';
@@ -41,6 +92,7 @@
                 threads = status.config?.threads ?? status.resolved.threads ?? null;
                 temperature = status.config?.temperature ?? status.resolved.temperature ?? null;
                 topP = status.config?.topP ?? status.resolved.topP ?? null;
+                maxTurns = status.config?.maxTurns ?? null;
                 extraArgs = (status.config?.extraArgs ?? status.resolved.extraArgs ?? []);
             } else if (status.config) {
                 currentModelPath = status.config.modelPath || '';
@@ -50,10 +102,20 @@
                 threads = status.config.threads ?? null;
                 temperature = status.config.temperature ?? null;
                 topP = status.config.topP ?? null;
+                maxTurns = status.config.maxTurns ?? null;
                 extraArgs = status.config.extraArgs ?? [];
             }
             
             enableJupyterExecution = localStorage.getItem('myelin_jupyter_exec') === 'true';
+
+            // Live-update the backend badge when a server actually starts.
+            await listen<{ backend: string; gpuOffloaded: boolean; fellBackToCpu: boolean }>(
+                'ai://llama_backend',
+                (event) => {
+                    activeBackend = event.payload.backend;
+                    backendFellBack = event.payload.fellBackToCpu;
+                }
+            );
         } catch (e) {
             console.error('Failed to load provider status:', e);
         }
@@ -158,13 +220,15 @@
         saved = false;
         try {
             const extraArgsArray = extraArgs.filter(arg => arg.trim() !== '');
-            await invoke('set_llama_advanced_config', { 
+            await invoke('set_llama_advanced_config', {
                 contextSize: contextSize,
                 gpuLayers: gpuLayers,
                 threads: threads,
                 temperature: temperature,
                 topP: topP,
-                extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null
+                extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null,
+                backendPreference: backendPreference,
+                maxTurns: maxTurns
             });
             saved = true;
             setTimeout(() => {
@@ -267,6 +331,62 @@
                 </button>
             </div>
 
+            <div class="compute-device">
+                <span class="compute-label">Compute device</span>
+                <div class="segmented" role="group" aria-label="Compute device">
+                    {#each [['auto', 'Auto'], ['gpu', 'GPU'], ['cpu', 'CPU']] as [value, label]}
+                        {@const disabled = value === 'gpu' && !gpuAvailable}
+                        <button
+                            type="button"
+                            class="segment"
+                            class:active={backendPreference === value}
+                            {disabled}
+                            title={disabled ? 'No GPU detected on this system' : ''}
+                            onclick={() => { backendPreference = value as 'auto' | 'gpu' | 'cpu'; debounceSave(); }}
+                        >
+                            {label}
+                        </button>
+                    {/each}
+                </div>
+                <p class="compute-hint">
+                    {#if backendPreference === 'auto'}
+                        Use the GPU when available, otherwise the CPU. {gpus.length ? `Detected: ${gpus.join(', ')}.` : 'No GPU detected.'}
+                    {:else if backendPreference === 'gpu'}
+                        Force GPU acceleration. Falls back to CPU with a warning if no GPU build is available.
+                    {:else}
+                        Force CPU only. Slower, but works everywhere. Takes effect after the AI server restarts.
+                    {/if}
+                </p>
+
+                {#if gpuIssue}
+                    <div class="device-issue" class:error={gpuIssue.level === 'error'} class:warn={gpuIssue.level === 'warn'}>
+                        <span class="issue-icon">{gpuIssue.level === 'error' ? '⛔' : '⚠️'}</span>
+                        <span>{gpuIssue.message}</span>
+                    </div>
+                {/if}
+
+                {#if !providerHealthy && providerDetail}
+                    <div class="device-issue error">
+                        <span class="issue-icon">⛔</span>
+                        <span>{providerDetail}</span>
+                    </div>
+                {/if}
+            </div>
+
+            {#if activeBackend}
+                <div class="backend-status" class:gpu={activeBackend !== 'cpu' && !backendFellBack} class:cpu={activeBackend === 'cpu' || backendFellBack}>
+                    <span class="backend-dot"></span>
+                    {#if backendFellBack}
+                        Running on <strong>CPU</strong> — a GPU was requested but no device was used.
+                        Install a GPU build (e.g. <code>cuda</code>) under the binary folder for full speed.
+                    {:else if activeBackend === 'cpu'}
+                        Running on <strong>CPU</strong>.{nvidiaDetected ? ' An NVIDIA GPU was detected — add a cuda/ build beside your llama-server binary for a big speedup.' : ''}
+                    {:else}
+                        GPU acceleration active: <strong>{activeBackend.toUpperCase()}</strong>.
+                    {/if}
+                </div>
+            {/if}
+
             <br/>
             <h2>Advanced AI Configuration</h2>
             <p class="description">
@@ -292,6 +412,10 @@
                 <div class="input-group">
                     <label for="top_p">Top P</label>
                     <input type="number" step="0.05" id="top_p" bind:value={topP} oninput={debounceSave} placeholder="0.95" />
+                </div>
+                <div class="input-group">
+                    <label for="max_turns">Max Tool Turns</label>
+                    <input type="number" min="1" max="12" step="1" id="max_turns" bind:value={maxTurns} oninput={debounceSave} placeholder="4" />
                 </div>
             </div>
             <div class="input-group full-width" style="margin-top: 1rem;">
@@ -485,6 +609,134 @@
     .path-display.empty {
         color: var(--text-secondary);
         font-style: italic;
+    }
+
+    .compute-device {
+        margin-top: var(--space-4);
+    }
+
+    .compute-label {
+        display: block;
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin-bottom: var(--space-2);
+    }
+
+    .segmented {
+        display: inline-flex;
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        overflow: hidden;
+    }
+
+    .segment {
+        padding: 0.45rem 1.1rem;
+        background: var(--bg-page);
+        color: var(--text-secondary);
+        border: none;
+        border-right: 1px solid var(--border-default);
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: background 0.12s, color 0.12s;
+    }
+
+    .segment:last-child {
+        border-right: none;
+    }
+
+    .segment:hover {
+        color: var(--text-primary);
+    }
+
+    .segment.active {
+        background: var(--neutral-800);
+        color: var(--text-primary);
+        font-weight: 600;
+    }
+
+    .segment:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    .device-issue {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        padding: 0.6rem 0.9rem;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-default);
+        font-size: 0.82rem;
+        line-height: 1.45;
+    }
+
+    .device-issue .issue-icon {
+        flex: 0 0 auto;
+    }
+
+    .device-issue.error {
+        border-color: #b3402f;
+        background: rgba(179, 64, 47, 0.1);
+        color: var(--text-primary);
+    }
+
+    .device-issue.warn {
+        border-color: #9a6b1f;
+        background: rgba(154, 107, 31, 0.1);
+        color: var(--text-primary);
+    }
+
+    .compute-hint {
+        margin: var(--space-2) 0 0;
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        line-height: 1.4;
+    }
+
+    .backend-status {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        padding: 0.6rem 0.9rem;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-default);
+        font-size: 0.85rem;
+        line-height: 1.4;
+        color: var(--text-secondary);
+    }
+
+    .backend-status code {
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+    }
+
+    .backend-dot {
+        flex: 0 0 auto;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--text-secondary);
+    }
+
+    .backend-status.gpu {
+        border-color: #2f7d4f;
+        background: rgba(47, 125, 79, 0.08);
+    }
+
+    .backend-status.gpu .backend-dot {
+        background: #36c46f;
+    }
+
+    .backend-status.cpu {
+        border-color: #9a6b1f;
+        background: rgba(154, 107, 31, 0.08);
+    }
+
+    .backend-status.cpu .backend-dot {
+        background: #e0a23a;
     }
 
     .browse-btn {

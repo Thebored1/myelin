@@ -3,8 +3,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -13,6 +15,57 @@ const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 39281;
 const STARTUP_ATTEMPTS: usize = 60;
 const STARTUP_DELAY_MS: u64 = 500;
+/// How many lines of llama-server stderr we retain to detect the active backend.
+const STDERR_CAPTURE_LINES: usize = 200;
+
+/// A compute backend for llama.cpp. The desktop strategy is CUDA-tiered:
+/// detect an NVIDIA GPU and prefer CUDA, otherwise fall back to a portable
+/// GPU backend (Vulkan on Windows/Linux, Metal on macOS), and finally CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuBackend {
+    Cuda,
+    Vulkan,
+    Metal,
+    Cpu,
+    /// A user-supplied executable whose backend we don't manage.
+    Custom,
+}
+
+impl GpuBackend {
+    /// Subdirectory under `<app_data>/bin` where this backend's binaries live.
+    fn dir_name(self) -> Option<&'static str> {
+        match self {
+            GpuBackend::Cuda => Some("cuda"),
+            GpuBackend::Vulkan => Some("vulkan"),
+            GpuBackend::Metal => Some("metal"),
+            GpuBackend::Cpu => Some("cpu"),
+            GpuBackend::Custom => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GpuBackend::Cuda => "cuda",
+            GpuBackend::Vulkan => "vulkan",
+            GpuBackend::Metal => "metal",
+            GpuBackend::Cpu => "cpu",
+            GpuBackend::Custom => "custom",
+        }
+    }
+
+    /// Whether this backend offloads work to a GPU.
+    pub fn is_gpu(self) -> bool {
+        matches!(self, GpuBackend::Cuda | GpuBackend::Vulkan | GpuBackend::Metal)
+    }
+}
+
+/// One launchable llama-server binary plus the backend it provides.
+#[derive(Debug, Clone)]
+pub struct BackendCandidate {
+    pub backend: GpuBackend,
+    pub executable_path: PathBuf,
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -28,6 +81,10 @@ pub struct WorkspaceLlamaConfig {
     pub top_p: Option<f32>,
     pub chat_format: Option<String>,
     pub extra_args: Vec<String>,
+    /// Compute device preference: "auto" (GPU if available), "gpu", or "cpu".
+    pub backend_preference: Option<String>,
+    /// Max agent tool-calling turns before forcing a final answer.
+    pub max_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +101,18 @@ pub struct ResolvedLlamaConfig {
     pub top_p: f32,
     pub chat_format: Option<String>,
     pub extra_args: Vec<String>,
+    /// The backend of the primary (preferred) candidate, for display before launch.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Compute device preference: "auto", "gpu", or "cpu".
+    #[serde(default)]
+    pub backend_preference: String,
+    /// Max agent tool-calling turns before forcing a final answer.
+    #[serde(default)]
+    pub max_turns: u32,
+    /// Ordered list of binaries to try (best first). Not serialized to the UI.
+    #[serde(skip)]
+    pub candidates: Vec<BackendCandidate>,
 }
 
 impl ResolvedLlamaConfig {
@@ -69,12 +138,25 @@ impl ResolvedLlamaConfig {
             && self.threads == other.threads
             && self.chat_format == other.chat_format
             && self.extra_args == other.extra_args
+            // Changing the device preference (e.g. GPU → CPU) must relaunch the
+            // server even when the same binary is selected, since it changes the
+            // effective --n-gpu-layers.
+            && self.backend_preference == other.backend_preference
     }
 }
 
 pub struct ManagedLlamaServer {
     pub config: ResolvedLlamaConfig,
     pub child: Child,
+    /// The backend that actually loaded, detected from the server's startup log.
+    pub active_backend: GpuBackend,
+    /// True when a GPU backend was requested for this launch.
+    pub requested_gpu: bool,
+    /// True when the model is actually running on a GPU.
+    pub gpu_offloaded: bool,
+    /// Drains the server's stderr for the process lifetime so its pipe never
+    /// fills and stalls generation. Detaches; exits on child EOF.
+    _stderr_reader: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,26 +165,190 @@ pub struct LlamaProviderInfo {
     pub config: WorkspaceLlamaConfig,
     pub healthy: bool,
     pub detail: String,
+    /// The backend we would prefer for this machine (before launch).
+    pub selected_backend: Option<String>,
+    /// Whether an NVIDIA GPU was detected on this machine.
+    pub nvidia_detected: bool,
+    /// Whether GPU acceleration is usable on this machine at all.
+    pub gpu_available: bool,
+    /// GPU adapter names detected on this machine (for display).
+    pub gpus: Vec<String>,
+    /// Backend builds actually installed ("cuda"/"vulkan"/"metal"/"cpu").
+    pub installed_backends: Vec<String>,
+}
+
+/// Detect a usable NVIDIA GPU by probing `nvidia-smi`. Cached for the process
+/// lifetime — driver availability does not change while the app runs.
+pub fn detect_nvidia() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        Command::new("nvidia-smi")
+            .arg("-L")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).contains("GPU"))
+            .unwrap_or(false)
+    })
+}
+
+/// Enumerate GPU adapter names on this machine. Returns `(names, probed)` where
+/// `probed` is true when the OS query actually ran (so an empty list means
+/// "definitely no GPU" rather than "couldn't tell"). Cached for the process.
+pub fn detect_gpus() -> (Vec<String>, bool) {
+    static CACHE: OnceLock<(Vec<String>, bool)> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            if cfg!(target_os = "macos") {
+                // Every supported Mac has a Metal-capable GPU.
+                return (vec!["Apple GPU".to_string()], true);
+            }
+            if cfg!(target_os = "windows") {
+                let out = Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "(Get-CimInstance Win32_VideoController).Name -join \"`n\"",
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .output();
+                if let Ok(out) = out {
+                    if out.status.success() {
+                        let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                            .lines()
+                            .map(|l| l.trim().to_string())
+                            .filter(|l| !l.is_empty())
+                            .collect();
+                        return (names, true);
+                    }
+                }
+                return (Vec::new(), false);
+            }
+            // Linux/other: best-effort via lspci.
+            let out = Command::new("lspci")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output();
+            if let Ok(out) = out {
+                if out.status.success() {
+                    let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter(|l| {
+                            let l = l.to_lowercase();
+                            l.contains("vga") || l.contains("3d controller") || l.contains("display")
+                        })
+                        .map(|l| l.trim().to_string())
+                        .collect();
+                    return (names, true);
+                }
+            }
+            (Vec::new(), false)
+        })
+        .clone()
+}
+
+/// Whether GPU acceleration is usable on this machine. Lenient on probe
+/// failure (assume available) so we never wrongly block a real GPU.
+pub fn gpu_available() -> bool {
+    if cfg!(target_os = "macos") || detect_nvidia() {
+        return true;
+    }
+    let (gpus, probed) = detect_gpus();
+    !probed || !gpus.is_empty()
+}
+
+/// Backend subfolders that actually contain a binary, across the tiering roots.
+pub fn installed_backends(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for root in tiering_roots(app_data_dir, workspace_config) {
+        for backend in [GpuBackend::Cuda, GpuBackend::Vulkan, GpuBackend::Metal, GpuBackend::Cpu] {
+            if let Some(dir) = backend.dir_name() {
+                let label = backend.label().to_string();
+                if root.join(dir).join(executable_name()).is_file() && !found.contains(&label) {
+                    found.push(label);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Directories that may hold per-backend subfolders, highest priority first.
+fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(raw) = &workspace_config.executable_path {
+        let exe = resolve_input_path(app_data_dir, raw);
+        if let Some(parent) = exe.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    roots.push(app_data_dir.join("bin"));
+    roots
+}
+
+/// Normalize a user backend preference string to "auto" | "gpu" | "cpu".
+fn normalize_preference(raw: Option<&str>) -> String {
+    match raw.map(|p| p.trim().to_lowercase()).as_deref() {
+        Some("cpu") => "cpu".into(),
+        Some("gpu") => "gpu".into(),
+        _ => "auto".into(),
+    }
+}
+
+/// Backend preference order for the current OS, detected hardware, and the
+/// user's device preference. CPU is always appended as a final safety net so
+/// the app never fails to launch — except when the user explicitly forces CPU.
+fn desired_backends(preference: &str) -> Vec<GpuBackend> {
+    if preference == "cpu" {
+        return vec![GpuBackend::Cpu];
+    }
+
+    if cfg!(target_os = "macos") {
+        // Metal ships in the standard macOS build and always has a CPU fallback.
+        vec![GpuBackend::Metal, GpuBackend::Cpu]
+    } else if detect_nvidia() {
+        vec![GpuBackend::Cuda, GpuBackend::Vulkan, GpuBackend::Cpu]
+    } else {
+        // Vulkan covers AMD/Intel/NVIDIA and degrades to CPU on its own.
+        vec![GpuBackend::Vulkan, GpuBackend::Cpu]
+    }
 }
 
 pub fn inspect_provider(app_data_dir: &Path) -> Result<LlamaProviderInfo> {
     let app_config = load_config(app_data_dir).unwrap_or_default();
+    let nvidia_detected = detect_nvidia();
+    let gpu_available = gpu_available();
+    let (gpus, _) = detect_gpus();
+    let installed_backends = installed_backends(app_data_dir, &app_config);
     match resolve_config(app_data_dir) {
         Ok(config) => Ok(LlamaProviderInfo {
             detail: format!(
-                "Ready to use {} with model {}.",
+                "Ready to use {} ({} backend) with model {}.",
                 config.executable_path.display(),
+                config.backend.clone().unwrap_or_else(|| "cpu".into()),
                 config.model_path.display()
             ),
+            selected_backend: config.backend.clone(),
             resolved: Some(config),
             config: app_config,
             healthy: true,
+            nvidia_detected,
+            gpu_available,
+            gpus,
+            installed_backends,
         }),
         Err(error) => Ok(LlamaProviderInfo {
             detail: error.to_string(),
             resolved: None,
             config: app_config,
             healthy: false,
+            selected_backend: None,
+            nvidia_detected,
+            gpu_available,
+            gpus,
+            installed_backends,
         }),
     }
 }
@@ -114,11 +360,15 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         .clone()
         .unwrap_or_else(|| DEFAULT_HOST.to_string());
     let port = app_config.port.unwrap_or(DEFAULT_PORT);
-    let executable_path = resolve_executable_path(app_data_dir, &app_config)?;
+    let preference = normalize_preference(app_config.backend_preference.as_deref());
+    let candidates = resolve_candidates(app_data_dir, &app_config, &preference)?;
+    let primary = candidates
+        .first()
+        .ok_or_else(|| anyhow!("no llama-server binary could be resolved"))?;
     let model_path = resolve_model_path(app_data_dir, &app_config)?;
 
     Ok(ResolvedLlamaConfig {
-        executable_path,
+        executable_path: primary.executable_path.clone(),
         model_path,
         host,
         port,
@@ -129,6 +379,10 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         top_p: app_config.top_p.unwrap_or(0.95),
         chat_format: app_config.chat_format.clone(),
         extra_args: app_config.extra_args.clone(),
+        backend: Some(primary.backend.label().to_string()),
+        backend_preference: preference,
+        max_turns: app_config.max_turns.filter(|&n| n > 0).unwrap_or(4),
+        candidates,
     })
 }
 
@@ -145,7 +399,48 @@ pub async fn start_server(
     client: &Client,
     config: &ResolvedLlamaConfig,
 ) -> Result<ManagedLlamaServer> {
-    let mut command = Command::new(&config.executable_path);
+    let mut last_error: Option<String> = None;
+
+    for candidate in &config.candidates {
+        match try_start_candidate(client, config, candidate).await {
+            Ok(server) => return Ok(server),
+            Err(error) => {
+                log::warn!(
+                    "llama-server candidate {} ({}) failed to start: {error}",
+                    candidate.executable_path.display(),
+                    candidate.backend.label()
+                );
+                last_error = Some(error.to_string());
+            }
+        }
+    }
+
+    bail!(
+        "no llama-server backend could be started. Last error: {}",
+        last_error.unwrap_or_else(|| "unknown".into())
+    )
+}
+
+async fn try_start_candidate(
+    client: &Client,
+    config: &ResolvedLlamaConfig,
+    candidate: &BackendCandidate,
+) -> Result<ManagedLlamaServer> {
+    // Force 0 layers when the user picked CPU, or for the explicit `cpu/`
+    // backend, so the server never probes for a device. GPU backends and
+    // unknown/custom binaries (which may themselves be GPU builds) honour the
+    // configured gpu_layers. requested_gpu reflects whether we asked for offload.
+    let gpu_layers = if config.backend_preference == "cpu" {
+        0
+    } else {
+        match candidate.backend {
+            GpuBackend::Cpu => 0,
+            _ => config.gpu_layers.unwrap_or(999),
+        }
+    };
+    let requested_gpu = gpu_layers > 0;
+
+    let mut command = Command::new(&candidate.executable_path);
     command
         .arg("--host")
         .arg(&config.host)
@@ -155,12 +450,17 @@ pub async fn start_server(
         .arg(&config.model_path)
         .arg("--ctx-size")
         .arg(config.context_size.to_string())
+        .arg("--n-gpu-layers")
+        .arg(gpu_layers.to_string())
+        // Single slot: this is a single-user desktop app. Multiple slots split
+        // the context window and scatter requests across cold slots, defeating
+        // the prompt-prefix KV cache (the system + tool-schema prefix is large
+        // and constant). One slot keeps the full ctx and reuses that prefix on
+        // every request. Placed before extra_args so a user can override.
+        .arg("--parallel")
+        .arg("1")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    if let Some(gpu_layers) = config.gpu_layers {
-        command.arg("--n-gpu-layers").arg(gpu_layers.to_string());
-    }
+        .stderr(Stdio::piped());
 
     if let Some(threads) = config.threads {
         command.arg("--threads").arg(threads.to_string());
@@ -172,27 +472,124 @@ pub async fn start_server(
 
     command.args(&config.extra_args);
 
-    let child = command.spawn().with_context(|| {
+    let mut child = command.spawn().with_context(|| {
         format!(
             "failed to start llama-server at {}",
-            config.executable_path.display()
+            candidate.executable_path.display()
         )
     })?;
 
+    // Drain and capture stderr so the pipe never blocks the server, and so we
+    // can read which compute backend actually loaded.
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let reader_handle = child.stderr.take().map(|stderr| {
+        let captured = Arc::clone(&captured);
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                let mut guard = captured.lock().unwrap();
+                if guard.len() < STDERR_CAPTURE_LINES {
+                    guard.push(line);
+                }
+                // Keep looping past the cap to keep draining the pipe.
+            }
+        })
+    });
+
     for _ in 0..STARTUP_ATTEMPTS {
         if health_check(client, config).await {
+            let log_lines = captured.lock().unwrap().clone();
+            let active_backend = detect_active_backend(&log_lines, candidate.backend);
+            let gpu_offloaded = active_backend.is_gpu();
+
+            let mut running = config.clone();
+            running.executable_path = candidate.executable_path.clone();
+            running.backend = Some(active_backend.label().to_string());
+
             return Ok(ManagedLlamaServer {
-                config: config.clone(),
+                config: running,
                 child,
+                active_backend,
+                requested_gpu,
+                gpu_offloaded,
+                _stderr_reader: reader_handle,
             });
         }
+
+        // If the process already exited, stop waiting and let the caller try
+        // the next backend.
+        if let Ok(Some(_status)) = child.try_wait() {
+            break;
+        }
+
         thread::sleep(Duration::from_millis(STARTUP_DELAY_MS));
     }
 
-    let mut child = child;
     let _ = child.kill();
     let _ = child.wait();
-    bail!("llama-server started but never became healthy")
+    let tail = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    bail!("started but never became healthy. {tail}")
+}
+
+/// Inspect llama.cpp startup log lines to determine which backend actually
+/// loaded the model. Falls back to the requested backend if undetermined.
+fn detect_active_backend(lines: &[String], requested: GpuBackend) -> GpuBackend {
+    let mut saw_gpu_device = false;
+    let mut detected: Option<GpuBackend> = None;
+
+    for line in lines {
+        let lower = line.to_lowercase();
+        // Backend registration lines, e.g. "loaded CUDA backend from ...".
+        if lower.contains("loaded cuda backend") {
+            detected = Some(GpuBackend::Cuda);
+        } else if lower.contains("loaded vulkan backend") {
+            detected = Some(GpuBackend::Vulkan);
+        } else if lower.contains("loaded metal backend") || lower.contains("ggml_metal_init") {
+            detected = Some(GpuBackend::Metal);
+        }
+        // Device assignment lines confirm the model is really on the GPU,
+        // e.g. "using device CUDA0" / "offloaded 29/29 layers to GPU".
+        if lower.contains("offloaded") && lower.contains("to gpu") {
+            saw_gpu_device = true;
+        }
+        if lower.contains("using device") && (lower.contains("cuda") || lower.contains("vulkan")) {
+            saw_gpu_device = true;
+        }
+    }
+
+    match detected {
+        // A GPU backend registered but nothing was offloaded → effectively CPU.
+        Some(gpu) if gpu.is_gpu() => {
+            if saw_gpu_device || requested.is_gpu() {
+                gpu
+            } else {
+                GpuBackend::Cpu
+            }
+        }
+        Some(other) => other,
+        None => {
+            // No backend line captured. Trust the request only if it was CPU;
+            // otherwise we genuinely don't know, so report CPU conservatively.
+            if requested == GpuBackend::Cpu {
+                GpuBackend::Cpu
+            } else if saw_gpu_device {
+                requested
+            } else {
+                GpuBackend::Cpu
+            }
+        }
+    }
 }
 
 pub async fn stop_server(server: &mut ManagedLlamaServer) {
@@ -250,15 +647,35 @@ pub fn set_advanced_config(
     threads: Option<u32>,
     temperature: Option<f32>,
     top_p: Option<f32>,
-    extra_args: Option<Vec<String>>
+    extra_args: Option<Vec<String>>,
+    backend_preference: Option<String>,
+    max_turns: Option<u32>,
 ) -> Result<()> {
     let mut config = load_config(app_data_dir).unwrap_or_default();
-    if let Some(cs) = context_size { config.context_size = Some(cs); }
-    if let Some(gl) = gpu_layers { config.gpu_layers = Some(gl); }
-    if let Some(t) = threads { config.threads = Some(t); }
-    if let Some(temp) = temperature { config.temperature = Some(temp); }
-    if let Some(tp) = top_p { config.top_p = Some(tp); }
-    if let Some(ea) = extra_args { config.extra_args = ea; }
+    if let Some(cs) = context_size {
+        config.context_size = Some(cs);
+    }
+    if let Some(gl) = gpu_layers {
+        config.gpu_layers = Some(gl);
+    }
+    if let Some(t) = threads {
+        config.threads = Some(t);
+    }
+    if let Some(temp) = temperature {
+        config.temperature = Some(temp);
+    }
+    if let Some(tp) = top_p {
+        config.top_p = Some(tp);
+    }
+    if let Some(ea) = extra_args {
+        config.extra_args = ea;
+    }
+    if let Some(bp) = backend_preference {
+        config.backend_preference = Some(normalize_preference(Some(&bp)));
+    }
+    if let Some(mt) = max_turns {
+        config.max_turns = Some(mt.clamp(1, 12));
+    }
 
     let path = config_path(app_data_dir);
     if let Some(parent) = path.parent() {
@@ -270,33 +687,93 @@ pub fn set_advanced_config(
     Ok(())
 }
 
-fn resolve_executable_path(
+/// Build the ordered list of llama-server binaries to try, best backend first.
+///
+/// A "root" is a directory that may contain per-backend subfolders
+/// (`<root>/cuda/`, `<root>/vulkan/`, `<root>/metal/`, `<root>/cpu/`) plus a
+/// flat `<root>/llama-server` used as a CPU fallback. Roots, in order:
+/// 1. The directory of a configured `executablePath` (so users can drop a
+///    `cuda/` folder beside their existing binary and auto-upgrade).
+/// 2. `<app_data>/bin`.
+///
+/// `MYELIN_LLAMA_SERVER_PATH` remains a hard single override for power users.
+fn resolve_candidates(
     app_data_dir: &Path,
     workspace_config: &WorkspaceLlamaConfig,
-) -> Result<PathBuf> {
+    preference: &str,
+) -> Result<Vec<BackendCandidate>> {
     if let Ok(path) = env::var("MYELIN_LLAMA_SERVER_PATH") {
-        return validate_existing_file(resolve_input_path(app_data_dir, &path), "llama-server");
+        let exe = validate_existing_file(resolve_input_path(app_data_dir, &path), "llama-server")?;
+        return Ok(vec![BackendCandidate {
+            backend: GpuBackend::Custom,
+            executable_path: exe,
+        }]);
     }
 
-    if let Some(path) = &workspace_config.executable_path {
-        return validate_existing_file(resolve_input_path(app_data_dir, path), "llama-server");
-    }
+    let mut candidates: Vec<BackendCandidate> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let push = |candidates: &mut Vec<BackendCandidate>,
+                seen: &mut Vec<PathBuf>,
+                backend: GpuBackend,
+                exe: PathBuf| {
+        if exe.is_file() && !seen.contains(&exe) {
+            seen.push(exe.clone());
+            candidates.push(BackendCandidate {
+                backend,
+                executable_path: exe,
+            });
+        }
+    };
 
-    let app_candidates = [app_data_dir.join("bin").join(executable_name())];
-    for candidate in app_candidates {
-        if candidate.is_file() {
-            return Ok(candidate);
+    // Collect tiering roots in priority order.
+    let roots = tiering_roots(app_data_dir, workspace_config);
+    let configured_exe = workspace_config
+        .executable_path
+        .as_ref()
+        .map(|raw| resolve_input_path(app_data_dir, raw));
+
+    // GPU/CPU backend subfolders, per detected hardware, across all roots.
+    for backend in desired_backends(preference) {
+        if let Some(dir) = backend.dir_name() {
+            for root in &roots {
+                push(
+                    &mut candidates,
+                    &mut seen,
+                    backend,
+                    root.join(dir).join(executable_name()),
+                );
+            }
         }
     }
 
+    // Flat fallbacks: the configured binary, each root's flat binary, then
+    // PATH. These are `Custom` (unknown) rather than `Cpu` — a flat extraction
+    // may itself be a GPU build, so it keeps the configured gpu_layers and the
+    // real backend is detected from the startup log.
+    if let Some(exe) = configured_exe {
+        push(&mut candidates, &mut seen, GpuBackend::Custom, exe);
+    }
+    for root in &roots {
+        push(
+            &mut candidates,
+            &mut seen,
+            GpuBackend::Custom,
+            root.join(executable_name()),
+        );
+    }
     if let Some(path) = find_on_path(executable_name()) {
-        return Ok(path);
+        push(&mut candidates, &mut seen, GpuBackend::Custom, path);
     }
 
-    bail!(
-        "llama-server not found. Set MYELIN_LLAMA_SERVER_PATH, add executablePath in app settings, or put {} on PATH.",
-        executable_name()
-    )
+    if candidates.is_empty() {
+        bail!(
+            "llama-server not found. Set MYELIN_LLAMA_SERVER_PATH, add executablePath in app settings, install a backend under {}, or put {} on PATH.",
+            app_data_dir.join("bin").display(),
+            executable_name()
+        );
+    }
+
+    Ok(candidates)
 }
 
 fn resolve_model_path(

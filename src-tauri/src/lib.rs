@@ -64,9 +64,20 @@ async fn set_llama_advanced_config(
     temperature: Option<f32>,
     top_p: Option<f32>,
     extra_args: Option<Vec<String>>,
+    backend_preference: Option<String>,
+    max_turns: Option<u32>,
 ) -> Result<(), String> {
     state
-        .set_llama_advanced_config(context_size, gpu_layers, threads, temperature, top_p, extra_args)
+        .set_llama_advanced_config(
+            context_size,
+            gpu_layers,
+            threads,
+            temperature,
+            top_p,
+            extra_args,
+            backend_preference,
+            max_turns,
+        )
         .await
         .map_err(|error| error.to_string())
 }

@@ -89,6 +89,8 @@ export type ProviderStatus = {
 		temperature?: number;
 		topP?: number;
 		extraArgs?: string[];
+		backendPreference?: 'auto' | 'gpu' | 'cpu';
+		maxTurns?: number;
 	};
 	resolved?: {
 		executablePath: string;
@@ -101,7 +103,18 @@ export type ProviderStatus = {
 		temperature: number;
 		topP: number;
 		extraArgs: string[];
+		backend?: string;
 	};
+	/** Backend running or preferred: "cuda" | "vulkan" | "metal" | "cpu". */
+	activeBackend?: string;
+	/** Whether an NVIDIA GPU was detected on this machine. */
+	nvidiaDetected?: boolean;
+	/** Whether GPU acceleration is usable on this machine at all. */
+	gpuAvailable?: boolean;
+	/** GPU adapter names detected on this machine. */
+	gpus?: string[];
+	/** Backend builds installed: subset of "cuda" | "vulkan" | "metal" | "cpu". */
+	installedBackends?: string[];
 };
 
 export type IndexState = {

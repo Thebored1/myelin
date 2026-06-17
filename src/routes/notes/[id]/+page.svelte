@@ -4279,4 +4279,18 @@
 		font-size: 0.75rem;
 		padding: var(--space-1) 0;
 	}
+	
+	.chat-time-taken {
+		display: block;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		opacity: 0.7;
+		margin-top: var(--space-2);
+		user-select: none;
+	}
+	
+	.chat-time-taken.live {
+		color: var(--accent);
+		opacity: 0.9;
+	}
 </style>

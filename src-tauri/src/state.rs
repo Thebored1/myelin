@@ -33,7 +33,6 @@ const EMBEDDING_DIM: i32 = 64;
 const INDEX_DIR_NAME: &str = "index";
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
 const NOTE_BODY_PROMPT_LIMIT: usize = 400;
-const RIG_MAX_TURNS: usize = 4;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
 
@@ -91,6 +90,7 @@ struct InnerState {
     llama_client: Client,
     chat_tools: Mutex<Vec<ChatTool>>,
     latest_chat_question: Mutex<Option<String>>,
+    current_note_id: Mutex<Option<String>>,
     require_tool_approval: std::sync::atomic::AtomicBool,
     pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
@@ -166,6 +166,7 @@ impl AppState {
                     .context("failed to create llama HTTP client")?,
                 chat_tools: Mutex::new(Vec::new()),
                 latest_chat_question: Mutex::new(None),
+                current_note_id: Mutex::new(None),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 pending_approvals: Mutex::new(HashMap::new()),
             }),
@@ -193,6 +194,40 @@ impl AppState {
 
     pub fn clear_latest_chat_question(&self) {
         *self.inner.latest_chat_question.lock() = None;
+    }
+
+    pub fn set_current_note_id(&self, note_id: impl Into<String>) {
+        *self.inner.current_note_id.lock() = Some(note_id.into());
+    }
+
+    pub fn clear_current_note_id(&self) {
+        *self.inner.current_note_id.lock() = None;
+    }
+
+    pub fn current_note_id(&self) -> Option<String> {
+        self.inner.current_note_id.lock().clone()
+    }
+
+    fn note_by_id(&self, id: &str) -> Option<NoteDocument> {
+        self.inner
+            .runtime
+            .read()
+            .notes
+            .get(id)
+            .map(|note| note.document.clone())
+    }
+
+    /// Resolve the note a chat tool should act on: always prefer the note that
+    /// is currently open in the editor, regardless of the title the model
+    /// passed (a small model often gets the title wrong). Fall back to an exact
+    /// title match only when no note is open.
+    pub fn resolve_chat_target_note(&self, title: &str) -> Option<NoteDocument> {
+        if let Some(id) = self.current_note_id() {
+            if let Some(doc) = self.note_by_id(&id) {
+                return Some(doc);
+            }
+        }
+        self.find_note_by_exact_title(title)
     }
 
     pub fn latest_chat_allows_note_mutation(&self) -> bool {
@@ -269,7 +304,9 @@ impl AppState {
         threads: Option<u32>,
         temperature: Option<f32>,
         top_p: Option<f32>,
-        extra_args: Option<Vec<String>>
+        extra_args: Option<Vec<String>>,
+        backend_preference: Option<String>,
+        max_turns: Option<u32>,
     ) -> Result<()> {
         crate::llama_server::set_advanced_config(
             &self.inner.app_data_dir,
@@ -278,7 +315,9 @@ impl AppState {
             threads,
             temperature,
             top_p,
-            extra_args
+            extra_args,
+            backend_preference,
+            max_turns,
         )?;
         Ok(())
     }
@@ -741,9 +780,13 @@ impl AppState {
     }
     pub async fn provider_status(&self) -> Result<ProviderStatus> {
         let info = llama_server::inspect_provider(&self.inner.app_data_dir)?;
+        // Prefer the backend of the running server; fall back to the backend we
+        // would select on this machine.
+        let mut active_backend = info.selected_backend.clone();
         let healthy = if let Some(config) = &info.resolved {
             let server = self.inner.llama_server.lock().await;
             if let Some(server) = server.as_ref() {
+                active_backend = Some(server.active_backend.label().to_string());
                 if server.config.matches_runtime(config) {
                     llama_server::health_check(&self.inner.llama_client, &server.config).await
                 } else {
@@ -763,6 +806,11 @@ impl AppState {
             detail: info.detail,
             config: Some(info.config),
             resolved: info.resolved,
+            active_backend,
+            nvidia_detected: info.nvidia_detected,
+            gpu_available: info.gpu_available,
+            gpus: info.gpus,
+            installed_backends: info.installed_backends,
         })
     }
 
@@ -817,6 +865,7 @@ impl AppState {
     ) -> Result<()> {
         self.reset_chat_tools();
         self.set_latest_chat_question(question.clone());
+        self.set_current_note_id(note_id.clone());
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
             let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
@@ -841,10 +890,15 @@ impl AppState {
                 self.clone(),
                 &format!("{}/v1", config.base_url()),
                 &config.model_name(),
-                "/no_think\nYou are a helpful AI note assistant. Use your judgment to determine the best course of action based on the user's request.\n\nRULES:\n- If the user asks you to modify, rewrite, or append to the note, use the rewrite_note, append_note, or replace_text tool.\n- To clear or delete the note's content, use the rewrite_note tool with an empty string for the content.\n- To delete or replace only a specific snippet of text, use the replace_text tool.\n- If the user asks a question or wants to chat, answer directly in the chat.\n- If the request is ambiguous, use your best judgment to either answer in chat or modify the note.\n- Always use the exact note title shown in 'Open Note:' as the rewrite_note/append_note title. You already have the open note's contents, do not search for it.\n- The content field for write/append tools must be the actual text to insert — never a description of what you did.\n- For URLs use fetch_web_page. Use search_notes only to find other local notes, NOT the current one."
+                crate::agent::MYELIN_PREAMBLE,
+                config.temperature as f64,
+                config.max_turns as usize,
             );
 
-            let mut response_stream = agent.stream_prompt(&prompt).multi_turn(RIG_MAX_TURNS).await;
+            let mut response_stream = agent
+                .stream_prompt(&prompt)
+                .multi_turn(config.max_turns as usize)
+                .await;
             let mut streamed_response = String::new();
             let mut final_response = String::new();
 
@@ -885,6 +939,7 @@ impl AppState {
         .await;
 
         self.clear_latest_chat_question();
+        self.clear_current_note_id();
 
         match result {
             Ok(()) => {
@@ -1231,11 +1286,13 @@ impl AppState {
             &format!("{}/v1", config.base_url()),
             &config.model_name(),
             &full_prompt,
+            config.temperature as f64,
+            config.max_turns as usize,
         );
 
         agent
             .prompt(user_prompt)
-            .max_turns(RIG_MAX_TURNS)
+            .max_turns(config.max_turns as usize)
             .await
             .map_err(|error| anyhow!(describe_prompt_error(&error)))
     }
@@ -1255,8 +1312,63 @@ impl AppState {
         }
 
         let server = llama_server::start_server(&self.inner.llama_client, config).await?;
+
+        // Surface which compute backend actually loaded so the UI can show it,
+        // and warn loudly if we wanted a GPU but silently landed on CPU.
+        let backend = server.active_backend.label().to_string();
+        let fell_back_to_cpu = server.requested_gpu && !server.gpu_offloaded;
+        if fell_back_to_cpu {
+            log::warn!(
+                "llama-server fell back to CPU: a GPU backend was requested but no device was used. Install a GPU backend under <app_data>/bin/ for full speed."
+            );
+        } else if server.gpu_offloaded {
+            log::info!("llama-server running on GPU backend: {backend}");
+        } else {
+            log::info!("llama-server running on CPU backend");
+        }
+        let _ = self.handle.emit(
+            "ai://llama_backend",
+            serde_json::json!({
+                "backend": backend,
+                "gpuOffloaded": server.gpu_offloaded,
+                "fellBackToCpu": fell_back_to_cpu,
+            }),
+        );
+
         *guard = Some(server);
+        drop(guard);
+
+        // Pre-warm the prompt cache: the system preamble + tool schemas are a
+        // large (~1.1k token) constant prefix. Processing it once now means the
+        // user's first real message reuses the cached prefix instead of paying
+        // the full prompt-eval cost (tens of seconds on CPU).
+        self.spawn_cache_warmup(config);
         Ok(())
+    }
+
+    /// Fire a throwaway completion that mirrors the live agent's system + tools
+    /// prefix so llama-server caches it in the (single) slot. Fire-and-forget.
+    fn spawn_cache_warmup(&self, config: &llama_server::ResolvedLlamaConfig) {
+        let client = self.inner.llama_client.clone();
+        let url = format!("{}/v1/chat/completions", config.base_url());
+        let model = config.model_name();
+        tokio::spawn(async move {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    { "role": "system", "content": crate::agent::MYELIN_PREAMBLE },
+                    { "role": "user", "content": "ping" }
+                ],
+                "tools": crate::agent::tool_specs(),
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "cache_prompt": true
+            });
+            match client.post(&url).json(&body).send().await {
+                Ok(_) => log::info!("llama prompt-cache warm-up complete"),
+                Err(error) => log::warn!("llama prompt-cache warm-up failed: {error}"),
+            }
+        });
     }
 }
 
@@ -2033,6 +2145,11 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
             detail: info.detail,
             config: Some(info.config),
             resolved: info.resolved,
+            active_backend: info.selected_backend,
+            nvidia_detected: info.nvidia_detected,
+            gpu_available: info.gpu_available,
+            gpus: info.gpus,
+            installed_backends: info.installed_backends,
         };
     }
 
@@ -2043,6 +2160,11 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
         detail: "Choose a .gguf model and llama-server executable in Settings.".into(),
         config: None,
         resolved: None,
+        active_backend: None,
+        nvidia_detected: llama_server::detect_nvidia(),
+        gpu_available: llama_server::gpu_available(),
+        gpus: llama_server::detect_gpus().0,
+        installed_backends: Vec::new(),
     }
 }
 
