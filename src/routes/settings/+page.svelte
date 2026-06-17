@@ -85,6 +85,56 @@
         return opts;
     });
 
+    const selectedDeviceName = $derived(devices.find((d) => d.id === gpuDevice)?.name ?? '');
+
+    // What the current selection will actually run on, and whether it's live yet.
+    const computeStatus = $derived.by((): { level: 'gpu' | 'cpu'; title: string; detail: string } => {
+        const installed = (b: string) => installedBackends.includes(b);
+
+        // Resolve the selection to a concrete backend.
+        let target: string;
+        if (backendPreference === 'cpu') target = 'cpu';
+        else if (backendPreference === 'auto') {
+            target =
+                nvidiaDetected && installed('cuda') ? 'cuda'
+                : installed('vulkan') ? 'vulkan'
+                : installed('metal') ? 'metal'
+                : 'cpu';
+        } else {
+            target = installed(backendPreference) ? backendPreference : 'cpu';
+        }
+
+        // Authoritative: the running server requested a GPU but landed on CPU.
+        if (backendFellBack) {
+            return { level: 'cpu', title: 'Running on CPU', detail: 'The selected GPU could not be used — check the GPU and driver.' };
+        }
+
+        // The running server already matches the GPU target.
+        if (activeBackend && activeBackend !== 'cpu' && activeBackend === target) {
+            return {
+                level: 'gpu',
+                title: `Running on ${activeBackend.toUpperCase()}`,
+                detail: selectedDeviceName ? `Using ${selectedDeviceName}.` : 'GPU acceleration active.'
+            };
+        }
+
+        const pending = activeBackend !== null && activeBackend !== target;
+        if (target === 'cpu') {
+            return {
+                level: 'cpu',
+                title: 'Running on CPU',
+                detail: backendPreference === 'cpu' ? 'CPU mode selected.' : 'No GPU build available — see the note above.'
+            };
+        }
+        return {
+            level: 'gpu',
+            title: `Set to use ${target.toUpperCase()}`,
+            detail:
+                (selectedDeviceName ? `${selectedDeviceName}. ` : '') +
+                (pending ? 'Applies on your next message.' : 'GPU acceleration active.')
+        };
+    });
+
     async function loadDevices(backend: string) {
         if (!isGpuBackend(backend)) {
             devices = [];
@@ -438,19 +488,13 @@
                 {/if}
             </div>
 
-            {#if activeBackend}
-                <div class="backend-status" class:gpu={activeBackend !== 'cpu' && !backendFellBack} class:cpu={activeBackend === 'cpu' || backendFellBack}>
-                    <span class="backend-dot"></span>
-                    {#if backendFellBack}
-                        Running on <strong>CPU</strong> — a GPU was requested but no device was used.
-                        Install a GPU build (e.g. <code>cuda</code>) under the binary folder for full speed.
-                    {:else if activeBackend === 'cpu'}
-                        Running on <strong>CPU</strong>.{nvidiaDetected ? ' An NVIDIA GPU was detected — add a cuda/ build beside your llama-server binary for a big speedup.' : ''}
-                    {:else}
-                        GPU acceleration active: <strong>{activeBackend.toUpperCase()}</strong>.
-                    {/if}
+            <div class="backend-status" class:gpu={computeStatus.level === 'gpu'} class:cpu={computeStatus.level === 'cpu'}>
+                <span class="backend-dot"></span>
+                <div class="backend-text">
+                    <strong>{computeStatus.title}</strong>
+                    <span>{computeStatus.detail}</span>
                 </div>
-            {/if}
+            </div>
 
             <br/>
             <h2>Advanced AI Configuration</h2>
@@ -786,7 +830,7 @@
 
     .backend-status {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: var(--space-2);
         margin-top: var(--space-3);
         padding: 0.6rem 0.9rem;
@@ -797,9 +841,15 @@
         color: var(--text-secondary);
     }
 
-    .backend-status code {
-        font-family: var(--font-mono);
-        font-size: 0.8rem;
+    .backend-text {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+    }
+
+    .backend-text strong {
+        color: var(--text-primary);
+        font-weight: 600;
     }
 
     .backend-dot {
@@ -807,6 +857,7 @@
         width: 8px;
         height: 8px;
         border-radius: 50%;
+        margin-top: 0.35rem;
         background: var(--text-secondary);
     }
 

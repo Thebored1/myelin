@@ -15,6 +15,9 @@
 	import { onMount } from 'svelte';
 
 	let app = $state<AppSnapshot | null>(null);
+	// True once the initial snapshot has loaded — prevents the "no workspace"
+	// welcome screen from flashing before we know if a workspace is connected.
+	let ready = $state(false);
 	let provider = $state<ProviderStatus | null>(null);
 	let query = $state('');
 	let isBusy = $state(false);
@@ -333,8 +336,12 @@
 		let unlistenChanged = () => {};
 		let unlistenStatus = () => {};
 		void (async () => {
-			app = await invoke<AppSnapshot>('bootstrap');
-			await refreshApp();
+			try {
+				app = await invoke<AppSnapshot>('bootstrap');
+				await refreshApp();
+			} finally {
+				ready = true;
+			}
 			unlistenChanged = await listen('index://changed', () => { message = 'Reindexing…'; });
 			unlistenStatus = await listen<string>('index://status', (event) => {
 				if (event.payload === 'started') message = 'Indexing…';
@@ -440,7 +447,9 @@
 		</div>
 
 		<div class="rail-list">
-			{#if !app?.workspacePath}
+			{#if !ready}
+				<!-- Loading: no empty-state flash. -->
+			{:else if !app?.workspacePath}
 				<p class="rail-empty">No workspace selected.</p>
 			{:else if query.trim()}
 				{#if visibleNotes.length === 0}
@@ -547,7 +556,9 @@
 		<div class="rail-footer">
 			<button class="footer-change-btn" onclick={pickWorkspace} disabled={isBusy} title={app?.workspacePath ?? 'Choose workspace'}>
 				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-				{#if app?.workspacePath}
+				{#if !ready}
+					&nbsp;
+				{:else if app?.workspacePath}
 					{workspaceLabel(app.workspacePath)}
 				{:else}
 					Connect workspace
@@ -561,7 +572,9 @@
 
 	<!-- ── Right: workspace panel ─────────────────────────── -->
 	<main class="workspace">
-		{#if !app?.workspacePath}
+		{#if !ready}
+			<!-- Initial load: render nothing to avoid flashing the welcome screen. -->
+		{:else if !app?.workspacePath}
 			<div class="landing">
 				<p class="eyebrow">Cross-platform local notes</p>
 				<h1>myelin</h1>

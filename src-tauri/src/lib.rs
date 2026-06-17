@@ -335,6 +335,13 @@ pub fn run() {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
+                        // Silence noisy dependency spans (e.g. lancedb's "load"
+                        // tracing spans) while keeping our own INFO logs.
+                        .level_for("tracing::span", log::LevelFilter::Warn)
+                        .level_for("lance", log::LevelFilter::Warn)
+                        .level_for("lance_table", log::LevelFilter::Warn)
+                        .level_for("lance_core", log::LevelFilter::Warn)
+                        .level_for("lance_io", log::LevelFilter::Warn)
                         .build(),
                 )?;
             }
