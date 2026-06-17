@@ -184,6 +184,23 @@ pub struct LlamaProviderInfo {
     pub installed_backends: Vec<String>,
 }
 
+/// The release of llama.cpp the app targets — must match the bundled builds so
+/// downloaded backends are ABI-compatible with each other.
+pub const LLAMA_RELEASE_TAG: &str = "b9585";
+
+/// Directory holding binaries bundled with the installer (resource dir / bin),
+/// set once at startup. Used as a low-priority tiering root so a shipped app
+/// finds its CPU/Vulkan builds with zero setup.
+static RESOURCE_BIN_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+pub fn set_resource_bin_dir(dir: Option<PathBuf>) {
+    let _ = RESOURCE_BIN_DIR.set(dir);
+}
+
+fn resource_bin_dir() -> Option<PathBuf> {
+    RESOURCE_BIN_DIR.get().cloned().flatten()
+}
+
 /// Detect a usable NVIDIA GPU by probing `nvidia-smi`. Cached for the process
 /// lifetime — driver availability does not change while the app runs.
 pub fn detect_nvidia() -> bool {
@@ -358,6 +375,128 @@ fn backend_binary(
     None
 }
 
+/// Release asset file names to download for a backend on the current OS.
+/// Empty when the backend isn't downloadable here (e.g. CUDA on Linux, or any
+/// GPU backend on macOS where Metal ships in the default build).
+pub fn assets_for_backend(backend: &str) -> Vec<String> {
+    let tag = LLAMA_RELEASE_TAG;
+    if cfg!(target_os = "windows") {
+        match backend {
+            // CUDA needs the runtime DLLs (cudart) alongside the binaries.
+            "cuda" => vec![
+                "cudart-llama-bin-win-cuda-12.4-x64.zip".to_string(),
+                format!("llama-{tag}-bin-win-cuda-12.4-x64.zip"),
+            ],
+            "vulkan" => vec![format!("llama-{tag}-bin-win-vulkan-x64.zip")],
+            "cpu" => vec![format!("llama-{tag}-bin-win-cpu-x64.zip")],
+            _ => vec![],
+        }
+    } else if cfg!(target_os = "linux") {
+        match backend {
+            "vulkan" => vec![format!("llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz")],
+            "cpu" => vec![format!("llama-{tag}-bin-ubuntu-x64.tar.gz")],
+            // No prebuilt CUDA tarball for Linux in this release; use Vulkan.
+            _ => vec![],
+        }
+    } else {
+        vec![]
+    }
+}
+
+/// Backends that can be downloaded on demand for this OS.
+pub fn downloadable_backends() -> Vec<String> {
+    ["cuda", "vulkan", "cpu"]
+        .iter()
+        .filter(|b| !assets_for_backend(b).is_empty())
+        .map(|b| b.to_string())
+        .collect()
+}
+
+pub fn download_url(asset: &str) -> String {
+    format!(
+        "https://github.com/ggml-org/llama.cpp/releases/download/{}/{}",
+        LLAMA_RELEASE_TAG, asset
+    )
+}
+
+/// Extract a downloaded archive using the platform's standard tool.
+pub fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    let name = archive
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let status = if name.ends_with(".zip") {
+        if cfg!(target_os = "windows") {
+            Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command"])
+                .arg(format!(
+                    "Expand-Archive -LiteralPath \"{}\" -DestinationPath \"{}\" -Force",
+                    archive.display(),
+                    dest.display()
+                ))
+                .status()
+        } else {
+            Command::new("unzip")
+                .arg("-o")
+                .arg(archive)
+                .arg("-d")
+                .arg(dest)
+                .status()
+        }
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        Command::new("tar")
+            .arg("-xzf")
+            .arg(archive)
+            .arg("-C")
+            .arg(dest)
+            .status()
+    } else {
+        bail!("unsupported archive format: {name}");
+    };
+
+    let status =
+        status.with_context(|| format!("failed to run extractor for {}", archive.display()))?;
+    if !status.success() {
+        bail!("extraction failed for {}", archive.display());
+    }
+    Ok(())
+}
+
+/// Find the llama-server binary inside an extracted archive and copy its whole
+/// directory into `backend_dir` (the .dll/.so siblings must come along).
+pub fn install_backend_from_staging(staging: &Path, backend_dir: &Path) -> Result<()> {
+    let exe_name = executable_name();
+    let server = walkdir::WalkDir::new(staging)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_type().is_file() && e.file_name().to_string_lossy() == exe_name)
+        .map(|e| e.path().to_path_buf())
+        .ok_or_else(|| anyhow!("no {} found in the downloaded archive", exe_name))?;
+    let src_dir = server
+        .parent()
+        .ok_or_else(|| anyhow!("invalid archive layout"))?;
+
+    fs::create_dir_all(backend_dir)?;
+    for entry in fs::read_dir(src_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let dest = backend_dir.join(entry.file_name());
+            fs::copy(entry.path(), &dest)?;
+            #[cfg(unix)]
+            if entry.file_name().to_string_lossy() == exe_name {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&dest)?.permissions();
+                perms.set_mode(0o755);
+                let _ = fs::set_permissions(&dest, perms);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Directories that may hold per-backend subfolders, highest priority first.
 fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -367,7 +506,12 @@ fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -
             roots.push(parent.to_path_buf());
         }
     }
+    // User-managed binaries take priority over bundled ones, so a downloaded
+    // CUDA build wins over the shipped Vulkan/CPU build.
     roots.push(app_data_dir.join("bin"));
+    if let Some(bundled) = resource_bin_dir() {
+        roots.push(bundled);
+    }
     roots
 }
 

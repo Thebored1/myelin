@@ -60,16 +60,42 @@ Download from <https://github.com/ggml-org/llama.cpp/releases>:
 - **Windows NVIDIA:** `llama-*-bin-win-cuda-x64.zip` **plus** the matching
   `cudart-llama-*.zip` (the CUDA runtime DLLs) — extract both into `bin/cuda/`.
 - **Windows any GPU:** `llama-*-bin-win-vulkan-x64.zip` → `bin/vulkan/`.
-- **Linux NVIDIA:** `llama-*-bin-ubuntu-cuda-x64.zip` → `bin/cuda/`.
+- **Linux any GPU:** `llama-*-bin-ubuntu-vulkan-x64.tar.gz` → `bin/vulkan/`.
+  (There is no prebuilt Linux CUDA tarball — Vulkan covers NVIDIA on Linux too.)
+- **Linux CPU:** `llama-*-bin-ubuntu-x64.tar.gz` → `bin/cpu/`.
 - **macOS:** the standard `llama-*-bin-macos-arm64.zip` already includes Metal →
   `bin/metal/`.
+
+## In-app downloads
+
+Settings → **Installed backends** lists the backends available for the current
+OS and offers a **Download** button for any not yet installed (e.g. CUDA on an
+NVIDIA Windows box). Downloads land in `<app-data>/bin/<backend>/` and are picked
+up immediately. CPU + Vulkan are bundled with the app, so this is mainly for
+adding CUDA. The release tag is pinned in `LLAMA_RELEASE_TAG` (llama_server.rs).
+
+## Bundling for release
+
+The installer ships CPU + Vulkan so users get GPU acceleration with zero setup.
+Before `tauri build`, place the per-OS builds under `src-tauri/resources/bin/`:
+
+```
+src-tauri/resources/bin/
+  cpu/      <- llama-server(.exe) + CPU ggml libs
+  vulkan/   <- llama-server(.exe) + ggml-vulkan
+```
+
+`tauri.conf.json` maps `resources/bin` → `bin`, and at runtime the app adds the
+resource `bin/` as a (lowest-priority) tiering root. So resolution order is:
+user-downloaded (`<app-data>/bin`) → bundled (`<resources>/bin`). The folder is
+gitignored (binaries are large) but its structure is kept.
 
 ## Override / power users
 
 - `MYELIN_LLAMA_SERVER_PATH` env var hard-pins a single executable and skips
   tiering entirely.
-- The **Browse…** button in Settings sets `executablePath`; its parent folder
-  becomes a tiering root, so dropping a `cuda/` folder beside it is enough.
+- The Settings compute selector now resolves the binary automatically; there is
+  no manual executable picker.
 
 ## Mobile (Android / iOS) — not supported by this model
 

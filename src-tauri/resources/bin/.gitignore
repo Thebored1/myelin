@@ -1,0 +1,6 @@
+# llama.cpp backend builds are placed here before `tauri build` to bundle them
+# into the installer (see docs/llama-backends.md). They are large, so don't
+# commit them — keep only this folder's structure.
+*
+!.gitignore
+!.gitkeep

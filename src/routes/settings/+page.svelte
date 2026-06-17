@@ -11,7 +11,6 @@
     const isGpuBackend = (b: string) => GPU_BACKENDS.includes(b);
 
     let currentModelPath = $state('');
-    let currentExecutablePath = $state('');
     let contextSize = $state<number | null>(null);
     let gpuLayers = $state<number | null>(null);
     let threads = $state<number | null>(null);
@@ -25,6 +24,8 @@
     let backendPreference = $state<BackendPref>('auto');
     let gpuDevice = $state<string>('');
     let devices = $state<LlamaDevice[]>([]);
+    let downloadableBackends = $state<string[]>([]);
+    let download = $state<{ backend: string; phase: string; percent: number; message: string } | null>(null);
     let activeBackend = $state<string | null>(null);
     let nvidiaDetected = $state(false);
     let gpuAvailable = $state(true);
@@ -86,6 +87,14 @@
     });
 
     const selectedDeviceName = $derived(devices.find((d) => d.id === gpuDevice)?.name ?? '');
+
+    // Integrated GPUs share (limited) system memory — flag them so users know
+    // large models / contexts may be slow or fail to load.
+    const isIntegratedSelected = $derived(
+        /uhd|iris|integrated|radeon\(tm\) graphics|radeon graphics|\bhd graphics\b/i.test(selectedDeviceName)
+    );
+
+    const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
 
     // What the current selection will actually run on, and whether it's live yet.
     const computeStatus = $derived.by((): { level: 'gpu' | 'cpu'; title: string; detail: string } => {
@@ -168,24 +177,30 @@
         indexState = snapshot.indexState ?? null;
     }
 
+    // Refresh just the hardware/backend status fields (used after a download).
+    async function loadProviderStatus(): Promise<ProviderStatus> {
+        const status = await invoke<ProviderStatus>('get_provider_status');
+        activeProvider = status.activeProvider || '';
+        activeBackend = status.activeBackend ?? status.resolved?.backend ?? null;
+        nvidiaDetected = status.nvidiaDetected ?? false;
+        gpuAvailable = status.gpuAvailable ?? true;
+        gpus = status.gpus ?? [];
+        installedBackends = status.installedBackends ?? [];
+        providerHealthy = status.healthy ?? true;
+        providerDetail = status.detail ?? '';
+        return status;
+    }
+
     onMount(async () => {
         try {
             await refreshSnapshot();
-            const status = await invoke<ProviderStatus>('get_provider_status');
-            activeProvider = status.activeProvider || '';
-            activeBackend = status.activeBackend ?? status.resolved?.backend ?? null;
-            nvidiaDetected = status.nvidiaDetected ?? false;
-            gpuAvailable = status.gpuAvailable ?? true;
-            gpus = status.gpus ?? [];
-            installedBackends = status.installedBackends ?? [];
-            providerHealthy = status.healthy ?? true;
-            providerDetail = status.detail ?? '';
+            const status = await loadProviderStatus();
+            downloadableBackends = await invoke<string[]>('downloadable_backends');
             backendPreference = (status.config?.backendPreference as BackendPref) ?? 'auto';
             gpuDevice = status.config?.gpuDevice ?? '';
             if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
-                currentExecutablePath = status.config?.executablePath || status.resolved.executablePath || '';
                 contextSize = status.config?.contextSize ?? status.resolved.contextSize ?? null;
                 gpuLayers = status.config?.gpuLayers ?? status.resolved.gpuLayers ?? null;
                 threads = status.config?.threads ?? status.resolved.threads ?? null;
@@ -195,7 +210,6 @@
                 extraArgs = (status.config?.extraArgs ?? status.resolved.extraArgs ?? []);
             } else if (status.config) {
                 currentModelPath = status.config.modelPath || '';
-                currentExecutablePath = status.config.executablePath || '';
                 contextSize = status.config.contextSize ?? null;
                 gpuLayers = status.config.gpuLayers ?? null;
                 threads = status.config.threads ?? null;
@@ -215,10 +229,33 @@
                     backendFellBack = event.payload.fellBackToCpu;
                 }
             );
+
+            // Backend download progress.
+            await listen<{ backend: string; phase: string; percent: number; message: string }>(
+                'backend://download',
+                async (event) => {
+                    download = event.payload;
+                    if (event.payload.phase === 'done') {
+                        await loadProviderStatus();
+                        if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
+                        setTimeout(() => {
+                            if (download?.phase === 'done') download = null;
+                        }, 4000);
+                    }
+                }
+            );
         } catch (e) {
             console.error('Failed to load provider status:', e);
         }
     });
+
+    async function downloadBackend(backend: string) {
+        try {
+            await invoke('download_llama_backend', { backend });
+        } catch (e) {
+            console.error('Backend download failed:', e);
+        }
+    }
 
     async function changeWorkspace() {
         const picked = await open({ directory: true, multiple: false, title: 'Choose your markdown workspace' });
@@ -257,25 +294,6 @@
         }
     }
 
-    async function selectExecutable() {
-        try {
-            const selected = await open({
-                multiple: false,
-                filters: [{
-                    name: 'Executable',
-                    extensions: ['exe', '']
-                }]
-            });
-            
-            if (selected && !Array.isArray(selected)) {
-                currentExecutablePath = selected;
-                await saveExecutablePath();
-            }
-        } catch (error) {
-            console.error('Failed to open file dialog:', error);
-        }
-    }
-
     async function saveModelPath() {
         if (!currentModelPath) return;
         
@@ -290,25 +308,6 @@
         } catch (error) {
             console.error('Failed to save model path:', error);
             alert('Failed to save model path: ' + error);
-        } finally {
-            isSaving = false;
-        }
-    }
-
-    async function saveExecutablePath() {
-        if (!currentExecutablePath) return;
-        
-        isSaving = true;
-        saved = false;
-        try {
-            await invoke('set_llama_executable_path', { executablePath: currentExecutablePath });
-            saved = true;
-            setTimeout(() => {
-                saved = false;
-            }, 3000);
-        } catch (error) {
-            console.error('Failed to save executable path:', error);
-            alert('Failed to save executable path: ' + error);
         } finally {
             isSaving = false;
         }
@@ -416,20 +415,6 @@
                 </button>
             </div>
             
-            <br/>
-            <h2>Llama-Server Executable</h2>
-            <p class="description">
-                Select the <code>llama-server</code> executable file. This is the server engine that will run your model.
-            </p>
-
-            <div class="model-picker">
-                <div class="path-display" class:empty={!currentExecutablePath}>
-                    {currentExecutablePath || 'No executable selected'}
-                </div>
-                <button class="browse-btn" onclick={selectExecutable} disabled={isSaving}>
-                    Browse...
-                </button>
-            </div>
 
             <div class="compute-device">
                 <span class="compute-label">Compute device</span>
@@ -471,6 +456,12 @@
                     <p class="compute-hint">
                         Pick a specific GPU — e.g. an integrated GPU to save battery, or the discrete GPU for speed.
                     </p>
+                    {#if isIntegratedSelected}
+                        <div class="device-issue warn">
+                            <span class="issue-icon">⚠️</span>
+                            <span>Integrated GPUs share system memory and have limited capacity. Large models or high context sizes may run slowly or fail to load — lower the context size, or use the discrete GPU / CPU for heavier work.</span>
+                        </div>
+                    {/if}
                 {/if}
 
                 {#if gpuIssue}
@@ -495,6 +486,40 @@
                     <span>{computeStatus.detail}</span>
                 </div>
             </div>
+
+            {#if downloadableBackends.length > 0}
+                <div class="backends-list">
+                    <span class="compute-label">Installed backends</span>
+                    {#each downloadableBackends as b}
+                        {@const installed = installedBackends.includes(b)}
+                        {@const busy = download?.backend === b && download?.phase !== 'done' && download?.phase !== 'error'}
+                        <div class="backend-item">
+                            <span class="backend-name">{backendLabel(b)}</span>
+                            {#if busy}
+                                <div class="backend-progress">
+                                    <div class="backend-bar"><div class="backend-bar-fill" style="width:{download?.percent ?? 0}%"></div></div>
+                                    <span class="backend-progress-text">{download?.message ?? ''} ({Math.round(download?.percent ?? 0)}%)</span>
+                                </div>
+                            {:else if installed}
+                                <span class="backend-installed">✓ Installed</span>
+                            {:else}
+                                <button class="browse-btn" onclick={() => downloadBackend(b)} disabled={!!download && download.phase !== 'done' && download.phase !== 'error'}>
+                                    Download
+                                </button>
+                            {/if}
+                        </div>
+                    {/each}
+                    {#if download?.phase === 'error'}
+                        <div class="device-issue error">
+                            <span class="issue-icon">⛔</span>
+                            <span>Download failed: {download.message}</span>
+                        </div>
+                    {/if}
+                    <p class="compute-hint">
+                        CPU and Vulkan ship with the app. Download CUDA for the fastest speed on NVIDIA GPUs.
+                    </p>
+                </div>
+            {/if}
 
             <br/>
             <h2>Advanced AI Configuration</h2>
@@ -859,6 +884,58 @@
         border-radius: 50%;
         margin-top: 0.35rem;
         background: var(--text-secondary);
+    }
+
+    .backends-list {
+        margin-top: var(--space-4);
+    }
+
+    .backend-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3);
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--border-default);
+    }
+
+    .backend-name {
+        font-size: 0.9rem;
+        color: var(--text-primary);
+        font-weight: 600;
+    }
+
+    .backend-installed {
+        font-size: 0.82rem;
+        color: #36c46f;
+    }
+
+    .backend-progress {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        flex: 1;
+        max-width: 70%;
+    }
+
+    .backend-bar {
+        flex: 1;
+        height: 6px;
+        border-radius: 3px;
+        background: var(--bg-page);
+        overflow: hidden;
+    }
+
+    .backend-bar-fill {
+        height: 100%;
+        background: var(--accent, #e8500f);
+        transition: width 0.2s;
+    }
+
+    .backend-progress-text {
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+        white-space: nowrap;
     }
 
     .backend-status.gpu {

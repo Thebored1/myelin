@@ -139,6 +139,15 @@ impl AppState {
             )
         })?;
 
+        // Register the bundled-binary directory (shipped CPU/Vulkan builds) so
+        // the backend resolver finds them automatically in a packaged app.
+        let resource_bin = handle
+            .path()
+            .resource_dir()
+            .ok()
+            .map(|dir| dir.join("bin"));
+        crate::llama_server::set_resource_bin_dir(resource_bin);
+
         let settings = load_settings(&app_data_dir)?;
         let workspace_path = settings.workspace_path.map(PathBuf::from);
 
@@ -326,6 +335,99 @@ impl AppState {
 
     pub fn list_llama_devices(&self, backend: String) -> Vec<crate::llama_server::DeviceInfo> {
         crate::llama_server::list_devices(&self.inner.app_data_dir, &backend)
+    }
+
+    pub fn downloadable_backends(&self) -> Vec<String> {
+        crate::llama_server::downloadable_backends()
+    }
+
+    fn emit_download(&self, backend: &str, phase: &str, percent: f64, message: &str) {
+        let _ = self.handle.emit(
+            "backend://download",
+            serde_json::json!({
+                "backend": backend,
+                "phase": phase,
+                "percent": percent,
+                "message": message,
+            }),
+        );
+    }
+
+    /// Download, extract and install a llama.cpp backend build into the
+    /// app-data bin dir, emitting `backend://download` progress events.
+    pub async fn download_llama_backend(&self, backend: String) -> Result<()> {
+        use futures_util::StreamExt;
+
+        let assets = crate::llama_server::assets_for_backend(&backend);
+        if assets.is_empty() {
+            anyhow::bail!("No downloadable {backend} build is available for this platform.");
+        }
+
+        let bin_root = self.inner.app_data_dir.join("bin");
+        let backend_dir = bin_root.join(&backend);
+        let staging = bin_root.join(format!(".staging-{backend}"));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging)?;
+
+        let result: Result<()> = async {
+            let total_assets = assets.len() as f64;
+            for (i, asset) in assets.iter().enumerate() {
+                let url = crate::llama_server::download_url(asset);
+                self.emit_download(&backend, "downloading", (i as f64 / total_assets) * 100.0,
+                    &format!("Downloading {} ({}/{})", asset, i + 1, assets.len()));
+
+                let resp = self.inner.llama_client.get(&url).send().await
+                    .with_context(|| format!("failed to download {asset}"))?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("download failed for {asset}: HTTP {}", resp.status());
+                }
+                let total = resp.content_length().unwrap_or(0);
+                let archive_path = staging.join(asset);
+                let mut file = fs::File::create(&archive_path)?;
+                let mut downloaded: u64 = 0;
+                let mut last_pct: i32 = -1;
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    std::io::Write::write_all(&mut file, &chunk)?;
+                    downloaded += chunk.len() as u64;
+                    if total > 0 {
+                        let frac = downloaded as f64 / total as f64;
+                        let overall = ((i as f64 + frac) / total_assets) * 100.0;
+                        let pct = overall as i32;
+                        if pct != last_pct {
+                            last_pct = pct;
+                            self.emit_download(&backend, "downloading", overall,
+                                &format!("Downloading {} ({}/{})", asset, i + 1, assets.len()));
+                        }
+                    }
+                }
+                drop(file);
+
+                self.emit_download(&backend, "extracting", 100.0, &format!("Extracting {asset}"));
+                crate::llama_server::extract_archive(&archive_path, &staging)?;
+                let _ = fs::remove_file(&archive_path);
+            }
+
+            self.emit_download(&backend, "installing", 100.0, "Installing");
+            let _ = fs::remove_dir_all(&backend_dir);
+            crate::llama_server::install_backend_from_staging(&staging, &backend_dir)?;
+            Ok(())
+        }
+        .await;
+
+        let _ = fs::remove_dir_all(&staging);
+        match result {
+            Ok(()) => {
+                self.emit_download(&backend, "done", 100.0, &format!("{backend} backend installed"));
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&backend_dir);
+                self.emit_download(&backend, "error", 0.0, &error.to_string());
+                Err(error)
+            }
+        }
     }
 
     fn ensure_unique_title(&self, requested_title: &str, current_note_id: Option<&str>) -> String {

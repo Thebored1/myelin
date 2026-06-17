@@ -93,6 +93,22 @@ async fn list_llama_devices(
 }
 
 #[tauri::command]
+async fn downloadable_backends(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state.downloadable_backends())
+}
+
+#[tauri::command]
+async fn download_llama_backend(
+    state: State<'_, AppState>,
+    backend: String,
+) -> Result<(), String> {
+    state
+        .download_llama_backend(backend)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn create_note(
     state: State<'_, AppState>,
     title: String,
@@ -356,6 +372,8 @@ pub fn run() {
             set_llama_executable_path,
             set_llama_advanced_config,
             list_llama_devices,
+            downloadable_backends,
+            download_llama_backend,
             create_note,
             load_note,
             save_note,
