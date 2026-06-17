@@ -243,6 +243,33 @@ pub fn set_executable_path(app_data_dir: &Path, executable_path: String) -> Resu
     Ok(())
 }
 
+pub fn set_advanced_config(
+    app_data_dir: &Path,
+    context_size: Option<u32>,
+    gpu_layers: Option<i32>,
+    threads: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    extra_args: Option<Vec<String>>
+) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    if let Some(cs) = context_size { config.context_size = Some(cs); }
+    if let Some(gl) = gpu_layers { config.gpu_layers = Some(gl); }
+    if let Some(t) = threads { config.threads = Some(t); }
+    if let Some(temp) = temperature { config.temperature = Some(temp); }
+    if let Some(tp) = top_p { config.top_p = Some(tp); }
+    if let Some(ea) = extra_args { config.extra_args = ea; }
+
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let raw = serde_json::to_string_pretty(&config)?;
+    fs::write(&path, raw)?;
+    Ok(())
+}
+
 fn resolve_executable_path(
     app_data_dir: &Path,
     workspace_config: &WorkspaceLlamaConfig,

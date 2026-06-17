@@ -210,7 +210,7 @@ impl Tool for RewriteNoteTool {
             .record_chat_tool(display_name, args.title.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": args.title }),
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", args.title, args.content) }),
         );
         if looks_like_placeholder(&args.content) {
             return Ok(
@@ -297,7 +297,7 @@ impl Tool for AppendNoteTool {
             .record_chat_tool("Append Note", args.title.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": "Append Note", "details": args.title }),
+            serde_json::json!({ "tool": "Append Note", "details": format!("Title: {}\n\n{}", args.title, args.content) }),
         );
         if looks_like_placeholder(&args.content) {
             return Ok(
@@ -413,7 +413,7 @@ impl Tool for ReplaceTextTool {
             .record_chat_tool(display_name, args.title.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": args.title }),
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\nTarget:\n{}\n\nReplacement:\n{}", args.title, args.target_text, args.replacement_text) }),
         );
 
         let existing = self

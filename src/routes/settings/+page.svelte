@@ -7,6 +7,12 @@
 
     let currentModelPath = $state('');
     let currentExecutablePath = $state('');
+    let contextSize = $state<number | null>(null);
+    let gpuLayers = $state<number | null>(null);
+    let threads = $state<number | null>(null);
+    let temperature = $state<number | null>(null);
+    let topP = $state<number | null>(null);
+    let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
     let activeProvider = $state('');
@@ -30,9 +36,21 @@
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
                 currentExecutablePath = status.config?.executablePath || status.resolved.executablePath || '';
+                contextSize = status.config?.contextSize ?? status.resolved.contextSize ?? null;
+                gpuLayers = status.config?.gpuLayers ?? status.resolved.gpuLayers ?? null;
+                threads = status.config?.threads ?? status.resolved.threads ?? null;
+                temperature = status.config?.temperature ?? status.resolved.temperature ?? null;
+                topP = status.config?.topP ?? status.resolved.topP ?? null;
+                extraArgs = (status.config?.extraArgs ?? status.resolved.extraArgs ?? []);
             } else if (status.config) {
                 currentModelPath = status.config.modelPath || '';
                 currentExecutablePath = status.config.executablePath || '';
+                contextSize = status.config.contextSize ?? null;
+                gpuLayers = status.config.gpuLayers ?? null;
+                threads = status.config.threads ?? null;
+                temperature = status.config.temperature ?? null;
+                topP = status.config.topP ?? null;
+                extraArgs = status.config.extraArgs ?? [];
             }
             
             enableJupyterExecution = localStorage.getItem('myelin_jupyter_exec') === 'true';
@@ -135,6 +153,47 @@
         }
     }
 
+    async function saveAdvancedConfig() {
+        isSaving = true;
+        saved = false;
+        try {
+            const extraArgsArray = extraArgs.filter(arg => arg.trim() !== '');
+            await invoke('set_llama_advanced_config', { 
+                contextSize: contextSize,
+                gpuLayers: gpuLayers,
+                threads: threads,
+                temperature: temperature,
+                topP: topP,
+                extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null
+            });
+            saved = true;
+            setTimeout(() => {
+                saved = false;
+            }, 3000);
+        } catch (error) {
+            console.error('Failed to save advanced config:', error);
+            alert('Failed to save advanced config: ' + error);
+        } finally {
+            isSaving = false;
+        }
+    }
+
+    let saveTimeout: ReturnType<typeof setTimeout>;
+    function debounceSave() {
+        clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(saveAdvancedConfig, 500);
+    }
+
+    function addExtraArg() {
+        extraArgs.push('');
+        debounceSave();
+    }
+
+    function removeExtraArg(index: number) {
+        extraArgs.splice(index, 1);
+        debounceSave();
+    }
+
     function toggleJupyterExecution() {
         enableJupyterExecution = !enableJupyterExecution;
         localStorage.setItem('myelin_jupyter_exec', enableJupyterExecution.toString());
@@ -208,9 +267,52 @@
                 </button>
             </div>
 
-            {#if saved}
-                <div class="success-message">Settings saved successfully!</div>
-            {/if}
+            <br/>
+            <h2>Advanced AI Configuration</h2>
+            <p class="description">
+                Fine-tune llama-server memory usage and CLI flags. Leave blank to use system defaults.
+            </p>
+            <div class="advanced-grid">
+                <div class="input-group">
+                    <label for="ctx">Context Size</label>
+                    <input type="number" id="ctx" bind:value={contextSize} oninput={debounceSave} placeholder="4096" />
+                </div>
+                <div class="input-group">
+                    <label for="ngl">GPU Layers</label>
+                    <input type="number" id="ngl" bind:value={gpuLayers} oninput={debounceSave} placeholder="999" />
+                </div>
+                <div class="input-group">
+                    <label for="threads">CPU Threads</label>
+                    <input type="number" id="threads" bind:value={threads} oninput={debounceSave} placeholder="Auto" />
+                </div>
+                <div class="input-group">
+                    <label for="temp">Temperature</label>
+                    <input type="number" step="0.1" id="temp" bind:value={temperature} oninput={debounceSave} placeholder="0.2" />
+                </div>
+                <div class="input-group">
+                    <label for="top_p">Top P</label>
+                    <input type="number" step="0.05" id="top_p" bind:value={topP} oninput={debounceSave} placeholder="0.95" />
+                </div>
+            </div>
+            <div class="input-group full-width" style="margin-top: 1rem;">
+                <label>
+                    Extra Arguments
+                    <div style="font-size: 0.8em; color: var(--text-error); margin-top: 4px;">
+                        <strong>CRITICAL NOTE:</strong> Because of how system processes work, you cannot put spaces in a single box! If you wanted to add <code>--threads 8</code>, you must put <code>--threads</code> in one box, click add again, and put <code>8</code> in the next box!
+                    </div>
+                </label>
+                {#each extraArgs as arg, i}
+                    <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-2);">
+                        <input type="text" bind:value={extraArgs[i]} oninput={debounceSave} placeholder="--flash-attn" style="flex: 1;" />
+                        <button class="browse-btn" onclick={() => removeExtraArg(i)} title="Remove argument" style="padding: 0 1rem; color: #f87171; border-color: rgba(248, 113, 113, 0.3);">
+                            Remove
+                        </button>
+                    </div>
+                {/each}
+                <button class="browse-btn" onclick={addExtraArg} style="align-self: flex-start; margin-top: 4px;">
+                    + Add Argument
+                </button>
+            </div>
         </section>
 
         <section class="settings-section">
@@ -227,6 +329,15 @@
         </section>
     </div>
 </div>
+
+{#if saved}
+    <div class="success-message">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+        Settings saved successfully!
+    </div>
+{/if}
 
 <style>
     .settings-container {
@@ -399,12 +510,61 @@
         cursor: not-allowed;
     }
 
+    .advanced-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--space-4);
+        margin-top: var(--space-2);
+    }
+
+    .input-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+    }
+
+    .input-group.full-width {
+        grid-column: 1 / -1;
+    }
+
+    .input-group label {
+        font-size: 0.875rem;
+        color: var(--text-secondary);
+        font-family: var(--font-sans);
+    }
+
+    .input-group input {
+        background: var(--bg-page);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        padding: 0.75rem 1rem;
+        color: var(--text-primary);
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+    }
+
+    .input-group input:focus {
+        outline: none;
+        border-color: var(--accent-200);
+    }
+
     .success-message {
+        position: fixed;
+        bottom: var(--space-6);
+        right: var(--space-6);
+        background: var(--bg-panel);
+        border: 1px solid var(--border-default);
         color: #4ade80;
+        padding: var(--space-3) var(--space-4);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
         font-size: 0.875rem;
         font-family: var(--font-sans);
-        margin-top: var(--space-2);
         animation: fade-in var(--duration-fast) ease-out;
+        z-index: 50;
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
     }
 
     @keyframes fade-in {

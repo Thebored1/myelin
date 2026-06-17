@@ -24,6 +24,7 @@
 	import HtmlViewer from '$lib/components/HtmlViewer.svelte';
 	import TexEditor from '$lib/components/TexEditor.svelte';
 	import IpynbEditor from '$lib/components/IpynbEditor.svelte';
+	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 
@@ -47,6 +48,7 @@
 	let chatInput = $state('');
 	let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
 	let chatMessagesEl: HTMLDivElement | undefined = $state();
+	let currentTime = $state(Date.now());
 
 	let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
 
@@ -105,7 +107,10 @@
 	function stopResizing() {
 		if (isResizing || isSidebarResizing) {
 			isResizing = false;
-			isSidebarResizing = false;
+			if (isSidebarResizing) {
+				isSidebarResizing = false;
+				localStorage.setItem('myelin_sidebar_width', sidebarWidth.toString());
+			}
 			if (vditorInstance) {
 				// Let Vditor resize after layout shift
 				setTimeout(() => {
@@ -133,9 +138,19 @@
 		}, 0);
 	}
 
-	function scrollChatToBottom() {
+	let userScrolledUp = false;
+
+	function handleChatScroll(e: Event) {
+		const el = e.currentTarget as HTMLElement;
+		const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+		userScrolledUp = distanceToBottom > 50;
+	}
+
+	function scrollChatToBottom(force = false) {
 		if (!chatMessagesEl) return;
-		chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+		if (force || !userScrolledUp) {
+			chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+		}
 	}
 
 	$effect(() => {
@@ -1179,6 +1194,7 @@
 	async function sendChatText(userText: string) {
 		if (!note) return;
 		const requestId = Date.now().toString();
+		const startTime = Date.now();
 		const snapshot: NoteSnapshot = {
 			noteBody: draftBody,
 			draftTitle: draftTitle,
@@ -1186,7 +1202,8 @@
 			chatLength: chatMessages.length
 		};
 		chatMessages = [...chatMessages, { role: 'user', content: userText, snapshotId: requestId, snapshot }];
-		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true }];
+		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true, startTime }];
+		setTimeout(() => scrollChatToBottom(true), 50);
 		try {
 			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId });
 		} catch (e) {
@@ -1268,7 +1285,7 @@
 
 	function finishStreamingChatMessage(tools: { name: string; details: string }[] = []) {
 		chatMessages = chatMessages.map((m) => {
-			if (m.isStreaming) return { ...m, isStreaming: false, tools: mergeChatTools(m.tools, tools) };
+			if (m.isStreaming) return { ...m, isStreaming: false, endTime: Date.now() };
 			return m;
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
@@ -1297,7 +1314,7 @@
 	) {
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming) {
-				return { ...m, isStreaming: false, error: true, content: m.content + '\n\n' + errorMsg, tools };
+				return { ...m, isStreaming: false, error: true, content: m.content + '\n\n' + errorMsg, tools, endTime: Date.now() };
 			}
 			return m;
 		});
@@ -1682,6 +1699,16 @@
 	}
 
 	onMount(() => {
+		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
+		if (savedSidebarWidth) {
+			const parsed = parseInt(savedSidebarWidth, 10);
+			if (!isNaN(parsed)) sidebarWidth = parsed;
+		}
+
+		const timerInterval = setInterval(() => {
+			currentTime = Date.now();
+		}, 100);
+
 		let unlistenChunk: UnlistenFn;
 		let unlistenDone: UnlistenFn;
 		let unlistenError: UnlistenFn;
@@ -1717,21 +1744,45 @@
 		).then((fn) => (unlistenNoteWritten = fn));
 
 		listen<{ tool: string; details: string }>('ai://chat_tool', (event) => {
+			let lastStartTime = Date.now();
 			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) {
-					const tools = m.tools || [];
-					return {
-						...m,
-						tools: [...tools, { name: event.payload.tool, details: event.payload.details }]
-					};
+					lastStartTime = m.startTime || lastStartTime;
+					return { ...m, isStreaming: false };
 				}
 				return m;
 			});
+			chatMessages = [
+				...chatMessages,
+				{
+					role: 'assistant',
+					content: '',
+					tools: [{ name: event.payload.tool, details: event.payload.details }],
+					isStreaming: false
+				},
+				{
+					role: 'assistant',
+					content: '',
+					isStreaming: true,
+					startTime: lastStartTime
+				}
+			];
+			if (chatMessagesEl) {
+				setTimeout(() => scrollChatToBottom(true), 100);
+			}
 		}).then((fn) => (unlistenTool = fn));
 
 		listen<{ id: string; tool: string; title: string; content: string }>(
 			'ai://tool_approval_request',
 			(event) => {
+				let lastStartTime = Date.now();
+				chatMessages = chatMessages.map((m) => {
+					if (m.isStreaming) {
+						lastStartTime = m.startTime || lastStartTime;
+						return { ...m, isStreaming: false };
+					}
+					return m;
+				});
 				chatMessages = [
 					...chatMessages,
 					{
@@ -1742,11 +1793,17 @@
 						approvalTool: event.payload.tool,
 						approvalDetails: `Title: ${event.payload.title}\nContent:\n${event.payload.content}`,
 						approvalStatus: 'pending'
+					},
+					{
+						role: 'assistant',
+						content: '',
+						isStreaming: true,
+						startTime: lastStartTime
 					}
 				];
 				if (chatMessagesEl) {
 					setTimeout(() => {
-						if (chatMessagesEl) chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+						scrollChatToBottom(true);
 					}, 100);
 				}
 			}
@@ -1784,6 +1841,8 @@
 			window.removeEventListener('mouseup', stopResizing);
 			window.removeEventListener('beforeunload', handleBeforeUnload);
 			$showSidebarToggle = false;
+
+			clearInterval(timerInterval);
 
 			if (unlistenChunk) unlistenChunk();
 			if (unlistenDone) unlistenDone();
@@ -2157,73 +2216,72 @@
 						</div>
 					{:else if activeSidebarTab === 'chat'}
 						<div class="chat-container">
-							<div class="chat-messages" bind:this={chatMessagesEl}>
+							<div class="chat-messages" bind:this={chatMessagesEl} onscroll={handleChatScroll}>
 								{#if chatMessages.length === 0}
 									<p class="empty-state">Ask me anything about this note or your library!</p>
 								{:else}
 									{#each chatMessages as msg, i}
-										<div class="chat-message {msg.role}">
-											<div class="chat-bubble" class:error={msg.error}>
-												{#if msg.tools && msg.tools.length > 0}
-													<div class="chat-tools" class:streaming={msg.isStreaming}>
-														{#each msg.tools as tool}
-															<div class="chat-tool-indicator">
-																<span class="tool-icon">⚡</span>
-																<span class="tool-name">{tool.name}</span>
-																{#if tool.details}
-																	<span class="tool-details"
-																		>{tool.details.substring(0, 30)}{tool.details.length > 30
-																			? '...'
-																			: ''}</span
-																	>
-																{/if}
-															</div>
-														{/each}
+										{#if msg.role === 'user' || msg.content || (msg.tools && msg.tools.length > 0) || (msg.isApprovalRequest && msg.approvalStatus !== 'approved') || msg.isStreaming || msg.error}
+											<div class="chat-message {msg.role}" class:tool-only={!msg.content && ((msg.tools && msg.tools.length > 0) || msg.isApprovalRequest)}>
+												<div class="chat-bubble" class:error={msg.error}>
+													{#if msg.tools && msg.tools.length > 0}
+														<div class="chat-tools">
+															{#each msg.tools as tool}
+																<ChatToolIndicator {tool} />
+															{/each}
+														</div>
+													{/if}
+													{#if msg.error}
+														<span class="chat-error-text">
+															{msg.content || 'Failed to generate response.'}
+														</span>
+													{:else if msg.isApprovalRequest && msg.approvalStatus !== 'approved'}
+														<ChatToolIndicator tool={{ name: (msg.approvalStatus === 'rejected' ? 'Rejected tool: ' : 'Pending tool: ') + msg.approvalTool, details: msg.approvalDetails || '' }} />
+													{:else if msg.role === 'assistant' && msg.content}
+														{@html DOMPurify.sanitize(marked.parse(msg.content) as string, { ADD_TAGS: ['think'] })}
+													{:else if msg.content}
+														{msg.content}
+													{/if}
+													{#if msg.isStreaming && msg.startTime}
+														<span class="chat-time-taken live">{((currentTime - msg.startTime) / 1000).toFixed(1)}s</span>
+													{:else if msg.endTime && msg.startTime}
+														<span class="chat-time-taken">{((msg.endTime - msg.startTime) / 1000).toFixed(1)}s</span>
+													{/if}
+												</div>
+												{#if msg.role === 'user' && msg.snapshot}
+													<div class="chat-msg-actions">
+														<button
+															class="rewind-btn"
+															onclick={() => rewindToSnapshot(msg.snapshot, msg.content)}
+															title="Undo — restore note and put prompt back in input">↩</button
+														>
+														<button
+															class="rewind-btn retry"
+															onclick={() => retryMessage(msg.snapshot!, msg.content)}
+															title="Retry — rewind and resend this prompt">↻</button
+														>
 													</div>
-												{/if}
-												{#if msg.error}
-													<span class="chat-error-text">
-														{msg.content || 'Failed to generate response.'}
-													</span>
-												{:else if msg.isApprovalRequest}
-													<div class="approval-card">
-														<p><strong>⚠️ The AI wants to use {msg.approvalTool}</strong></p>
-														<pre>{msg.approvalDetails}</pre>
-														{#if msg.approvalStatus === 'pending'}
-															<div class="approval-actions">
-																<button class="primary" onclick={() => resolveApproval(msg.approvalId!, true)}>Approve</button>
-																<button class="secondary" onclick={() => resolveApproval(msg.approvalId!, false)}>Reject</button>
-															</div>
-														{:else}
-															<p><em>{msg.approvalStatus === 'approved' ? '✅ Approved' : '❌ Rejected'}</em></p>
-														{/if}
-													</div>
-												{:else if msg.role === 'assistant'}
-													{@html DOMPurify.sanitize(marked.parse(msg.content) as string, { ADD_TAGS: ['think'] })}
-												{:else if msg.content}
-													{msg.content}
-												{:else if msg.isStreaming && (!msg.tools || msg.tools.length === 0)}
-													<span class="loading-dots"></span>
 												{/if}
 											</div>
-											{#if msg.role === 'user' && msg.snapshot}
-												<div class="chat-msg-actions">
-													<button
-														class="rewind-btn"
-														onclick={() => rewindToSnapshot(msg.snapshot, msg.content)}
-														title="Undo — restore note and put prompt back in input">↩</button
-													>
-													<button
-														class="rewind-btn retry"
-														onclick={() => retryMessage(msg.snapshot!, msg.content)}
-														title="Retry — rewind and resend this prompt">↻</button
-													>
-												</div>
-											{/if}
-										</div>
+										{/if}
 									{/each}
 								{/if}
 							</div>
+							
+							{#if chatMessages.find(m => m.isApprovalRequest && m.approvalStatus === 'pending')}
+								{@const pendingReq = chatMessages.find(m => m.isApprovalRequest && m.approvalStatus === 'pending')}
+								<div class="pending-approval-bar">
+									<div class="pending-info">
+										<span class="tool-icon">⚡</span>
+										<span class="pending-text">AI wants to use <strong>{pendingReq?.approvalTool}</strong></span>
+									</div>
+									<div class="pending-actions">
+										<button class="primary" onclick={() => resolveApproval(pendingReq!.approvalId!, true)}>Approve</button>
+										<button class="secondary" onclick={() => resolveApproval(pendingReq!.approvalId!, false)}>Reject</button>
+									</div>
+								</div>
+							{/if}
+							
 							<div class="chat-input-area">
 								<textarea
 									bind:this={chatTextareaEl}
@@ -2237,13 +2295,12 @@
 									oninput={(e) => {
 										const target = e.target as HTMLTextAreaElement;
 										target.style.height = 'auto';
-										target.style.height = `${Math.min(target.scrollHeight, 200)}px`;
+										target.style.height = `${Math.min(target.scrollHeight + 2, 150)}px`;
 									}}
 									placeholder="Ask AI..."
 									rows="1"
 								></textarea>
 								<label class="full-permission-toggle">
-									<span class="toggle-label">Full-permission</span>
 									<div class="toggle-switch">
 										<input type="checkbox" checked={!requireToolApproval} onchange={(e) => {
 											requireToolApproval = !e.currentTarget.checked;
@@ -2251,6 +2308,9 @@
 										}} />
 										<span class="slider"></span>
 									</div>
+									<span style="font-size: 0.7rem; color: var(--text-secondary); opacity: 0.8; margin-left: 4px;">
+										{requireToolApproval ? 'OFF (Asks for permission)' : 'ON (Edits freely)'}
+									</span>
 								</label>
 							</div>
 						</div>
@@ -2839,6 +2899,7 @@
 	}
 
 	.main-layout {
+		flex: 1;
 		min-height: 0;
 		position: relative;
 		display: flex;
@@ -2898,7 +2959,7 @@
 	/* Main Pane */
 	.main-pane {
 		flex: 1;
-		min-width: 520px;
+		min-width: 800px;
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-page);
@@ -2929,6 +2990,12 @@
 
 	.vditor-wrapper {
 		border: none !important;
+		flex: 1;
+		min-height: 0;
+	}
+
+	:global(.vditor) {
+		height: 100% !important;
 	}
 
 	:global(.vditor-reset) {
@@ -3064,7 +3131,7 @@
 		box-sizing: border-box !important;
 		flex: 1 !important;
 		min-height: 0 !important;
-		overflow-y: visible !important; /* Move scrollbar to .main-pane */
+		overflow-y: auto !important;
 	}
 
 	/* Clear padding from the scroll container so its scrollbar is pinned to the far right edge */
@@ -3087,11 +3154,12 @@
 	   This makes the width strictly static across screen sizes. */
 	:global(.vditor-reset) {
 		width: 210mm !important;
-		max-width: none !important; /* STRICTLY fixed width */
+		max-width: none !important;
 		margin: 0 auto !important;
-		padding-left: 2rem !important;
-		padding-right: 2rem !important;
+		padding-left: var(--space-8) !important;
+		padding-right: var(--space-8) !important;
 		overflow: visible !important;
+		box-sizing: border-box !important;
 	}
 
 	:global(.vditor-preview__action) {
@@ -3877,6 +3945,10 @@
 		display: flex;
 		flex-direction: column;
 	}
+	.chat-message.tool-only {
+		margin-top: calc(-1 * var(--space-3));
+		margin-bottom: calc(-1 * var(--space-3));
+	}
 	.chat-message.user {
 		align-items: flex-end;
 	}
@@ -3901,6 +3973,11 @@
 		background: var(--bg-panel);
 		color: var(--text-primary);
 	}
+	.chat-message.tool-only .chat-bubble {
+		padding-top: var(--space-1);
+		padding-bottom: var(--space-1);
+		background: transparent;
+	}
 	.chat-bubble.error {
 		background: color-mix(in srgb, var(--bg-panel) 82%, var(--accent-200));
 	}
@@ -3912,28 +3989,62 @@
 	.approval-card {
 		background: rgba(0, 0, 0, 0.2);
 		border: 1px solid var(--accent);
-		border-radius: 6px;
-		padding: 12px;
-		margin: 8px 0;
+		border-radius: var(--radius-md);
+		padding: var(--space-3);
+		margin: var(--space-2) 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		width: 100%;
+		box-sizing: border-box;
+	}
+	.approval-card.rejected {
+		border-color: rgba(239, 68, 68, 0.4);
+		background: rgba(239, 68, 68, 0.05);
+	}
+	.approval-card.rejected .title {
+		color: #fca5a5;
 	}
 	
-	.approval-card p { margin: 0 0 8px 0; }
+	.approval-card .title {
+		margin: 0;
+		font-size: 0.85rem;
+		color: var(--accent-300);
+	}
 	
 	.approval-card pre {
 		background: rgba(0, 0, 0, 0.3);
-		padding: 8px;
-		border-radius: 4px;
-		font-size: 0.85em;
+		padding: var(--space-2);
+		border-radius: var(--radius-sm);
+		font-size: 0.75rem;
+		font-family: var(--font-mono);
 		white-space: pre-wrap;
 		word-break: break-word;
-		max-height: 150px;
+		max-height: 120px;
 		overflow-y: auto;
-		margin-bottom: 12px;
+		margin: 0;
+		color: var(--text-muted);
+	}
+	
+	.approval-card pre::-webkit-scrollbar {
+		width: 6px;
+		height: 6px;
+	}
+	.approval-card pre::-webkit-scrollbar-track {
+		background: transparent;
+	}
+	.approval-card pre::-webkit-scrollbar-thumb {
+		background: var(--neutral-700, #444);
+		border-radius: 3px;
+	}
+	.approval-card pre::-webkit-scrollbar-thumb:hover {
+		background: var(--neutral-500, #666);
 	}
 	
 	.approval-actions {
 		display: flex;
-		gap: 8px;
+		gap: var(--space-2);
+		flex-wrap: wrap; /* Fix responsiveness for narrow sidebars */
 	}
 	
 	.full-permission-toggle {
@@ -3984,15 +4095,50 @@
 	}
 
 	input:checked + .slider {
-		background-color: var(--accent);
+		background-color: var(--primary, #f97316);
 	}
 
 	input:checked + .slider:before {
 		transform: translateX(14px);
 	}
 
-	.chat-error-text {
-		font-weight: 600;
+	.pending-approval-bar {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: var(--space-3) var(--space-4);
+		background: var(--surface-2);
+		border-top: 1px solid var(--border-subtle);
+		border-bottom: 1px solid var(--border-subtle);
+		gap: var(--space-4);
+	}
+	.pending-info {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		font-size: 0.85rem;
+		color: var(--text-primary);
+	}
+	.pending-actions {
+		display: flex;
+		gap: var(--space-2);
+	}
+	.pending-actions button {
+		padding: 0.4rem 0.8rem;
+		border-radius: var(--radius-sm);
+		font-size: 0.8rem;
+		cursor: pointer;
+		font-weight: 500;
+	}
+	.pending-actions .primary {
+		background: var(--accent-500);
+		color: white;
+		border: 1px solid var(--accent-500);
+	}
+	.pending-actions .secondary {
+		background: transparent;
+		color: var(--text-primary);
+		border: 1px solid var(--border-default);
 	}
 	.chat-tools {
 		display: flex;
@@ -4007,35 +4153,15 @@
 		background: inherit;
 		padding-bottom: var(--space-2);
 	}
-	.chat-tool-indicator {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		font-size: 0.75rem;
-		padding: var(--space-1) var(--space-2);
-		background: rgba(255, 255, 255, 0.05);
-		border-radius: var(--radius-sm);
-		border: 1px dashed var(--border-default);
-		color: var(--text-secondary);
-	}
-	.tool-name {
-		font-weight: 500;
-		color: var(--accent-300);
-	}
-	.tool-details {
-		font-style: italic;
-		opacity: 0.8;
-	}
 	.chat-input-area {
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-2);
-		margin-top: auto;
-		padding-top: var(--space-4);
-		border-top: 1px solid var(--border-default);
+		padding-top: var(--space-3);
+		border-top: 1px solid var(--border-subtle);
 	}
 	.chat-input-area textarea {
-		flex: 1;
+		width: 100%;
 		background: var(--bg-page);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-xs);
@@ -4046,11 +4172,19 @@
 		font-family: inherit;
 		line-height: 1.4;
 		overflow-y: auto;
-		-ms-overflow-style: none;
-		scrollbar-width: none;
 	}
 	.chat-input-area textarea::-webkit-scrollbar {
-		display: none;
+		width: 6px;
+	}
+	.chat-input-area textarea::-webkit-scrollbar-track {
+		background: transparent;
+	}
+	.chat-input-area textarea::-webkit-scrollbar-thumb {
+		background: var(--neutral-700, #444);
+		border-radius: 3px;
+	}
+	.chat-input-area textarea::-webkit-scrollbar-thumb:hover {
+		background: var(--neutral-500, #666);
 	}
 	.chat-input-area textarea:focus {
 		border-color: var(--accent-200);

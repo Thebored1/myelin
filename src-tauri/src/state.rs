@@ -262,6 +262,27 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn set_llama_advanced_config(
+        &self,
+        context_size: Option<u32>,
+        gpu_layers: Option<i32>,
+        threads: Option<u32>,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+        extra_args: Option<Vec<String>>
+    ) -> Result<()> {
+        crate::llama_server::set_advanced_config(
+            &self.inner.app_data_dir,
+            context_size,
+            gpu_layers,
+            threads,
+            temperature,
+            top_p,
+            extra_args
+        )?;
+        Ok(())
+    }
+
     fn ensure_unique_title(&self, requested_title: &str, current_note_id: Option<&str>) -> String {
         let runtime = self.inner.runtime.read();
 

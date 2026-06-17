@@ -56,6 +56,22 @@ async fn set_llama_executable_path(
 }
 
 #[tauri::command]
+async fn set_llama_advanced_config(
+    state: State<'_, AppState>,
+    context_size: Option<u32>,
+    gpu_layers: Option<i32>,
+    threads: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    extra_args: Option<Vec<String>>,
+) -> Result<(), String> {
+    state
+        .set_llama_advanced_config(context_size, gpu_layers, threads, temperature, top_p, extra_args)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn create_note(
     state: State<'_, AppState>,
     title: String,
@@ -310,6 +326,7 @@ pub fn run() {
             set_workspace,
             set_llama_model_path,
             set_llama_executable_path,
+            set_llama_advanced_config,
             create_note,
             load_note,
             save_note,

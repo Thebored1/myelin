@@ -12,6 +12,8 @@ export type ChatMessage = {
 	approvalTool?: string;
 	approvalDetails?: string;
 	approvalStatus?: 'pending' | 'approved' | 'rejected';
+	startTime?: number;
+	endTime?: number;
 };
 
 export type NoteSnapshot = {
@@ -81,6 +83,12 @@ export type ProviderStatus = {
 	config?: {
 		executablePath?: string;
 		modelPath?: string;
+		contextSize?: number;
+		gpuLayers?: number;
+		threads?: number;
+		temperature?: number;
+		topP?: number;
+		extraArgs?: string[];
 	};
 	resolved?: {
 		executablePath: string;
@@ -88,6 +96,11 @@ export type ProviderStatus = {
 		host: string;
 		port: number;
 		contextSize: number;
+		gpuLayers?: number;
+		threads?: number;
+		temperature: number;
+		topP: number;
+		extraArgs: string[];
 	};
 };
 
