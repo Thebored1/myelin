@@ -89,7 +89,8 @@ export type ProviderStatus = {
 		temperature?: number;
 		topP?: number;
 		extraArgs?: string[];
-		backendPreference?: 'auto' | 'gpu' | 'cpu';
+		backendPreference?: 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
+		gpuDevice?: string;
 		maxTurns?: number;
 	};
 	resolved?: {
@@ -115,6 +116,13 @@ export type ProviderStatus = {
 	gpus?: string[];
 	/** Backend builds installed: subset of "cuda" | "vulkan" | "metal" | "cpu". */
 	installedBackends?: string[];
+};
+
+/** A compute device exposed by a backend, e.g. { id: "Vulkan0", name: "Intel UHD" }. */
+export type LlamaDevice = {
+	id: string;
+	name: string;
+	backend: string;
 };
 
 export type IndexState = {

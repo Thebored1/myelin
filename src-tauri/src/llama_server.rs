@@ -81,8 +81,11 @@ pub struct WorkspaceLlamaConfig {
     pub top_p: Option<f32>,
     pub chat_format: Option<String>,
     pub extra_args: Vec<String>,
-    /// Compute device preference: "auto" (GPU if available), "gpu", or "cpu".
+    /// Compute backend preference: "auto", "cuda", "vulkan", "metal", or "cpu".
     pub backend_preference: Option<String>,
+    /// Optional specific GPU device id (e.g. "Vulkan0", "CUDA0") to pin to.
+    /// Empty/None means let the backend choose. Lets users pick the iGPU.
+    pub gpu_device: Option<String>,
     /// Max agent tool-calling turns before forcing a final answer.
     pub max_turns: Option<u32>,
 }
@@ -104,9 +107,12 @@ pub struct ResolvedLlamaConfig {
     /// The backend of the primary (preferred) candidate, for display before launch.
     #[serde(default)]
     pub backend: Option<String>,
-    /// Compute device preference: "auto", "gpu", or "cpu".
+    /// Compute backend preference: "auto", "cuda", "vulkan", "metal", or "cpu".
     #[serde(default)]
     pub backend_preference: String,
+    /// Specific GPU device id to pin to ("Vulkan0", "CUDA0", …), if any.
+    #[serde(default)]
+    pub gpu_device: Option<String>,
     /// Max agent tool-calling turns before forcing a final answer.
     #[serde(default)]
     pub max_turns: u32,
@@ -140,8 +146,9 @@ impl ResolvedLlamaConfig {
             && self.extra_args == other.extra_args
             // Changing the device preference (e.g. GPU → CPU) must relaunch the
             // server even when the same binary is selected, since it changes the
-            // effective --n-gpu-layers.
+            // effective --n-gpu-layers; likewise for pinning a specific GPU.
             && self.backend_preference == other.backend_preference
+            && self.gpu_device == other.gpu_device
     }
 }
 
@@ -275,6 +282,82 @@ pub fn installed_backends(app_data_dir: &Path, workspace_config: &WorkspaceLlama
     found
 }
 
+/// A compute device exposed by a backend, e.g. id "Vulkan0", name
+/// "Intel(R) UHD Graphics".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub backend: String,
+}
+
+/// Run `llama-server --list-devices` for a given backend's binary and parse the
+/// devices it exposes. Lets the UI offer a "use the iGPU" choice. Returns an
+/// empty list if the backend isn't installed or the probe fails.
+pub fn list_devices(app_data_dir: &Path, backend_label: &str) -> Vec<DeviceInfo> {
+    let workspace_config = load_config(app_data_dir).unwrap_or_default();
+    let exe = match backend_binary(app_data_dir, &workspace_config, backend_label) {
+        Some(exe) => exe,
+        None => return Vec::new(),
+    };
+
+    let output = Command::new(&exe)
+        .arg("--list-devices")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut devices = Vec::new();
+    for line in text.lines() {
+        // Lines look like: "  Vulkan0: Intel(R) UHD Graphics (8025 MiB, ...)"
+        let trimmed = line.trim();
+        let Some((id, rest)) = trimmed.split_once(':') else {
+            continue;
+        };
+        // Device ids are a backend prefix + index, no spaces.
+        if id.is_empty() || id.contains(char::is_whitespace) {
+            continue;
+        }
+        let name = rest
+            .trim()
+            .rsplit_once(" (")
+            .map(|(n, _)| n)
+            .unwrap_or_else(|| rest.trim())
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        devices.push(DeviceInfo {
+            id: id.to_string(),
+            name,
+            backend: backend_label.to_string(),
+        });
+    }
+    devices
+}
+
+/// Locate the llama-server binary for a specific backend ("cuda"/"vulkan"/…),
+/// searching the tiering roots' `<backend>/` subfolders.
+fn backend_binary(
+    app_data_dir: &Path,
+    workspace_config: &WorkspaceLlamaConfig,
+    backend_label: &str,
+) -> Option<PathBuf> {
+    for root in tiering_roots(app_data_dir, workspace_config) {
+        let exe = root.join(backend_label).join(executable_name());
+        if exe.is_file() {
+            return Some(exe);
+        }
+    }
+    None
+}
+
 /// Directories that may hold per-backend subfolders, highest priority first.
 fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -288,31 +371,38 @@ fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -
     roots
 }
 
-/// Normalize a user backend preference string to "auto" | "gpu" | "cpu".
+/// Normalize a user backend preference to "auto" | "cuda" | "vulkan" |
+/// "metal" | "cpu". Legacy "gpu" maps to "auto".
 fn normalize_preference(raw: Option<&str>) -> String {
     match raw.map(|p| p.trim().to_lowercase()).as_deref() {
         Some("cpu") => "cpu".into(),
-        Some("gpu") => "gpu".into(),
+        Some("cuda") => "cuda".into(),
+        Some("vulkan") => "vulkan".into(),
+        Some("metal") => "metal".into(),
         _ => "auto".into(),
     }
 }
 
-/// Backend preference order for the current OS, detected hardware, and the
-/// user's device preference. CPU is always appended as a final safety net so
-/// the app never fails to launch — except when the user explicitly forces CPU.
+/// Backend order for the current OS, hardware, and preference. A specific
+/// preference forces that backend first; CPU is appended as a safety net so the
+/// app never fails to launch — except when the user explicitly forces CPU.
 fn desired_backends(preference: &str) -> Vec<GpuBackend> {
-    if preference == "cpu" {
-        return vec![GpuBackend::Cpu];
-    }
-
-    if cfg!(target_os = "macos") {
-        // Metal ships in the standard macOS build and always has a CPU fallback.
-        vec![GpuBackend::Metal, GpuBackend::Cpu]
-    } else if detect_nvidia() {
-        vec![GpuBackend::Cuda, GpuBackend::Vulkan, GpuBackend::Cpu]
-    } else {
-        // Vulkan covers AMD/Intel/NVIDIA and degrades to CPU on its own.
-        vec![GpuBackend::Vulkan, GpuBackend::Cpu]
+    match preference {
+        "cpu" => vec![GpuBackend::Cpu],
+        "cuda" => vec![GpuBackend::Cuda, GpuBackend::Cpu],
+        "vulkan" => vec![GpuBackend::Vulkan, GpuBackend::Cpu],
+        "metal" => vec![GpuBackend::Metal, GpuBackend::Cpu],
+        // "auto": best for the detected hardware.
+        _ => {
+            if cfg!(target_os = "macos") {
+                vec![GpuBackend::Metal, GpuBackend::Cpu]
+            } else if detect_nvidia() {
+                vec![GpuBackend::Cuda, GpuBackend::Vulkan, GpuBackend::Cpu]
+            } else {
+                // Vulkan covers AMD/Intel/NVIDIA and degrades to CPU on its own.
+                vec![GpuBackend::Vulkan, GpuBackend::Cpu]
+            }
+        }
     }
 }
 
@@ -381,6 +471,10 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         extra_args: app_config.extra_args.clone(),
         backend: Some(primary.backend.label().to_string()),
         backend_preference: preference,
+        gpu_device: app_config
+            .gpu_device
+            .clone()
+            .filter(|d| !d.trim().is_empty()),
         max_turns: app_config.max_turns.filter(|&n| n > 0).unwrap_or(4),
         candidates,
     })
@@ -461,6 +555,18 @@ async fn try_start_candidate(
         .arg("1")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+
+    // Pin a specific GPU (e.g. the iGPU to save battery) when requested and the
+    // device id belongs to this candidate's backend. Guarded by the prefix so a
+    // stale "CUDA0" is never passed to a Vulkan launch.
+    if candidate.backend.is_gpu() && gpu_layers > 0 {
+        if let Some(device) = config.gpu_device.as_deref().filter(|d| !d.is_empty()) {
+            let prefix = candidate.backend.label(); // "cuda" | "vulkan" | "metal"
+            if device.to_lowercase().starts_with(prefix) {
+                command.arg("--device").arg(device);
+            }
+        }
+    }
 
     if let Some(threads) = config.threads {
         command.arg("--threads").arg(threads.to_string());
@@ -649,6 +755,7 @@ pub fn set_advanced_config(
     top_p: Option<f32>,
     extra_args: Option<Vec<String>>,
     backend_preference: Option<String>,
+    gpu_device: Option<String>,
     max_turns: Option<u32>,
 ) -> Result<()> {
     let mut config = load_config(app_data_dir).unwrap_or_default();
@@ -672,6 +779,10 @@ pub fn set_advanced_config(
     }
     if let Some(bp) = backend_preference {
         config.backend_preference = Some(normalize_preference(Some(&bp)));
+    }
+    if let Some(dev) = gpu_device {
+        // Empty string clears the pin (back to automatic device choice).
+        config.gpu_device = if dev.trim().is_empty() { None } else { Some(dev) };
     }
     if let Some(mt) = max_turns {
         config.max_turns = Some(mt.clamp(1, 12));

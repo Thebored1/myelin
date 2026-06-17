@@ -65,6 +65,7 @@ async fn set_llama_advanced_config(
     top_p: Option<f32>,
     extra_args: Option<Vec<String>>,
     backend_preference: Option<String>,
+    gpu_device: Option<String>,
     max_turns: Option<u32>,
 ) -> Result<(), String> {
     state
@@ -76,10 +77,19 @@ async fn set_llama_advanced_config(
             top_p,
             extra_args,
             backend_preference,
+            gpu_device,
             max_turns,
         )
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_llama_devices(
+    state: State<'_, AppState>,
+    backend: String,
+) -> Result<Vec<crate::llama_server::DeviceInfo>, String> {
+    Ok(state.list_llama_devices(backend))
 }
 
 #[tauri::command]
@@ -338,6 +348,7 @@ pub fn run() {
             set_llama_model_path,
             set_llama_executable_path,
             set_llama_advanced_config,
+            list_llama_devices,
             create_note,
             load_note,
             save_note,

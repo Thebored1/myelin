@@ -4,7 +4,11 @@
     import { listen } from '@tauri-apps/api/event';
     import { open } from '@tauri-apps/plugin-dialog';
     import { goto } from '$app/navigation';
-    import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
+    import type { AppSnapshot, IndexState, ProviderStatus, LlamaDevice } from '$lib/types';
+
+    type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
+    const GPU_BACKENDS = ['cuda', 'vulkan', 'metal'];
+    const isGpuBackend = (b: string) => GPU_BACKENDS.includes(b);
 
     let currentModelPath = $state('');
     let currentExecutablePath = $state('');
@@ -18,7 +22,9 @@
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
     let activeProvider = $state('');
-    let backendPreference = $state<'auto' | 'gpu' | 'cpu'>('auto');
+    let backendPreference = $state<BackendPref>('auto');
+    let gpuDevice = $state<string>('');
+    let devices = $state<LlamaDevice[]>([]);
     let activeBackend = $state<string | null>(null);
     let nvidiaDetected = $state(false);
     let gpuAvailable = $state(true);
@@ -28,37 +34,78 @@
     let providerHealthy = $state(true);
     let providerDetail = $state('');
 
-    // Proactive validation of the chosen compute device against this machine.
+    // Proactive validation of the chosen compute backend against this machine.
     const gpuIssue = $derived.by((): { level: 'error' | 'warn'; message: string } | null => {
         if (backendPreference === 'cpu') return null;
+        const explicitGpu = isGpuBackend(backendPreference);
 
         if (!gpuAvailable) {
-            // Only a hard error when the user explicitly forces GPU.
-            if (backendPreference === 'gpu') {
+            if (explicitGpu) {
                 return {
                     level: 'error',
                     message:
                         'No GPU was detected on this system' +
                         (gpus.length ? ` (${gpus.join(', ')})` : '') +
-                        '. GPU mode is unavailable here — switch to Auto or CPU.'
+                        '. This will fall back to CPU.'
                 };
             }
             return null; // Auto on a GPU-less machine correctly uses CPU.
         }
 
-        const hasGpuBuild =
-            installedBackends.includes('cuda') ||
-            installedBackends.includes('vulkan') ||
-            installedBackends.includes('metal');
-        if (!hasGpuBuild) {
-            const which = nvidiaDetected ? 'CUDA (bin/cuda/)' : 'Vulkan (bin/vulkan/)';
+        if (explicitGpu && !installedBackends.includes(backendPreference)) {
             return {
                 level: 'warn',
-                message: `A GPU was detected (${gpus.join(', ') || 'unknown'}), but no GPU build is installed. Add a ${which} build — see docs/llama-backends.md — otherwise the app falls back to CPU.`
+                message: `The ${backendPreference.toUpperCase()} build isn't installed. Add it under bin/${backendPreference}/ — see docs/llama-backends.md — or it falls back to CPU.`
+            };
+        }
+        if (backendPreference === 'cuda' && !nvidiaDetected) {
+            return {
+                level: 'warn',
+                message: 'No NVIDIA GPU detected — CUDA may fail and fall back. Use Vulkan for Intel/AMD GPUs.'
+            };
+        }
+        if (backendPreference === 'auto' && !installedBackends.some((b) => isGpuBackend(b))) {
+            return {
+                level: 'warn',
+                message: `A GPU was detected (${gpus.join(', ') || 'unknown'}), but no GPU build is installed. Add ${nvidiaDetected ? 'CUDA' : 'Vulkan'} — see docs/llama-backends.md — otherwise it runs on CPU.`
             };
         }
         return null;
     });
+
+    // Backends offered in the selector: Auto + CPU always, plus any installed GPU build.
+    const backendOptions = $derived.by(() => {
+        const opts: { value: BackendPref; label: string }[] = [{ value: 'auto', label: 'Auto' }];
+        for (const b of ['cuda', 'vulkan', 'metal'] as const) {
+            if (installedBackends.includes(b)) {
+                opts.push({ value: b, label: b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : 'Metal' });
+            }
+        }
+        opts.push({ value: 'cpu', label: 'CPU' });
+        return opts;
+    });
+
+    async function loadDevices(backend: string) {
+        if (!isGpuBackend(backend)) {
+            devices = [];
+            return;
+        }
+        try {
+            devices = await invoke<LlamaDevice[]>('list_llama_devices', { backend });
+        } catch (e) {
+            console.error('Failed to list devices:', e);
+            devices = [];
+        }
+    }
+
+    function selectBackend(value: BackendPref) {
+        if (value === backendPreference) return;
+        backendPreference = value;
+        gpuDevice = ''; // a device id is backend-specific; reset on switch
+        if (isGpuBackend(value)) loadDevices(value);
+        else devices = [];
+        debounceSave();
+    }
     let isSaving = $state(false);
     let isRebuilding = $state(false);
     let saved = $state(false);
@@ -83,7 +130,9 @@
             installedBackends = status.installedBackends ?? [];
             providerHealthy = status.healthy ?? true;
             providerDetail = status.detail ?? '';
-            backendPreference = (status.config?.backendPreference as 'auto' | 'gpu' | 'cpu') ?? 'auto';
+            backendPreference = (status.config?.backendPreference as BackendPref) ?? 'auto';
+            gpuDevice = status.config?.gpuDevice ?? '';
+            if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
                 currentExecutablePath = status.config?.executablePath || status.resolved.executablePath || '';
@@ -228,6 +277,7 @@
                 topP: topP,
                 extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null,
                 backendPreference: backendPreference,
+                gpuDevice: gpuDevice || null,
                 maxTurns: maxTurns
             });
             saved = true;
@@ -333,30 +383,45 @@
 
             <div class="compute-device">
                 <span class="compute-label">Compute device</span>
-                <div class="segmented" role="group" aria-label="Compute device">
-                    {#each [['auto', 'Auto'], ['gpu', 'GPU'], ['cpu', 'CPU']] as [value, label]}
-                        {@const disabled = value === 'gpu' && !gpuAvailable}
+                <div class="segmented" role="group" aria-label="Compute backend">
+                    {#each backendOptions as opt}
+                        {@const disabled = isGpuBackend(opt.value) && !gpuAvailable}
                         <button
                             type="button"
                             class="segment"
-                            class:active={backendPreference === value}
+                            class:active={backendPreference === opt.value}
                             {disabled}
                             title={disabled ? 'No GPU detected on this system' : ''}
-                            onclick={() => { backendPreference = value as 'auto' | 'gpu' | 'cpu'; debounceSave(); }}
+                            onclick={() => selectBackend(opt.value)}
                         >
-                            {label}
+                            {opt.label}
                         </button>
                     {/each}
                 </div>
                 <p class="compute-hint">
                     {#if backendPreference === 'auto'}
-                        Use the GPU when available, otherwise the CPU. {gpus.length ? `Detected: ${gpus.join(', ')}.` : 'No GPU detected.'}
-                    {:else if backendPreference === 'gpu'}
-                        Force GPU acceleration. Falls back to CPU with a warning if no GPU build is available.
+                        Pick the best backend automatically. {gpus.length ? `Detected: ${gpus.join(', ')}.` : 'No GPU detected.'}
+                    {:else if backendPreference === 'cpu'}
+                        Force CPU only. Slower, but works everywhere.
                     {:else}
-                        Force CPU only. Slower, but works everywhere. Takes effect after the AI server restarts.
+                        Force the {backendPreference.toUpperCase()} backend. Falls back to CPU if unavailable.
                     {/if}
                 </p>
+
+                {#if isGpuBackend(backendPreference) && devices.length > 0}
+                    <div class="device-row">
+                        <label for="gpu_device">GPU device</label>
+                        <select id="gpu_device" bind:value={gpuDevice} onchange={debounceSave}>
+                            <option value="">Automatic (let {backendPreference.toUpperCase()} choose)</option>
+                            {#each devices as dev}
+                                <option value={dev.id}>{dev.name} ({dev.id})</option>
+                            {/each}
+                        </select>
+                    </div>
+                    <p class="compute-hint">
+                        Pick a specific GPU — e.g. an integrated GPU to save battery, or the discrete GPU for speed.
+                    </p>
+                {/if}
 
                 {#if gpuIssue}
                     <div class="device-issue" class:error={gpuIssue.level === 'error'} class:warn={gpuIssue.level === 'warn'}>
@@ -693,6 +758,30 @@
         font-size: 0.8rem;
         color: var(--text-secondary);
         line-height: 1.4;
+    }
+
+    .device-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+        margin-top: var(--space-3);
+    }
+
+    .device-row label {
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+
+    .device-row select {
+        flex: 1;
+        background: var(--bg-page);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-sm);
+        padding: 0.5rem 0.75rem;
+        color: var(--text-primary);
+        font-size: 0.85rem;
     }
 
     .backend-status {

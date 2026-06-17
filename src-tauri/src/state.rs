@@ -306,6 +306,7 @@ impl AppState {
         top_p: Option<f32>,
         extra_args: Option<Vec<String>>,
         backend_preference: Option<String>,
+        gpu_device: Option<String>,
         max_turns: Option<u32>,
     ) -> Result<()> {
         crate::llama_server::set_advanced_config(
@@ -317,9 +318,14 @@ impl AppState {
             top_p,
             extra_args,
             backend_preference,
+            gpu_device,
             max_turns,
         )?;
         Ok(())
+    }
+
+    pub fn list_llama_devices(&self, backend: String) -> Vec<crate::llama_server::DeviceInfo> {
+        crate::llama_server::list_devices(&self.inner.app_data_dir, &backend)
     }
 
     fn ensure_unique_title(&self, requested_title: &str, current_note_id: Option<&str>) -> String {
