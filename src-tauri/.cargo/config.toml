@@ -6,3 +6,6 @@ CXXFLAGS = "/std:c++17"
 
 [build]
 rustflags = ["-C", "target-feature=+crt-static"]
+# Cap parallel codegen so heavy linking (arrow/lance/tectonic) doesn't exhaust
+# RAM and swap on 16 GB machines. Raise on boxes with more memory.
+jobs = 6

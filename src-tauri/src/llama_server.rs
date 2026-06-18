@@ -319,11 +319,12 @@ pub fn list_devices(app_data_dir: &Path, backend_label: &str) -> Vec<DeviceInfo>
         None => return Vec::new(),
     };
 
-    let output = Command::new(&exe)
-        .arg("--list-devices")
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--list-devices")
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
+        .stderr(Stdio::null());
+    apply_library_path(&mut cmd, &exe);
+    let output = cmd.output();
 
     let Ok(output) = output else {
         return Vec::new();
@@ -721,6 +722,7 @@ async fn try_start_candidate(
     }
 
     command.args(&config.extra_args);
+    apply_library_path(&mut command, &candidate.executable_path);
 
     let mut child = command.spawn().with_context(|| {
         format!(
@@ -1135,6 +1137,32 @@ fn executable_name() -> &'static str {
     } else {
         "llama-server"
     }
+}
+
+/// On Linux/macOS the dynamic loader does not search the executable's own
+/// directory, so a relocatable llama-server can't find its sibling
+/// `libggml*.so` / `libllama.so` and fails to launch (which surfaces as an
+/// unreachable server / rig completion error). Prepend the binary's directory
+/// to the child's library search path. No-op on Windows, where DLLs load from
+/// the executable's directory automatically.
+fn apply_library_path(command: &mut Command, executable: &Path) {
+    #[cfg(not(target_os = "windows"))]
+    if let Some(dir) = executable.parent() {
+        let var = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        let mut paths = vec![dir.to_path_buf()];
+        if let Some(existing) = env::var_os(var) {
+            paths.extend(env::split_paths(&existing));
+        }
+        if let Ok(joined) = env::join_paths(paths) {
+            command.env(var, joined);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    let _ = (command, executable);
 }
 
 fn find_on_path(binary_name: &str) -> Option<PathBuf> {
