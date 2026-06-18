@@ -253,8 +253,23 @@ The two places bugs actually live are both testable without launching the app:
   This is how we discovered the model mislabels a rewrite as `mode:"edit"` with
   the full note in `content` and no `find`. `plan_write` is built to handle that.
 
-Together: `cargo test` proves our code is correct; the probe shows whether a
-given model cooperates. Neither needs the desktop GUI.
+- **Every tool, end-to-end** — `src-tauri/src/bin/tool_e2e.rs` drives a real
+  `llama-server` through the same multi-turn tool loop the app uses, with the
+  real shared logic (`MYELIN_PREAMBLE`, `tool_specs`, `plan_write`, web
+  fetch/extract) against a scratch note store, and prints PASS/FAIL for each
+  tool (write replace/append/edit/clear, search_notes, read_note,
+  fetch_web_page):
+  ```
+  cargo run --bin tool_e2e -- [model.gguf] [llama-server-bin] [port]
+  ```
+  `AppState` is hardwired to Tauri's Wry runtime, so it can't be built
+  headlessly; the harness mirrors note storage/search on a scratch store while
+  writes go through the real `plan_write` and web fetch through the real code.
+  This is the harness that caught the `mode:"replace"` + stray `find` garble.
+
+Together: `cargo test` proves the logic, `tool_e2e` proves every tool
+round-trips with a real model, and the probe shows whether a given model
+cooperates. None need the desktop GUI.
 
 ## 6. Startup cache warm-up (why the prefix is duplicated)
 
