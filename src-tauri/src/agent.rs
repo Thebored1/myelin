@@ -287,7 +287,16 @@ impl Tool for WriteNoteTool {
 
         let mode = args.mode.as_deref().unwrap_or("replace").trim().to_lowercase();
         let content = args.content;
-        let is_delete = mode == "edit" && content.trim().is_empty();
+        let find = args.find.clone().unwrap_or_default();
+        // Decide intent from the FIELDS, not the (often mislabelled) `mode`:
+        //   - a non-empty `find`  -> targeted snippet edit/delete
+        //   - else `mode == append` -> append
+        //   - else                 -> whole-body replace
+        // Models routinely send mode:"edit" with the full note in `content` and
+        // no `find`; treating that as a replace is what they actually mean.
+        let has_find = !find.trim().is_empty();
+        let is_append = !has_find && mode == "append";
+        let is_delete = has_find && content.trim().is_empty();
 
         // Resolve the open note up front — needed for the tool chip, approval
         // dialog title, and the actual save. Writes always target the open note.
@@ -298,18 +307,18 @@ impl Tool for WriteNoteTool {
             }
         };
 
-        let display_name = match mode.as_str() {
-            "append" => "Append Note",
-            "edit" => if is_delete { "Delete Text" } else { "Replace Text" },
-            _ => if content.trim().is_empty() { "Clear Note" } else { "Write Note" },
+        let display_name = if has_find {
+            if is_delete { "Delete Text" } else { "Replace Text" }
+        } else if is_append {
+            "Append Note"
+        } else if content.trim().is_empty() {
+            "Clear Note"
+        } else {
+            "Write Note"
         };
 
-        let preview = if mode == "edit" {
-            format!(
-                "Find:\n{}\n\nReplace with:\n{}",
-                args.find.clone().unwrap_or_default(),
-                content
-            )
+        let preview = if has_find {
+            format!("Find:\n{}\n\nReplace with:\n{}", find, content)
         } else {
             content.clone()
         };
@@ -344,41 +353,32 @@ impl Tool for WriteNoteTool {
         }
 
         // Build the new body and decide how the UI should apply it.
-        let (new_body, emit_content, emit_mode) = match mode.as_str() {
-            "append" => {
-                let body = if existing.body.trim().is_empty() {
-                    content.trim().to_string()
-                } else {
-                    format!(
-                        "{}\n\n{}",
-                        existing.body.trim_end(),
-                        content.trim_start()
-                    )
-                };
-                (body, content.clone(), "append")
-            }
-            "edit" => {
-                let find = args.find.unwrap_or_default();
-                if find.trim().is_empty() {
-                    return Ok("Refused to edit: mode \"edit\" needs the exact `find` text to change. Use mode \"replace\" and send the full updated note instead.".to_string());
+        let (new_body, emit_content, emit_mode) = if has_find {
+            // Targeted snippet edit/delete (tolerant match of `find`).
+            match find_tolerant(&existing.body, &find) {
+                Some((start, end)) => {
+                    let mut body =
+                        String::with_capacity(existing.body.len() + content.len());
+                    body.push_str(&existing.body[..start]);
+                    body.push_str(&content);
+                    body.push_str(&existing.body[end..]);
+                    (body.clone(), body, "write")
                 }
-                match find_tolerant(&existing.body, &find) {
-                    Some((start, end)) => {
-                        let mut body = String::with_capacity(
-                            existing.body.len() + content.len(),
-                        );
-                        body.push_str(&existing.body[..start]);
-                        body.push_str(&content);
-                        body.push_str(&existing.body[end..]);
-                        (body.clone(), body, "write")
-                    }
-                    None => {
-                        return Ok("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string());
-                    }
+                None => {
+                    return Ok("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string());
                 }
             }
-            // "replace" and any unknown mode fall back to a full-body replace.
-            _ => (content.clone(), content.clone(), "write"),
+        } else if is_append {
+            let body = if existing.body.trim().is_empty() {
+                content.trim().to_string()
+            } else {
+                format!("{}\n\n{}", existing.body.trim_end(), content.trim_start())
+            };
+            (body, content.clone(), "append")
+        } else {
+            // Whole-body replace — including mode:"edit" with no `find`, which is
+            // how models usually phrase "rewrite the note with this content".
+            (content.clone(), content.clone(), "write")
         };
 
         self.state

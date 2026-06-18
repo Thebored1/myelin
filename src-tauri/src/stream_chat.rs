@@ -149,9 +149,16 @@ pub async fn run_chat(
                         // append/edit the live preview would be misleading, so we
                         // cancel and let the final note_written reconcile.
                         if slot.name == "write_note" && !note_cancelled {
+                            // Mirror the tool's intent logic: a whole-body write
+                            // (what we live-stream) is anything that's NOT an
+                            // append and has NO `find` snippet. mode:"edit" with
+                            // no find is a replace, so it streams too.
                             let mode = partial_field(&slot.args, "mode");
-                            let is_replace =
-                                !matches!(mode.as_deref(), Some(m) if m != "replace");
+                            let find = partial_field(&slot.args, "find");
+                            let is_append = matches!(mode.as_deref(), Some("append"));
+                            let has_find =
+                                find.map(|f| !f.trim().is_empty()).unwrap_or(false);
+                            let is_replace = !is_append && !has_find;
                             if !is_replace {
                                 if note_streaming {
                                     if let Some(nid) = &note_id {
@@ -193,6 +200,23 @@ pub async fn run_chat(
             }
         }
 
+        // Diagnostics: surface exactly what the model emitted this turn so we can
+        // tell a missing tool call (steering) from a refused one (tool result),
+        // and catch a tool call that leaked through as plain text.
+        let tc_summary: Vec<String> = tool_calls
+            .iter()
+            .map(|t| format!("{}({}b)", t.name, t.args.len()))
+            .collect();
+        log::info!(
+            "[stream_chat] turn {_turn}: text={}c tool_calls=[{}]",
+            assistant_text.chars().count(),
+            tc_summary.join(", ")
+        );
+        if !assistant_text.trim().is_empty() {
+            let preview: String = assistant_text.chars().take(400).collect();
+            log::info!("[stream_chat] assistant text preview: {preview}");
+        }
+
         // No tool calls → the streamed text is the final answer; we're done.
         let real_calls: Vec<&ToolAccum> =
             tool_calls.iter().filter(|t| !t.name.is_empty()).collect();
@@ -220,6 +244,12 @@ pub async fn run_chat(
 
         for t in &real_calls {
             let result = execute_tool(state, &t.name, &t.args).await;
+            let args_preview: String = t.args.chars().take(300).collect();
+            let result_preview: String = result.chars().take(200).collect();
+            log::info!(
+                "[stream_chat] exec {} args={args_preview} -> {result_preview}",
+                t.name
+            );
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": t.id,
