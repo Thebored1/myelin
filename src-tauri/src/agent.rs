@@ -138,11 +138,12 @@ fn find_tolerant(body: &str, find: &str) -> Option<(usize, usize)> {
     re.find(body).map(|m| (m.start(), m.end()))
 }
 
-/// How the editor should apply a write (drives the streaming UI).
-#[derive(Debug, PartialEq, Eq)]
+/// How the editor should apply a write (drives the streaming UI and chip label).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum WriteOp {
     Replace,
     Append,
+    EditSnippet,
 }
 
 #[derive(Debug)]
@@ -153,20 +154,29 @@ pub struct WritePlan {
 
 /// Pure decision for `write_note`: given the note's current body and the tool
 /// args, produce the new full body — or an `Err` message to relay back to the
-/// model. Intent is inferred from the FIELDS present, not the (often
-/// mislabelled) `mode`: a non-empty `find` is a targeted edit/delete; otherwise
-/// `mode == append` appends; otherwise it's a whole-body replace (which is also
-/// how models phrase `mode:"edit"` with the full note in `content` and no
-/// `find`). Kept free of `AppState`/Tauri so it can be unit-tested headlessly.
+/// model. Decided from intent, tolerant of the mislabelling small models do:
+///   - explicit `mode == "append"` -> append `content`
+///   - explicit `mode == "replace"` -> whole-body replace, IGNORING any stray
+///     `find` (models often send mode:"replace" with the full note in `content`
+///     AND a leftover `find` — honouring find there garbles the note)
+///   - otherwise a non-empty `find` -> targeted snippet edit/delete
+///   - otherwise (e.g. mode:"edit" with no find, or unspecified) -> replace
+/// `mode` is passed raw ("" when unspecified) so an explicit "replace" can be
+/// told apart from the default. Kept free of `AppState`/Tauri for unit tests.
 pub fn plan_write(
     current_body: &str,
     content: &str,
     mode: &str,
     find: &str,
 ) -> Result<WritePlan, String> {
+    let m = mode.trim().to_lowercase();
     let has_find = !find.trim().is_empty();
-    let is_append = !has_find && mode.trim().eq_ignore_ascii_case("append");
-    let is_delete = has_find && content.trim().is_empty();
+    let is_append = m == "append";
+    let explicit_replace = m == "replace";
+    // A targeted edit only when a `find` is given and the model did NOT
+    // explicitly ask for a whole-body replace/append.
+    let snippet = has_find && !explicit_replace && !is_append;
+    let is_delete = snippet && content.trim().is_empty();
 
     // Reject content clearly meant for the chat rather than the note. A snippet
     // delete legitimately has empty content, so skip the check in that case.
@@ -179,14 +189,14 @@ pub fn plan_write(
         }
     }
 
-    if has_find {
+    if snippet {
         match find_tolerant(current_body, find) {
             Some((start, end)) => {
                 let mut body = String::with_capacity(current_body.len() + content.len());
                 body.push_str(&current_body[..start]);
                 body.push_str(content);
                 body.push_str(&current_body[end..]);
-                Ok(WritePlan { new_body: body, op: WriteOp::Replace })
+                Ok(WritePlan { new_body: body, op: WriteOp::EditSnippet })
             }
             None => Err("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string()),
         }
@@ -198,6 +208,8 @@ pub fn plan_write(
         };
         Ok(WritePlan { new_body: body, op: WriteOp::Append })
     } else {
+        // Whole-body replace: explicit replace (find ignored), mode:"edit" with
+        // no find, or unspecified mode.
         Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace })
     }
 }
@@ -349,18 +361,11 @@ impl Tool for WriteNoteTool {
             );
         }
 
-        let mode = args.mode.as_deref().unwrap_or("replace").trim().to_lowercase();
+        // Pass mode raw ("" when unspecified) so the planner can tell an explicit
+        // "replace" from the default.
+        let mode = args.mode.as_deref().unwrap_or("").to_string();
         let content = args.content;
         let find = args.find.clone().unwrap_or_default();
-        // Decide intent from the FIELDS, not the (often mislabelled) `mode`:
-        //   - a non-empty `find`  -> targeted snippet edit/delete
-        //   - else `mode == append` -> append
-        //   - else                 -> whole-body replace
-        // Models routinely send mode:"edit" with the full note in `content` and
-        // no `find`; treating that as a replace is what they actually mean.
-        let has_find = !find.trim().is_empty();
-        let is_append = !has_find && mode == "append";
-        let is_delete = has_find && content.trim().is_empty();
 
         // Resolve the open note up front — needed for the tool chip, approval
         // dialog title, and the actual save. Writes always target the open note.
@@ -371,17 +376,30 @@ impl Tool for WriteNoteTool {
             }
         };
 
-        let display_name = if has_find {
-            if is_delete { "Delete Text" } else { "Replace Text" }
-        } else if is_append {
-            "Append Note"
-        } else if content.trim().is_empty() {
-            "Clear Note"
-        } else {
-            "Write Note"
+        // Decide the new body (and how the UI should apply it) using the pure,
+        // unit-tested planner. A refusal comes back as Err and is relayed to the
+        // model verbatim so it can correct itself.
+        let plan = match plan_write(&existing.body, &content, &mode, &find) {
+            Ok(p) => p,
+            Err(msg) => return Ok(msg),
         };
+        let content_empty = content.trim().is_empty();
+        let (emit_content, emit_mode, display_name) = match plan.op {
+            WriteOp::Append => (content.clone(), "append", "Append Note"),
+            WriteOp::EditSnippet => (
+                plan.new_body.clone(),
+                "write",
+                if content_empty { "Delete Text" } else { "Replace Text" },
+            ),
+            WriteOp::Replace => (
+                plan.new_body.clone(),
+                "write",
+                if content_empty { "Clear Note" } else { "Write Note" },
+            ),
+        };
+        let new_body = plan.new_body;
 
-        let preview = if has_find {
+        let preview = if plan.op == WriteOp::EditSnippet {
             format!("Find:\n{}\n\nReplace with:\n{}", find, content)
         } else {
             content.clone()
@@ -398,19 +416,6 @@ impl Tool for WriteNoteTool {
             "ai://chat_tool",
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, preview) }),
         );
-
-        // Decide the new body (and how the UI should apply it) using the pure,
-        // unit-tested planner. A refusal comes back as Err and is relayed to the
-        // model verbatim so it can correct itself.
-        let plan = match plan_write(&existing.body, &content, &mode, &find) {
-            Ok(p) => p,
-            Err(msg) => return Ok(msg),
-        };
-        let new_body = plan.new_body;
-        let (emit_content, emit_mode) = match plan.op {
-            WriteOp::Append => (content.clone(), "append"),
-            WriteOp::Replace => (new_body.clone(), "write"),
-        };
 
         self.state
             .save_note(
@@ -679,7 +684,28 @@ mod tests {
     #[test]
     fn find_replaces_only_the_snippet() {
         let plan = plan_write(NOTE, "slow", "edit", "fast").unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
         assert_eq!(plan.new_body, "Cars are slow. They have engines. People drive them daily.");
+    }
+
+    // Regression: the live harness caught the model sending mode:"replace" with
+    // the full new sentence in `content` AND a stray find:"blue". An explicit
+    // replace must use the full content and IGNORE find (not splice it in).
+    #[test]
+    fn explicit_replace_ignores_stray_find() {
+        let plan = plan_write("The sky is blue today.", "The sky is green today.", "replace", "blue")
+            .unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "The sky is green today.");
+    }
+
+    // A `find` with no explicit mode is a snippet edit (the model means to swap
+    // just that text), so content is the replacement, not the whole body.
+    #[test]
+    fn find_without_mode_is_snippet_edit() {
+        let plan = plan_write("The sky is blue.", "green", "", "blue").unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
+        assert_eq!(plan.new_body, "The sky is green.");
     }
 
     #[test]

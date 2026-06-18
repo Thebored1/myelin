@@ -134,8 +134,13 @@ async fn run_all(
         let used = chat(client, base, model,
             "In the note, change the word blue to green.", &mut store).await;
         let body = store.open_body().to_lowercase();
+        // Must contain green, not blue, and NOT be garbled by splicing the whole
+        // sentence in place of the word (the bug the harness first caught).
         let ok = used.iter().any(|t| t == "write_note")
-            && body.contains("green") && !body.contains("blue");
+            && body.contains("green")
+            && !body.contains("blue")
+            && !body.contains("the sky is the sky")
+            && store.open_body().len() < 40;
         out.push(("write_note/edit".into(), ok, format!("tools={used:?}; body: {:?}", trunc(&store.open_body(), 80))));
     }
 
@@ -246,7 +251,9 @@ async fn exec_tool(client: &reqwest::Client, store: &mut Store, name: &str, args
     match name {
         "write_note" => {
             let content = v["content"].as_str().unwrap_or("").to_string();
-            let mode = v["mode"].as_str().unwrap_or("replace").to_string();
+            // Pass mode raw ("" when absent), exactly like WriteNoteTool, so the
+            // planner can distinguish an explicit replace from the default.
+            let mode = v["mode"].as_str().unwrap_or("").to_string();
             let find = v["find"].as_str().unwrap_or("").to_string();
             match plan_write(&store.open_body(), &content, &mode, &find) {
                 Ok(plan) => {

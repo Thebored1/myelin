@@ -149,16 +149,21 @@ pub async fn run_chat(
                         // append/edit the live preview would be misleading, so we
                         // cancel and let the final note_written reconcile.
                         if slot.name == "write_note" && !note_cancelled {
-                            // Mirror the tool's intent logic: a whole-body write
-                            // (what we live-stream) is anything that's NOT an
-                            // append and has NO `find` snippet. mode:"edit" with
-                            // no find is a replace, so it streams too.
+                            // Mirror the planner's intent logic: a whole-body
+                            // write (what we live-stream) is anything that is NOT
+                            // an append and NOT a targeted `find` snippet. An
+                            // explicit mode:"replace" is a whole write even if a
+                            // stray `find` is present; mode:"edit" with no find is
+                            // also a whole write.
                             let mode = partial_field(&slot.args, "mode");
                             let find = partial_field(&slot.args, "find");
-                            let is_append = matches!(mode.as_deref(), Some("append"));
+                            let m = mode.as_deref().unwrap_or("");
+                            let is_append = m == "append";
+                            let explicit_replace = m == "replace";
                             let has_find =
                                 find.map(|f| !f.trim().is_empty()).unwrap_or(false);
-                            let is_replace = !is_append && !has_find;
+                            let snippet = has_find && !explicit_replace && !is_append;
+                            let is_replace = !is_append && !snippet;
                             if !is_replace {
                                 if note_streaming {
                                     if let Some(nid) = &note_id {
