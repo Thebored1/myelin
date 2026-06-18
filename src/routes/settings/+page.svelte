@@ -6,7 +6,7 @@
     import { goto } from '$app/navigation';
     import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
 
-    type BackendPref = 'gpu' | 'vulkan';
+    type BackendPref = 'gpu' | 'vulkan' | 'cpu';
 
     let currentModelPath = $state('');
     let contextSize = $state<number | null>(null);
@@ -49,6 +49,7 @@
     // Heads-up when the chosen GPU path isn't available / installed — the app
     // falls back to CPU automatically, so it's never a hard error.
     const gpuIssue = $derived.by((): { level: 'warn'; message: string } | null => {
+        if (backendPreference === 'cpu') return null;
         if (!gpuAvailable) {
             return { level: 'warn', message: `No GPU detected${gpus.length ? ` (${gpus.join(', ')})` : ''} — running on CPU.` };
         }
@@ -66,25 +67,27 @@
     const computeStatus = $derived.by((): { level: 'gpu' | 'cpu'; title: string; detail: string } => {
         const installed = (b: string) => installedBackends.includes(b);
         const target =
-            backendPreference === 'vulkan'
+            backendPreference === 'cpu'
+                ? 'cpu'
+                : backendPreference === 'vulkan'
                 ? (installed('vulkan') ? 'vulkan' : 'cpu')
                 : nvidiaDetected && installed('cuda') ? 'cuda'
                 : installed('vulkan') ? 'vulkan'
                 : installed('metal') ? 'metal'
                 : 'cpu';
 
-        if (backendFellBack) {
+        if (backendPreference !== 'cpu' && backendFellBack) {
             return { level: 'cpu', title: 'Running on CPU', detail: 'The GPU could not be used — check the GPU and driver.' };
         }
-        if (activeBackend && activeBackend !== 'cpu') {
+        if (target !== 'cpu' && activeBackend && activeBackend !== 'cpu') {
             return { level: 'gpu', title: `Running on ${activeBackend.toUpperCase()}`, detail: 'GPU acceleration active.' };
         }
         if (target === 'cpu') {
-            return {
-                level: 'cpu',
-                title: 'Running on CPU',
-                detail: hasGpuBuild() ? 'No GPU available on this machine.' : 'Install a GPU build below to accelerate.'
-            };
+            const detail =
+                backendPreference === 'cpu'
+                    ? 'CPU mode — the most reliable option (works with every model).'
+                    : hasGpuBuild() ? 'No GPU available on this machine.' : 'Install a GPU build below to accelerate.';
+            return { level: 'cpu', title: 'Running on CPU', detail };
         }
         const pending = activeBackend !== null && activeBackend !== target;
         return {
@@ -130,10 +133,12 @@
             await refreshSnapshot();
             const status = await loadProviderStatus();
             downloadableBackends = await invoke<string[]>('downloadable_backends');
-            // GPU = dedicated/fastest GPU; Vulkan = integrated GPU (power saving).
-            backendPreference = status.config?.backendPreference === 'vulkan' ? 'vulkan' : 'gpu';
-            // No dedicated GPU → the "GPU" choice is meaningless; use Vulkan.
-            if (!hasDedicatedGpu) backendPreference = 'vulkan';
+            // GPU = dedicated/fastest GPU; Vulkan = integrated GPU; CPU = most reliable.
+            const sp = status.config?.backendPreference;
+            backendPreference = sp === 'cpu' ? 'cpu' : sp === 'vulkan' ? 'vulkan' : 'gpu';
+            // No dedicated GPU → the "GPU" choice is meaningless; fall to Vulkan
+            // (but respect an explicit CPU choice).
+            if (!hasDedicatedGpu && backendPreference === 'gpu') backendPreference = 'vulkan';
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
             if (status.resolved) {
@@ -347,7 +352,7 @@
         <section class="settings-section">
             <h2>Local AI Model Configuration</h2>
             <p class="description">
-                Select a <code>.gguf</code> model to use for local AI features. This model will run completely offline on your device and is saved in app settings, not inside the notes workspace.
+                Select a model to use for local AI features. It runs completely offline on your device and is saved in app settings, not inside the notes workspace. <strong>Only <code>.gguf</code> models are supported</strong> (llama.cpp format).
             </p>
 
             <div class="model-picker">
@@ -363,7 +368,7 @@
             <div class="compute-device">
                 <span class="compute-label">Compute device</span>
                 <div class="segmented" role="group" aria-label="Compute device">
-                    {#each [{ value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }] as opt}
+                    {#each [{ value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }, { value: 'cpu', label: 'CPU' }] as opt}
                         {@const disabled = opt.value === 'gpu' && !hasDedicatedGpu}
                         <button
                             type="button"
@@ -378,17 +383,19 @@
                     {/each}
                 </div>
                 <p class="compute-hint">
-                    {#if backendPreference === 'vulkan'}
+                    {#if backendPreference === 'cpu'}
+                        Most reliable: runs entirely on the CPU. Works with every model (some models give wrong output on the GPU), at the cost of speed.
+                    {:else if backendPreference === 'vulkan'}
                         Power-saving: runs on the integrated GPU via Vulkan. The app still manages offload and falls back to CPU if needed.
                     {:else}
                         Performance: uses the fastest available GPU (the dedicated GPU where present). Falls back automatically.
                     {/if}
                 </p>
 
-                {#if !hasDedicatedGpu}
+                {#if !hasDedicatedGpu && backendPreference !== 'cpu'}
                     <div class="device-issue warn">
                         <span class="issue-icon">ℹ️</span>
-                        <span>No dedicated GPU detected — GPU mode is unavailable. Using the integrated GPU via Vulkan.</span>
+                        <span>No dedicated GPU detected — GPU mode is unavailable. Using the integrated GPU via Vulkan, or switch to CPU for the most reliable output.</span>
                     </div>
                 {/if}
 

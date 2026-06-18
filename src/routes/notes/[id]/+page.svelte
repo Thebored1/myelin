@@ -72,7 +72,7 @@
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
 
-	const NOTE_MIN_WIDTH = 760;
+	const NOTE_MIN_WIDTH = 800; // must match .main-pane min-width in CSS
 	let sidebarWidth = $state(320);
 	let isSidebarResizing = $state(false);
 
@@ -98,8 +98,11 @@
 		} else if (isSidebarResizing) {
 			const newWidth = window.innerWidth - e.clientX;
 			// Never let the sidebar grow past the point where the note would drop
-			// below its protected minimum width — keeps it on-screen and the editor stable.
-			const maxSidebar = Math.max(320, window.innerWidth - NOTE_MIN_WIDTH);
+			// below its protected minimum width — keeps it on-screen and the editor
+			// stable. Clamp against the layout container (which excludes the left
+			// rail), not the full window, or the panes overflow and get clipped.
+			const containerWidth = mainLayoutEl?.getBoundingClientRect().width ?? window.innerWidth;
+			const maxSidebar = Math.max(320, containerWidth - NOTE_MIN_WIDTH);
 			sidebarWidth = Math.max(320, Math.min(newWidth, maxSidebar));
 		}
 	}
@@ -3304,8 +3307,9 @@
 			position: relative;
 			transform: none;
 			margin-right: calc(var(--sidebar-width, 20rem) * -1);
-			/* Hard cap: the note keeps at least NOTE_MIN_WIDTH (760px) no matter what. */
-			max-width: calc(100vw - 760px);
+			/* Hard cap relative to the layout container (excludes the left rail), so
+			   the note keeps its 800px min-width and the panes never overflow/clip. */
+			max-width: calc(100% - 800px);
 			box-shadow: none;
 			flex-shrink: 0;
 		}

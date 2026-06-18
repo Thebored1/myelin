@@ -170,11 +170,9 @@ VRAM is detected best-effort (AMD sysfs / `nvidia-smi` on Linux; DXGI/Metal
 later) and used only as a hint — the retry loop is what guarantees a working
 launch. Turn the toggle **off** to set Context Size / GPU Layers manually.
 
-## Compute device: GPU vs Vulkan
+## Compute device: GPU / Vulkan / CPU
 
-The Settings compute selector has two choices — there is **no manual CPU or
-per-device option**, because the app always manages CPU fallback and offload
-itself:
+The Settings compute selector has three choices:
 
 - **GPU** (performance) — uses the fastest available GPU: CUDA on an NVIDIA
   discrete card, otherwise Vulkan. `backend_preference = "gpu"`.
@@ -182,14 +180,29 @@ itself:
   also has a discrete GPU, **auto-pins the integrated GPU** (matched by name)
   via `--device`, so heavy work stays off the power-hungry dGPU.
   `backend_preference = "vulkan"`.
+- **CPU** (most reliable) — forces CPU-only execution (`-ngl 0`, no GPU
+  fallback). `backend_preference = "cpu"`. Slower, but it is the **most
+  reliable** path: it works with every model regardless of GPU driver/quant
+  bugs. Some GGUFs (e.g. certain Qwen quants on AMD RADV/Vulkan) produce
+  garbage output on the GPU but are correct on the CPU — this is the escape
+  hatch for that.
 
 On a machine with **no discrete GPU**, the **GPU** option is disabled (with a
-note) and the app uses **Vulkan** on the integrated GPU. The "Running on …"
-badge polls the provider status, so it reflects the live backend as the server
-starts / restarts / recovers.
+note) and the app defaults to **Vulkan** on the integrated GPU; **CPU** stays
+available as the reliable fallback. The "Running on …" badge polls the provider
+status, so it reflects the live backend as the server starts / restarts /
+recovers.
 
-Either choice still falls back through Vulkan → CPU automatically if the
-preferred path is unavailable (adaptive offload + retry loop handle it).
+The GPU and Vulkan choices still fall back through Vulkan → CPU automatically if
+the preferred path is unavailable (adaptive offload + retry loop handle it). The
+CPU choice pins CPU only and does not attempt the GPU at all.
+
+## Supported models
+
+Only **GGUF** models (the llama.cpp format) are supported — that is what
+`llama-server` loads. The Settings model picker filters to `.gguf` files. The
+launcher reads each model's GGUF metadata (see `gguf.rs`) to size context and
+decide whether `--jinja` is safe (only when the model embeds a chat template).
 
 ## Tool calling
 
