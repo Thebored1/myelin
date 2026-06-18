@@ -37,7 +37,7 @@ const WEB_FETCH_LIMIT: usize = 12_000;
 /// System preamble for the note assistant. Kept as a single source of truth so
 /// the startup cache warm-up replays the exact same prefix the live agent uses.
 /// The leading `/no_think` disables Qwen3 reasoning.
-pub const MYELIN_PREAMBLE: &str = "You are Myelin's built-in note assistant. You are also a capable general assistant with broad knowledge of history, art, science, culture, and everyday topics.\n\nCORE BEHAVIOR (most important):\n- Be decisive and DO THE TASK. NEVER ask the user clarifying or permission questions about formatting, length, structure, or what to include. Make reasonable choices and act immediately.\n- Treat replies like \"yes\", \"sure\", \"ok\", \"anything\", \"anything you like\", \"you decide\", \"go ahead\" as approval to proceed RIGHT NOW with your best version.\n- You have extensive general knowledge. Answer factual or general questions (e.g. \"describe the Mona Lisa\") directly and fully from your own knowledge. NEVER say you cannot browse the internet, cannot access your training data, or need to search — just give the answer.\n- After a tool reports success, STOP calling tools. Do NOT re-read, search, or verify the note. Reply with one short sentence confirming what you did.\n- If a tool reports an error or a refusal, tell the user exactly what went wrong. NEVER claim success when a tool did not succeed.\n- Do not repeat the same question or the same tool call. Make progress on every turn.\n\nWRITING NOTES:\n- When the user asks you to write, create, draft, add, generate, or 'write a note' about something, IMMEDIATELY call rewrite_note (or append_note to extend existing content) with the COMPLETE, finished text. Do not ask what to include — just write it well, in Markdown.\n- rewrite_note, append_note and replace_text ALWAYS act on the note currently open in the editor. You do NOT need to read or search for it first. Pass the title shown in 'Open Note:' and the full content; one call is enough.\n- The content field must be the actual final text — never a description of what you did, and never a placeholder.\n- Use replace_text to change a specific snippet; use rewrite_note with an empty string to clear the note.\n\nTOOLS (only when actually needed):\n- search_notes: ONLY to find OTHER notes by keyword when the user explicitly refers to them. Never to interpret a message or read the currently open note (its contents are already provided below).\n- fetch_web_page: only when the user gives a URL.\n- Greetings and small talk (\"hi\", \"gg\", \"thanks\"): reply briefly in chat with no tools.";
+pub const MYELIN_PREAMBLE: &str = "You are Myelin's built-in note assistant. You are also a capable general assistant with broad knowledge of history, art, science, culture, and everyday topics.\n\nCORE BEHAVIOR (most important):\n- Be decisive and DO THE TASK. NEVER ask the user clarifying or permission questions about formatting, length, structure, or what to include. Make reasonable choices and act immediately.\n- Treat replies like \"yes\", \"sure\", \"ok\", \"anything\", \"anything you like\", \"you decide\", \"go ahead\" as approval to proceed RIGHT NOW with your best version.\n- You have extensive general knowledge. Answer factual or general questions (e.g. \"describe the Mona Lisa\") directly and fully from your own knowledge. NEVER say you cannot browse the internet, cannot access your training data, or need to search — just give the answer.\n- After a tool reports success, STOP calling tools. Do NOT re-read, search, or verify the note. Reply with one short sentence confirming what you did.\n- If a tool reports an error or a refusal, tell the user exactly what went wrong. NEVER claim success when a tool did not succeed.\n- Do not repeat the same question or the same tool call. Make progress on every turn.\n\nWRITING NOTES:\n- When the user asks you to write, create, draft, add, generate, or 'write a note' about something, IMMEDIATELY call write_note (or append_note to extend existing content) with the COMPLETE, finished text. Do not ask what to include — just write it well, in Markdown.\n- write_note, append_note and replace_text ALWAYS act on the note currently open in the editor. You do NOT need to read or search for it first. Pass the title shown in 'Open Note:' and the full content; one call is enough.\n- The content field must be the actual final text — never a description of what you did, and never a placeholder.\n- Use replace_text to change a specific snippet; use write_note with an empty string to clear the note.\n\nTOOLS (only when actually needed):\n- search_notes: ONLY to find OTHER notes by keyword when the user explicitly refers to them. Never to interpret a message or read the currently open note (its contents are already provided below).\n- fetch_web_page: only when the user gives a URL.\n- Greetings and small talk (\"hi\", \"gg\", \"thanks\"): reply briefly in chat with no tools.";
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
 /// order they are registered in [`build_myelin_agent`]. Used only by the startup
@@ -61,7 +61,7 @@ pub fn tool_specs() -> Vec<Value> {
             }),
         ),
         spec(
-            "rewrite_note",
+            "write_note",
             "Fully replace the existing note content. Use this to rewrite the note, or to clear the note (by passing an empty string). Do not use this to add a paragraph; use append_note for that. The content must be the full final note body.",
             serde_json::json!({
                 "type": "object",
@@ -88,7 +88,7 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         spec(
             "append_note",
-            "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use rewrite_note for that.",
+            "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use write_note for that.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -233,7 +233,7 @@ impl Tool for ReadNoteTool {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct RewriteNoteArgs {
+pub struct WriteNoteArgs {
     title: String,
     content: String,
     tags: Option<Vec<String>>,
@@ -246,20 +246,20 @@ pub struct AppendNoteArgs {
 }
 
 #[derive(Clone)]
-pub struct RewriteNoteTool {
+pub struct WriteNoteTool {
     pub state: AppState,
 }
 
-impl Tool for RewriteNoteTool {
-    const NAME: &'static str = "rewrite_note";
+impl Tool for WriteNoteTool {
+    const NAME: &'static str = "write_note";
 
     type Error = ToolError;
-    type Args = RewriteNoteArgs;
+    type Args = WriteNoteArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
-            name: "rewrite_note".to_string(),
+            name: "write_note".to_string(),
             description:
                 "Fully replace the existing note content. Use this to rewrite the note, or to clear the note (by passing an empty string). Do not use this to add a paragraph; use append_note for that. The content must be the full final note body."
                     .to_string(),
@@ -283,13 +283,13 @@ impl Tool for RewriteNoteTool {
             );
         }
 
-        if let Err(msg) = check_tool_approval(&self.state, "Rewrite Note", &args.title, &args.content).await {
+        if let Err(msg) = check_tool_approval(&self.state, "Write Note", &args.title, &args.content).await {
             return Ok(msg);
         }
         let display_name = if args.content.trim().is_empty() {
             "Clear Note"
         } else {
-            "Rewrite Note"
+            "Write Note"
         };
         self.state
             .record_chat_tool(display_name, args.title.clone());
@@ -299,13 +299,13 @@ impl Tool for RewriteNoteTool {
         );
         if looks_like_placeholder(&args.content) {
             return Ok(
-                "Refused to save because rewrite_note received placeholder text instead of the full final content. Call rewrite_note again with the actual poem body."
+                "Refused to save because write_note received placeholder text instead of the full final content. Call write_note again with the actual poem body."
                     .to_string(),
             );
         }
         if looks_like_meta_status(&args.content) {
             return Ok(
-                "Refused to save because rewrite_note received a status/update sentence instead of the actual note body. Call rewrite_note again with only the final poem/content that should appear in the note."
+                "Refused to save because write_note received a status/update sentence instead of the actual note body. Call write_note again with only the final poem/content that should appear in the note."
                     .to_string(),
             );
         }
@@ -354,7 +354,7 @@ impl Tool for AppendNoteTool {
         ToolDefinition {
             name: "append_note".to_string(),
             description:
-                "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use rewrite_note for that."
+                "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use write_note for that."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -696,7 +696,7 @@ pub fn build_myelin_agent(
         .tool(ReadNoteTool {
             state: state.clone(),
         })
-        .tool(RewriteNoteTool {
+        .tool(WriteNoteTool {
             state: state.clone(),
         })
         .tool(ReplaceTextTool {
