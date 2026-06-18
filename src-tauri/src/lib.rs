@@ -66,6 +66,7 @@ async fn set_llama_advanced_config(
     extra_args: Option<Vec<String>>,
     backend_preference: Option<String>,
     gpu_device: Option<String>,
+    thinking: Option<bool>,
     max_turns: Option<u32>,
 ) -> Result<(), String> {
     state
@@ -78,6 +79,7 @@ async fn set_llama_advanced_config(
             extra_args,
             backend_preference,
             gpu_device,
+            thinking,
             max_turns,
         )
         .await

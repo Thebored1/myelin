@@ -86,6 +86,10 @@ pub struct WorkspaceLlamaConfig {
     /// Optional specific GPU device id (e.g. "Vulkan0", "CUDA0") to pin to.
     /// Empty/None means let the backend choose. Lets users pick the iGPU.
     pub gpu_device: Option<String>,
+    /// Whether the model is allowed to "think"/reason. None defaults to off
+    /// (faster, no hidden reasoning tokens). Universal across models via the
+    /// llama-server `--reasoning on|off` flag.
+    pub thinking: Option<bool>,
     /// Max agent tool-calling turns before forcing a final answer.
     pub max_turns: Option<u32>,
 }
@@ -113,6 +117,9 @@ pub struct ResolvedLlamaConfig {
     /// Specific GPU device id to pin to ("Vulkan0", "CUDA0", …), if any.
     #[serde(default)]
     pub gpu_device: Option<String>,
+    /// Whether the model may think/reason (false = faster, no hidden tokens).
+    #[serde(default)]
+    pub thinking: bool,
     /// Max agent tool-calling turns before forcing a final answer.
     #[serde(default)]
     pub max_turns: u32,
@@ -149,6 +156,7 @@ impl ResolvedLlamaConfig {
             // effective --n-gpu-layers; likewise for pinning a specific GPU.
             && self.backend_preference == other.backend_preference
             && self.gpu_device == other.gpu_device
+            && self.thinking == other.thinking
     }
 }
 
@@ -622,6 +630,7 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
             .gpu_device
             .clone()
             .filter(|d| !d.trim().is_empty()),
+        thinking: app_config.thinking.unwrap_or(false),
         max_turns: app_config.max_turns.filter(|&n| n > 0).unwrap_or(4),
         candidates,
     })
@@ -722,6 +731,11 @@ async fn try_start_candidate(
     if let Some(chat_format) = &config.chat_format {
         command.arg("--chat-template").arg(chat_format);
     }
+
+    // Universal thinking/reasoning switch (model-agnostic via the chat template).
+    command
+        .arg("--reasoning")
+        .arg(if config.thinking { "on" } else { "off" });
 
     command.args(&config.extra_args);
     // Self-heal: ensure the backend dir has its .so soname symlinks (covers
@@ -909,6 +923,7 @@ pub fn set_advanced_config(
     extra_args: Option<Vec<String>>,
     backend_preference: Option<String>,
     gpu_device: Option<String>,
+    thinking: Option<bool>,
     max_turns: Option<u32>,
 ) -> Result<()> {
     let mut config = load_config(app_data_dir).unwrap_or_default();
@@ -936,6 +951,9 @@ pub fn set_advanced_config(
     if let Some(dev) = gpu_device {
         // Empty string clears the pin (back to automatic device choice).
         config.gpu_device = if dev.trim().is_empty() { None } else { Some(dev) };
+    }
+    if let Some(t) = thinking {
+        config.thinking = Some(t);
     }
     if let Some(mt) = max_turns {
         config.max_turns = Some(mt.clamp(1, 12));

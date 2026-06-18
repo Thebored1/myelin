@@ -316,6 +316,7 @@ impl AppState {
         extra_args: Option<Vec<String>>,
         backend_preference: Option<String>,
         gpu_device: Option<String>,
+        thinking: Option<bool>,
         max_turns: Option<u32>,
     ) -> Result<()> {
         crate::llama_server::set_advanced_config(
@@ -328,6 +329,7 @@ impl AppState {
             extra_args,
             backend_preference,
             gpu_device,
+            thinking,
             max_turns,
         )?;
         Ok(())
@@ -1388,7 +1390,7 @@ impl AppState {
         let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
         self.ensure_llama_server(&config).await?;
 
-        let full_prompt = format!("/no_think\n{}", system_prompt);
+        let full_prompt = system_prompt.to_string();
         let agent = crate::agent::build_myelin_agent(
             self.clone(),
             &format!("{}/v1", config.base_url()),

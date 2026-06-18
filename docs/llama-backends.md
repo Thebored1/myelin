@@ -90,13 +90,6 @@ resource `bin/` as a (lowest-priority) tiering root. So resolution order is:
 user-downloaded (`<app-data>/bin`) → bundled (`<resources>/bin`). The folder is
 gitignored (binaries are large) but its structure is kept.
 
-## Override / power users
-
-- `MYELIN_LLAMA_SERVER_PATH` env var hard-pins a single executable and skips
-  tiering entirely.
-- The Settings compute selector now resolves the binary automatically; there is
-  no manual executable picker.
-
 ## Building from source (cross-platform)
 
 `src-tauri/.cargo/config.toml` is kept cross-platform: it only caps build
@@ -123,6 +116,15 @@ per-OS:
   proc-macros with `crt-static` can fail to link; if that happens, build with an
   explicit `--target x86_64-pc-windows-msvc` so the flag stays off host units.
 - **macOS:** no extra setup; Metal is in the standard toolchain.
+
+## Thinking / reasoning toggle
+
+Settings → **Advanced AI Configuration → Model thinking / reasoning** toggles
+whether the model reasons before answering. It's model-agnostic: the launcher
+passes `--reasoning on|off` to llama-server, which drives each model's chat
+template (Qwen, LFM, …) rather than a model-specific prompt token. Off (default)
+is faster and emits no hidden reasoning tokens; on may improve accuracy at the
+cost of speed. Changing it relaunches the server.
 
 ## Override / power users
 

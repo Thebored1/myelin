@@ -17,6 +17,7 @@
     let temperature = $state<number | null>(null);
     let topP = $state<number | null>(null);
     let maxTurns = $state<number | null>(null);
+    let thinking = $state(false);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
@@ -198,6 +199,7 @@
             downloadableBackends = await invoke<string[]>('downloadable_backends');
             backendPreference = (status.config?.backendPreference as BackendPref) ?? 'auto';
             gpuDevice = status.config?.gpuDevice ?? '';
+            thinking = status.config?.thinking ?? false;
             if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
@@ -327,6 +329,7 @@
                 extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null,
                 backendPreference: backendPreference,
                 gpuDevice: gpuDevice || null,
+                thinking: thinking,
                 maxTurns: maxTurns
             });
             saved = true;
@@ -552,6 +555,18 @@
                     <input type="number" min="1" max="12" step="1" id="max_turns" bind:value={maxTurns} oninput={debounceSave} placeholder="4" />
                 </div>
             </div>
+
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={thinking} onchange={debounceSave} />
+                <span class="toggle-text">
+                    <strong>Model thinking / reasoning</strong>
+                    <span class="toggle-hint">
+                        {thinking
+                            ? 'On — the model reasons before answering (slower, may be more accurate).'
+                            : 'Off — faster, no hidden reasoning tokens. Works across models (Qwen, LFM, …).'}
+                    </span>
+                </span>
+            </label>
             <div class="input-group full-width" style="margin-top: 1rem;">
                 <label>
                     Extra Arguments
@@ -977,6 +992,36 @@
     .browse-btn:disabled {
         opacity: 0.5;
         cursor: not-allowed;
+    }
+
+    .toggle-row {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        cursor: pointer;
+    }
+
+    .toggle-row input {
+        margin-top: 0.2rem;
+        flex: 0 0 auto;
+    }
+
+    .toggle-text {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+    }
+
+    .toggle-text strong {
+        color: var(--text-primary);
+        font-size: 0.9rem;
+    }
+
+    .toggle-hint {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        line-height: 1.4;
     }
 
     .advanced-grid {

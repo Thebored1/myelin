@@ -91,6 +91,7 @@ export type ProviderStatus = {
 		extraArgs?: string[];
 		backendPreference?: 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 		gpuDevice?: string;
+		thinking?: boolean;
 		maxTurns?: number;
 	};
 	resolved?: {
