@@ -18,6 +18,7 @@
     let topP = $state<number | null>(null);
     let maxTurns = $state<number | null>(null);
     let thinking = $state(false);
+    let autoOffload = $state(true);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
@@ -200,6 +201,7 @@
             backendPreference = (status.config?.backendPreference as BackendPref) ?? 'auto';
             gpuDevice = status.config?.gpuDevice ?? '';
             thinking = status.config?.thinking ?? false;
+            autoOffload = status.config?.autoOffload ?? true;
             if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
@@ -330,6 +332,7 @@
                 backendPreference: backendPreference,
                 gpuDevice: gpuDevice || null,
                 thinking: thinking,
+                autoOffload: autoOffload,
                 maxTurns: maxTurns
             });
             saved = true;
@@ -529,14 +532,26 @@
             <p class="description">
                 Fine-tune llama-server memory usage and CLI flags. Leave blank to use system defaults.
             </p>
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={autoOffload} onchange={debounceSave} />
+                <span class="toggle-text">
+                    <strong>Adaptive GPU offload (recommended)</strong>
+                    <span class="toggle-hint">
+                        {autoOffload
+                            ? 'On — automatically uses available VRAM, keeps the KV cache in RAM for a large (32k) context, and retries with less if the GPU runs out. Manages Context Size & GPU Layers for you.'
+                            : 'Off — use the manual Context Size & GPU Layers below exactly as set.'}
+                    </span>
+                </span>
+            </label>
+
             <div class="advanced-grid">
                 <div class="input-group">
-                    <label for="ctx">Context Size</label>
-                    <input type="number" id="ctx" bind:value={contextSize} oninput={debounceSave} placeholder="4096" />
+                    <label for="ctx">Context Size {autoOffload ? '(auto)' : ''}</label>
+                    <input type="number" id="ctx" bind:value={contextSize} oninput={debounceSave} placeholder="auto" disabled={autoOffload} />
                 </div>
                 <div class="input-group">
-                    <label for="ngl">GPU Layers</label>
-                    <input type="number" id="ngl" bind:value={gpuLayers} oninput={debounceSave} placeholder="999" />
+                    <label for="ngl">GPU Layers {autoOffload ? '(auto)' : ''}</label>
+                    <input type="number" id="ngl" bind:value={gpuLayers} oninput={debounceSave} placeholder="auto" disabled={autoOffload} />
                 </div>
                 <div class="input-group">
                     <label for="threads">CPU Threads</label>

@@ -90,6 +90,12 @@ pub struct WorkspaceLlamaConfig {
     /// (faster, no hidden reasoning tokens). Universal across models via the
     /// llama-server `--reasoning on|off` flag.
     pub thinking: Option<bool>,
+    /// Adaptive offload: when true (default), the launcher manages
+    /// --n-gpu-layers / --ctx-size / --no-kv-offload / --flash-attn so the model
+    /// uses available VRAM, keeps KV in RAM, holds a large context, and retries
+    /// with reduced settings on failure. When false, the manual gpu_layers /
+    /// context_size are used verbatim.
+    pub auto_offload: Option<bool>,
     /// Max agent tool-calling turns before forcing a final answer.
     pub max_turns: Option<u32>,
 }
@@ -120,6 +126,9 @@ pub struct ResolvedLlamaConfig {
     /// Whether the model may think/reason (false = faster, no hidden tokens).
     #[serde(default)]
     pub thinking: bool,
+    /// Adaptive offload management (default true).
+    #[serde(default)]
+    pub auto_offload: bool,
     /// Max agent tool-calling turns before forcing a final answer.
     #[serde(default)]
     pub max_turns: u32,
@@ -157,6 +166,7 @@ impl ResolvedLlamaConfig {
             && self.backend_preference == other.backend_preference
             && self.gpu_device == other.gpu_device
             && self.thinking == other.thinking
+            && self.auto_offload == other.auto_offload
     }
 }
 
@@ -631,6 +641,7 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
             .clone()
             .filter(|d| !d.trim().is_empty()),
         thinking: app_config.thinking.unwrap_or(false),
+        auto_offload: app_config.auto_offload.unwrap_or(true),
         max_turns: app_config.max_turns.filter(|&n| n > 0).unwrap_or(4),
         candidates,
     })
@@ -645,22 +656,165 @@ pub async fn health_check(client: &Client, config: &ResolvedLlamaConfig) -> bool
         .unwrap_or(false)
 }
 
+/// Default context the adaptive offloader aims to hold on every machine,
+/// clamped down only if RAM can't fit the KV cache for it.
+const AUTO_CTX_TARGET: u32 = 32768;
+
+/// Available system RAM in bytes (cross-platform, via sysinfo).
+fn available_ram_bytes() -> u64 {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.available_memory()
+}
+
+/// Free device-local VRAM in bytes (true fast VRAM, not GTT), best-effort and
+/// cross-platform. `None` when undeterminable — we then just request full
+/// offload and let it spill to GTT / retry on failure. Informational for now.
+pub fn free_device_local_vram() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // AMD exposes true device-local VRAM via sysfs (total/used).
+        for n in 0..4u8 {
+            let base = format!("/sys/class/drm/card{n}/device");
+            if let Ok(total) = std::fs::read_to_string(format!("{base}/mem_info_vram_total")) {
+                if let Ok(t) = total.trim().parse::<u64>() {
+                    let used = std::fs::read_to_string(format!("{base}/mem_info_vram_used"))
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u64>().ok())
+                        .unwrap_or(0);
+                    return Some(t.saturating_sub(used));
+                }
+            }
+        }
+        // NVIDIA via nvidia-smi (MiB).
+        if let Ok(out) = Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if out.status.success() {
+                if let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                    if let Ok(mib) = first.trim().parse::<u64>() {
+                        return Some(mib.saturating_mul(1024 * 1024));
+                    }
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Windows/macOS: full-offload + retry handles fit; DXGI/Metal probing
+        // can be added later as a starting-ngl optimizer.
+        None
+    }
+}
+
+/// Largest context whose f16 KV cache fits in ~60% of available RAM (KV lives in
+/// system RAM via --no-kv-offload), bounded by the model's trained context.
+fn ram_safe_ctx(requested: u32, gguf: Option<&crate::gguf::GgufInfo>) -> u32 {
+    let kv_per_tok = match gguf.and_then(|g| g.kv_bytes_per_token()).filter(|&k| k > 0) {
+        Some(k) => k,
+        None => return requested, // unknown geometry → trust the request
+    };
+    let budget = (available_ram_bytes() as f64 * 0.6) as u64;
+    let max_ctx = (budget / kv_per_tok).clamp(512, u32::MAX as u64) as u32;
+    let model_max = gguf
+        .and_then(|g| g.context_length)
+        .map(|c| c.min(u32::MAX as u64) as u32)
+        .unwrap_or(u32::MAX);
+    requested.min(max_ctx).min(model_max).max(512)
+}
+
+/// One launch attempt's parameters.
+#[derive(Debug, Clone)]
+struct LaunchPlan {
+    ngl: i32,
+    ctx: u32,
+    no_kv_offload: bool,
+    flash_attn: bool,
+    ubatch: Option<u32>,
+}
+
+/// Ordered launch attempts for a candidate: in auto mode on a GPU, take all the
+/// VRAM (spill to GTT), keep KV in RAM, hold a big context, and degrade on
+/// failure. Otherwise a single attempt with the configured values.
+fn launch_plans(
+    config: &ResolvedLlamaConfig,
+    candidate: &BackendCandidate,
+    gguf: Option<&crate::gguf::GgufInfo>,
+) -> Vec<LaunchPlan> {
+    let forced_cpu = config.backend_preference == "cpu" || candidate.backend == GpuBackend::Cpu;
+    let is_gpu = !forced_cpu
+        && (candidate.backend.is_gpu()
+            || (candidate.backend == GpuBackend::Custom && config.gpu_layers.unwrap_or(999) > 0));
+
+    if !config.auto_offload || !is_gpu {
+        let ngl = if forced_cpu {
+            0
+        } else {
+            config
+                .gpu_layers
+                .unwrap_or(if is_gpu { 999 } else { 0 })
+        };
+        return vec![LaunchPlan {
+            ngl,
+            ctx: config.context_size,
+            no_kv_offload: false,
+            flash_attn: false,
+            ubatch: None,
+        }];
+    }
+
+    let target = AUTO_CTX_TARGET.max(config.context_size);
+    let base_ctx = ram_safe_ctx(target, gguf);
+    let half_layers = gguf
+        .and_then(|g| g.n_layers)
+        .map(|n| (n / 2).max(1) as i32)
+        .unwrap_or(16);
+
+    vec![
+        LaunchPlan { ngl: 999, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256) },
+        LaunchPlan { ngl: 999, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256) },
+        LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128) },
+    ]
+}
+
 pub async fn start_server(
     client: &Client,
     config: &ResolvedLlamaConfig,
 ) -> Result<ManagedLlamaServer> {
-    let mut last_error: Option<String> = None;
+    let gguf = crate::gguf::read_gguf_info(&config.model_path).ok();
+    if let Some(g) = &gguf {
+        log::info!(
+            "model: arch={:?} layers={:?} kv/token={:?}B ctx_train={:?}",
+            g.architecture,
+            g.n_layers,
+            g.kv_bytes_per_token(),
+            g.context_length
+        );
+    }
+    if let Some(v) = free_device_local_vram() {
+        log::info!("free device-local VRAM ~= {} MiB", v / 1_048_576);
+    }
 
+    let mut last_error: Option<String> = None;
     for candidate in &config.candidates {
-        match try_start_candidate(client, config, candidate).await {
-            Ok(server) => return Ok(server),
-            Err(error) => {
-                log::warn!(
-                    "llama-server candidate {} ({}) failed to start: {error}",
-                    candidate.executable_path.display(),
-                    candidate.backend.label()
-                );
-                last_error = Some(error.to_string());
+        for plan in launch_plans(config, candidate, gguf.as_ref()) {
+            match try_start_candidate(client, config, candidate, &plan).await {
+                Ok(server) => return Ok(server),
+                Err(error) => {
+                    log::warn!(
+                        "llama-server {} ({}) ngl={} ctx={} failed: {error}",
+                        candidate.executable_path.display(),
+                        candidate.backend.label(),
+                        plan.ngl,
+                        plan.ctx
+                    );
+                    last_error = Some(error.to_string());
+                }
             }
         }
     }
@@ -675,19 +829,9 @@ async fn try_start_candidate(
     client: &Client,
     config: &ResolvedLlamaConfig,
     candidate: &BackendCandidate,
+    plan: &LaunchPlan,
 ) -> Result<ManagedLlamaServer> {
-    // Force 0 layers when the user picked CPU, or for the explicit `cpu/`
-    // backend, so the server never probes for a device. GPU backends and
-    // unknown/custom binaries (which may themselves be GPU builds) honour the
-    // configured gpu_layers. requested_gpu reflects whether we asked for offload.
-    let gpu_layers = if config.backend_preference == "cpu" {
-        0
-    } else {
-        match candidate.backend {
-            GpuBackend::Cpu => 0,
-            _ => config.gpu_layers.unwrap_or(999),
-        }
-    };
+    let gpu_layers = plan.ngl;
     let requested_gpu = gpu_layers > 0;
 
     let mut command = Command::new(&candidate.executable_path);
@@ -699,7 +843,7 @@ async fn try_start_candidate(
         .arg("--model")
         .arg(&config.model_path)
         .arg("--ctx-size")
-        .arg(config.context_size.to_string())
+        .arg(plan.ctx.to_string())
         .arg("--n-gpu-layers")
         .arg(gpu_layers.to_string())
         // Single slot: this is a single-user desktop app. Multiple slots split
@@ -711,6 +855,18 @@ async fn try_start_candidate(
         .arg("1")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+
+    // Adaptive offload: keep the KV cache in system RAM so a big context fits on
+    // any VRAM, and use flash attention + a small ubatch to bound GPU buffers.
+    if plan.no_kv_offload {
+        command.arg("--no-kv-offload");
+    }
+    if plan.flash_attn {
+        command.arg("--flash-attn").arg("on");
+    }
+    if let Some(ub) = plan.ubatch {
+        command.arg("--ubatch-size").arg(ub.to_string());
+    }
 
     // Pin a specific GPU (e.g. the iGPU to save battery) when requested and the
     // device id belongs to this candidate's backend. Guarded by the prefix so a
@@ -924,6 +1080,7 @@ pub fn set_advanced_config(
     backend_preference: Option<String>,
     gpu_device: Option<String>,
     thinking: Option<bool>,
+    auto_offload: Option<bool>,
     max_turns: Option<u32>,
 ) -> Result<()> {
     let mut config = load_config(app_data_dir).unwrap_or_default();
@@ -954,6 +1111,9 @@ pub fn set_advanced_config(
     }
     if let Some(t) = thinking {
         config.thinking = Some(t);
+    }
+    if let Some(ao) = auto_offload {
+        config.auto_offload = Some(ao);
     }
     if let Some(mt) = max_turns {
         config.max_turns = Some(mt.clamp(1, 12));

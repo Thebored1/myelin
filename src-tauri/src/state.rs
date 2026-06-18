@@ -317,6 +317,7 @@ impl AppState {
         backend_preference: Option<String>,
         gpu_device: Option<String>,
         thinking: Option<bool>,
+        auto_offload: Option<bool>,
         max_turns: Option<u32>,
     ) -> Result<()> {
         crate::llama_server::set_advanced_config(
@@ -330,6 +331,7 @@ impl AppState {
             backend_preference,
             gpu_device,
             thinking,
+            auto_offload,
             max_turns,
         )?;
         Ok(())
@@ -1415,6 +1417,22 @@ impl AppState {
                 && llama_server::health_check(&self.inner.llama_client, &server.config).await
             {
                 return Ok(());
+            }
+
+            // Distinguish an unexpected crash (e.g. a GPU device-lost mid-reply)
+            // from a config change, and surface it. start_server then relaunches
+            // with its adaptive offload + degrade-on-failure plans.
+            if let Ok(Some(status)) = server.child.try_wait() {
+                log::warn!("llama-server exited unexpectedly ({status}); relaunching");
+                let _ = self.handle.emit(
+                    "ai://llama_backend",
+                    serde_json::json!({
+                        "backend": server.active_backend.label(),
+                        "gpuOffloaded": false,
+                        "fellBackToCpu": false,
+                        "crashed": true,
+                    }),
+                );
             }
 
             llama_server::stop_server(server).await;

@@ -92,6 +92,7 @@ export type ProviderStatus = {
 		backendPreference?: 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 		gpuDevice?: string;
 		thinking?: boolean;
+		autoOffload?: boolean;
 		maxTurns?: number;
 	};
 	resolved?: {

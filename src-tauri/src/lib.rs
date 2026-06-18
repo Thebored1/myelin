@@ -1,4 +1,5 @@
 pub mod git_history;
+mod gguf;
 mod llama_server;
 mod models;
 mod state;
@@ -67,6 +68,7 @@ async fn set_llama_advanced_config(
     backend_preference: Option<String>,
     gpu_device: Option<String>,
     thinking: Option<bool>,
+    auto_offload: Option<bool>,
     max_turns: Option<u32>,
 ) -> Result<(), String> {
     state
@@ -80,6 +82,7 @@ async fn set_llama_advanced_config(
             backend_preference,
             gpu_device,
             thinking,
+            auto_offload,
             max_turns,
         )
         .await
