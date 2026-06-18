@@ -1,11 +1,7 @@
-[env]
-TECTONIC_DEP_BACKEND = "vcpkg"
-VCPKGRS_TRIPLET = "x64-windows-static-release"
-VCPKG_ROOT = "C:\\Users\\Paper\\StudioProjects\\myelin\\src-tauri\\target\\vcpkg"
-CXXFLAGS = "/std:c++17"
-
 [build]
-rustflags = ["-C", "target-feature=+crt-static"]
 # Cap parallel codegen so heavy linking (arrow/lance/tectonic) doesn't exhaust
 # RAM and swap on 16 GB machines. Raise on boxes with more memory.
 jobs = 6
+
+[target.'cfg(windows)']
+rustflags = ["-C", "target-feature=+crt-static"]
