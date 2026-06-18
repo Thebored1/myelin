@@ -8,16 +8,12 @@ use arrow_array::types::Float32Type;
 use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::Utc;
-use futures_util::StreamExt;
 use lancedb::connection::Connection;
 use lancedb::{connect, Table};
 use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
-use rig_core::agent::MultiTurnStreamItem;
 use rig_core::completion::{CompletionError, Prompt, PromptError};
-use rig_core::message::Text;
-use rig_core::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1008,53 +1004,18 @@ impl AppState {
             let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
             self.ensure_llama_server(&config).await?;
 
-            let agent = crate::agent::build_myelin_agent(
-                self.clone(),
-                &format!("{}/v1", config.base_url()),
-                &config.model_name(),
+            // Stream directly against llama-server (not through rig) so the note
+            // content can be surfaced token-by-token as it is generated — rig
+            // buffers tool-call arguments until complete, which makes real
+            // streaming impossible. See `stream_chat`.
+            crate::stream_chat::run_chat(
+                self,
+                &config,
                 crate::agent::MYELIN_PREAMBLE,
-                config.temperature as f64,
-                config.max_turns as usize,
-            );
-
-            let mut response_stream = agent
-                .stream_prompt(&prompt)
-                .multi_turn(config.max_turns as usize)
-                .await;
-            let mut streamed_response = String::new();
-            let mut final_response = String::new();
-
-            while let Some(chunk) = response_stream.next().await {
-                match chunk {
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(Text { text, .. }),
-                    )) => {
-                        streamed_response.push_str(&text);
-                        self.handle.emit(
-                            "ai://chat_chunk",
-                            serde_json::json!({
-                                "requestId": request_id,
-                                "delta": text
-                            }),
-                        )?;
-                    }
-                    Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                        final_response = response.response().to_string();
-                    }
-                    Ok(_) => {}
-                    Err(error) => return Err(anyhow!(error.to_string())),
-                }
-            }
-
-            if streamed_response.is_empty() && !final_response.is_empty() {
-                self.handle.emit(
-                    "ai://chat_chunk",
-                    serde_json::json!({
-                        "requestId": request_id,
-                        "delta": final_response
-                    }),
-                )?;
-            }
+                &prompt,
+                &request_id,
+            )
+            .await?;
 
             Ok(())
         }

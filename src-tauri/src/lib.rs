@@ -3,6 +3,7 @@ mod gguf;
 mod llama_server;
 mod models;
 mod state;
+mod stream_chat;
 
 use models::{AppSnapshot, NoteDocument, ProviderStatus, SearchResponse};
 use state::AppState;

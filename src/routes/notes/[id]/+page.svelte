@@ -57,6 +57,10 @@
 	let vditorInstance: Vditor | null = null;
 	let fullscreenShortcut = $state('Esc');
 	let noteAnimationTimer: ReturnType<typeof setTimeout> | undefined;
+	// Live note streaming (real token-by-token writes from the backend).
+	let noteStreaming = $state(false);
+	let noteStreamBuf = '';
+	let noteStreamBackup = '';
 	let savedEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
 
@@ -800,27 +804,45 @@
 		void fetchRelatedNotes();
 	}
 
-	function startNoteStreamAnimation(newContent: string, mode: 'write' | 'append') {
+	// A live note stream is starting (whole-body replace). Clear the editor so
+	// the new content streams in from scratch, after stashing the old body so we
+	// can restore it if the stream is cancelled.
+	function beginNoteStream() {
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		noteAnimationTimer = undefined;
+		noteStreamBackup = vditorInstance ? vditorInstance.getValue() : draftBody;
+		noteStreamBuf = '';
+		noteStreaming = true;
+		if (vditorInstance) vditorInstance.setValue('');
+	}
+
+	// A token (or several) of the note arrived — append and reflect it live.
+	function appendNoteStream(delta: string) {
+		if (!noteStreaming) beginNoteStream();
+		noteStreamBuf += delta;
+		if (vditorInstance) vditorInstance.setValue(noteStreamBuf);
+	}
+
+	// The stream turned out not to be a whole-body replace (append/edit) — undo
+	// the live preview; the authoritative note_written will apply the real change.
+	function cancelNoteStream() {
+		if (!noteStreaming) return;
+		noteStreaming = false;
+		if (vditorInstance) vditorInstance.setValue(noteStreamBackup);
+	}
+
+	// Authoritative result of a write_note tool call. Sets the final content in
+	// one shot (no fake animation) and reconciles any live-streamed preview.
+	function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
+		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
+		noteAnimationTimer = undefined;
+		noteStreaming = false;
 		const baseContent =
 			mode === 'append' && vditorInstance ? vditorInstance.getValue().trimEnd() + '\n\n' : '';
 		const finalContent = baseContent + newContent;
 		if (note) note = { ...note, body: finalContent };
 		draftBody = finalContent;
-		if (!newContent) return;
-		let i = 0;
-		const chunkSize = 8;
-		function step() {
-			i = Math.min(i + chunkSize, newContent.length);
-			if (vditorInstance) vditorInstance.setValue(baseContent + newContent.slice(0, i));
-			if (i < newContent.length) {
-				noteAnimationTimer = setTimeout(step, 20);
-			} else {
-				noteAnimationTimer = undefined;
-			}
-		}
-		noteAnimationTimer = setTimeout(step, 20);
+		if (vditorInstance) vditorInstance.setValue(finalContent);
 	}
 
 	function initVditor() {
@@ -1293,7 +1315,9 @@
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
 		if (wroteToCurrentNote(tools)) {
-			void refreshCurrentNoteFromBackend(noteAnimationTimer !== undefined);
+			// note_written already set the editor authoritatively — sync metadata
+			// from the backend but don't overwrite the editor content.
+			void refreshCurrentNoteFromBackend(true);
 		}
 	}
 
@@ -1315,6 +1339,9 @@
 		errorMsg: string,
 		tools: { name: string; details: string }[] = []
 	) {
+		// If a live note stream was interrupted, the note was never saved —
+		// restore the pre-stream content rather than leaving a partial draft.
+		cancelNoteStream();
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming) {
 				return { ...m, isStreaming: false, error: true, content: m.content + '\n\n' + errorMsg, tools, endTime: Date.now() };
@@ -1719,6 +1746,9 @@
 		let unlistenError: UnlistenFn;
 		let unlistenApproval: UnlistenFn;
 		let unlistenNoteWritten: UnlistenFn;
+		let unlistenNoteStreamStart: UnlistenFn;
+		let unlistenNoteDelta: UnlistenFn;
+		let unlistenNoteStreamCancel: UnlistenFn;
 
 		$showSidebarToggle = true;
 		if (window.innerWidth > 1200) {
@@ -1744,9 +1774,24 @@
 			(event) => {
 				const { noteId, content, mode } = event.payload;
 				if (!note || note.id !== noteId) return;
-				startNoteStreamAnimation(content, mode);
+				applyNoteWrite(content, mode);
 			}
 		).then((fn) => (unlistenNoteWritten = fn));
+
+		listen<{ noteId: string }>('ai://note_stream_start', (event) => {
+			if (!note || note.id !== event.payload.noteId) return;
+			beginNoteStream();
+		}).then((fn) => (unlistenNoteStreamStart = fn));
+
+		listen<{ noteId: string; delta: string }>('ai://note_delta', (event) => {
+			if (!note || note.id !== event.payload.noteId) return;
+			appendNoteStream(event.payload.delta);
+		}).then((fn) => (unlistenNoteDelta = fn));
+
+		listen<{ noteId: string }>('ai://note_stream_cancel', (event) => {
+			if (!note || note.id !== event.payload.noteId) return;
+			cancelNoteStream();
+		}).then((fn) => (unlistenNoteStreamCancel = fn));
 
 		listen<{ tool: string; details: string }>('ai://chat_tool', (event) => {
 			let lastStartTime = Date.now();
@@ -1855,6 +1900,9 @@
 			if (unlistenTool) unlistenTool();
 			if (unlistenApproval) unlistenApproval();
 			if (unlistenNoteWritten) unlistenNoteWritten();
+			if (unlistenNoteStreamStart) unlistenNoteStreamStart();
+			if (unlistenNoteDelta) unlistenNoteDelta();
+			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
 		};
 	});
 

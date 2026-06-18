@@ -37,7 +37,7 @@ const WEB_FETCH_LIMIT: usize = 12_000;
 /// System preamble for the note assistant. Kept as a single source of truth so
 /// the startup cache warm-up replays the exact same prefix the live agent uses.
 /// The leading `/no_think` disables Qwen3 reasoning.
-pub const MYELIN_PREAMBLE: &str = "You are Myelin's built-in note assistant. You are also a capable general assistant with broad knowledge of history, art, science, culture, and everyday topics.\n\nCORE BEHAVIOR (most important):\n- Be decisive and DO THE TASK. NEVER ask the user clarifying or permission questions about formatting, length, structure, or what to include. Make reasonable choices and act immediately.\n- Treat replies like \"yes\", \"sure\", \"ok\", \"anything\", \"anything you like\", \"you decide\", \"go ahead\" as approval to proceed RIGHT NOW with your best version.\n- You have extensive general knowledge. Answer factual or general questions (e.g. \"describe the Mona Lisa\") directly and fully from your own knowledge. NEVER say you cannot browse the internet, cannot access your training data, or need to search — just give the answer.\n- Put the COMPLETE, full-length content (the entire essay/poem/list itself) into the tool's content field — that is the deliverable, NOT your chat reply.\n- After a tool succeeds, STOP. Reply with ONLY a brief one-line confirmation (e.g. \"Done — I've written it to the note.\"). Do NOT repeat, rewrite, or re-compose the content in your chat reply, and do NOT call more tools or re-read/verify the note.\n- If a tool reports an error or a refusal, tell the user exactly what went wrong. NEVER claim success when a tool did not succeed.\n- Do not repeat the same question or the same tool call. Make progress on every turn.\n\nWRITING NOTES:\n- When the user asks you to write, create, draft, add, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, or change the note — including short requests like 'format this', 'clean this up', 'make it nicer', 'fix the formatting' — IMMEDIATELY call write_note (or append_note to extend existing content) with the COMPLETE, finished text. These requests always refer to the OPEN note; never reply that you lack a tool for this. Do not ask what to include — just produce the full updated note in Markdown.\n- write_note, append_note and replace_text ALWAYS act on the note currently open in the editor. You do NOT need to read or search for it first. Pass the title shown in 'Open Note:' and the full content; one call is enough.\n- The content field must be the actual final text — never a description of what you did, and never a placeholder.\n- Use replace_text to change a specific snippet; use write_note with an empty string to clear the note.\n\nTOOLS (only when actually needed):\n- search_notes: ONLY to find OTHER notes by keyword when the user explicitly refers to them. Never to interpret a message or read the currently open note (its contents are already provided below).\n- fetch_web_page: only when the user gives a URL.\n- Greetings and small talk (\"hi\", \"gg\", \"thanks\"): reply briefly in chat with no tools.";
+pub const MYELIN_PREAMBLE: &str = "You are Myelin's built-in note assistant. You are also a capable general assistant with broad knowledge of history, art, science, culture, and everyday topics.\n\nCORE BEHAVIOR (most important):\n- Be decisive and DO THE TASK. NEVER ask the user clarifying or permission questions about formatting, length, structure, or what to include. Make reasonable choices and act immediately.\n- Treat replies like \"yes\", \"sure\", \"ok\", \"anything\", \"anything you like\", \"you decide\", \"go ahead\" as approval to proceed RIGHT NOW with your best version.\n- You have extensive general knowledge. Answer factual or general questions (e.g. \"describe the Mona Lisa\") directly and fully from your own knowledge. NEVER say you cannot browse the internet, cannot access your training data, or need to search — just give the answer.\n- Put the COMPLETE, full-length content (the entire essay/poem/list itself) into the tool's content field — that is the deliverable, NOT your chat reply.\n- After a tool succeeds, STOP. Reply with ONLY a brief one-line confirmation (e.g. \"Done — I've written it to the note.\"). Do NOT repeat, rewrite, or re-compose the content in your chat reply, and do NOT call more tools or re-read/verify the note.\n- If a tool reports an error or a refusal, tell the user exactly what went wrong. NEVER claim success when a tool did not succeed.\n- Do not repeat the same question or the same tool call. Make progress on every turn.\n\nWRITING NOTES:\n- When the user asks you to write, create, draft, add, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, or change the note — including short requests like 'format this', 'clean this up', 'make it nicer', 'fix the formatting' — IMMEDIATELY call write_note with the COMPLETE, finished text. These requests always refer to the OPEN note; never reply that you lack a tool for this. Do not ask what to include — just produce the full updated note in Markdown.\n- write_note ALWAYS acts on the note currently open in the editor. You do NOT need to read or search for it first; one call is enough. It takes a `mode`:\n  - \"replace\" (default): set the ENTIRE note body to `content` (pass an empty string to clear the note). Use this for writing, rewriting, formatting, or reformatting.\n  - \"append\": ADD `content` to the end — send ONLY the new text, not the whole body. Use when the user says add, continue, extend, or append.\n  - \"edit\": replace a specific snippet — pass `find` (the exact existing text) and `content` (the replacement; empty `content` deletes it). Use for small targeted changes without rewriting everything.\n- The `content` field must be the actual final text — never a description of what you did, and never a placeholder.\n\nTOOLS (only when actually needed):\n- search_notes: ONLY to find OTHER notes by keyword when the user explicitly refers to them. Never to interpret a message or read the currently open note (its contents are already provided below).\n- fetch_web_page: only when the user gives a URL.\n- Greetings and small talk (\"hi\", \"gg\", \"thanks\"): reply briefly in chat with no tools.";
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
 /// order they are registered in [`build_myelin_agent`]. Used only by the startup
@@ -62,40 +62,15 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         spec(
             "write_note",
-            "Write or replace the open note's content. Use this for ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, or change the note — including reformatting what's already there. Provide the COMPLETE final note body in Markdown (pass an empty string to clear the note). To add to the end without rewriting, use append_note instead.",
+            "Write to the note currently open in the editor. This single tool handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the note. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "The complete final note body to save. Never use placeholders like [insert poem here]." },
-                    "tags": { "type": "array", "items": { "type": "string" } }
+                    "content": { "type": "string", "description": "The text payload. For replace/append it is the note body or the new text; for edit it is the replacement (empty string deletes the matched text). Never a placeholder like [insert poem here]." },
+                    "mode": { "type": "string", "enum": ["replace", "append", "edit"], "description": "How to apply content: replace (default, whole body) | append (add to end) | edit (swap the `find` snippet)." },
+                    "find": { "type": "string", "description": "Required only when mode is \"edit\": the exact existing text in the note to replace or delete." }
                 },
-                "required": ["title", "content"]
-            }),
-        ),
-        spec(
-            "replace_text",
-            "Find exact text in the note and replace it with new text. Use an empty string for replacement_text to delete the target_text. Use this when the user asks to modify, replace, or remove a specific small portion of the note without rewriting everything.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "target_text": { "type": "string", "description": "The exact string of text to find and remove/replace. Must be an exact match of what is in the note." },
-                    "replacement_text": { "type": "string", "description": "The new text to insert instead. Use an empty string to delete the target_text." }
-                },
-                "required": ["title", "target_text", "replacement_text"]
-            }),
-        ),
-        spec(
-            "append_note",
-            "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use write_note for that.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "Only the new content to append to the existing note. Do not repeat the whole note body and do not use placeholders." }
-                },
-                "required": ["title", "content"]
+                "required": ["content"]
             }),
         ),
         spec(
@@ -234,15 +209,15 @@ impl Tool for ReadNoteTool {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct WriteNoteArgs {
-    title: String,
+    /// The text payload. For replace/append it is the note body or new text; for
+    /// edit it is the replacement (empty string deletes the matched text).
     content: String,
-    tags: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct AppendNoteArgs {
-    title: String,
-    content: String,
+    /// "replace" (default, whole body) | "append" (add to end) | "edit" (swap `find`).
+    #[serde(default)]
+    mode: Option<String>,
+    /// Required only when `mode` is "edit": the exact existing text to replace.
+    #[serde(default)]
+    find: Option<String>,
 }
 
 #[derive(Clone)]
@@ -261,16 +236,16 @@ impl Tool for WriteNoteTool {
         ToolDefinition {
             name: "write_note".to_string(),
             description:
-                "Write or replace the open note's content. Use this for ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, or change the note — including reformatting what's already there. Provide the COMPLETE final note body in Markdown (pass an empty string to clear the note). To add to the end without rewriting, use append_note instead."
+                "Write to the note currently open in the editor. This single tool handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the note. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "The complete final note body to save. Never use placeholders like [insert poem here]." },
-                    "tags": { "type": "array", "items": { "type": "string" } }
+                    "content": { "type": "string", "description": "The text payload. For replace/append it is the note body or the new text; for edit it is the replacement (empty string deletes the matched text). Never a placeholder like [insert poem here]." },
+                    "mode": { "type": "string", "enum": ["replace", "append", "edit"], "description": "How to apply content: replace (default, whole body) | append (add to end) | edit (swap the `find` snippet)." },
+                    "find": { "type": "string", "description": "Required only when mode is \"edit\": the exact existing text in the note to replace or delete." }
                 },
-                "required": ["title", "content"]
+                "required": ["content"]
             }),
         }
     }
@@ -283,243 +258,99 @@ impl Tool for WriteNoteTool {
             );
         }
 
-        if let Err(msg) = check_tool_approval(&self.state, "Write Note", &args.title, &args.content).await {
-            return Ok(msg);
-        }
-        let display_name = if args.content.trim().is_empty() {
-            "Clear Note"
-        } else {
-            "Write Note"
+        let mode = args.mode.as_deref().unwrap_or("replace").trim().to_lowercase();
+        let content = args.content;
+        let is_delete = mode == "edit" && content.trim().is_empty();
+
+        // Resolve the open note up front — needed for the tool chip, approval
+        // dialog title, and the actual save. Writes always target the open note.
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => {
+                return Ok("No note is currently open to write to. Creating new notes from the sidebar chat is not allowed.".to_string());
+            }
         };
-        self.state
-            .record_chat_tool(display_name, args.title.clone());
-        let _ = self.state.handle.emit(
-            "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", args.title, args.content) }),
-        );
-        if looks_like_placeholder(&args.content) {
-            return Ok(
-                "Refused to save because write_note received placeholder text instead of the full final content. Call write_note again with the actual poem body."
-                    .to_string(),
-            );
-        }
-        if looks_like_meta_status(&args.content) {
-            return Ok(
-                "Refused to save because write_note received a status/update sentence instead of the actual note body. Call write_note again with only the final poem/content that should appear in the note."
-                    .to_string(),
-            );
-        }
-        if let Some(existing) = self.state.resolve_chat_target_note(&args.title) {
-            let tags = args.tags.unwrap_or(existing.tags.clone());
-            self.state
-                .save_note(
-                    existing.id.clone(),
-                    existing.title,
-                    tags,
-                    args.content.clone(),
-                    existing.source_pdf,
-                    Some(existing.annotations),
-                )
-                .await
-                .map_err(|e| ToolError {
-                    message: e.to_string(),
-                })?;
-            let _ = self.state.handle.emit(
-                "ai://note_written",
-                serde_json::json!({ "noteId": existing.id, "content": args.content, "mode": "write" }),
-            );
-            Ok(format!(
-                "Note successfully updated with ID: {}",
-                existing.id
-            ))
-        } else {
-            Ok("Creating new notes from the sidebar chat is not allowed. I can only write to or append content on the currently open note.".to_string())
-        }
-    }
-}
 
-#[derive(Clone)]
-pub struct AppendNoteTool {
-    pub state: AppState,
-}
+        let display_name = match mode.as_str() {
+            "append" => "Append Note",
+            "edit" => if is_delete { "Delete Text" } else { "Replace Text" },
+            _ => if content.trim().is_empty() { "Clear Note" } else { "Write Note" },
+        };
 
-impl Tool for AppendNoteTool {
-    const NAME: &'static str = "append_note";
-
-    type Error = ToolError;
-    type Args = AppendNoteArgs;
-    type Output = String;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "append_note".to_string(),
-            description:
-                "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use write_note for that."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "Only the new content to append to the existing note. Do not repeat the whole note body and do not use placeholders." }
-                },
-                "required": ["title", "content"]
-            }),
-        }
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if !self.state.latest_chat_allows_note_mutation() {
-            return Ok(
-                "Refused to append because the latest user message did not explicitly ask to modify a note."
-                    .to_string(),
-            );
-        }
-
-        if let Err(msg) = check_tool_approval(&self.state, "Append Note", &args.title, &args.content).await {
-            return Ok(msg);
-        }
-        self.state
-            .record_chat_tool("Append Note", args.title.clone());
-        let _ = self.state.handle.emit(
-            "ai://chat_tool",
-            serde_json::json!({ "tool": "Append Note", "details": format!("Title: {}\n\n{}", args.title, args.content) }),
-        );
-        if looks_like_placeholder(&args.content) {
-            return Ok(
-                "Refused to append because append_note received placeholder text instead of the final paragraph."
-                    .to_string(),
-            );
-        }
-        if looks_like_meta_status(&args.content) {
-            return Ok(
-                "Refused to append because append_note received a status/update sentence instead of the actual paragraph to append."
-                    .to_string(),
-            );
-        }
-
-        let existing = self
-            .state
-            .resolve_chat_target_note(&args.title)
-            .ok_or_else(|| ToolError {
-                message: "No note is currently open to append to.".to_string(),
-            })?;
-
-        let appended_body = if existing.body.trim().is_empty() {
-            args.content.trim().to_string()
-        } else {
+        let preview = if mode == "edit" {
             format!(
-                "{}\n\n{}",
-                existing.body.trim_end(),
-                args.content.trim_start()
+                "Find:\n{}\n\nReplace with:\n{}",
+                args.find.clone().unwrap_or_default(),
+                content
             )
+        } else {
+            content.clone()
         };
 
-        self.state
-            .save_note(
-                existing.id.clone(),
-                existing.title,
-                existing.tags,
-                appended_body,
-                existing.source_pdf,
-                Some(existing.annotations),
-            )
-            .await
-            .map_err(|e| ToolError {
-                message: e.to_string(),
-            })?;
-        let _ = self.state.handle.emit(
-            "ai://note_written",
-            serde_json::json!({ "noteId": existing.id, "content": args.content, "mode": "append" }),
-        );
-
-        Ok(format!(
-            "Content successfully appended to note with ID: {}",
-            existing.id
-        ))
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct ReplaceTextArgs {
-    title: String,
-    target_text: String,
-    replacement_text: String,
-}
-
-#[derive(Clone)]
-pub struct ReplaceTextTool {
-    pub state: AppState,
-}
-
-impl Tool for ReplaceTextTool {
-    const NAME: &'static str = "replace_text";
-
-    type Error = ToolError;
-    type Args = ReplaceTextArgs;
-    type Output = String;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "replace_text".to_string(),
-            description:
-                "Find exact text in the note and replace it with new text. Use an empty string for replacement_text to delete the target_text. Use this when the user asks to modify, replace, or remove a specific small portion of the note without rewriting everything."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "target_text": { "type": "string", "description": "The exact string of text to find and remove/replace. Must be an exact match of what is in the note." },
-                    "replacement_text": { "type": "string", "description": "The new text to insert instead. Use an empty string to delete the target_text." }
-                },
-                "required": ["title", "target_text", "replacement_text"]
-            }),
-        }
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if !self.state.latest_chat_allows_note_mutation() {
-            return Ok(
-                "Refused to replace because the latest user message did not explicitly ask to modify a note."
-                    .to_string(),
-            );
-        }
-
-        if let Err(msg) = check_tool_approval(&self.state, "Replace Text", &args.title, &args.replacement_text).await {
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+        {
             return Ok(msg);
         }
-
-        let display_name = if args.replacement_text.trim().is_empty() {
-            "Delete Text"
-        } else {
-            "Replace Text"
-        };
-
         self.state
-            .record_chat_tool(display_name, args.title.clone());
+            .record_chat_tool(display_name, existing.title.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\nTarget:\n{}\n\nReplacement:\n{}", args.title, args.target_text, args.replacement_text) }),
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, preview) }),
         );
 
-        let existing = self
-            .state
-            .resolve_chat_target_note(&args.title)
-            .ok_or_else(|| ToolError {
-                message: "No note is currently open to edit.".to_string(),
-            })?;
-
-        if !existing.body.contains(&args.target_text) {
-            return Ok("Could not find the target_text in the note. Make sure to quote the exact text you want to replace or delete.".to_string());
+        // Reject content that is clearly meant for the chat, not the note. Skip
+        // for an edit-delete (empty content is intentional there).
+        if !is_delete {
+            if looks_like_placeholder(&content) {
+                return Ok(
+                    "Refused to save because write_note received placeholder text instead of the full final content. Call write_note again with the actual content."
+                        .to_string(),
+                );
+            }
+            if looks_like_meta_status(&content) {
+                return Ok(
+                    "Refused to save because write_note received a status/update sentence instead of the actual note body. Call write_note again with only the final content that should appear in the note."
+                        .to_string(),
+                );
+            }
         }
 
-        let new_body = existing.body.replacen(&args.target_text, &args.replacement_text, 1);
+        // Build the new body and decide how the UI should apply it.
+        let (new_body, emit_content, emit_mode) = match mode.as_str() {
+            "append" => {
+                let body = if existing.body.trim().is_empty() {
+                    content.trim().to_string()
+                } else {
+                    format!(
+                        "{}\n\n{}",
+                        existing.body.trim_end(),
+                        content.trim_start()
+                    )
+                };
+                (body, content.clone(), "append")
+            }
+            "edit" => {
+                let find = args.find.unwrap_or_default();
+                if find.is_empty() {
+                    return Ok("Refused to edit: mode \"edit\" requires the exact `find` text to replace. Send `find` with the text to change, or use mode \"replace\" to rewrite the whole note.".to_string());
+                }
+                if !existing.body.contains(&find) {
+                    return Ok("Could not find the `find` text in the note. Quote the exact text you want to replace or delete, or use mode \"replace\" to rewrite the whole note.".to_string());
+                }
+                let body = existing.body.replacen(&find, &content, 1);
+                (body.clone(), body, "write")
+            }
+            // "replace" and any unknown mode fall back to a full-body replace.
+            _ => (content.clone(), content.clone(), "write"),
+        };
 
         self.state
             .save_note(
                 existing.id.clone(),
                 existing.title,
                 existing.tags,
-                new_body.clone(),
+                new_body,
                 existing.source_pdf,
                 Some(existing.annotations),
             )
@@ -527,16 +358,11 @@ impl Tool for ReplaceTextTool {
             .map_err(|e| ToolError {
                 message: e.to_string(),
             })?;
-
         let _ = self.state.handle.emit(
             "ai://note_written",
-            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
+            serde_json::json!({ "noteId": existing.id, "content": emit_content, "mode": emit_mode }),
         );
-
-        Ok(format!(
-            "Text successfully replaced in note with ID: {}",
-            existing.id
-        ))
+        Ok(format!("Note successfully updated with ID: {}", existing.id))
     }
 }
 
@@ -697,12 +523,6 @@ pub fn build_myelin_agent(
             state: state.clone(),
         })
         .tool(WriteNoteTool {
-            state: state.clone(),
-        })
-        .tool(ReplaceTextTool {
-            state: state.clone(),
-        })
-        .tool(AppendNoteTool {
             state: state.clone(),
         })
         .tool(FetchWebPageTool {
