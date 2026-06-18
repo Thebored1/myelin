@@ -232,7 +232,31 @@ full deliverable lands in the note, only the one-line confirmation lands in chat
 
 ---
 
-## 5. Startup cache warm-up (why the prefix is duplicated)
+## 5. Testing it headlessly (no GUI)
+
+The two places bugs actually live are both testable without launching the app:
+
+- **The decision logic** — `plan_write` (intent inference), `find_tolerant`, and
+  the streaming JSON extractors (`extract_partial_content`, `partial_field`) are
+  pure functions with unit tests. Run them anywhere:
+  ```
+  cargo test -p myelin --lib
+  ```
+  These lock in the regressions we hit (e.g. `mode:"edit"` with no `find` must be
+  treated as a whole-body replace).
+
+- **What the model emits** — run a real request against `llama-server` and see
+  the assembled tool-call arguments:
+  ```
+  scripts/probe-toolcall.sh /path/to/model.gguf "your request here"
+  ```
+  This is how we discovered the model mislabels a rewrite as `mode:"edit"` with
+  the full note in `content` and no `find`. `plan_write` is built to handle that.
+
+Together: `cargo test` proves our code is correct; the probe shows whether a
+given model cooperates. Neither needs the desktop GUI.
+
+## 6. Startup cache warm-up (why the prefix is duplicated)
 
 On startup, `spawn_cache_warmup` sends one request whose **system message =
 `MYELIN_PREAMBLE`** and whose tool list = `tool_specs()` (a hand-mirrored copy of

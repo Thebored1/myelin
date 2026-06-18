@@ -370,3 +370,46 @@ fn extract_partial_content(raw: &str) -> Option<String> {
     }
     Some(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_complete_content_after_other_keys() {
+        // The live probe's exact shape: mode first, then content.
+        let raw = r#"{"mode":"edit","content":"hello world"}"#;
+        assert_eq!(extract_partial_content(raw).as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn extracts_partial_content_mid_string() {
+        let raw = r#"{"content":"hello wo"#;
+        assert_eq!(extract_partial_content(raw).as_deref(), Some("hello wo"));
+    }
+
+    #[test]
+    fn decodes_escapes() {
+        let raw = r#"{"content":"line1\nline2\t!"}"#;
+        assert_eq!(extract_partial_content(raw).as_deref(), Some("line1\nline2\t!"));
+    }
+
+    #[test]
+    fn stops_before_incomplete_escape() {
+        // A lone trailing backslash is an unfinished escape — don't emit it.
+        let raw = "{\"content\":\"ab\\";
+        assert_eq!(extract_partial_content(raw).as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn no_content_key_yet() {
+        assert_eq!(extract_partial_content(r#"{"mode":"replace""#), None);
+    }
+
+    #[test]
+    fn partial_field_reads_closed_value_only() {
+        assert_eq!(partial_field(r#"{"mode":"append"}"#, "mode").as_deref(), Some("append"));
+        assert_eq!(partial_field(r#"{"mode":"app"#, "mode"), None); // not closed yet
+        assert_eq!(partial_field(r#"{"content":"x"}"#, "mode"), None); // absent
+    }
+}

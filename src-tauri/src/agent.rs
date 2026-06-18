@@ -138,6 +138,70 @@ fn find_tolerant(body: &str, find: &str) -> Option<(usize, usize)> {
     re.find(body).map(|m| (m.start(), m.end()))
 }
 
+/// How the editor should apply a write (drives the streaming UI).
+#[derive(Debug, PartialEq, Eq)]
+pub enum WriteOp {
+    Replace,
+    Append,
+}
+
+#[derive(Debug)]
+pub struct WritePlan {
+    pub new_body: String,
+    pub op: WriteOp,
+}
+
+/// Pure decision for `write_note`: given the note's current body and the tool
+/// args, produce the new full body — or an `Err` message to relay back to the
+/// model. Intent is inferred from the FIELDS present, not the (often
+/// mislabelled) `mode`: a non-empty `find` is a targeted edit/delete; otherwise
+/// `mode == append` appends; otherwise it's a whole-body replace (which is also
+/// how models phrase `mode:"edit"` with the full note in `content` and no
+/// `find`). Kept free of `AppState`/Tauri so it can be unit-tested headlessly.
+pub fn plan_write(
+    current_body: &str,
+    content: &str,
+    mode: &str,
+    find: &str,
+) -> Result<WritePlan, String> {
+    let has_find = !find.trim().is_empty();
+    let is_append = !has_find && mode.trim().eq_ignore_ascii_case("append");
+    let is_delete = has_find && content.trim().is_empty();
+
+    // Reject content clearly meant for the chat rather than the note. A snippet
+    // delete legitimately has empty content, so skip the check in that case.
+    if !is_delete {
+        if looks_like_placeholder(content) {
+            return Err("Refused to save because write_note received placeholder text instead of the full final content. Call write_note again with the actual content.".to_string());
+        }
+        if looks_like_meta_status(content) {
+            return Err("Refused to save because write_note received a status/update sentence instead of the actual note body. Call write_note again with only the final content that should appear in the note.".to_string());
+        }
+    }
+
+    if has_find {
+        match find_tolerant(current_body, find) {
+            Some((start, end)) => {
+                let mut body = String::with_capacity(current_body.len() + content.len());
+                body.push_str(&current_body[..start]);
+                body.push_str(content);
+                body.push_str(&current_body[end..]);
+                Ok(WritePlan { new_body: body, op: WriteOp::Replace })
+            }
+            None => Err("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string()),
+        }
+    } else if is_append {
+        let body = if current_body.trim().is_empty() {
+            content.trim().to_string()
+        } else {
+            format!("{}\n\n{}", current_body.trim_end(), content.trim_start())
+        };
+        Ok(WritePlan { new_body: body, op: WriteOp::Append })
+    } else {
+        Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace })
+    }
+}
+
 fn looks_like_placeholder(content: &str) -> bool {
     let normalized = content.trim().to_lowercase();
     normalized.contains("[insert")
@@ -335,50 +399,17 @@ impl Tool for WriteNoteTool {
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, preview) }),
         );
 
-        // Reject content that is clearly meant for the chat, not the note. Skip
-        // for an edit-delete (empty content is intentional there).
-        if !is_delete {
-            if looks_like_placeholder(&content) {
-                return Ok(
-                    "Refused to save because write_note received placeholder text instead of the full final content. Call write_note again with the actual content."
-                        .to_string(),
-                );
-            }
-            if looks_like_meta_status(&content) {
-                return Ok(
-                    "Refused to save because write_note received a status/update sentence instead of the actual note body. Call write_note again with only the final content that should appear in the note."
-                        .to_string(),
-                );
-            }
-        }
-
-        // Build the new body and decide how the UI should apply it.
-        let (new_body, emit_content, emit_mode) = if has_find {
-            // Targeted snippet edit/delete (tolerant match of `find`).
-            match find_tolerant(&existing.body, &find) {
-                Some((start, end)) => {
-                    let mut body =
-                        String::with_capacity(existing.body.len() + content.len());
-                    body.push_str(&existing.body[..start]);
-                    body.push_str(&content);
-                    body.push_str(&existing.body[end..]);
-                    (body.clone(), body, "write")
-                }
-                None => {
-                    return Ok("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string());
-                }
-            }
-        } else if is_append {
-            let body = if existing.body.trim().is_empty() {
-                content.trim().to_string()
-            } else {
-                format!("{}\n\n{}", existing.body.trim_end(), content.trim_start())
-            };
-            (body, content.clone(), "append")
-        } else {
-            // Whole-body replace — including mode:"edit" with no `find`, which is
-            // how models usually phrase "rewrite the note with this content".
-            (content.clone(), content.clone(), "write")
+        // Decide the new body (and how the UI should apply it) using the pure,
+        // unit-tested planner. A refusal comes back as Err and is relayed to the
+        // model verbatim so it can correct itself.
+        let plan = match plan_write(&existing.body, &content, &mode, &find) {
+            Ok(p) => p,
+            Err(msg) => return Ok(msg),
+        };
+        let new_body = plan.new_body;
+        let (emit_content, emit_mode) = match plan.op {
+            WriteOp::Append => (content.clone(), "append"),
+            WriteOp::Replace => (new_body.clone(), "write"),
         };
 
         self.state
@@ -613,4 +644,87 @@ fn html_to_text(raw: &str) -> String {
     regex::Regex::new(r"\s+")
         .map(|re| re.replace_all(&decoded, " ").trim().to_string())
         .unwrap_or_else(|_| decoded.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOTE: &str = "Cars are fast. They have engines. People drive them daily.";
+
+    // The exact bug from the live probe: the model labels a whole-note rewrite as
+    // mode "edit" and sends NO `find`. That must be treated as a replace.
+    #[test]
+    fn edit_mode_without_find_is_a_replace() {
+        let plan = plan_write(NOTE, "## Cars\nThey are fast.", "edit", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "## Cars\nThey are fast.");
+    }
+
+    #[test]
+    fn default_mode_replaces_whole_body() {
+        let plan = plan_write(NOTE, "brand new body", "replace", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "brand new body");
+    }
+
+    #[test]
+    fn append_adds_to_end() {
+        let plan = plan_write(NOTE, "A new line.", "append", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Append);
+        assert!(plan.new_body.starts_with(NOTE));
+        assert!(plan.new_body.ends_with("A new line."));
+    }
+
+    #[test]
+    fn find_replaces_only_the_snippet() {
+        let plan = plan_write(NOTE, "slow", "edit", "fast").unwrap();
+        assert_eq!(plan.new_body, "Cars are slow. They have engines. People drive them daily.");
+    }
+
+    #[test]
+    fn find_with_empty_content_deletes_snippet() {
+        let plan = plan_write(NOTE, "", "edit", "They have engines. ").unwrap();
+        assert_eq!(plan.new_body, "Cars are fast. People drive them daily.");
+    }
+
+    #[test]
+    fn find_tolerates_whitespace_mismatch() {
+        // Model reproduces the snippet with different internal whitespace.
+        let plan = plan_write(NOTE, "X", "edit", "have   engines").unwrap();
+        assert!(plan.new_body.contains("They X."));
+    }
+
+    #[test]
+    fn find_not_present_is_refused_not_destructive() {
+        let err = plan_write(NOTE, "x", "edit", "no such text here").unwrap_err();
+        assert!(err.to_lowercase().contains("could not find"));
+    }
+
+    #[test]
+    fn placeholder_content_is_rejected() {
+        let err = plan_write(NOTE, "[insert essay here]", "replace", "").unwrap_err();
+        assert!(err.to_lowercase().contains("placeholder"));
+    }
+
+    #[test]
+    fn status_sentence_is_rejected() {
+        let err = plan_write(NOTE, "I have written the essay to your note", "replace", "")
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("status"));
+    }
+
+    #[test]
+    fn empty_replace_clears_the_note() {
+        let plan = plan_write(NOTE, "", "replace", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "");
+    }
+
+    #[test]
+    fn find_tolerant_exact_and_normalized() {
+        assert_eq!(find_tolerant("hello world", "world"), Some((6, 11)));
+        assert!(find_tolerant("a  b   c", "a b c").is_some());
+        assert!(find_tolerant("abc", "xyz").is_none());
+    }
 }
