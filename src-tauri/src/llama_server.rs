@@ -935,6 +935,19 @@ async fn try_start_candidate(
     }
     apply_library_path(&mut command, &candidate.executable_path);
 
+    // Tie the server's lifetime to ours on Linux: if the app exits (e.g. a
+    // `tauri dev` rebuild/restart), the kernel kills the server too. Otherwise
+    // the orphaned server keeps holding the port and the next app instance
+    // reuses it — running stale flags/prompt.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+
     let mut child = command.spawn().with_context(|| {
         format!(
             "failed to start llama-server at {}",

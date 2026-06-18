@@ -5503,6 +5503,7 @@ dependencies = [
  "futures-util",
  "git2",
  "lancedb",
+ "libc",
  "log",
  "notify",
  "parking_lot",

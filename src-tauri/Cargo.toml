@@ -45,6 +45,9 @@ tectonic = "0.16.9"
 tokio = { version = "1.52.3", features = ["sync"] }
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
 rev = "master"
