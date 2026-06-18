@@ -1629,13 +1629,15 @@
 		}
 	}
 
+	let aiModal = $state<{ title: string; body: string } | null>(null);
+
 	async function runSummarise() {
 		if (!note) return;
 		isBusy = true;
 		try {
 			message = 'Summarising note...';
 			const res = await invoke<string>('summarise_note', { noteId: note.id });
-			alert(`AI Summary:\n\n${res}`);
+			aiModal = { title: 'AI summary', body: res };
 			message = 'Summary complete.';
 		} finally {
 			isBusy = false;
@@ -1650,7 +1652,7 @@
 		try {
 			message = 'Asking AI...';
 			const res = await invoke<string>('ask_ai', { noteId: note.id, question: q });
-			alert(`AI Answer:\n\n${res}`);
+			aiModal = { title: 'AI answer', body: res };
 			message = 'AI answered.';
 		} finally {
 			isBusy = false;
@@ -2760,7 +2762,55 @@
 	</div>
 </dialog>
 
+{#if aiModal}
+	<div class="ai-modal-overlay" role="presentation" onclick={() => (aiModal = null)}>
+		<div class="ai-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+			<h3 class="ai-modal-title">{aiModal.title}</h3>
+			<div class="ai-modal-body">{aiModal.body}</div>
+			<div class="dialog-actions">
+				<button class="secondary" onclick={() => (aiModal = null)}>Close</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
+	.ai-modal-overlay {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.5);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		padding: var(--space-4);
+	}
+	.ai-modal {
+		background: var(--bg-elevated, #1a1a1a);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md, 8px);
+		max-width: 640px;
+		width: 100%;
+		max-height: 80vh;
+		display: flex;
+		flex-direction: column;
+		padding: var(--space-4);
+		gap: var(--space-3);
+	}
+	.ai-modal-title {
+		margin: 0;
+		font-size: 0.95rem;
+		color: var(--text-secondary);
+		font-weight: 600;
+	}
+	.ai-modal-body {
+		overflow-y: auto;
+		white-space: pre-wrap;
+		line-height: 1.5;
+		color: var(--text-primary);
+		font-size: 0.9rem;
+	}
+
 	:global(.chat-bubble think) {
 		display: block;
 		padding: 12px 14px;
