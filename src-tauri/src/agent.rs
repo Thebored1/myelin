@@ -599,7 +599,7 @@ pub fn build_myelin_agent(
         .build()
 }
 
-fn normalize_web_url(raw: &str) -> Result<String, String> {
+pub fn normalize_web_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("URL is required.".to_string());
@@ -620,7 +620,7 @@ fn normalize_web_url(raw: &str) -> Result<String, String> {
     Ok(url)
 }
 
-fn html_to_text(raw: &str) -> String {
+pub fn html_to_text(raw: &str) -> String {
     let mut without_scripts = raw.to_string();
     for pattern in [
         "(?is)<script[^>]*>.*?</script>",
@@ -726,5 +726,23 @@ mod tests {
         assert_eq!(find_tolerant("hello world", "world"), Some((6, 11)));
         assert!(find_tolerant("a  b   c", "a b c").is_some());
         assert!(find_tolerant("abc", "xyz").is_none());
+    }
+
+    #[test]
+    fn normalize_url_adds_scheme_and_rejects_junk() {
+        assert_eq!(normalize_web_url("example.com").unwrap(), "https://example.com");
+        assert_eq!(normalize_web_url("http://x.io").unwrap(), "http://x.io");
+        assert!(normalize_web_url("   ").is_err());
+        assert!(normalize_web_url("has space.com").is_err());
+    }
+
+    #[test]
+    fn html_to_text_strips_tags_and_scripts() {
+        let html = "<html><head><style>x{}</style></head><body><h1>Hi</h1><script>bad()</script><p>world &amp; more</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Hi"));
+        assert!(text.contains("world & more"));
+        assert!(!text.contains("bad()"));
+        assert!(!text.contains("<"));
     }
 }
