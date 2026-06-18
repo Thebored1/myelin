@@ -495,6 +495,8 @@ pub fn install_backend_from_staging(staging: &Path, backend_dir: &Path) -> Resul
             }
         }
     }
+    // Recreate the .so soname symlinks the file-only copy above dropped.
+    ensure_sonames(backend_dir);
     Ok(())
 }
 
@@ -722,6 +724,11 @@ async fn try_start_candidate(
     }
 
     command.args(&config.extra_args);
+    // Self-heal: ensure the backend dir has its .so soname symlinks (covers
+    // manually-installed or older downloads that dropped them).
+    if let Some(dir) = candidate.executable_path.parent() {
+        ensure_sonames(dir);
+    }
     apply_library_path(&mut command, &candidate.executable_path);
 
     let mut child = command.spawn().with_context(|| {
@@ -1163,6 +1170,45 @@ fn apply_library_path(command: &mut Command, executable: &Path) {
     }
     #[cfg(target_os = "windows")]
     let _ = (command, executable);
+}
+
+/// llama.cpp's Linux/macOS archives ship versioned libraries
+/// (`libllama.so.0.0.9585`) alongside soname symlinks (`libllama.so.0`) that the
+/// binary actually needs. Copying only regular files drops those symlinks, so
+/// recreate them: for every `lib*.so.<major>...` real file, ensure a
+/// `lib*.so.<major>` symlink exists. Idempotent and best-effort. No-op on
+/// Windows (DLLs aren't versioned this way).
+fn ensure_sonames(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(idx) = name.find(".so.") else {
+                continue;
+            };
+            let major: String = name[idx + 4..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if major.is_empty() {
+                continue;
+            }
+            let soname = format!("{}.so.{}", &name[..idx], major);
+            if soname == name {
+                continue; // already the bare soname
+            }
+            let link = dir.join(&soname);
+            if !link.exists() {
+                let _ = symlink(&name, &link); // relative target, best-effort
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 fn find_on_path(binary_name: &str) -> Option<PathBuf> {
