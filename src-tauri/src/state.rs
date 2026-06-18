@@ -28,7 +28,10 @@ use uuid::Uuid;
 const EMBEDDING_DIM: i32 = 64;
 const INDEX_DIR_NAME: &str = "index";
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
-const NOTE_BODY_PROMPT_LIMIT: usize = 400;
+// How much of the open note to put in the prompt. The assistant edits this note,
+// so it must see (nearly) all of it — 400 chars left it editing blind. ~24k chars
+// (~6k tokens) fits comfortably in the 32k context alongside the preamble/tools.
+const NOTE_BODY_PROMPT_LIMIT: usize = 24_000;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
 
@@ -978,21 +981,24 @@ impl AppState {
             let note = self.load_note(note_id).await?;
             let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
 
-            let note_body_excerpt = if note.body.len() > NOTE_BODY_PROMPT_LIMIT {
-                format!("{}…", &note.body[..NOTE_BODY_PROMPT_LIMIT])
+            // Truncate on a char boundary (never a raw byte slice — that panics
+            // on multi-byte UTF-8). Most notes fit well under the limit.
+            let note_body_excerpt = if note.body.chars().count() > NOTE_BODY_PROMPT_LIMIT {
+                let head: String = note.body.chars().take(NOTE_BODY_PROMPT_LIMIT).collect();
+                format!("{head}\n…[note truncated — ask me to work on a specific section]")
             } else {
                 note.body.clone()
             };
-            // Keep context clearly separated from the request, and label the
-            // note's current content as reference-only so the model doesn't
-            // echo it (e.g. writing "(empty)") as its answer. Omit the body
-            // line entirely when the note is empty.
+            // Give the model the note's CURRENT content as editable text. The old
+            // "reference only — do NOT copy" framing (plus a 400-char cap) meant it
+            // could neither see nor feel allowed to modify existing content, so it
+            // could only write fresh, never edit/format/shorten/delete.
             let mut context = format!("The note currently open is titled \"{}\".", note.title);
             if note_body_excerpt.trim().is_empty() {
                 context.push_str(" It is currently empty.");
             } else {
                 context.push_str(&format!(
-                    "\nIts current content (reference only — do NOT copy this as your answer):\n{}",
+                    "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---",
                     note_body_excerpt
                 ));
             }
