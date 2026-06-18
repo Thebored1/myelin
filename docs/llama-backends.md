@@ -183,6 +183,11 @@ itself:
   via `--device`, so heavy work stays off the power-hungry dGPU.
   `backend_preference = "vulkan"`.
 
+On a machine with **no discrete GPU**, the **GPU** option is disabled (with a
+note) and the app uses **Vulkan** on the integrated GPU. The "Running on …"
+badge polls the provider status, so it reflects the live backend as the server
+starts / restarts / recovers.
+
 Either choice still falls back through Vulkan → CPU automatically if the
 preferred path is unavailable (adaptive offload + retry loop handle it).
 

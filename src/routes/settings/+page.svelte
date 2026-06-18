@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, onDestroy } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
     import { listen } from '@tauri-apps/api/event';
     import { open } from '@tauri-apps/plugin-dialog';
@@ -35,6 +35,14 @@
 
     const hasGpuBuild = () => installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
     const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
+
+    const INTEGRATED_HINTS = ['uhd', 'iris', 'integrated', 'radeon graphics', 'hd graphics', 'renoir', 'cezanne', 'rembrandt', 'phoenix'];
+    const isIntegratedName = (n: string) => { const l = n.toLowerCase(); return INTEGRATED_HINTS.some((h) => l.includes(h)); };
+    // A "GPU" (performance/dedicated) choice only makes sense with a discrete GPU.
+    const hasDedicatedGpu = $derived(nvidiaDetected || gpus.some((g) => g && !isIntegratedName(g)));
+
+    let statusPoll: ReturnType<typeof setInterval> | undefined;
+    onDestroy(() => { if (statusPoll) clearInterval(statusPoll); });
 
     // Heads-up when the chosen GPU path isn't available / installed — the app
     // falls back to CPU automatically, so it's never a hard error.
@@ -122,6 +130,8 @@
             downloadableBackends = await invoke<string[]>('downloadable_backends');
             // GPU = dedicated/fastest GPU; Vulkan = integrated GPU (power saving).
             backendPreference = status.config?.backendPreference === 'vulkan' ? 'vulkan' : 'gpu';
+            // No dedicated GPU → the "GPU" choice is meaningless; use Vulkan.
+            if (!hasDedicatedGpu) backendPreference = 'vulkan';
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
             if (status.resolved) {
@@ -168,6 +178,12 @@
                     }
                 }
             );
+
+            // Keep the "Running on" badge live (server may start/restart/crash
+            // while this page is open).
+            statusPoll = setInterval(() => {
+                loadProviderStatus().catch(() => {});
+            }, 2500);
         } catch (e) {
             console.error('Failed to load provider status:', e);
         }
@@ -346,10 +362,13 @@
                 <span class="compute-label">Compute device</span>
                 <div class="segmented" role="group" aria-label="Compute device">
                     {#each [{ value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }] as opt}
+                        {@const disabled = opt.value === 'gpu' && !hasDedicatedGpu}
                         <button
                             type="button"
                             class="segment"
                             class:active={backendPreference === opt.value}
+                            {disabled}
+                            title={disabled ? 'No dedicated GPU detected on this system' : ''}
                             onclick={() => selectBackend(opt.value as BackendPref)}
                         >
                             {opt.label}
@@ -363,6 +382,13 @@
                         Performance: uses the fastest available GPU (the dedicated GPU where present). Falls back automatically.
                     {/if}
                 </p>
+
+                {#if !hasDedicatedGpu}
+                    <div class="device-issue warn">
+                        <span class="issue-icon">ℹ️</span>
+                        <span>No dedicated GPU detected — GPU mode is unavailable. Using the integrated GPU via Vulkan.</span>
+                    </div>
+                {/if}
 
                 {#if gpuIssue}
                     <div class="device-issue warn">
