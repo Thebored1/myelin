@@ -4,11 +4,9 @@
     import { listen } from '@tauri-apps/api/event';
     import { open } from '@tauri-apps/plugin-dialog';
     import { goto } from '$app/navigation';
-    import type { AppSnapshot, IndexState, ProviderStatus, LlamaDevice } from '$lib/types';
+    import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
 
-    type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
-    const GPU_BACKENDS = ['cuda', 'vulkan', 'metal'];
-    const isGpuBackend = (b: string) => GPU_BACKENDS.includes(b);
+    type BackendPref = 'gpu' | 'vulkan';
 
     let currentModelPath = $state('');
     let contextSize = $state<number | null>(null);
@@ -23,9 +21,7 @@
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
     let activeProvider = $state('');
-    let backendPreference = $state<BackendPref>('auto');
-    let gpuDevice = $state<string>('');
-    let devices = $state<LlamaDevice[]>([]);
+    let backendPreference = $state<BackendPref>('gpu');
     let downloadableBackends = $state<string[]>([]);
     let download = $state<{ backend: string; phase: string; percent: number; message: string } | null>(null);
     let activeBackend = $state<string | null>(null);
@@ -37,134 +33,60 @@
     let providerHealthy = $state(true);
     let providerDetail = $state('');
 
-    // Proactive validation of the chosen compute backend against this machine.
-    const gpuIssue = $derived.by((): { level: 'error' | 'warn'; message: string } | null => {
-        if (backendPreference === 'cpu') return null;
-        const explicitGpu = isGpuBackend(backendPreference);
+    const hasGpuBuild = () => installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
+    const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
 
+    // Heads-up when the chosen GPU path isn't available / installed — the app
+    // falls back to CPU automatically, so it's never a hard error.
+    const gpuIssue = $derived.by((): { level: 'warn'; message: string } | null => {
         if (!gpuAvailable) {
-            if (explicitGpu) {
-                return {
-                    level: 'error',
-                    message:
-                        'No GPU was detected on this system' +
-                        (gpus.length ? ` (${gpus.join(', ')})` : '') +
-                        '. This will fall back to CPU.'
-                };
-            }
-            return null; // Auto on a GPU-less machine correctly uses CPU.
+            return { level: 'warn', message: `No GPU detected${gpus.length ? ` (${gpus.join(', ')})` : ''} — running on CPU.` };
         }
-
-        if (explicitGpu && !installedBackends.includes(backendPreference)) {
+        const need = backendPreference === 'vulkan' ? 'vulkan' : nvidiaDetected ? 'cuda' : 'vulkan';
+        if (!installedBackends.includes(need)) {
             return {
                 level: 'warn',
-                message: `The ${backendPreference.toUpperCase()} build isn't installed. Add it under bin/${backendPreference}/ — see docs/llama-backends.md — or it falls back to CPU.`
-            };
-        }
-        if (backendPreference === 'cuda' && !nvidiaDetected) {
-            return {
-                level: 'warn',
-                message: 'No NVIDIA GPU detected — CUDA may fail and fall back. Use Vulkan for Intel/AMD GPUs.'
-            };
-        }
-        if (backendPreference === 'auto' && !installedBackends.some((b) => isGpuBackend(b))) {
-            return {
-                level: 'warn',
-                message: `A GPU was detected (${gpus.join(', ') || 'unknown'}), but no GPU build is installed. Add ${nvidiaDetected ? 'CUDA' : 'Vulkan'} — see docs/llama-backends.md — otherwise it runs on CPU.`
+                message: `No ${backendLabel(need)} build installed — install it below, otherwise it runs on CPU.`
             };
         }
         return null;
     });
 
-    // Backends offered in the selector: Auto + CPU always, plus any installed GPU build.
-    const backendOptions = $derived.by(() => {
-        const opts: { value: BackendPref; label: string }[] = [{ value: 'auto', label: 'Auto' }];
-        for (const b of ['cuda', 'vulkan', 'metal'] as const) {
-            if (installedBackends.includes(b)) {
-                opts.push({ value: b, label: b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : 'Metal' });
-            }
-        }
-        opts.push({ value: 'cpu', label: 'CPU' });
-        return opts;
-    });
-
-    const selectedDeviceName = $derived(devices.find((d) => d.id === gpuDevice)?.name ?? '');
-
-    // Integrated GPUs share (limited) system memory — flag them so users know
-    // large models / contexts may be slow or fail to load.
-    const isIntegratedSelected = $derived(
-        /uhd|iris|integrated|radeon\(tm\) graphics|radeon graphics|\bhd graphics\b/i.test(selectedDeviceName)
-    );
-
-    const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
-
-    // What the current selection will actually run on, and whether it's live yet.
+    // What the current selection resolves to, and whether it's live yet.
     const computeStatus = $derived.by((): { level: 'gpu' | 'cpu'; title: string; detail: string } => {
         const installed = (b: string) => installedBackends.includes(b);
-
-        // Resolve the selection to a concrete backend.
-        let target: string;
-        if (backendPreference === 'cpu') target = 'cpu';
-        else if (backendPreference === 'auto') {
-            target =
-                nvidiaDetected && installed('cuda') ? 'cuda'
+        const target =
+            backendPreference === 'vulkan'
+                ? (installed('vulkan') ? 'vulkan' : 'cpu')
+                : nvidiaDetected && installed('cuda') ? 'cuda'
                 : installed('vulkan') ? 'vulkan'
                 : installed('metal') ? 'metal'
                 : 'cpu';
-        } else {
-            target = installed(backendPreference) ? backendPreference : 'cpu';
-        }
 
-        // Authoritative: the running server requested a GPU but landed on CPU.
         if (backendFellBack) {
-            return { level: 'cpu', title: 'Running on CPU', detail: 'The selected GPU could not be used — check the GPU and driver.' };
+            return { level: 'cpu', title: 'Running on CPU', detail: 'The GPU could not be used — check the GPU and driver.' };
         }
-
-        // The running server already matches the GPU target.
-        if (activeBackend && activeBackend !== 'cpu' && activeBackend === target) {
-            return {
-                level: 'gpu',
-                title: `Running on ${activeBackend.toUpperCase()}`,
-                detail: selectedDeviceName ? `Using ${selectedDeviceName}.` : 'GPU acceleration active.'
-            };
+        if (activeBackend && activeBackend !== 'cpu') {
+            return { level: 'gpu', title: `Running on ${activeBackend.toUpperCase()}`, detail: 'GPU acceleration active.' };
         }
-
-        const pending = activeBackend !== null && activeBackend !== target;
         if (target === 'cpu') {
             return {
                 level: 'cpu',
                 title: 'Running on CPU',
-                detail: backendPreference === 'cpu' ? 'CPU mode selected.' : 'No GPU build available — see the note above.'
+                detail: hasGpuBuild() ? 'No GPU available on this machine.' : 'Install a GPU build below to accelerate.'
             };
         }
+        const pending = activeBackend !== null && activeBackend !== target;
         return {
             level: 'gpu',
             title: `Set to use ${target.toUpperCase()}`,
-            detail:
-                (selectedDeviceName ? `${selectedDeviceName}. ` : '') +
-                (pending ? 'Applies on your next message.' : 'GPU acceleration active.')
+            detail: pending ? 'Applies on your next message.' : 'GPU acceleration active.'
         };
     });
-
-    async function loadDevices(backend: string) {
-        if (!isGpuBackend(backend)) {
-            devices = [];
-            return;
-        }
-        try {
-            devices = await invoke<LlamaDevice[]>('list_llama_devices', { backend });
-        } catch (e) {
-            console.error('Failed to list devices:', e);
-            devices = [];
-        }
-    }
 
     function selectBackend(value: BackendPref) {
         if (value === backendPreference) return;
         backendPreference = value;
-        gpuDevice = ''; // a device id is backend-specific; reset on switch
-        if (isGpuBackend(value)) loadDevices(value);
-        else devices = [];
         debounceSave();
     }
     let isSaving = $state(false);
@@ -198,11 +120,10 @@
             await refreshSnapshot();
             const status = await loadProviderStatus();
             downloadableBackends = await invoke<string[]>('downloadable_backends');
-            backendPreference = (status.config?.backendPreference as BackendPref) ?? 'auto';
-            gpuDevice = status.config?.gpuDevice ?? '';
+            // GPU = dedicated/fastest GPU; Vulkan = integrated GPU (power saving).
+            backendPreference = status.config?.backendPreference === 'vulkan' ? 'vulkan' : 'gpu';
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
-            if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
                 contextSize = status.config?.contextSize ?? status.resolved.contextSize ?? null;
@@ -241,7 +162,6 @@
                     download = event.payload;
                     if (event.payload.phase === 'done') {
                         await loadProviderStatus();
-                        if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
                         setTimeout(() => {
                             if (download?.phase === 'done') download = null;
                         }, 4000);
@@ -330,7 +250,7 @@
                 topP: topP,
                 extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null,
                 backendPreference: backendPreference,
-                gpuDevice: gpuDevice || null,
+                gpuDevice: null,
                 thinking: thinking,
                 autoOffload: autoOffload,
                 maxTurns: maxTurns
@@ -424,55 +344,29 @@
 
             <div class="compute-device">
                 <span class="compute-label">Compute device</span>
-                <div class="segmented" role="group" aria-label="Compute backend">
-                    {#each backendOptions as opt}
-                        {@const disabled = isGpuBackend(opt.value) && !gpuAvailable}
+                <div class="segmented" role="group" aria-label="Compute device">
+                    {#each [{ value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }] as opt}
                         <button
                             type="button"
                             class="segment"
                             class:active={backendPreference === opt.value}
-                            {disabled}
-                            title={disabled ? 'No GPU detected on this system' : ''}
-                            onclick={() => selectBackend(opt.value)}
+                            onclick={() => selectBackend(opt.value as BackendPref)}
                         >
                             {opt.label}
                         </button>
                     {/each}
                 </div>
                 <p class="compute-hint">
-                    {#if backendPreference === 'auto'}
-                        Pick the best backend automatically. {gpus.length ? `Detected: ${gpus.join(', ')}.` : 'No GPU detected.'}
-                    {:else if backendPreference === 'cpu'}
-                        Force CPU only. Slower, but works everywhere.
+                    {#if backendPreference === 'vulkan'}
+                        Power-saving: runs on the integrated GPU via Vulkan. The app still manages offload and falls back to CPU if needed.
                     {:else}
-                        Force the {backendPreference.toUpperCase()} backend. Falls back to CPU if unavailable.
+                        Performance: uses the fastest available GPU (the dedicated GPU where present). Falls back automatically.
                     {/if}
                 </p>
 
-                {#if isGpuBackend(backendPreference) && devices.length > 0}
-                    <div class="device-row">
-                        <label for="gpu_device">GPU device</label>
-                        <select id="gpu_device" bind:value={gpuDevice} onchange={debounceSave}>
-                            <option value="">Automatic (let {backendPreference.toUpperCase()} choose)</option>
-                            {#each devices as dev}
-                                <option value={dev.id}>{dev.name} ({dev.id})</option>
-                            {/each}
-                        </select>
-                    </div>
-                    <p class="compute-hint">
-                        Pick a specific GPU — e.g. an integrated GPU to save battery, or the discrete GPU for speed.
-                    </p>
-                    {#if isIntegratedSelected}
-                        <div class="device-issue warn">
-                            <span class="issue-icon">⚠️</span>
-                            <span>Integrated GPUs share system memory and have limited capacity. Large models or high context sizes may run slowly or fail to load — lower the context size, or use the discrete GPU / CPU for heavier work.</span>
-                        </div>
-                    {/if}
-                {/if}
-
                 {#if gpuIssue}
-                    <div class="device-issue" class:error={gpuIssue.level === 'error'} class:warn={gpuIssue.level === 'warn'}>
-                        <span class="issue-icon">{gpuIssue.level === 'error' ? '⛔' : '⚠️'}</span>
+                    <div class="device-issue warn">
+                        <span class="issue-icon">⚠️</span>
                         <span>{gpuIssue.message}</span>
                     </div>
                 {/if}
@@ -857,30 +751,6 @@
         font-size: 0.8rem;
         color: var(--text-secondary);
         line-height: 1.4;
-    }
-
-    .device-row {
-        display: flex;
-        align-items: center;
-        gap: var(--space-3);
-        margin-top: var(--space-3);
-    }
-
-    .device-row label {
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: var(--text-secondary);
-        white-space: nowrap;
-    }
-
-    .device-row select {
-        flex: 1;
-        background: var(--bg-page);
-        border: 1px solid var(--border-default);
-        border-radius: var(--radius-sm);
-        padding: 0.5rem 0.75rem;
-        color: var(--text-primary);
-        font-size: 0.85rem;
     }
 
     .backend-status {

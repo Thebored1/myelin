@@ -332,19 +332,21 @@ pub struct DeviceInfo {
 /// empty list if the backend isn't installed or the probe fails.
 pub fn list_devices(app_data_dir: &Path, backend_label: &str) -> Vec<DeviceInfo> {
     let workspace_config = load_config(app_data_dir).unwrap_or_default();
-    let exe = match backend_binary(app_data_dir, &workspace_config, backend_label) {
-        Some(exe) => exe,
-        None => return Vec::new(),
-    };
+    match backend_binary(app_data_dir, &workspace_config, backend_label) {
+        Some(exe) => list_devices_on(&exe, backend_label),
+        None => Vec::new(),
+    }
+}
 
-    let mut cmd = Command::new(&exe);
+/// Run `<exe> --list-devices` and parse the devices it exposes.
+fn list_devices_on(exe: &Path, backend_label: &str) -> Vec<DeviceInfo> {
+    let mut cmd = Command::new(exe);
     cmd.arg("--list-devices")
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    apply_library_path(&mut cmd, &exe);
-    let output = cmd.output();
+    apply_library_path(&mut cmd, exe);
 
-    let Ok(output) = output else {
+    let Ok(output) = cmd.output() else {
         return Vec::new();
     };
     let text = String::from_utf8_lossy(&output.stdout);
@@ -376,6 +378,23 @@ pub fn list_devices(app_data_dir: &Path, backend_label: &str) -> Vec<DeviceInfo>
         });
     }
     devices
+}
+
+/// Pick the integrated GPU's device id from a device list (for the power-saving
+/// Vulkan path on machines that also have a discrete GPU). Matches common iGPU
+/// names; returns None if none look integrated.
+fn integrated_device_id(devices: &[DeviceInfo]) -> Option<String> {
+    const HINTS: [&str; 9] = [
+        "uhd", "iris", "integrated", "radeon graphics", "hd graphics", "renoir",
+        "cezanne", "rembrandt", "phoenix",
+    ];
+    devices
+        .iter()
+        .find(|d| {
+            let n = d.name.to_lowercase();
+            HINTS.iter().any(|h| n.contains(h))
+        })
+        .map(|d| d.id.clone())
 }
 
 /// Locate the llama-server binary for a specific backend ("cuda"/"vulkan"/…),
@@ -541,6 +560,7 @@ fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -
 fn normalize_preference(raw: Option<&str>) -> String {
     match raw.map(|p| p.trim().to_lowercase()).as_deref() {
         Some("cpu") => "cpu".into(),
+        Some("gpu") => "gpu".into(),
         Some("cuda") => "cuda".into(),
         Some("vulkan") => "vulkan".into(),
         Some("metal") => "metal".into(),
@@ -876,6 +896,14 @@ async fn try_start_candidate(
             let prefix = candidate.backend.label(); // "cuda" | "vulkan" | "metal"
             if device.to_lowercase().starts_with(prefix) {
                 command.arg("--device").arg(device);
+            }
+        } else if candidate.backend == GpuBackend::Vulkan && config.backend_preference == "vulkan" {
+            // Power-saving "Vulkan" mode: prefer the integrated GPU when the
+            // machine also has a discrete one.
+            let devices = list_devices_on(&candidate.executable_path, "vulkan");
+            if let Some(id) = integrated_device_id(&devices) {
+                log::info!("vulkan power-saving: pinning integrated device {id}");
+                command.arg("--device").arg(id);
             }
         }
     }
