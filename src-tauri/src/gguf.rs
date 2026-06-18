@@ -19,6 +19,9 @@ pub struct GgufInfo {
     pub head_count_kv: Option<u64>,
     pub key_length: Option<u64>,
     pub context_length: Option<u64>,
+    /// Whether the model embeds a chat template (needed for `--jinja`). Models
+    /// without one must not be launched with `--jinja` or the server fails.
+    pub has_chat_template: bool,
 }
 
 impl GgufInfo {
@@ -61,6 +64,7 @@ pub fn read_gguf_info(path: &Path) -> io::Result<GgufInfo> {
     let kv_count = read_u64(&mut r)?;
 
     let mut arch: Option<String> = None;
+    let mut has_chat_template = false;
     let mut ints: HashMap<String, u64> = HashMap::new();
 
     for _ in 0..kv_count {
@@ -71,6 +75,8 @@ pub fn read_gguf_info(path: &Path) -> io::Result<GgufInfo> {
                 let s = read_gguf_string(&mut r)?;
                 if key == "general.architecture" {
                     arch = Some(s);
+                } else if key == "tokenizer.chat_template" && !s.trim().is_empty() {
+                    has_chat_template = true;
                 }
             }
             0 => {
@@ -111,6 +117,7 @@ pub fn read_gguf_info(path: &Path) -> io::Result<GgufInfo> {
     }
 
     let mut info = GgufInfo::default();
+    info.has_chat_template = has_chat_template;
     if let Some(a) = arch {
         let get = |suffix: &str| ints.get(&format!("{a}.{suffix}")).copied();
         info.n_layers = get("block_count");

@@ -756,6 +756,10 @@ struct LaunchPlan {
     no_kv_offload: bool,
     flash_attn: bool,
     ubatch: Option<u32>,
+    /// Pass `--jinja` (use the model's embedded chat template; needed for tool
+    /// calling). Off for models without an embedded template, or as a final
+    /// fallback so the server still starts.
+    jinja: bool,
 }
 
 /// Ordered launch attempts for a candidate: in auto mode on a GPU, take all the
@@ -771,6 +775,11 @@ fn launch_plans(
         && (candidate.backend.is_gpu()
             || (candidate.backend == GpuBackend::Custom && config.gpu_layers.unwrap_or(999) > 0));
 
+    // Only pass --jinja when the model embeds a chat template, otherwise the
+    // server fails to start. Unknown (gguf unreadable) → assume yes (most
+    // instruct models have one); a no-jinja fallback below covers the rest.
+    let jinja = gguf.map(|g| g.has_chat_template).unwrap_or(true);
+
     if !config.auto_offload || !is_gpu {
         let ngl = if forced_cpu {
             0
@@ -779,13 +788,21 @@ fn launch_plans(
                 .gpu_layers
                 .unwrap_or(if is_gpu { 999 } else { 0 })
         };
-        return vec![LaunchPlan {
+        let mut plans = vec![LaunchPlan {
             ngl,
             ctx: config.context_size,
             no_kv_offload: false,
             flash_attn: false,
             ubatch: None,
+            jinja,
         }];
+        // If we tried with --jinja, add a no-jinja fallback so the server still
+        // starts for models with a broken/unsupported template (chat works,
+        // tool calling may not).
+        if jinja {
+            plans.push(LaunchPlan { jinja: false, ..plans[0].clone() });
+        }
+        return plans;
     }
 
     let target = AUTO_CTX_TARGET.max(config.context_size);
@@ -795,11 +812,17 @@ fn launch_plans(
         .map(|n| (n / 2).max(1) as i32)
         .unwrap_or(16);
 
-    vec![
-        LaunchPlan { ngl: 999, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256) },
-        LaunchPlan { ngl: 999, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256) },
-        LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128) },
-    ]
+    let mut plans = vec![
+        LaunchPlan { ngl: 999, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
+        LaunchPlan { ngl: 999, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
+        LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128), jinja },
+    ];
+    // Last resort: start without --jinja so a model with a missing/broken
+    // template still runs (chat-only; tools may not work).
+    if jinja {
+        plans.push(LaunchPlan { jinja: false, ngl: 999, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256) });
+    }
+    plans
 }
 
 pub async fn start_server(
@@ -916,11 +939,12 @@ async fn try_start_candidate(
         command.arg("--chat-template").arg(chat_format);
     }
 
-    // Use each model's embedded Jinja chat template. This is what makes tool
-    // calling work correctly across models (e.g. LFM2), which rely on their own
-    // template to render tool definitions — without it llama-server falls back
-    // to a generic path and the model mis-selects or "loses" tools.
-    command.arg("--jinja");
+    // Use the model's embedded Jinja chat template (needed for correct tool
+    // calling, e.g. LFM2). Only when the model actually has one — passing
+    // --jinja to a template-less model fails to start.
+    if plan.jinja {
+        command.arg("--jinja");
+    }
 
     // Universal thinking/reasoning switch (model-agnostic via the chat template).
     command
