@@ -36,10 +36,12 @@
     const hasGpuBuild = () => installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
     const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
 
-    const INTEGRATED_HINTS = ['uhd', 'iris', 'integrated', 'radeon graphics', 'hd graphics', 'renoir', 'cezanne', 'rembrandt', 'phoenix'];
-    const isIntegratedName = (n: string) => { const l = n.toLowerCase(); return INTEGRATED_HINTS.some((h) => l.includes(h)); };
-    // A "GPU" (performance/dedicated) choice only makes sense with a discrete GPU.
-    const hasDedicatedGpu = $derived(nvidiaDetected || gpus.some((g) => g && !isIntegratedName(g)));
+    // A "GPU" (performance) choice is only distinct from "Vulkan" when there's a
+    // discrete GPU: an NVIDIA card (CUDA), or more than one GPU (a real iGPU +
+    // dGPU split). A single non-NVIDIA GPU is integrated → GPU adds nothing over
+    // Vulkan, so it's disabled. (Robust: no fragile codename matching — lspci
+    // reports APUs under inconsistent names like "Lucienne".)
+    const hasDedicatedGpu = $derived(nvidiaDetected || gpus.length >= 2);
 
     let statusPoll: ReturnType<typeof setInterval> | undefined;
     onDestroy(() => { if (statusPoll) clearInterval(statusPoll); });
