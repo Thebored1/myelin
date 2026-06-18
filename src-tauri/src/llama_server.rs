@@ -916,6 +916,12 @@ async fn try_start_candidate(
         command.arg("--chat-template").arg(chat_format);
     }
 
+    // Use each model's embedded Jinja chat template. This is what makes tool
+    // calling work correctly across models (e.g. LFM2), which rely on their own
+    // template to render tool definitions — without it llama-server falls back
+    // to a generic path and the model mis-selects or "loses" tools.
+    command.arg("--jinja");
+
     // Universal thinking/reasoning switch (model-agnostic via the chat template).
     command
         .arg("--reasoning")

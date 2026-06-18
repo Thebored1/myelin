@@ -987,13 +987,23 @@ impl AppState {
             } else {
                 note.body.clone()
             };
-            let prompt = format!(
-                "Open Note: \"{}\"\nNote body (excerpt): {}\n\nChat History (for context only):\n{}\n\n### USER REQUEST ###\n{}\n### END REQUEST ###",
-                note.title,
-                if note_body_excerpt.trim().is_empty() { "(empty)".to_string() } else { note_body_excerpt },
-                history_text,
-                question
-            );
+            // Keep context clearly separated from the request, and label the
+            // note's current content as reference-only so the model doesn't
+            // echo it (e.g. writing "(empty)") as its answer. Omit the body
+            // line entirely when the note is empty.
+            let mut context = format!("The note currently open is titled \"{}\".", note.title);
+            if note_body_excerpt.trim().is_empty() {
+                context.push_str(" It is currently empty.");
+            } else {
+                context.push_str(&format!(
+                    "\nIts current content (reference only — do NOT copy this as your answer):\n{}",
+                    note_body_excerpt
+                ));
+            }
+            if !history_text.trim().is_empty() {
+                context.push_str(&format!("\n\nEarlier in this conversation:\n{}", history_text));
+            }
+            let prompt = format!("{}\n\nUser request: {}", context, question);
 
             let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
             self.ensure_llama_server(&config).await?;

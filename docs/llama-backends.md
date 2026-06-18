@@ -191,6 +191,15 @@ starts / restarts / recovers.
 Either choice still falls back through Vulkan → CPU automatically if the
 preferred path is unavailable (adaptive offload + retry loop handle it).
 
+## Tool calling
+
+The launcher passes **`--jinja`** so llama-server uses each model's embedded
+chat template to render tool definitions. This is required for correct tool
+calling on models like **LFM2** (which, unlike Qwen, has no built-in C++
+template path) — without it the model mis-selects or appears to "lose" its
+tools. Note context is also passed as labelled reference (separate from the
+user's request) so models don't echo the note's current content as their answer.
+
 ## Thinking / reasoning toggle
 
 Settings → **Advanced AI Configuration → Model thinking / reasoning** toggles
