@@ -148,6 +148,28 @@ starting `-ngl`, but the design intentionally doesn't depend on predicting exact
 VRAM. Turn the toggle **off** to use the manual Context Size / GPU Layers fields
 verbatim.
 
+## Adaptive offload (auto)
+
+Settings → **Advanced AI Configuration → Adaptive GPU offload** (default **on**)
+sizes everything per machine + model so it uses the GPU for what it can without
+running out of VRAM — *consistent context, variable performance*:
+
+- **KV cache stays in system RAM** (`--no-kv-offload`), so context size doesn't
+  compete for VRAM — a large context fits on any GPU, even a 512 MB iGPU.
+- **Targets a 32k context**, clamped down only if RAM can't hold the KV cache
+  (estimated from GGUF metadata: `layers × kv_heads × head_dim`, read by a small
+  built-in GGUF parser).
+- **Requests full offload** (`-ngl 999`) + **flash attention**; weights fill real
+  VRAM and spill to GTT on shared-memory iGPUs.
+- **Degrades on failure**: if a launch fails (e.g. device-lost / OOM) it retries
+  with a smaller context, then fewer layers, then falls through to the next
+  backend / CPU — instead of predicting exact VRAM up front.
+- **Recovers from a mid-generation GPU crash** by relaunching.
+
+VRAM is detected best-effort (AMD sysfs / `nvidia-smi` on Linux; DXGI/Metal
+later) and used only as a hint — the retry loop is what guarantees a working
+launch. Turn the toggle **off** to set Context Size / GPU Layers manually.
+
 ## Thinking / reasoning toggle
 
 Settings → **Advanced AI Configuration → Model thinking / reasoning** toggles
