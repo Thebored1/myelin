@@ -97,6 +97,40 @@ gitignored (binaries are large) but its structure is kept.
 - The Settings compute selector now resolves the binary automatically; there is
   no manual executable picker.
 
+## Building from source (cross-platform)
+
+`src-tauri/.cargo/config.toml` is kept cross-platform: it only caps build
+parallelism and applies `crt-static` on the Windows target. Everything else is
+per-OS:
+
+- **Linux:** no extra setup. tectonic uses system libraries (`pkg-config`).
+  Needs the usual Tauri deps (`libwebkit2gtk-4.1`, GTK3, `libsoup-3.0`,
+  `librsvg2`) plus a C/C++ toolchain. The harfbuzz symbol clash with the system
+  text stack is handled in `build.rs` (`-Wl,--exclude-libs,ALL`).
+- **Windows:** tectonic's C/C++ deps are built via **vcpkg**, so the build needs
+  these environment variables (set them as **user** env vars, not in the repo, so
+  Linux/macOS stay clean):
+
+  ```
+  TECTONIC_DEP_BACKEND = vcpkg
+  VCPKGRS_TRIPLET      = x64-windows-static-release
+  VCPKG_ROOT           = <repo>\src-tauri\target\vcpkg
+  CXXFLAGS             = /std:c++17
+  ```
+
+  Run `cargo vcpkg build` once to populate `target/vcpkg`. Note: a change to
+  `.cargo/config.toml` forces a full rebuild, and a clean rebuild of host
+  proc-macros with `crt-static` can fail to link; if that happens, build with an
+  explicit `--target x86_64-pc-windows-msvc` so the flag stays off host units.
+- **macOS:** no extra setup; Metal is in the standard toolchain.
+
+## Override / power users
+
+- `MYELIN_LLAMA_SERVER_PATH` env var hard-pins a single executable and skips
+  tiering entirely.
+- The Settings compute selector now resolves the binary automatically; there is
+  no manual executable picker.
+
 ## Mobile (Android / iOS) — not supported by this model
 
 The launch-a-server approach does not work on iOS (the sandbox forbids spawning
