@@ -13,7 +13,9 @@
 		SearchResponse
 	} from '$lib/types';
 	import { onMount } from 'svelte';
+	import { getVersion } from '@tauri-apps/api/app';
 
+	let appVersion = $state('');
 	let app = $state<AppSnapshot | null>(null);
 	// True once the initial snapshot has loaded — prevents the "no workspace"
 	// welcome screen from flashing before we know if a workspace is connected.
@@ -336,6 +338,7 @@
 		let unlistenChanged = () => {};
 		let unlistenStatus = () => {};
 		void (async () => {
+			getVersion().then((v) => { appVersion = v; }).catch(() => {});
 			try {
 				app = await invoke<AppSnapshot>('bootstrap');
 				await refreshApp();
@@ -552,6 +555,10 @@
 				</div>
 			{/if}
 		</div>
+
+		{#if appVersion}
+			<div class="rail-version">v{appVersion}</div>
+		{/if}
 
 		<div class="rail-footer">
 			<button class="footer-change-btn" onclick={pickWorkspace} disabled={isBusy} title={app?.workspacePath ?? 'Choose workspace'}>
@@ -1087,6 +1094,14 @@
 	.ov-clickable { cursor: pointer; }
 	.ov-clickable:hover .ov-key { color: var(--text-primary); }
 
+	.rail-version {
+		flex-shrink: 0;
+		padding: 0 var(--space-4) var(--space-2);
+		font-size: 0.7rem;
+		color: var(--text-secondary);
+		opacity: 0.6;
+		font-family: var(--font-mono);
+	}
 	.rail-footer {
 		flex-shrink: 0;
 		padding: var(--space-3) var(--space-4);
