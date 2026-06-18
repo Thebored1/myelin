@@ -170,6 +170,22 @@ VRAM is detected best-effort (AMD sysfs / `nvidia-smi` on Linux; DXGI/Metal
 later) and used only as a hint — the retry loop is what guarantees a working
 launch. Turn the toggle **off** to set Context Size / GPU Layers manually.
 
+## Compute device: GPU vs Vulkan
+
+The Settings compute selector has two choices — there is **no manual CPU or
+per-device option**, because the app always manages CPU fallback and offload
+itself:
+
+- **GPU** (performance) — uses the fastest available GPU: CUDA on an NVIDIA
+  discrete card, otherwise Vulkan. `backend_preference = "gpu"`.
+- **Vulkan** (power-saving) — forces the Vulkan backend and, on a machine that
+  also has a discrete GPU, **auto-pins the integrated GPU** (matched by name)
+  via `--device`, so heavy work stays off the power-hungry dGPU.
+  `backend_preference = "vulkan"`.
+
+Either choice still falls back through Vulkan → CPU automatically if the
+preferred path is unavailable (adaptive offload + retry loop handle it).
+
 ## Thinking / reasoning toggle
 
 Settings → **Advanced AI Configuration → Model thinking / reasoning** toggles
