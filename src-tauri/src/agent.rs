@@ -730,8 +730,85 @@ pub fn build_myelin_agent(
         .build()
 }
 
+/// Meta-commentary phrases that describe the task instead of being note content.
+/// Sentences containing these are stripped from harvested content.
+const META_PHRASES: &[&str] = &[
+    "the note should",
+    "this note should",
+    "the updated note",
+    "the note now",
+    "should be expanded",
+    "key points to cover",
+    "key points to include",
+    "to enrich the original",
+    "the current summary",
+    "this expansion",
+    "i will ",
+    "i'll ",
+    "here is the expanded",
+    "here's the expanded",
+    "expand the note",
+    "expanding the note",
+    "make the note longer",
+    "the note has been",
+    "this updated version",
+];
+
+/// Split text into rough sentences (on . ! ? followed by whitespace/EOL).
+fn split_sentences(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') && chars.peek().map_or(true, |n| n.is_whitespace()) {
+            let t = cur.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+            cur.clear();
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
+}
+
+/// Drop sentences that are meta-commentary about the task, keeping the real
+/// on-topic content and markdown structure (processed line by line so headings
+/// and bullets survive). Fixes the "the note should be expanded…" text leaking
+/// into the saved note.
+pub fn strip_meta_sentences(text: &str) -> String {
+    text.lines()
+        .filter_map(|line| {
+            if line.trim().is_empty() {
+                return Some(String::new());
+            }
+            let kept: Vec<String> = split_sentences(line)
+                .into_iter()
+                .filter(|s| {
+                    let l = s.to_lowercase();
+                    !META_PHRASES.iter().any(|m| l.contains(m))
+                })
+                .collect();
+            let joined = kept.join(" ").trim().to_string();
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Strip the wrappers a model tends to add around harvested note content:
-/// a leading ``` fence and echoed prompt markers. Used by the harvest backstop.
+/// a leading ``` fence, echoed prompt markers, and meta-commentary sentences.
+/// Used by the harvest backstop.
 pub fn clean_note_text(s: &str) -> String {
     let mut t = s.trim().to_string();
     if t.starts_with("```") {
@@ -746,7 +823,7 @@ pub fn clean_note_text(s: &str) -> String {
     for marker in ["--- CURRENT NOTE ---", "--- END CURRENT NOTE ---"] {
         t = t.replace(marker, "");
     }
-    t.trim().to_string()
+    strip_meta_sentences(t.trim())
 }
 
 pub fn normalize_web_url(raw: &str) -> Result<String, String> {
@@ -880,6 +957,24 @@ mod tests {
     fn clean_note_text_strips_fences_and_markers() {
         assert_eq!(clean_note_text("```markdown\n# Hi\nbody\n```"), "# Hi\nbody");
         assert_eq!(clean_note_text("--- CURRENT NOTE ---\nreal body"), "real body");
+    }
+
+    #[test]
+    fn strips_meta_sentences_keeps_real_content() {
+        // On-topic content with a meta sentence mixed in (the leak we saw).
+        let input = "The Mona Lisa is a portrait by Leonardo da Vinci. The note should be expanded to add more detail. It hangs in the Louvre in Paris.";
+        let out = strip_meta_sentences(input);
+        assert!(out.contains("Mona Lisa"));
+        assert!(out.contains("Louvre"));
+        assert!(!out.to_lowercase().contains("the note should"));
+    }
+
+    #[test]
+    fn strip_meta_keeps_headings_and_bullets() {
+        let input = "## Mona Lisa\n- Painted by Leonardo\n- Hangs in the Louvre";
+        let out = strip_meta_sentences(input);
+        assert!(out.contains("## Mona Lisa"));
+        assert!(out.contains("- Painted by Leonardo"));
     }
 
     #[test]
