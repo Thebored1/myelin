@@ -206,9 +206,15 @@ async fn run_all(
             let used = chat_h(client, base, model, req, history, &mut store).await;
             let body = store.open_body();
             let grew = body.len() > short.len() + 200;
-            let formatted = body.contains("# ")   // any markdown heading
+            // Any reasonable Markdown structure: heading, bullet, numbered list,
+            // or bold section label.
+            let formatted = body.contains("#")
                 || body.contains("\n- ")
                 || body.contains("\n* ")
+                || body.contains("\n• ")
+                || body.contains("\n1.")
+                || body.contains("\n2.")
+                || body.contains("**")
                 || body.starts_with("- ");
             let ok = used.iter().any(|t| t == "write_note") && body != short && grew && formatted;
             eprintln!(
