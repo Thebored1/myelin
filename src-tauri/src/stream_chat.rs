@@ -298,7 +298,6 @@ pub async fn run_chat(
             let args = json!({ "content": "", "mode": "replace" }).to_string();
             let result = execute_tool(state, "write_note", &args).await;
             if result.starts_with("Note successfully updated") {
-                wrote_note = true;
                 confirmation = Some("Done — I've cleared the note.");
             }
         } else if let Some(content) =
@@ -313,7 +312,6 @@ pub async fn run_chat(
                     p
                 });
                 if result.starts_with("Note successfully updated") {
-                    wrote_note = true;
                     confirmation = Some("Done — I've written it to the note.");
                 }
             }
