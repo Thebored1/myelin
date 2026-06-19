@@ -419,14 +419,15 @@ async fn chat_h(
         }
     }
 
-    if want_write && !wrote_note {
-        if agent::note_clear_intent(request) {
-            eprintln!("  [backstop] clear intent, no write landed; clearing note");
-            let args = json!({ "content": "", "mode": "replace" }).to_string();
-            let result = exec_tool(client, store, "write_note", &args).await;
-            used.push("write_note".into());
-            eprintln!("  [clear] -> {}", trunc(&result, 80));
-        } else if let Some(content) = harvest(client, base, model, &prompt).await {
+    if agent::note_clear_intent(request) {
+        // Clear/delete must end empty regardless of what the model did (mirrors
+        // stream_chat: some models call write_note with content instead of clearing).
+        let args = json!({ "content": "", "mode": "replace" }).to_string();
+        let result = exec_tool(client, store, "write_note", &args).await;
+        used.push("write_note".into());
+        eprintln!("  [clear] forced empty -> {}", trunc(&result, 80));
+    } else if want_write && !wrote_note {
+        if let Some(content) = harvest(client, base, model, &prompt).await {
             eprintln!("  [backstop] write intent, no write landed; harvested plain-text content");
             if !content.trim().is_empty() {
                 let args = json!({ "content": content, "mode": "replace" }).to_string();

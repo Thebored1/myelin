@@ -59,11 +59,9 @@ pub async fn run_chat(
     // prose but fail to emit a large string argument as a parseable tool call.
     let want_write = state.latest_chat_wants_note_write();
     let mut wrote_note = false;
-    // On a write turn the model's chat text is suppressed (it's either the
-    // content — which belongs in the note — or a refusal/fake claim); we show
-    // this single confirmation at the end reflecting what actually happened.
-    let mut confirmation: Option<&str> = None;
-    let mut last_assistant_text = String::new();
+    // Track whether we streamed any assistant chat text (to decide if a terse
+    // tool-only turn still needs a confirmation line).
+    let mut streamed_any = false;
 
     for _turn in 0..max_turns {
         let body = json!({
@@ -128,14 +126,13 @@ pub async fn run_chat(
                 if let Some(t) = delta["content"].as_str() {
                     if !t.is_empty() {
                         assistant_text.push_str(t);
-                        // Suppress the model's chat text on a write turn — show a
-                        // single truthful confirmation at the end instead.
-                        if !want_write {
-                            let _ = state.handle.emit(
-                                "ai://chat_chunk",
-                                json!({ "requestId": request_id, "delta": t }),
-                            );
-                        }
+                        streamed_any = true;
+                        // Stream the model's chat text live. If the backstop later
+                        // has to do the write itself, it wipes this bubble first.
+                        let _ = state.handle.emit(
+                            "ai://chat_chunk",
+                            json!({ "requestId": request_id, "delta": t }),
+                        );
                     }
                 }
 
@@ -238,8 +235,6 @@ pub async fn run_chat(
             log::info!("[stream_chat] assistant text preview: {preview}");
         }
 
-        last_assistant_text = assistant_text.clone();
-
         // No tool calls → the streamed text is the final answer for this turn.
         // The harvest backstop after the loop handles a stranded note-write.
         let real_calls: Vec<&ToolAccum> =
@@ -270,7 +265,6 @@ pub async fn run_chat(
             let result = execute_tool(state, &t.name, &t.args).await;
             if t.name == "write_note" && result.starts_with("Note successfully updated") {
                 wrote_note = true;
-                confirmation = Some("Done — I've updated the note.");
             }
             let args_preview: String = t.args.chars().take(300).collect();
             let result_preview: String = result.chars().take(200).collect();
@@ -290,17 +284,23 @@ pub async fn run_chat(
     // (the model answered in chat, or emitted a large tool call llama.cpp couldn't
     // parse). Generate the note body as plain text — which weak models do reliably
     // — and save it deterministically.
-    if want_write && !wrote_note {
-        if state.latest_chat_wants_clear() {
-            // Deterministic clear: the user asked to empty the note but no tool
-            // call landed — clear it ourselves rather than generating content.
-            log::info!("[stream_chat] clear intent, no write landed; clearing note");
-            let args = json!({ "content": "", "mode": "replace" }).to_string();
-            let result = execute_tool(state, "write_note", &args).await;
-            if result.starts_with("Note successfully updated") {
-                confirmation = Some("Done — I've cleared the note.");
-            }
-        } else if let Some(content) =
+    if state.latest_chat_wants_clear() {
+        // A clear/delete request must end with an EMPTY note no matter what the
+        // model did — some models (esp. tool-tuned) call write_note with content
+        // instead of clearing, so we can't rely on the model or on !wrote_note.
+        log::info!("[stream_chat] clear intent; forcing empty note");
+        let _ = state.handle.emit("ai://chat_reset", json!({ "requestId": request_id }));
+        let args = json!({ "content": "", "mode": "replace" }).to_string();
+        let _ = execute_tool(state, "write_note", &args).await;
+        let _ = state.handle.emit(
+            "ai://chat_chunk",
+            json!({ "requestId": request_id, "delta": "Done — I've cleared the note." }),
+        );
+    } else if want_write && !wrote_note {
+        // The model answered in chat without writing. Wipe whatever it streamed
+        // (usually a refusal or a fake "done" claim), then harvest the content.
+        let _ = state.handle.emit("ai://chat_reset", json!({ "requestId": request_id }));
+        if let Some(content) =
             harvest_note_content(&client, &url, &model, temperature, prompt).await
         {
             log::info!("[stream_chat] write intent but no write landed; harvested plain-text content");
@@ -312,27 +312,20 @@ pub async fn run_chat(
                     p
                 });
                 if result.starts_with("Note successfully updated") {
-                    confirmation = Some("Done — I've written it to the note.");
+                    let _ = state.handle.emit(
+                        "ai://chat_chunk",
+                        json!({ "requestId": request_id, "delta": "Done — I've written it to the note." }),
+                    );
                 }
             }
         }
-    }
-
-    // For a write turn we suppressed the model's chat text; emit one truthful
-    // confirmation now (or, if nothing was written, surface the model's reply so
-    // the chat isn't left blank).
-    if want_write {
-        if let Some(msg) = confirmation {
-            let _ = state.handle.emit(
-                "ai://chat_chunk",
-                json!({ "requestId": request_id, "delta": msg }),
-            );
-        } else if !last_assistant_text.trim().is_empty() {
-            let _ = state.handle.emit(
-                "ai://chat_chunk",
-                json!({ "requestId": request_id, "delta": last_assistant_text }),
-            );
-        }
+    } else if want_write && wrote_note && !streamed_any {
+        // The model wrote via its own tool call but said nothing in chat — add a
+        // brief confirmation so the reply isn't blank.
+        let _ = state.handle.emit(
+            "ai://chat_chunk",
+            json!({ "requestId": request_id, "delta": "Done — I've updated the note." }),
+        );
     }
 
     Ok(())

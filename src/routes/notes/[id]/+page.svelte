@@ -1749,6 +1749,7 @@
 		let unlistenNoteStreamStart: UnlistenFn;
 		let unlistenNoteDelta: UnlistenFn;
 		let unlistenNoteStreamCancel: UnlistenFn;
+		let unlistenChatReset: UnlistenFn;
 
 		$showSidebarToggle = true;
 		if (window.innerWidth > 1200) {
@@ -1792,6 +1793,12 @@
 			if (!note || note.id !== event.payload.noteId) return;
 			cancelNoteStream();
 		}).then((fn) => (unlistenNoteStreamCancel = fn));
+
+		// Backstop stepped in (model answered in chat without writing): clear the
+		// streamed text (a refusal / fake claim) before the real confirmation.
+		listen<{ requestId: string }>('ai://chat_reset', () => {
+			chatMessages = chatMessages.map((m) => (m.isStreaming ? { ...m, content: '' } : m));
+		}).then((fn) => (unlistenChatReset = fn));
 
 		listen<{ tool: string; details: string }>('ai://chat_tool', (event) => {
 			let lastStartTime = Date.now();
@@ -1903,6 +1910,7 @@
 			if (unlistenNoteStreamStart) unlistenNoteStreamStart();
 			if (unlistenNoteDelta) unlistenNoteDelta();
 			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
+			if (unlistenChatReset) unlistenChatReset();
 		};
 	});
 
