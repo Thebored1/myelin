@@ -232,6 +232,37 @@ async fn run_all(
         ));
     }
 
+    // ---- HAMMER: removal. The "New note 14" chat showed the model REFUSING
+    // ("I can't delete notes") and the backstop generating content for "remove
+    // all content". Each removal phrasing must end with an EMPTY note. ----
+    {
+        let content = "AI is transforming industries by enabling smarter automation and decision-making.\n\nIt impacts healthcare, education, and the creative arts in profound ways.";
+        let reqs = [
+            "remove all content from the note",
+            "delete this note",
+            "clear the note completely",
+            "empty the note",
+        ];
+        let mut cleared = 0;
+        for (i, req) in reqs.iter().enumerate() {
+            let mut store = sample_store();
+            store.notes.get_mut(&store.open_id).unwrap().body = content.to_string();
+            let used = chat(client, base, model, req, &mut store).await;
+            let body = store.open_body();
+            let ok = body.trim().is_empty();
+            eprintln!("  removal {}/{}: emptied={ok} len={} req={:?}", i + 1, reqs.len(), body.len(), req);
+            if ok {
+                cleared += 1;
+            }
+            let _ = used;
+        }
+        out.push((
+            "remove/clear content (hammer)".into(),
+            cleared == reqs.len(),
+            format!("{cleared}/{} emptied the note", reqs.len()),
+        ));
+    }
+
     out
 }
 
