@@ -53,14 +53,31 @@ pub async fn run_chat(
 
     let client = reqwest::Client::new();
 
+    // Backstop state: the user asked to modify the note, so if a turn comes back
+    // as chat text with no tool call we steer one forced `write_note` (small
+    // models often compose the content in chat and forget to call the tool).
+    let want_write = state.latest_chat_wants_note_write();
+    let mut wrote_note = false;
+    let mut forced_once = false;
+    let mut force_next = false;
+
     for _turn in 0..max_turns {
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "messages": messages,
             "tools": tools,
             "temperature": temperature,
             "stream": true,
         });
+        // On the corrective turn, require the model to emit write_note.
+        if force_next {
+            body["tool_choice"] = json!({
+                "type": "function",
+                "function": { "name": "write_note" }
+            });
+        }
+        let forcing = force_next;
+        force_next = false;
 
         let resp = client
             .post(&url)
@@ -222,10 +239,31 @@ pub async fn run_chat(
             log::info!("[stream_chat] assistant text preview: {preview}");
         }
 
-        // No tool calls → the streamed text is the final answer; we're done.
+        // No tool calls → normally the streamed text is the final answer. But if
+        // the user asked to modify the note and nothing was written, steer one
+        // forced write_note turn instead of leaving the content stranded in chat.
         let real_calls: Vec<&ToolAccum> =
             tool_calls.iter().filter(|t| !t.name.is_empty()).collect();
         if real_calls.is_empty() {
+            if want_write && !wrote_note && !forced_once {
+                forced_once = true;
+                force_next = true;
+                log::info!(
+                    "[stream_chat] note-write request answered in chat with no tool call; forcing write_note"
+                );
+                // Preserve the chat text the model just produced — it usually
+                // contains the composed content the forced call can reuse.
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": if assistant_text.is_empty() { Value::Null } else { Value::String(assistant_text.clone()) },
+                }));
+                messages.push(json!({
+                    "role": "user",
+                    "content": "You replied in chat but did not change the note. The user asked you to write to the note. Call write_note now with the COMPLETE final note content in the `content` field — do not ask for more input and do not put the content in your chat reply."
+                }));
+                continue;
+            }
+            let _ = forcing; // forced turn still produced no call → give up gracefully.
             return Ok(());
         }
 
@@ -249,6 +287,9 @@ pub async fn run_chat(
 
         for t in &real_calls {
             let result = execute_tool(state, &t.name, &t.args).await;
+            if t.name == "write_note" && result.starts_with("Note successfully updated") {
+                wrote_note = true;
+            }
             let args_preview: String = t.args.chars().take(300).collect();
             let result_preview: String = result.chars().take(200).collect();
             log::info!(

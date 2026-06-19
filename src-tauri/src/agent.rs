@@ -36,7 +36,8 @@ const WEB_FETCH_LIMIT: usize = 12_000;
 
 /// System preamble for the note assistant. Kept as a single source of truth so
 /// the startup cache warm-up replays the exact same prefix the live agent uses.
-/// The leading `/no_think` disables Qwen3 reasoning.
+/// Model-agnostic: it must read the same to any local GGUF (no provider- or
+/// family-specific control tokens such as a leading `/no_think`).
 pub const MYELIN_PREAMBLE: &str = "You are Myelin's built-in note assistant. You are also a capable general assistant with broad knowledge of history, art, science, culture, and everyday topics.\n\nCORE BEHAVIOR (most important):\n- Be decisive and DO THE TASK. NEVER ask the user clarifying or permission questions about formatting, length, structure, or what to include. Make reasonable choices and act immediately.\n- Treat replies like \"yes\", \"sure\", \"ok\", \"anything\", \"anything you like\", \"you decide\", \"go ahead\" as approval to proceed RIGHT NOW with your best version.\n- You have extensive general knowledge. Answer factual or general questions (e.g. \"describe the Mona Lisa\") directly and fully from your own knowledge. NEVER say you cannot browse the internet, cannot access your training data, or need to search — just give the answer.\n- Put the COMPLETE, full-length content (the entire essay/poem/list itself) into the tool's content field — that is the deliverable, NOT your chat reply.\n- After a tool succeeds, STOP. Reply with ONLY a brief one-line confirmation (e.g. \"Done — I've written it to the note.\"). Do NOT repeat, rewrite, or re-compose the content in your chat reply, and do NOT call more tools or re-read/verify the note.\n- If a tool reports an error or a refusal, tell the user exactly what went wrong. NEVER claim success when a tool did not succeed.\n- Do not repeat the same question or the same tool call. Make progress on every turn.\n\nWRITING NOTES:\n- When the user asks you to write, create, draft, add, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, shorten, expand, reorder, or remove part of the note — including short requests like 'format this', 'clean this up', 'make it nicer', 'fix the formatting', 'remove the second paragraph' — IMMEDIATELY call write_note. These requests always refer to the OPEN note; never reply that you lack a tool for this, and do not ask what to include.\n- The note's CURRENT content is provided below. To edit, change, fix, format, shorten, expand, reorder, or remove part of it, DEFAULT to mode \"replace\": take the current content, apply the change, and send the ENTIRE updated note as `content`. This is the reliable way to edit.\n- write_note ALWAYS acts on the note currently open in the editor; one call is enough. Modes:\n  - \"replace\" (default): set the ENTIRE note body to `content` (empty string clears the note). Use for writing, rewriting, formatting, AND for almost all edits/removals — just send the full updated note.\n  - \"append\": ADD `content` to the end — send ONLY the new text. Use only when the user says add, continue, extend, or append.\n  - \"edit\": replace one short snippet — pass `find` (text copied EXACTLY from the current note above, character-for-character) and `content` (the replacement; empty deletes it). Only use this for a single small unique snippet; if you are unsure the `find` text is exact, use \"replace\" instead.\n- The `content` field must be the actual final note text — never a description of what you did, and never a placeholder.\n- The note changes ONLY when write_note returns success. Never tell the user you wrote, edited, removed, or changed anything unless write_note succeeded in THIS turn; if it returned an error or 'could not find', fix it (e.g. switch to mode \"replace\") and call write_note again.\n\nTOOLS (only when actually needed):\n- search_notes: ONLY to find OTHER notes by keyword when the user explicitly refers to them. Never to interpret a message or read the currently open note (its contents are already provided below).\n- fetch_web_page: only when the user gives a URL.\n- Greetings and small talk (\"hi\", \"gg\", \"thanks\"): reply briefly in chat with no tools.";
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
@@ -257,6 +258,97 @@ fn looks_like_meta_status(content: &str) -> bool {
         || normalized.starts_with("the new ");
 
     !content.contains('\n') && mentions_note && starts_like_status
+}
+
+/// Word-boundary check: true if any of `words` (lowercase literals/phrases)
+/// appears as a whole word in the already-lowercased `haystack`. Avoids
+/// substring false hits like "fix" inside "prefix" or "add" inside "address".
+fn contains_any_word(haystack: &str, words: &[&str]) -> bool {
+    let alternation = words
+        .iter()
+        .map(|w| regex::escape(w))
+        .collect::<Vec<_>>()
+        .join("|");
+    regex::Regex::new(&format!(r"\b(?:{alternation})\b"))
+        .map(|re| re.is_match(haystack))
+        .unwrap_or(false)
+}
+
+/// Heuristic: does this user message ask to CREATE or MODIFY the open note (as
+/// opposed to just chatting / asking a question)?
+///
+/// In Myelin the chat is a note-assistant sidebar, so virtually every edit verb
+/// refers to the open note. We use this in two places:
+///   - as a guard: `write_note` refuses when the latest message did not ask for
+///     a note change (stops a weak model from clobbering the note on a Q&A turn);
+///   - as a backstop trigger: when a turn produces chat text but NO tool call and
+///     this returns true, `stream_chat` forces a `write_note` call so the content
+///     lands in the note instead of the chat — the exact failure a 1.2B model hits.
+///
+/// Pure and unit-tested; intentionally conservative so the forced-write backstop
+/// never fires on a plain question.
+pub fn note_write_intent(message: &str) -> bool {
+    let m = message.trim().to_lowercase();
+    if m.is_empty() {
+        return false;
+    }
+
+    // Short affirmations greenlight a write the user just asked for. The preamble
+    // also treats these as "proceed now", so honour them here too.
+    let affirmation = m.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    const AFFIRMATIONS: &[&str] = &[
+        "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "k", "go ahead",
+        "do it", "please do", "go for it", "sounds good", "anything", "you decide",
+        "proceed", "go",
+    ];
+    if AFFIRMATIONS.contains(&affirmation) {
+        return true;
+    }
+    // Leading affirmation word ("yes please", "sure, go for it"). Limited to
+    // strong single-word affirmations so a question like "ok what is X" is not
+    // mistaken for a write.
+    const LEADING_AFFIRMATIONS: &[&str] =
+        &["yes", "yeah", "yep", "yup", "sure", "absolutely", "definitely"];
+    let first_word = affirmation.split_whitespace().next().unwrap_or("");
+    if LEADING_AFFIRMATIONS.contains(&first_word) {
+        return true;
+    }
+
+    // Strong create/edit verbs. In this app these always target the open note.
+    const WRITE_VERBS: &[&str] = &[
+        "write", "rewrite", "re-write", "create", "draft", "compose", "add",
+        "append", "insert", "generate", "produce", "jot", "fill", "format",
+        "reformat", "restructure", "reorganize", "reorganise", "organize",
+        "organise", "clean up", "cleanup", "tidy", "fix", "correct", "proofread",
+        "improve", "polish", "edit", "revise", "update", "change", "modify",
+        "shorten", "condense", "trim", "expand", "lengthen", "elaborate",
+        "reorder", "rearrange", "remove", "delete", "erase", "replace", "swap",
+        "bold", "italic", "italicize", "capitalize", "capitalise", "continue",
+        "extend", "finish", "translate", "rephrase", "reword",
+        // Transform phrasings that don't use a bare edit verb.
+        "make it", "make this", "make the", "turn it", "turn this", "convert it",
+        "convert this", "shorter", "longer", "concise",
+    ];
+    if contains_any_word(&m, WRITE_VERBS) {
+        return true;
+    }
+
+    // Soft content verbs (explain/describe/...) only count as a note write when
+    // the message explicitly points at the note ("explain X in the note").
+    const NOTE_TARGETS: &[&str] = &[
+        "the note", "this note", "in the note", "to the note", "into the note",
+        "my note", "the document", "the doc", "the page",
+    ];
+    const SOFT_VERBS: &[&str] = &[
+        "explain", "describe", "list", "summarize", "summarise", "answer",
+        "outline", "detail", "note down", "record",
+    ];
+    let targets_note = NOTE_TARGETS.iter().any(|t| m.contains(t));
+    if targets_note && contains_any_word(&m, SOFT_VERBS) {
+        return true;
+    }
+
+    false
 }
 
 #[derive(Clone)]
@@ -770,5 +862,56 @@ mod tests {
         assert!(text.contains("world & more"));
         assert!(!text.contains("bad()"));
         assert!(!text.contains("<"));
+    }
+
+    #[test]
+    fn write_intent_detects_edit_verbs() {
+        for msg in [
+            "write a poem about cars",
+            "format this",
+            "clean up the formatting",
+            "remove the second paragraph",
+            "make the intro shorter",
+            "rewrite it more formally",
+            "add a conclusion",
+            "fix the spelling",
+        ] {
+            assert!(note_write_intent(msg), "expected write intent: {msg}");
+        }
+    }
+
+    #[test]
+    fn write_intent_soft_verb_needs_note_target() {
+        // "explain X" alone is a chat answer; "explain X in the note" is a write.
+        assert!(!note_write_intent("explain what you are"));
+        assert!(note_write_intent("explain what you are in the note with an h1"));
+        assert!(note_write_intent("summarise this into the note"));
+    }
+
+    #[test]
+    fn write_intent_affirmations_greenlight() {
+        for msg in ["yes", "sure", "ok", "go ahead", "do it", "Yes please!"] {
+            assert!(note_write_intent(msg), "expected affirmation: {msg}");
+        }
+    }
+
+    #[test]
+    fn write_intent_rejects_plain_questions() {
+        for msg in [
+            "what is the capital of France?",
+            "who painted the mona lisa",
+            "hi there",
+            "thanks!",
+            "describe the ocean",
+        ] {
+            assert!(!note_write_intent(msg), "expected no write intent: {msg}");
+        }
+    }
+
+    #[test]
+    fn write_intent_ignores_substring_false_positives() {
+        // "address" contains "add", "prefix" contains "fix" — must not trigger.
+        assert!(!note_write_intent("what is my ip address"));
+        assert!(!note_write_intent("what does the prefix mean"));
     }
 }

@@ -238,9 +238,30 @@ impl AppState {
         self.find_note_by_exact_title(title)
     }
 
+    /// Guard for `write_note`: only let the model mutate the note when the latest
+    /// user message actually asked for a note change. A small model otherwise
+    /// "helpfully" rewrites the note on a plain Q&A turn. When no question is
+    /// recorded (warm-up / programmatic paths) we stay permissive.
     pub fn latest_chat_allows_note_mutation(&self) -> bool {
-        // We now rely on the LLM's own intelligence to decide when to mutate the note.
-        true
+        self.inner
+            .latest_chat_question
+            .lock()
+            .as_deref()
+            .map(crate::agent::note_write_intent)
+            .unwrap_or(true)
+    }
+
+    /// Precise "the user asked to write/edit the note" signal, used by the
+    /// streaming loop to decide whether to force a `write_note` call when a weak
+    /// model answered in chat without calling the tool. Unlike the guard above,
+    /// a missing question means "no write intent" (we never force blindly).
+    pub fn latest_chat_wants_note_write(&self) -> bool {
+        self.inner
+            .latest_chat_question
+            .lock()
+            .as_deref()
+            .map(crate::agent::note_write_intent)
+            .unwrap_or(false)
     }
 
     pub fn is_tool_approval_required(&self) -> bool {
