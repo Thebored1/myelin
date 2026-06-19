@@ -282,11 +282,14 @@ async fn run_all(
             store.notes.get_mut(&store.open_id).unwrap().body = short.to_string();
             let used = chat(client, base, model, "expand it", &mut store).await;
             let body = store.open_body();
-            // Must grow with REAL content (about AI), not meta-commentary.
+            // Must grow with REAL content about AI, not meta-commentary, and not
+            // drift to the old harvest-example topic ("dog").
+            let lc = body.to_lowercase();
             let ok = used.iter().any(|t| t == "write_note")
                 && body.len() > short.len() + 150
                 && !is_meta(&body)
-                && body.to_lowercase().contains("ai");
+                && lc.contains("ai")
+                && !lc.contains("dog");
             eprintln!("  expand-it {}/{}: ok={ok} meta={} {}->{} chars", i + 1, rounds, is_meta(&body), short.len(), body.len());
             if ok {
                 grown += 1;
@@ -296,6 +299,37 @@ async fn run_all(
             "terse 'expand it' (hammer)".into(),
             grown == rounds,
             format!("{grown}/{rounds} actually expanded the note"),
+        ));
+    }
+
+    // ---- topic fidelity: expanding a Mona Lisa note must stay about the Mona
+    // Lisa, never drift to the harvest example's topic (the "dogs" bug). ----
+    {
+        let short = "The Mona Lisa is a famous portrait painting by Leonardo da Vinci, housed in the Louvre in Paris.";
+        let mut on = 0;
+        let rounds = 3;
+        for i in 0..rounds {
+            let mut store = sample_store();
+            store.notes.get_mut(&store.open_id).unwrap().body = short.to_string();
+            let used = chat(client, base, model, "expand it", &mut store).await;
+            let b = store.open_body().to_lowercase();
+            let on_topic = b.contains("mona") || b.contains("lisa") || b.contains("leonardo")
+                || b.contains("painting") || b.contains("louvre");
+            let drifted = b.contains("dog");
+            let ok = used.iter().any(|t| t == "write_note")
+                && store.open_body().len() > short.len() + 150
+                && on_topic
+                && !drifted
+                && !is_meta(&store.open_body());
+            eprintln!("  mona-lisa {}/{}: ok={ok} on_topic={on_topic} drifted_to_dogs={drifted} len={}", i + 1, rounds, store.open_body().len());
+            if ok {
+                on += 1;
+            }
+        }
+        out.push((
+            "expand stays on topic (mona lisa, hammer)".into(),
+            on == rounds,
+            format!("{on}/{rounds} stayed on the note's topic"),
         ));
     }
 
@@ -551,7 +585,7 @@ async fn one_turn(
 
 /// Mirror of stream_chat::harvest_note_content for the harness.
 async fn harvest(client: &reqwest::Client, base: &str, model: &str, user_prompt: &str) -> Option<String> {
-    let sys = "You are writing the literal text of a note — output ONLY the note body the reader sees, never a description of the task. Given the current note and the request, produce the COMPLETE updated note on the SAME topic. When asked to expand/lengthen, make it substantially longer with real sentences, concrete examples, and (when helpful) ## headings and - bullets — never just repeat the old text. EXAMPLE — current note \"Dogs are pets.\" + request \"expand it\" → GOOD output: \"## Dogs\\n\\nDogs are domesticated mammals valued as loyal companions. Breeds range from tiny Chihuahuas to large Great Danes, each suited to different homes and lifestyles. They need daily exercise, training, and veterinary care...\" → BAD output (NEVER do this): \"The note should be expanded to cover more about dogs. The key points to include are breeds and care.\" Write the GOOD style: the actual subject content, never meta-commentary about the note. Output Markdown only — no preamble, no commentary, no code fences.";
+    let sys = "You are writing the literal text of a note. Output ONLY the note body — the real content a reader sees — about the SUBJECT OF THE CURRENT NOTE the user gives you, and nothing else. Do NOT switch topics or invent a different subject; stay strictly on the note's own topic. When asked to expand or lengthen, make it substantially longer with real sentences, concrete examples, and (when helpful) ## headings and - bullets — never just repeat the old text. NEVER write meta-commentary about the task — no sentences like 'the note should be expanded', 'the updated note now includes', 'the key points to cover', or 'I will'; write the actual subject content directly. Output Markdown only — no preamble, no commentary, no code fences.";
     let body = json!({
         "model": model,
         "messages": [{"role":"system","content":sys},{"role":"user","content":user_prompt}],
