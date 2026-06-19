@@ -270,6 +270,30 @@ async fn run_all(
         ));
     }
 
+    // ---- terse "expand it" on a short note (the New note 14 case): the model
+    // claimed it expanded but didn't. The harvest backstop must actually grow it. ----
+    {
+        let short = "AI is transforming industries by enabling smarter automation, personalized experiences, and breakthroughs in research.";
+        let mut grown = 0;
+        let rounds = 3;
+        for i in 0..rounds {
+            let mut store = sample_store();
+            store.notes.get_mut(&store.open_id).unwrap().body = short.to_string();
+            let used = chat(client, base, model, "expand it", &mut store).await;
+            let body = store.open_body();
+            let ok = used.iter().any(|t| t == "write_note") && body.len() > short.len() + 150;
+            eprintln!("  expand-it {}/{}: ok={ok} {}->{} chars", i + 1, rounds, short.len(), body.len());
+            if ok {
+                grown += 1;
+            }
+        }
+        out.push((
+            "terse 'expand it' (hammer)".into(),
+            grown == rounds,
+            format!("{grown}/{rounds} actually expanded the note"),
+        ));
+    }
+
     out
 }
 

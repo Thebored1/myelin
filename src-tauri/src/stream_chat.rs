@@ -59,6 +59,11 @@ pub async fn run_chat(
     // prose but fail to emit a large string argument as a parseable tool call.
     let want_write = state.latest_chat_wants_note_write();
     let mut wrote_note = false;
+    // On a write turn the model's chat text is suppressed (it's either the
+    // content — which belongs in the note — or a refusal/fake claim); we show
+    // this single confirmation at the end reflecting what actually happened.
+    let mut confirmation: Option<&str> = None;
+    let mut last_assistant_text = String::new();
 
     for _turn in 0..max_turns {
         let body = json!({
@@ -123,10 +128,14 @@ pub async fn run_chat(
                 if let Some(t) = delta["content"].as_str() {
                     if !t.is_empty() {
                         assistant_text.push_str(t);
-                        let _ = state.handle.emit(
-                            "ai://chat_chunk",
-                            json!({ "requestId": request_id, "delta": t }),
-                        );
+                        // Suppress the model's chat text on a write turn — show a
+                        // single truthful confirmation at the end instead.
+                        if !want_write {
+                            let _ = state.handle.emit(
+                                "ai://chat_chunk",
+                                json!({ "requestId": request_id, "delta": t }),
+                            );
+                        }
                     }
                 }
 
@@ -229,6 +238,8 @@ pub async fn run_chat(
             log::info!("[stream_chat] assistant text preview: {preview}");
         }
 
+        last_assistant_text = assistant_text.clone();
+
         // No tool calls → the streamed text is the final answer for this turn.
         // The harvest backstop after the loop handles a stranded note-write.
         let real_calls: Vec<&ToolAccum> =
@@ -259,6 +270,7 @@ pub async fn run_chat(
             let result = execute_tool(state, &t.name, &t.args).await;
             if t.name == "write_note" && result.starts_with("Note successfully updated") {
                 wrote_note = true;
+                confirmation = Some("Done — I've updated the note.");
             }
             let args_preview: String = t.args.chars().take(300).collect();
             let result_preview: String = result.chars().take(200).collect();
@@ -286,10 +298,8 @@ pub async fn run_chat(
             let args = json!({ "content": "", "mode": "replace" }).to_string();
             let result = execute_tool(state, "write_note", &args).await;
             if result.starts_with("Note successfully updated") {
-                let _ = state.handle.emit(
-                    "ai://chat_chunk",
-                    json!({ "requestId": request_id, "delta": "Done — I've cleared the note." }),
-                );
+                wrote_note = true;
+                confirmation = Some("Done — I've cleared the note.");
             }
         } else if let Some(content) =
             harvest_note_content(&client, &url, &model, temperature, prompt).await
@@ -303,12 +313,27 @@ pub async fn run_chat(
                     p
                 });
                 if result.starts_with("Note successfully updated") {
-                    let _ = state.handle.emit(
-                        "ai://chat_chunk",
-                        json!({ "requestId": request_id, "delta": "Done — I've written it to the note." }),
-                    );
+                    wrote_note = true;
+                    confirmation = Some("Done — I've written it to the note.");
                 }
             }
+        }
+    }
+
+    // For a write turn we suppressed the model's chat text; emit one truthful
+    // confirmation now (or, if nothing was written, surface the model's reply so
+    // the chat isn't left blank).
+    if want_write {
+        if let Some(msg) = confirmation {
+            let _ = state.handle.emit(
+                "ai://chat_chunk",
+                json!({ "requestId": request_id, "delta": msg }),
+            );
+        } else if !last_assistant_text.trim().is_empty() {
+            let _ = state.handle.emit(
+                "ai://chat_chunk",
+                json!({ "requestId": request_id, "delta": last_assistant_text }),
+            );
         }
     }
 
