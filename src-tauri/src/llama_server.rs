@@ -825,6 +825,20 @@ fn launch_plans(
     plans
 }
 
+/// Corrected LFM2.5 chat template. The upstream template breaks multi-turn tool
+/// calling (ignores the `tool_calls` field and renders `content=None` as the
+/// literal "null"); this fixed version reconstructs tool calls in LFM's native
+/// format. Applied via `--chat-template-file` for `lfm2` models. See
+/// https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/discussions/12
+const LFM2_CHAT_TEMPLATE: &str = include_str!("../templates/lfm2.jinja");
+
+/// Write the corrected LFM2 template to a temp file and return its path.
+fn lfm2_template_path() -> std::io::Result<PathBuf> {
+    let path = std::env::temp_dir().join("myelin-lfm2-chat-template.jinja");
+    std::fs::write(&path, LFM2_CHAT_TEMPLATE)?;
+    Ok(path)
+}
+
 pub async fn start_server(
     client: &Client,
     config: &ResolvedLlamaConfig,
@@ -843,10 +857,28 @@ pub async fn start_server(
         log::info!("free device-local VRAM ~= {} MiB", v / 1_048_576);
     }
 
+    // LFM2 ships a chat template that's broken for multi-turn tool calling; pass
+    // the corrected one via --chat-template-file. Other models use their embedded
+    // template (via --jinja) unchanged.
+    let chat_template_file = gguf
+        .as_ref()
+        .and_then(|g| g.architecture.as_deref())
+        .filter(|a| a.eq_ignore_ascii_case("lfm2"))
+        .and_then(|_| match lfm2_template_path() {
+            Ok(p) => {
+                log::info!("using corrected LFM2 chat template: {}", p.display());
+                Some(p)
+            }
+            Err(e) => {
+                log::warn!("failed to write LFM2 chat template: {e}");
+                None
+            }
+        });
+
     let mut last_error: Option<String> = None;
     for candidate in &config.candidates {
         for plan in launch_plans(config, candidate, gguf.as_ref()) {
-            match try_start_candidate(client, config, candidate, &plan).await {
+            match try_start_candidate(client, config, candidate, &plan, chat_template_file.as_deref()).await {
                 Ok(server) => return Ok(server),
                 Err(error) => {
                     log::warn!(
@@ -873,6 +905,7 @@ async fn try_start_candidate(
     config: &ResolvedLlamaConfig,
     candidate: &BackendCandidate,
     plan: &LaunchPlan,
+    chat_template_file: Option<&Path>,
 ) -> Result<ManagedLlamaServer> {
     let gpu_layers = plan.ngl;
     let requested_gpu = gpu_layers > 0;
@@ -941,8 +974,14 @@ async fn try_start_candidate(
 
     // Use the model's embedded Jinja chat template (needed for correct tool
     // calling, e.g. LFM2). Only when the model actually has one — passing
-    // --jinja to a template-less model fails to start.
+    // --jinja to a template-less model fails to start. For LFM2 we override with
+    // the corrected template file (the embedded one breaks multi-turn tools).
     if plan.jinja {
+        if let Some(tpl) = chat_template_file {
+            if config.chat_format.is_none() {
+                command.arg("--chat-template-file").arg(tpl);
+            }
+        }
         command.arg("--jinja");
     }
 
