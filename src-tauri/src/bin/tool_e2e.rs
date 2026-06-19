@@ -275,17 +275,13 @@ async fn chat_h(
     let tools = agent::tool_specs();
     let mut used = Vec::new();
 
-    // Backstop, mirroring stream_chat: if the user asked to change the note but a
-    // turn comes back with no tool call, steer one forced write_note turn.
+    // Harvest backstop, mirroring stream_chat: if the user asked to change the
+    // note but no write lands, generate the body as plain text and save it.
     let want_write = agent::note_write_intent(request);
     let mut wrote_note = false;
-    let mut forced_once = false;
-    let mut force_next = false;
 
     for _ in 0..5 {
-        let forcing = force_next;
-        force_next = false;
-        let (text, calls) = match one_turn(client, base, model, &messages, &tools, forcing).await {
+        let (text, calls) = match one_turn(client, base, model, &messages, &tools, false).await {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("  turn error: {e}");
@@ -293,20 +289,6 @@ async fn chat_h(
             }
         };
         if calls.is_empty() {
-            if want_write && !wrote_note && !forced_once {
-                forced_once = true;
-                force_next = true;
-                eprintln!("  [backstop] no tool call on a note-write request; forcing write_note");
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": if text.is_empty() { Value::Null } else { Value::String(text) },
-                }));
-                messages.push(json!({
-                    "role": "user",
-                    "content": "You replied in chat but did not change the note. The user asked you to write to the note. Call write_note now with the COMPLETE final note content in the `content` field — do not ask for more input and do not put the content in your chat reply."
-                }));
-                continue;
-            }
             break;
         }
         let tc_json: Vec<Value> = calls
@@ -326,6 +308,18 @@ async fn chat_h(
             }
             eprintln!("  [{}] args={} -> {}", t.name, trunc(&t.args, 120), trunc(&result, 100));
             messages.push(json!({"role": "tool", "tool_call_id": t.id, "content": result}));
+        }
+    }
+
+    if want_write && !wrote_note {
+        eprintln!("  [backstop] write intent, no write landed; harvesting plain-text content");
+        if let Some(content) = harvest(client, base, model, &prompt).await {
+            if !content.trim().is_empty() {
+                let args = json!({ "content": content, "mode": "replace" }).to_string();
+                let result = exec_tool(client, store, "write_note", &args).await;
+                used.push("write_note".into());
+                eprintln!("  [harvest write] -> {}", trunc(&result, 80));
+            }
         }
     }
     used
@@ -473,6 +467,49 @@ async fn one_turn(
     }
     calls.retain(|c| !c.name.is_empty());
     Ok((text, calls))
+}
+
+/// Mirror of stream_chat::harvest_note_content for the harness.
+async fn harvest(client: &reqwest::Client, base: &str, model: &str, user_prompt: &str) -> Option<String> {
+    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let body = json!({
+        "model": model,
+        "messages": [{"role":"system","content":sys},{"role":"user","content":user_prompt}],
+        "temperature": 0.2, "stream": true
+    });
+    let resp = client.post(format!("{base}/v1/chat/completions")).json(&body).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut text = String::new();
+    let mut done = false;
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.ok()?;
+        buf.extend_from_slice(&bytes);
+        while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line);
+            let data = match line.trim().strip_prefix("data:") {
+                Some(d) => d.trim().to_string(),
+                None => continue,
+            };
+            if data == "[DONE]" {
+                done = true;
+                break;
+            }
+            if let Ok(j) = serde_json::from_str::<Value>(&data) {
+                if let Some(t) = j["choices"][0]["delta"]["content"].as_str() {
+                    text.push_str(t);
+                }
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    Some(agent::clean_note_text(&text))
 }
 
 fn start_server(bin: &str, model: &str, port: u16) -> std::io::Result<Child> {

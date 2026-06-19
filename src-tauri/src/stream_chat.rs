@@ -53,31 +53,21 @@ pub async fn run_chat(
 
     let client = reqwest::Client::new();
 
-    // Backstop state: the user asked to modify the note, so if a turn comes back
-    // as chat text with no tool call we steer one forced `write_note` (small
-    // models often compose the content in chat and forget to call the tool).
+    // Backstop state: the user asked to modify the note, so if the turns finish
+    // without a write landing we harvest the content as plain text and save it
+    // (see the harvest step after the loop). Weak models reliably *generate*
+    // prose but fail to emit a large string argument as a parseable tool call.
     let want_write = state.latest_chat_wants_note_write();
     let mut wrote_note = false;
-    let mut forced_once = false;
-    let mut force_next = false;
 
     for _turn in 0..max_turns {
-        let mut body = json!({
+        let body = json!({
             "model": model,
             "messages": messages,
             "tools": tools,
             "temperature": temperature,
             "stream": true,
         });
-        // On the corrective turn, require the model to emit write_note.
-        if force_next {
-            body["tool_choice"] = json!({
-                "type": "function",
-                "function": { "name": "write_note" }
-            });
-        }
-        let forcing = force_next;
-        force_next = false;
 
         let resp = client
             .post(&url)
@@ -239,32 +229,12 @@ pub async fn run_chat(
             log::info!("[stream_chat] assistant text preview: {preview}");
         }
 
-        // No tool calls → normally the streamed text is the final answer. But if
-        // the user asked to modify the note and nothing was written, steer one
-        // forced write_note turn instead of leaving the content stranded in chat.
+        // No tool calls → the streamed text is the final answer for this turn.
+        // The harvest backstop after the loop handles a stranded note-write.
         let real_calls: Vec<&ToolAccum> =
             tool_calls.iter().filter(|t| !t.name.is_empty()).collect();
         if real_calls.is_empty() {
-            if want_write && !wrote_note && !forced_once {
-                forced_once = true;
-                force_next = true;
-                log::info!(
-                    "[stream_chat] note-write request answered in chat with no tool call; forcing write_note"
-                );
-                // Preserve the chat text the model just produced — it usually
-                // contains the composed content the forced call can reuse.
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": if assistant_text.is_empty() { Value::Null } else { Value::String(assistant_text.clone()) },
-                }));
-                messages.push(json!({
-                    "role": "user",
-                    "content": "You replied in chat but did not change the note. The user asked you to write to the note. Call write_note now with the COMPLETE final note content in the `content` field — do not ask for more input and do not put the content in your chat reply."
-                }));
-                continue;
-            }
-            let _ = forcing; // forced turn still produced no call → give up gracefully.
-            return Ok(());
+            break;
         }
 
         // Record the assistant's tool-call turn, then execute each tool and feed
@@ -304,7 +274,87 @@ pub async fn run_chat(
         }
     }
 
+    // Harvest backstop: the user asked to write/edit the note but no write landed
+    // (the model answered in chat, or emitted a large tool call llama.cpp couldn't
+    // parse). Generate the note body as plain text — which weak models do reliably
+    // — and save it deterministically.
+    if want_write && !wrote_note {
+        log::info!("[stream_chat] write intent but no write landed; harvesting plain-text content");
+        if let Some(content) = harvest_note_content(&client, &url, &model, temperature, prompt).await
+        {
+            if !content.trim().is_empty() {
+                let args = json!({ "content": content, "mode": "replace" }).to_string();
+                let result = execute_tool(state, "write_note", &args).await;
+                log::info!("[stream_chat] harvest write -> {}", {
+                    let p: String = result.chars().take(80).collect();
+                    p
+                });
+                if result.starts_with("Note successfully updated") {
+                    let _ = state.handle.emit(
+                        "ai://chat_chunk",
+                        json!({ "requestId": request_id, "delta": "Done — I've written it to the note." }),
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Generate the note body as plain text (no tools) and return it cleaned. Weak
+/// models reliably *generate* prose but fail to emit a large string argument as a
+/// parseable tool call, so for a stranded note-write we harvest the text here.
+async fn harvest_note_content(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    temperature: f32,
+    user_prompt: &str,
+) -> Option<String> {
+    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let body = json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": sys },
+            { "role": "user", "content": user_prompt },
+        ],
+        "temperature": temperature,
+        "stream": true,
+    });
+    let resp = client.post(url).json(&body).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut text = String::new();
+    let mut done = false;
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.ok()?;
+        buf.extend_from_slice(&bytes);
+        while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line);
+            let data = match line.trim().strip_prefix("data:") {
+                Some(d) => d.trim().to_string(),
+                None => continue,
+            };
+            if data == "[DONE]" {
+                done = true;
+                break;
+            }
+            if let Ok(j) = serde_json::from_str::<Value>(&data) {
+                if let Some(t) = j["choices"][0]["delta"]["content"].as_str() {
+                    text.push_str(t);
+                }
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    Some(crate::agent::clean_note_text(&text))
 }
 
 /// Deserialize the arguments for a named tool and run the matching rig `Tool`,

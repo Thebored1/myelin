@@ -696,6 +696,25 @@ pub fn build_myelin_agent(
         .build()
 }
 
+/// Strip the wrappers a model tends to add around harvested note content:
+/// a leading ``` fence and echoed prompt markers. Used by the harvest backstop.
+pub fn clean_note_text(s: &str) -> String {
+    let mut t = s.trim().to_string();
+    if t.starts_with("```") {
+        let rest = t.strip_prefix("```").unwrap_or("");
+        let rest = rest.splitn(2, '\n').nth(1).unwrap_or("");
+        t = rest.to_string();
+        if let Some(idx) = t.rfind("```") {
+            t = t[..idx].to_string();
+        }
+        t = t.trim().to_string();
+    }
+    for marker in ["--- CURRENT NOTE ---", "--- END CURRENT NOTE ---"] {
+        t = t.replace(marker, "");
+    }
+    t.trim().to_string()
+}
+
 pub fn normalize_web_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
