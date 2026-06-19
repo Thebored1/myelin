@@ -217,10 +217,11 @@ async fn run_all(
                 || body.contains("\n2.")
                 || body.contains("**")
                 || body.starts_with("- ");
-            // The bug we fixed is "note doesn't change". Gate on that (write
-            // landed + note grew); formatting is a model-quality metric we report
-            // but don't fail a deterministic suite on (a 1.2B won't format 100%).
-            let ok = used.iter().any(|t| t == "write_note") && body != short && grew;
+            // The bug we fixed is "note doesn't change" with REAL content (not
+            // meta-commentary). Gate on write-landed + grew + not-meta; formatting
+            // is a reported model-quality metric.
+            let ok =
+                used.iter().any(|t| t == "write_note") && body != short && grew && !is_meta(&body);
             eprintln!(
                 "  hammer {}/{}: updated={ok} grew={grew} formatted={formatted} len={} req={:?}",
                 i + 1, rounds, body.len(), trunc(req, 40)
@@ -281,8 +282,12 @@ async fn run_all(
             store.notes.get_mut(&store.open_id).unwrap().body = short.to_string();
             let used = chat(client, base, model, "expand it", &mut store).await;
             let body = store.open_body();
-            let ok = used.iter().any(|t| t == "write_note") && body.len() > short.len() + 150;
-            eprintln!("  expand-it {}/{}: ok={ok} {}->{} chars", i + 1, rounds, short.len(), body.len());
+            // Must grow with REAL content (about AI), not meta-commentary.
+            let ok = used.iter().any(|t| t == "write_note")
+                && body.len() > short.len() + 150
+                && !is_meta(&body)
+                && body.to_lowercase().contains("ai");
+            eprintln!("  expand-it {}/{}: ok={ok} meta={} {}->{} chars", i + 1, rounds, is_meta(&body), short.len(), body.len());
             if ok {
                 grown += 1;
             }
@@ -546,7 +551,7 @@ async fn one_turn(
 
 /// Mirror of stream_chat::harvest_note_content for the harness.
 async fn harvest(client: &reqwest::Client, base: &str, model: &str, user_prompt: &str) -> Option<String> {
-    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets. If they ask for a word count or to make it longer/expand, write a thorough, detailed note that clearly meets or exceeds that length — several sections with multiple full sentences each; do not be brief. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let sys = "You are writing the literal text of a note. Given the user's request and the current note, output the COMPLETE new note exactly as a reader should see it — the real subject content, fully written out. If it is an essay about a topic, write the full essay about that topic (expanded or edited per the request), keeping the same subject. Use Markdown headings (## Heading) and bullet lists (- item) when asked, and meet any requested length (write thorough, detailed prose). CRITICAL: never write meta-commentary or describe the task — do NOT output sentences like \"the note should be expanded\", \"the updated note now includes\", \"the key points to cover\", \"I will\", or \"here is\", and never refer to \"the note\" in the third person. Output ONLY the finished note body in Markdown — no preamble, no commentary, no code fences.";
     let body = json!({
         "model": model,
         "messages": [{"role":"system","content":sys},{"role":"user","content":user_prompt}],
@@ -621,6 +626,27 @@ async fn wait_health(client: &reqwest::Client, base: &str) -> bool {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     false
+}
+
+/// True if the body reads like meta-commentary about the task rather than the
+/// actual note content (the failure where "expand it" wrote "the note should be
+/// expanded…" instead of the expanded essay).
+fn is_meta(body: &str) -> bool {
+    let b = body.to_lowercase();
+    [
+        "the note should",
+        "the updated note",
+        "this expansion",
+        "key points to cover",
+        "should be expanded",
+        "i will ",
+        "here is the",
+        "the note now",
+        "the current summary",
+        "to enrich the original",
+    ]
+    .iter()
+    .any(|p| b.contains(p))
 }
 
 fn trunc(s: &str, n: usize) -> String {

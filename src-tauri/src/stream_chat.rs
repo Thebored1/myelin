@@ -350,7 +350,7 @@ async fn harvest_note_content(
     temperature: f32,
     user_prompt: &str,
 ) -> Option<String> {
-    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets. If they ask for a word count or to make it longer/expand, write a thorough, detailed note that clearly meets or exceeds that length — several sections with multiple full sentences each; do not be brief. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let sys = "You are writing the literal text of a note. Given the user's request and the current note, output the COMPLETE new note exactly as a reader should see it — the real subject content, fully written out. If it is an essay about a topic, write the full essay about that topic (expanded or edited per the request), keeping the same subject. Use Markdown headings (## Heading) and bullet lists (- item) when asked, and meet any requested length (write thorough, detailed prose). CRITICAL: never write meta-commentary or describe the task — do NOT output sentences like \"the note should be expanded\", \"the updated note now includes\", \"the key points to cover\", \"I will\", or \"here is\", and never refer to \"the note\" in the third person. Output ONLY the finished note body in Markdown — no preamble, no commentary, no code fences.";
     let body = json!({
         "model": model,
         "messages": [
