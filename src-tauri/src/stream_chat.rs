@@ -278,10 +278,23 @@ pub async fn run_chat(
     // (the model answered in chat, or emitted a large tool call llama.cpp couldn't
     // parse). Generate the note body as plain text — which weak models do reliably
     // — and save it deterministically.
-    if want_write && !wrote_note && !state.latest_chat_wants_clear() {
-        log::info!("[stream_chat] write intent but no write landed; harvesting plain-text content");
-        if let Some(content) = harvest_note_content(&client, &url, &model, temperature, prompt).await
+    if want_write && !wrote_note {
+        if state.latest_chat_wants_clear() {
+            // Deterministic clear: the user asked to empty the note but no tool
+            // call landed — clear it ourselves rather than generating content.
+            log::info!("[stream_chat] clear intent, no write landed; clearing note");
+            let args = json!({ "content": "", "mode": "replace" }).to_string();
+            let result = execute_tool(state, "write_note", &args).await;
+            if result.starts_with("Note successfully updated") {
+                let _ = state.handle.emit(
+                    "ai://chat_chunk",
+                    json!({ "requestId": request_id, "delta": "Done — I've cleared the note." }),
+                );
+            }
+        } else if let Some(content) =
+            harvest_note_content(&client, &url, &model, temperature, prompt).await
         {
+            log::info!("[stream_chat] write intent but no write landed; harvested plain-text content");
             if !content.trim().is_empty() {
                 let args = json!({ "content": content, "mode": "replace" }).to_string();
                 let result = execute_tool(state, "write_note", &args).await;
@@ -312,7 +325,7 @@ async fn harvest_note_content(
     temperature: f32,
     user_prompt: &str,
 ) -> Option<String> {
-    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets, and meet any length they ask for. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets. If they ask for a word count or to make it longer/expand, write a thorough, detailed note that clearly meets or exceeds that length — several sections with multiple full sentences each; do not be brief. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
     let body = json!({
         "model": model,
         "messages": [

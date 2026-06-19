@@ -312,9 +312,15 @@ async fn chat_h(
         }
     }
 
-    if want_write && !wrote_note && !agent::note_clear_intent(request) {
-        eprintln!("  [backstop] write intent, no write landed; harvesting plain-text content");
-        if let Some(content) = harvest(client, base, model, &prompt).await {
+    if want_write && !wrote_note {
+        if agent::note_clear_intent(request) {
+            eprintln!("  [backstop] clear intent, no write landed; clearing note");
+            let args = json!({ "content": "", "mode": "replace" }).to_string();
+            let result = exec_tool(client, store, "write_note", &args).await;
+            used.push("write_note".into());
+            eprintln!("  [clear] -> {}", trunc(&result, 80));
+        } else if let Some(content) = harvest(client, base, model, &prompt).await {
+            eprintln!("  [backstop] write intent, no write landed; harvested plain-text content");
             if !content.trim().is_empty() {
                 let args = json!({ "content": content, "mode": "replace" }).to_string();
                 let result = exec_tool(client, store, "write_note", &args).await;
@@ -472,7 +478,7 @@ async fn one_turn(
 
 /// Mirror of stream_chat::harvest_note_content for the harness.
 async fn harvest(client: &reqwest::Client, base: &str, model: &str, user_prompt: &str) -> Option<String> {
-    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets, and meet any length they ask for. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets. If they ask for a word count or to make it longer/expand, write a thorough, detailed note that clearly meets or exceeds that length — several sections with multiple full sentences each; do not be brief. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
     let body = json!({
         "model": model,
         "messages": [{"role":"system","content":sys},{"role":"user","content":user_prompt}],
