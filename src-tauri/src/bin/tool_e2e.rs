@@ -476,11 +476,22 @@ async fn one_turn(
 }
 
 fn start_server(bin: &str, model: &str, port: u16) -> std::io::Result<Child> {
+    let port_s = port.to_string();
+    let mut args: Vec<String> = vec![
+        "-m".into(), model.into(), "--jinja".into(), "--ctx-size".into(), "4096".into(),
+        "--port".into(), port_s, "--no-warmup".into(),
+    ];
+    // Optional chat-template override (e.g. the corrected LFM2.5 template that
+    // fixes multi-turn tool calling). Set CHAT_TEMPLATE_FILE to A/B test it.
+    if let Ok(tpl) = std::env::var("CHAT_TEMPLATE_FILE") {
+        if !tpl.is_empty() {
+            args.push("--chat-template-file".into());
+            args.push(tpl);
+        }
+    }
+    eprintln!("starting: {} {}", bin, args.join(" "));
     Command::new(bin)
-        .args([
-            "-m", model, "--jinja", "--ctx-size", "4096",
-            "--port", &port.to_string(), "--no-warmup",
-        ])
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
