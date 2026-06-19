@@ -182,6 +182,49 @@ async fn run_all(
         out.push(("fetch_web_page".into(), ok, format!("tools={used:?}")));
     }
 
+    // ---- HAMMER: the screenshot bug. A follow-up "expand + format" on an
+    // existing note must actually change the note, not just claim success in
+    // chat. This is the multi-turn case (note already has content + prior chat
+    // history saying it was written) where a weak model tends to chat a fake
+    // "updated, 498 words" with no tool call. Run it several times — flaky =
+    // fail. ----
+    {
+        let short = "The capital of India is New Delhi. It serves as the political and administrative center of the country. Established in the early 20th century, New Delhi replaced the erstwhile capital, Delhi, and is home to important government institutions, museums, and historical landmarks.";
+        let history = "User: write an essay about the capital of India\nAssistant: Done — I've written the full essay about the capital of India in the note.";
+        let reqs = [
+            "make it over 500 words and do proper formatting like heading bullet points etc",
+            "expand this to at least 500 words with headings and bullet points",
+            "rewrite it longer with markdown headings and bullets",
+        ];
+        let rounds = 6;
+        let mut updated = 0;
+        for i in 0..rounds {
+            let req = reqs[i % reqs.len()];
+            let mut store = sample_store();
+            store.notes.get_mut(&store.open_id).unwrap().body = short.to_string();
+            let used = chat_h(client, base, model, req, history, &mut store).await;
+            let body = store.open_body();
+            let grew = body.len() > short.len() + 200;
+            let formatted = body.contains("##")
+                || body.contains("\n- ")
+                || body.contains("\n* ")
+                || body.contains("\n# ");
+            let ok = used.iter().any(|t| t == "write_note") && body != short && grew && formatted;
+            eprintln!(
+                "  hammer {}/{}: ok={ok} grew={grew} formatted={formatted} len={} req={:?}",
+                i + 1, rounds, body.len(), trunc(req, 40)
+            );
+            if ok {
+                updated += 1;
+            }
+        }
+        out.push((
+            "expand+format follow-up (hammer)".into(),
+            updated == rounds,
+            format!("{updated}/{rounds} actually updated the note"),
+        ));
+    }
+
     out
 }
 
@@ -202,12 +245,29 @@ async fn chat(
     request: &str,
     store: &mut Store,
 ) -> Vec<String> {
-    let prompt = format!(
-        "The note currently open is titled \"{}\".\n\nHere is the note's CURRENT content:\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---\n\nUser request: {}",
+    chat_h(client, base, model, request, "", store).await
+}
+
+/// Like `chat` but with optional prior chat history embedded in the prompt
+/// (mirrors ask_ai_stream) and the real forced-write backstop from stream_chat.
+async fn chat_h(
+    client: &reqwest::Client,
+    base: &str,
+    model: &str,
+    request: &str,
+    history: &str,
+    store: &mut Store,
+) -> Vec<String> {
+    let mut prompt = format!(
+        "The note currently open is titled \"{}\".\n\nHere is the note's CURRENT content:\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---\n",
         store.open_title(),
         store.open_body(),
-        request
     );
+    if !history.trim().is_empty() {
+        prompt.push_str(&format!("\nEarlier in this conversation:\n{history}\n"));
+    }
+    prompt.push_str(&format!("\nUser request: {request}"));
+
     let mut messages = vec![
         json!({"role": "system", "content": agent::MYELIN_PREAMBLE}),
         json!({"role": "user", "content": prompt}),
@@ -215,8 +275,17 @@ async fn chat(
     let tools = agent::tool_specs();
     let mut used = Vec::new();
 
-    for _ in 0..4 {
-        let (text, calls) = match one_turn(client, base, model, &messages, &tools).await {
+    // Backstop, mirroring stream_chat: if the user asked to change the note but a
+    // turn comes back with no tool call, steer one forced write_note turn.
+    let want_write = agent::note_write_intent(request);
+    let mut wrote_note = false;
+    let mut forced_once = false;
+    let mut force_next = false;
+
+    for _ in 0..5 {
+        let forcing = force_next;
+        force_next = false;
+        let (text, calls) = match one_turn(client, base, model, &messages, &tools, forcing).await {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("  turn error: {e}");
@@ -224,6 +293,20 @@ async fn chat(
             }
         };
         if calls.is_empty() {
+            if want_write && !wrote_note && !forced_once {
+                forced_once = true;
+                force_next = true;
+                eprintln!("  [backstop] no tool call on a note-write request; forcing write_note");
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": if text.is_empty() { Value::Null } else { Value::String(text) },
+                }));
+                messages.push(json!({
+                    "role": "user",
+                    "content": "You replied in chat but did not change the note. The user asked you to write to the note. Call write_note now with the COMPLETE final note content in the `content` field — do not ask for more input and do not put the content in your chat reply."
+                }));
+                continue;
+            }
             break;
         }
         let tc_json: Vec<Value> = calls
@@ -238,6 +321,9 @@ async fn chat(
         for t in &calls {
             used.push(t.name.clone());
             let result = exec_tool(client, store, &t.name, &t.args).await;
+            if t.name == "write_note" && result.starts_with("Note successfully updated") {
+                wrote_note = true;
+            }
             eprintln!("  [{}] args={} -> {}", t.name, trunc(&t.args, 120), trunc(&result, 100));
             messages.push(json!({"role": "tool", "tool_call_id": t.id, "content": result}));
         }
@@ -303,18 +389,24 @@ async fn exec_tool(client: &reqwest::Client, store: &mut Store, name: &str, args
     }
 }
 
-/// Stream one completion; collect assistant text + assembled tool calls.
+/// Stream one completion; collect assistant text + assembled tool calls. When
+/// `force_write` is set, require the model to emit `write_note` (the backstop
+/// corrective turn — mirrors stream_chat).
 async fn one_turn(
     client: &reqwest::Client,
     base: &str,
     model: &str,
     messages: &[Value],
     tools: &[Value],
+    force_write: bool,
 ) -> Result<(String, Vec<ToolCall>), String> {
-    let body = json!({
+    let mut body = json!({
         "model": model, "messages": messages, "tools": tools,
         "temperature": 0.2, "stream": true
     });
+    if force_write {
+        body["tool_choice"] = json!({ "type": "function", "function": { "name": "write_note" } });
+    }
     let resp = client
         .post(format!("{base}/v1/chat/completions"))
         .json(&body)
