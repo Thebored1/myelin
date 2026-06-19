@@ -264,6 +264,17 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// The user asked to EMPTY the note. Used to suppress the harvest backstop
+    /// (which would otherwise generate text instead of clearing).
+    pub fn latest_chat_wants_clear(&self) -> bool {
+        self.inner
+            .latest_chat_question
+            .lock()
+            .as_deref()
+            .map(crate::agent::note_clear_intent)
+            .unwrap_or(false)
+    }
+
     pub fn is_tool_approval_required(&self) -> bool {
         self.inner.require_tool_approval.load(std::sync::atomic::Ordering::SeqCst)
     }

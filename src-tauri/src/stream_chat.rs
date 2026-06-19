@@ -278,7 +278,7 @@ pub async fn run_chat(
     // (the model answered in chat, or emitted a large tool call llama.cpp couldn't
     // parse). Generate the note body as plain text — which weak models do reliably
     // — and save it deterministically.
-    if want_write && !wrote_note {
+    if want_write && !wrote_note && !state.latest_chat_wants_clear() {
         log::info!("[stream_chat] write intent but no write landed; harvesting plain-text content");
         if let Some(content) = harvest_note_content(&client, &url, &model, temperature, prompt).await
         {
@@ -312,7 +312,7 @@ async fn harvest_note_content(
     temperature: f32,
     user_prompt: &str,
 ) -> Option<String> {
-    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets, and meet any length they ask for. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
     let body = json!({
         "model": model,
         "messages": [

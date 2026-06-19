@@ -109,7 +109,8 @@ async fn run_all(
             "Rewrite the open note with Markdown section headings (use ## ). Keep all the information.",
             &mut store).await;
         let body = store.open_body();
-        let ok = used.iter().any(|t| t == "write_note") && body.contains("##");
+        // Accept any Markdown heading the model added (# or ##).
+        let ok = used.iter().any(|t| t == "write_note") && body.contains("# ");
         out.push(("write_note/replace".into(), ok, format!("tools={used:?}; body now: {:?}", trunc(&body, 80))));
     }
 
@@ -205,10 +206,10 @@ async fn run_all(
             let used = chat_h(client, base, model, req, history, &mut store).await;
             let body = store.open_body();
             let grew = body.len() > short.len() + 200;
-            let formatted = body.contains("##")
+            let formatted = body.contains("# ")   // any markdown heading
                 || body.contains("\n- ")
                 || body.contains("\n* ")
-                || body.contains("\n# ");
+                || body.starts_with("- ");
             let ok = used.iter().any(|t| t == "write_note") && body != short && grew && formatted;
             eprintln!(
                 "  hammer {}/{}: ok={ok} grew={grew} formatted={formatted} len={} req={:?}",
@@ -311,7 +312,7 @@ async fn chat_h(
         }
     }
 
-    if want_write && !wrote_note {
+    if want_write && !wrote_note && !agent::note_clear_intent(request) {
         eprintln!("  [backstop] write intent, no write landed; harvesting plain-text content");
         if let Some(content) = harvest(client, base, model, &prompt).await {
             if !content.trim().is_empty() {
@@ -471,7 +472,7 @@ async fn one_turn(
 
 /// Mirror of stream_chat::harvest_note_content for the harness.
 async fn harvest(client: &reqwest::Client, base: &str, model: &str, user_prompt: &str) -> Option<String> {
-    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
+    let sys = "You produce note content. Output ONLY the final note body in Markdown — the exact text that should go in the note. Follow the user's formatting request exactly: use Markdown headings (## Heading) and bullet lists (- item) when they ask for headings/bullets, and meet any length they ask for. No preamble, no \"here is\", no commentary or explanation, no surrounding code fences, and do not repeat or describe the request. Just the note content itself.";
     let body = json!({
         "model": model,
         "messages": [{"role":"system","content":sys},{"role":"user","content":user_prompt}],

@@ -193,10 +193,22 @@ pub fn plan_write(
     if snippet {
         match find_tolerant(current_body, find) {
             Some((start, end)) => {
+                let prefix = &current_body[..start];
+                let suffix = &current_body[end..];
+                // If `content` already contains the surrounding text (so splicing
+                // would duplicate it), the model actually sent the whole updated
+                // body, not a snippet replacement — treat it as a replace. Catches
+                // e.g. find:"blue", content:"The sky is green today." on a note of
+                // "The sky is blue today." (which would otherwise garble).
+                let absorbs = (!prefix.trim().is_empty() && content.starts_with(prefix))
+                    || (!suffix.trim().is_empty() && content.ends_with(suffix));
+                if absorbs {
+                    return Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace });
+                }
                 let mut body = String::with_capacity(current_body.len() + content.len());
-                body.push_str(&current_body[..start]);
+                body.push_str(prefix);
                 body.push_str(content);
-                body.push_str(&current_body[end..]);
+                body.push_str(suffix);
                 Ok(WritePlan { new_body: body, op: WriteOp::EditSnippet })
             }
             None => Err("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string()),
@@ -349,6 +361,21 @@ pub fn note_write_intent(message: &str) -> bool {
     }
 
     false
+}
+
+/// Does the user want to EMPTY/clear the note (rather than produce content)?
+/// Used to suppress the harvest backstop, which would otherwise generate text
+/// for a "clear the note" request and leave it non-empty.
+pub fn note_clear_intent(message: &str) -> bool {
+    let m = message.trim().to_lowercase();
+    const CLEAR: &[&str] = &[
+        "clear the note", "clear this note", "clear my note", "clear everything",
+        "empty the note", "empty this note", "make it empty", "make the note empty",
+        "wipe the note", "blank the note", "erase the note", "erase everything",
+        "delete everything", "remove everything", "delete the whole note",
+        "delete the entire note",
+    ];
+    CLEAR.iter().any(|p| m.contains(p))
 }
 
 #[derive(Clone)]
@@ -817,6 +844,31 @@ mod tests {
         let plan = plan_write("The sky is blue.", "green", "", "blue").unwrap();
         assert_eq!(plan.op, WriteOp::EditSnippet);
         assert_eq!(plan.new_body, "The sky is green.");
+    }
+
+    // Regression: LFM sends find:"blue" but the WHOLE updated sentence as content.
+    // Splicing would garble ("The sky is The sky is green today. today.") — detect
+    // the absorbed surrounding text and treat it as a replace.
+    #[test]
+    fn find_with_full_sentence_content_replaces() {
+        let plan =
+            plan_write("The sky is blue today.", "The sky is green today.", "edit", "blue").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "The sky is green today.");
+    }
+
+    #[test]
+    fn clear_intent_detection() {
+        assert!(note_clear_intent("clear the note completely — make it empty"));
+        assert!(note_clear_intent("empty the note"));
+        assert!(!note_clear_intent("expand this to 500 words with headings"));
+        assert!(!note_clear_intent("remove the second paragraph"));
+    }
+
+    #[test]
+    fn clean_note_text_strips_fences_and_markers() {
+        assert_eq!(clean_note_text("```markdown\n# Hi\nbody\n```"), "# Hi\nbody");
+        assert_eq!(clean_note_text("--- CURRENT NOTE ---\nreal body"), "real body");
     }
 
     #[test]
