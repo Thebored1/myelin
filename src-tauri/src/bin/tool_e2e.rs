@@ -551,7 +551,7 @@ async fn one_turn(
 
 /// Mirror of stream_chat::harvest_note_content for the harness.
 async fn harvest(client: &reqwest::Client, base: &str, model: &str, user_prompt: &str) -> Option<String> {
-    let sys = "You are writing the literal text of a note. Given the user's request and the current note, output the COMPLETE new note exactly as a reader should see it — the real subject content, fully written out. If it is an essay about a topic, write the full essay about that topic (expanded or edited per the request), keeping the same subject. Use Markdown headings (## Heading) and bullet lists (- item) when asked, and meet any requested length (write thorough, detailed prose). CRITICAL: never write meta-commentary or describe the task — do NOT output sentences like \"the note should be expanded\", \"the updated note now includes\", \"the key points to cover\", \"I will\", or \"here is\", and never refer to \"the note\" in the third person. Output ONLY the finished note body in Markdown — no preamble, no commentary, no code fences.";
+    let sys = "You are writing the literal text of a note — output exactly what the reader should see, never a description of the task. Given the current note and the user's request, produce the COMPLETE updated note on the SAME topic. When the request is to expand, lengthen, or add detail, the result MUST be substantially longer than the current note: write out new sentences, concrete examples, and (when helpful) ## headings and - bullets — do NOT merely repeat or restate the current text. CRITICAL: never write meta-commentary about the task — do NOT output sentences like \"the note should be expanded\", \"the updated note now includes\", \"the key points to cover\", \"I will\", and never refer to \"the note\" in the third person. Output ONLY the finished note body in Markdown — no preamble, no commentary, no code fences.";
     let body = json!({
         "model": model,
         "messages": [{"role":"system","content":sys},{"role":"user","content":user_prompt}],
@@ -633,17 +633,16 @@ async fn wait_health(client: &reqwest::Client, base: &str) -> bool {
 /// expanded…" instead of the expanded essay).
 fn is_meta(body: &str) -> bool {
     let b = body.to_lowercase();
+    // Targeted meta phrases (avoid generic ones like "here is the" that can
+    // appear in legitimate prose).
     [
         "the note should",
         "the updated note",
-        "this expansion",
+        "this expansion will",
         "key points to cover",
         "should be expanded",
-        "i will ",
-        "here is the",
-        "the note now",
-        "the current summary",
         "to enrich the original",
+        "the current summary gives",
     ]
     .iter()
     .any(|p| b.contains(p))
