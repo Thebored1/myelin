@@ -179,18 +179,6 @@ pub fn plan_write(
     // A targeted edit only when a `find` is given and the model did NOT
     // explicitly ask for a whole-body replace/append.
     let snippet = has_find && !explicit_replace && !is_append;
-    let is_delete = snippet && content.trim().is_empty();
-
-    // Reject content clearly meant for the chat rather than the note. A snippet
-    // delete legitimately has empty content, so skip the check in that case.
-    if !is_delete {
-        if looks_like_placeholder(content) {
-            return Err("Refused to save because write_note received placeholder text instead of the full final content. Call write_note again with the actual content.".to_string());
-        }
-        if looks_like_meta_status(content) {
-            return Err("Refused to save because write_note received a status/update sentence instead of the actual note body. Call write_note again with only the final content that should appear in the note.".to_string());
-        }
-    }
 
     if snippet {
         match find_tolerant(current_body, find) {
@@ -227,51 +215,6 @@ pub fn plan_write(
         // no find, or unspecified mode.
         Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace })
     }
-}
-
-fn looks_like_placeholder(content: &str) -> bool {
-    let normalized = content.trim().to_lowercase();
-    normalized.contains("[insert")
-        || normalized.contains("placeholder")
-        || normalized.contains("write the poem here")
-        || normalized.contains("add the poem here")
-}
-
-fn looks_like_meta_status(content: &str) -> bool {
-    let normalized = content.trim().to_lowercase();
-    if normalized.starts_with("chat history:") {
-        return true;
-    }
-    // Reject single-line sentences that describe the action rather than being the content.
-    let action_prefix = normalized.starts_with("i have appended ")
-        || normalized.starts_with("i have written ")
-        || normalized.starts_with("i have added ")
-        || normalized.starts_with("i've appended ")
-        || normalized.starts_with("i've written ")
-        || normalized.starts_with("i've added ")
-        || normalized.starts_with("i just appended ")
-        || normalized.starts_with("i just wrote ")
-        || normalized.starts_with("i appended ")
-        || normalized.starts_with("i wrote ")
-        || normalized.starts_with("here is the ")
-        || normalized.starts_with("here's the ")
-        || normalized.starts_with("i've written ")
-        || normalized.starts_with("the note has been ")
-        || normalized.starts_with("the note was ");
-    if action_prefix {
-        return true;
-    }
-    let mentions_note = normalized.contains("note \"")
-        || normalized.contains("in the note")
-        || normalized.contains("to your note")
-        || normalized.contains("to the note")
-        || normalized.contains("successfully");
-    let starts_like_status = normalized.starts_with("here is ")
-        || normalized.starts_with("i've written ")
-        || normalized.starts_with("the note ")
-        || normalized.starts_with("the new ");
-
-    !content.contains('\n') && mentions_note && starts_like_status
 }
 
 /// Word-boundary check: true if any of `words` (lowercase literals/phrases)
@@ -482,13 +425,6 @@ impl Tool for WriteNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if !self.state.latest_chat_allows_note_mutation() {
-            return Ok(
-                "Refused to write because the latest user message did not explicitly ask to modify a note."
-                    .to_string(),
-            );
-        }
-
         // Pass mode raw ("" when unspecified) so the planner can tell an explicit
         // "replace" from the default.
         let mode = args.mode.as_deref().unwrap_or("").to_string();
@@ -996,19 +932,6 @@ mod tests {
     fn find_not_present_is_refused_not_destructive() {
         let err = plan_write(NOTE, "x", "edit", "no such text here").unwrap_err();
         assert!(err.to_lowercase().contains("could not find"));
-    }
-
-    #[test]
-    fn placeholder_content_is_rejected() {
-        let err = plan_write(NOTE, "[insert essay here]", "replace", "").unwrap_err();
-        assert!(err.to_lowercase().contains("placeholder"));
-    }
-
-    #[test]
-    fn status_sentence_is_rejected() {
-        let err = plan_write(NOTE, "I have written the essay to your note", "replace", "")
-            .unwrap_err();
-        assert!(err.to_lowercase().contains("status"));
     }
 
     #[test]
