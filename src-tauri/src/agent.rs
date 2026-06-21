@@ -172,6 +172,11 @@ pub fn plan_write(
     mode: &str,
     find: &str,
 ) -> Result<WritePlan, String> {
+    // Some models echo the prompt's note-framing markers into the tool content
+    // (seen with Granite). Strip them so they never land in the saved note. This
+    // runs before the intent logic so the absorb-check can still clean an edit.
+    let content = strip_prompt_markers(content);
+    let content = content.as_str();
     let m = mode.trim().to_lowercase();
     let has_find = !find.trim().is_empty();
     let is_append = m == "append";
@@ -744,6 +749,16 @@ pub fn strip_meta_sentences(text: &str) -> String {
         .to_string()
 }
 
+/// Remove the prompt's note-framing markers that some models echo into content.
+/// Tolerant of the dash-count / spacing variants models produce (e.g. Granite
+/// emitted "--- END CURRENT NOTE --" with two trailing dashes).
+pub fn strip_prompt_markers(s: &str) -> String {
+    let cleaned = regex::Regex::new(r"(?i)-{2,}\s*(?:end\s+)?current note\s*-*")
+        .map(|re| re.replace_all(s, "").into_owned())
+        .unwrap_or_else(|_| s.to_string());
+    cleaned.trim().to_string()
+}
+
 /// Strip the wrappers a model tends to add around harvested note content:
 /// a leading ``` fence, echoed prompt markers, and meta-commentary sentences.
 /// Used by the harvest backstop.
@@ -758,9 +773,7 @@ pub fn clean_note_text(s: &str) -> String {
         }
         t = t.trim().to_string();
     }
-    for marker in ["--- CURRENT NOTE ---", "--- END CURRENT NOTE ---"] {
-        t = t.replace(marker, "");
-    }
+    t = strip_prompt_markers(&t);
     strip_meta_sentences(t.trim())
 }
 
@@ -831,6 +844,30 @@ mod tests {
         let plan = plan_write(NOTE, "brand new body", "replace", "").unwrap();
         assert_eq!(plan.op, WriteOp::Replace);
         assert_eq!(plan.new_body, "brand new body");
+    }
+
+    // Granite echoed the prompt's note-framing markers into a direct tool call;
+    // they must never reach the saved note.
+    #[test]
+    fn strips_echoed_prompt_markers_from_content() {
+        let plan = plan_write(
+            "The sky is blue today.",
+            "--- CURRENT NOTE ---\nThe sky is green today.\n--- END CURRENT NOTE ---",
+            "edit",
+            "blue",
+        )
+        .unwrap();
+        assert_eq!(plan.new_body, "The sky is green today.");
+        assert!(!plan.new_body.contains("CURRENT NOTE"));
+    }
+
+    #[test]
+    fn strips_malformed_marker_variants() {
+        // Models emit dash/spacing variants — all must be stripped.
+        assert_eq!(strip_prompt_markers("hi\n--- END CURRENT NOTE --"), "hi");
+        assert_eq!(strip_prompt_markers("---CURRENT NOTE---\nbody"), "body");
+        assert_eq!(strip_prompt_markers("body\n-- end current note ---"), "body");
+        assert_eq!(strip_prompt_markers("clean note"), "clean note");
     }
 
     #[test]
