@@ -36,11 +36,11 @@ const WEB_FETCH_LIMIT: usize = 12_000;
 
 /// System preamble for the note assistant. Kept as a single source of truth so
 /// the startup cache warm-up replays the exact same prefix the live agent uses.
-/// Intentionally minimal: just establishes the role and notes that the open
-/// note + tools are available. No behavioral instructions, so a model's native
-/// tool-use can be judged without prompt steering. Tool awareness comes from the
-/// function-call schema (`tool_specs`), passed separately on every request.
-pub const MYELIN_PREAMBLE: &str = "You are the assistant inside Myelin, a local notes app. The note currently open in the editor is provided in the user's message, and you have tools available to read, search, and edit notes.";
+/// Deliberately small: a role line plus the minimum tool guidance needed to keep
+/// a weak model from flooding the (memory-bounded) context with stray web/search
+/// calls or describing edits in chat instead of writing them. Tool schemas are
+/// still passed separately via `tool_specs` on every request.
+pub const MYELIN_PREAMBLE: &str = "You are the assistant inside Myelin, a local notes app. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call write_note with the full result. Don't just describe the change in chat — make it with the tool.\n- Use fetch_web_page only when the user gives a URL, and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.";
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
 /// order they are registered in [`build_myelin_agent`]. Used only by the startup

@@ -742,20 +742,25 @@ pub fn free_device_local_vram() -> Option<u64> {
     }
 }
 
-/// Largest context whose f16 KV cache fits in ~60% of available RAM (KV lives in
+/// Largest context whose f16 KV cache fits in ~75% of available RAM (KV lives in
 /// system RAM via --no-kv-offload), bounded by the model's trained context.
+/// The launch ladder degrades ctx on a failed start, so this can be optimistic;
+/// a too-conservative value here needlessly starves context (a 1B model on a
+/// machine momentarily low on free RAM was collapsing to ~5K tokens, which the
+/// note + tool schemas + any fetched page would then overflow). A 4096 floor
+/// keeps a usable window; the ladder still backs off if the allocation fails.
 fn ram_safe_ctx(requested: u32, gguf: Option<&crate::gguf::GgufInfo>) -> u32 {
     let kv_per_tok = match gguf.and_then(|g| g.kv_bytes_per_token()).filter(|&k| k > 0) {
         Some(k) => k,
         None => return requested, // unknown geometry → trust the request
     };
-    let budget = (available_ram_bytes() as f64 * 0.6) as u64;
+    let budget = (available_ram_bytes() as f64 * 0.75) as u64;
     let max_ctx = (budget / kv_per_tok).clamp(512, u32::MAX as u64) as u32;
     let model_max = gguf
         .and_then(|g| g.context_length)
         .map(|c| c.min(u32::MAX as u64) as u32)
         .unwrap_or(u32::MAX);
-    requested.min(max_ctx).min(model_max).max(512)
+    requested.min(max_ctx).min(model_max).max(4096)
 }
 
 /// One launch attempt's parameters.
