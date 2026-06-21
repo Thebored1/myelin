@@ -555,8 +555,8 @@ fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -
     roots
 }
 
-/// Normalize a user backend preference to "auto" | "cuda" | "vulkan" |
-/// "metal" | "cpu". Legacy "gpu" maps to "auto".
+/// Normalize a user backend preference to "auto" | "gpu" | "cuda" | "vulkan" |
+/// "metal" | "cpu". "gpu" means "prefer any GPU backend" (see `desired_backends`).
 fn normalize_preference(raw: Option<&str>) -> String {
     match raw.map(|p| p.trim().to_lowercase()).as_deref() {
         Some("cpu") => "cpu".into(),
@@ -577,6 +577,16 @@ fn desired_backends(preference: &str) -> Vec<GpuBackend> {
         "cuda" => vec![GpuBackend::Cuda, GpuBackend::Cpu],
         "vulkan" => vec![GpuBackend::Vulkan, GpuBackend::Cpu],
         "metal" => vec![GpuBackend::Metal, GpuBackend::Cpu],
+        // Generic "GPU": try every GPU backend in order (the matching subfolder
+        // only exists for installed backends, so absent ones are skipped) before
+        // CPU. Does NOT depend on detect_nvidia(), which can fail inside the GUI
+        // process and silently strand the model on CPU.
+        "gpu" => vec![
+            GpuBackend::Cuda,
+            GpuBackend::Vulkan,
+            GpuBackend::Metal,
+            GpuBackend::Cpu,
+        ],
         // "auto": best for the detected hardware.
         _ => {
             if cfg!(target_os = "macos") {
