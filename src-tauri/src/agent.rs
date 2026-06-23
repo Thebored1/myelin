@@ -285,6 +285,7 @@ pub fn note_write_intent(message: &str) -> bool {
         "improve", "polish", "edit", "revise", "update", "change", "modify",
         "shorten", "condense", "trim", "expand", "lengthen", "elaborate",
         "reorder", "rearrange", "remove", "delete", "erase", "replace", "swap",
+        "clear", "empty", "wipe", "blank", "scrap",
         "bold", "italic", "italicize", "capitalize", "capitalise", "continue",
         "extend", "finish", "translate", "rephrase", "reword",
         // Transform phrasings that don't use a bare edit verb.

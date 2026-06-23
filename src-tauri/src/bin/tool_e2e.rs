@@ -380,16 +380,12 @@ async fn chat_h(
         json!({"role": "system", "content": agent::MYELIN_PREAMBLE}),
         json!({"role": "user", "content": prompt}),
     ];
-    let tools = agent::tool_specs();
+    // Per-message tool gating — exactly what the app does via select_tools.
+    let tools = agent::select_tools(request, true);
     let mut used = Vec::new();
 
-    // Harvest backstop, mirroring stream_chat: if the user asked to change the
-    // note but no write lands, generate the body as plain text and save it.
-    let want_write = agent::note_write_intent(request);
-    let mut wrote_note = false;
-
     for _ in 0..5 {
-        let (text, calls) = match one_turn(client, base, model, &messages, &tools, false).await {
+        let (text, calls) = match one_turn(client, base, model, &messages, &tools).await {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("  turn error: {e}");
@@ -411,30 +407,8 @@ async fn chat_h(
         for t in &calls {
             used.push(t.name.clone());
             let result = exec_tool(client, store, &t.name, &t.args).await;
-            if t.name == "write_note" && result.starts_with("Note successfully updated") {
-                wrote_note = true;
-            }
             eprintln!("  [{}] args={} -> {}", t.name, trunc(&t.args, 120), trunc(&result, 100));
             messages.push(json!({"role": "tool", "tool_call_id": t.id, "content": result}));
-        }
-    }
-
-    if agent::note_clear_intent(request) {
-        // Clear/delete must end empty regardless of what the model did (mirrors
-        // stream_chat: some models call write_note with content instead of clearing).
-        let args = json!({ "content": "", "mode": "replace" }).to_string();
-        let result = exec_tool(client, store, "write_note", &args).await;
-        used.push("write_note".into());
-        eprintln!("  [clear] forced empty -> {}", trunc(&result, 80));
-    } else if want_write && !wrote_note {
-        if let Some(content) = harvest(client, base, model, &prompt).await {
-            eprintln!("  [backstop] write intent, no write landed; harvested plain-text content");
-            if !content.trim().is_empty() {
-                let args = json!({ "content": content, "mode": "replace" }).to_string();
-                let result = exec_tool(client, store, "write_note", &args).await;
-                used.push("write_note".into());
-                eprintln!("  [harvest write] -> {}", trunc(&result, 80));
-            }
         }
     }
     used
@@ -498,23 +472,22 @@ async fn exec_tool(client: &reqwest::Client, store: &mut Store, name: &str, args
     }
 }
 
-/// Stream one completion; collect assistant text + assembled tool calls. When
-/// `force_write` is set, require the model to emit `write_note` (the backstop
-/// corrective turn — mirrors stream_chat).
+/// Stream one completion; collect assistant text + assembled tool calls. Omits
+/// the tools/tool_choice when none are gated in, mirroring run_chat.
 async fn one_turn(
     client: &reqwest::Client,
     base: &str,
     model: &str,
     messages: &[Value],
     tools: &[Value],
-    force_write: bool,
 ) -> Result<(String, Vec<ToolCall>), String> {
     let mut body = json!({
-        "model": model, "messages": messages, "tools": tools,
+        "model": model, "messages": messages,
         "temperature": 0.2, "stream": true
     });
-    if force_write {
-        body["tool_choice"] = json!({ "type": "function", "function": { "name": "write_note" } });
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+        body["tool_choice"] = json!("auto");
     }
     let resp = client
         .post(format!("{base}/v1/chat/completions"))
@@ -582,49 +555,6 @@ async fn one_turn(
     }
     calls.retain(|c| !c.name.is_empty());
     Ok((text, calls))
-}
-
-/// Mirror of stream_chat::harvest_note_content for the harness.
-async fn harvest(client: &reqwest::Client, base: &str, model: &str, user_prompt: &str) -> Option<String> {
-    let sys = "You are writing the literal text of a note. Output ONLY the note body — the real content a reader sees — about the SUBJECT OF THE CURRENT NOTE the user gives you, and nothing else. Do NOT switch topics or invent a different subject; stay strictly on the note's own topic. When asked to expand or lengthen, make it substantially longer with real sentences, concrete examples, and (when helpful) ## headings and - bullets — never just repeat the old text. NEVER write meta-commentary about the task — no sentences like 'the note should be expanded', 'the updated note now includes', 'the key points to cover', or 'I will'; write the actual subject content directly. Output Markdown only — no preamble, no commentary, no code fences.";
-    let body = json!({
-        "model": model,
-        "messages": [{"role":"system","content":sys},{"role":"user","content":user_prompt}],
-        "temperature": 0.2, "stream": true
-    });
-    let resp = client.post(format!("{base}/v1/chat/completions")).json(&body).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut text = String::new();
-    let mut done = false;
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.ok()?;
-        buf.extend_from_slice(&bytes);
-        while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=nl).collect();
-            let line = String::from_utf8_lossy(&line);
-            let data = match line.trim().strip_prefix("data:") {
-                Some(d) => d.trim().to_string(),
-                None => continue,
-            };
-            if data == "[DONE]" {
-                done = true;
-                break;
-            }
-            if let Ok(j) = serde_json::from_str::<Value>(&data) {
-                if let Some(t) = j["choices"][0]["delta"]["content"].as_str() {
-                    text.push_str(t);
-                }
-            }
-        }
-        if done {
-            break;
-        }
-    }
-    Some(agent::clean_note_text(&text))
 }
 
 fn start_server(bin: &str, model: &str, port: u16) -> std::io::Result<Child> {
