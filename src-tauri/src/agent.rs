@@ -40,7 +40,7 @@ const WEB_FETCH_LIMIT: usize = 12_000;
 /// a weak model from flooding the (memory-bounded) context with stray web/search
 /// calls or describing edits in chat instead of writing them. Tool schemas are
 /// still passed separately via `tool_specs` on every request.
-pub const MYELIN_PREAMBLE: &str = "You are the assistant inside Myelin, a local notes app. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call write_note with the full result. Don't just describe the change in chat — make it with the tool.\n- Use fetch_web_page only when the user gives a URL, and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.";
+pub const MYELIN_PREAMBLE: &str = "You are the assistant inside Myelin, a local notes app. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call write_note with the full result. Don't just describe the change in chat — make it with the tool.\n- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.";
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
 /// order they are registered in [`build_myelin_agent`]. Used only by the startup
@@ -362,14 +362,26 @@ pub fn wants_other_notes(message: &str) -> bool {
         || (contains_any_word(&m, &["search", "find"]) && m.contains("notes"))
 }
 
-/// Does the message ask to fetch a specific web page (URL present, or an
-/// explicit "fetch/open/visit the page/url")?
+/// TLD allowlist used to spot a BARE domain (example.com, speediq.ai) in a
+/// message while keeping real file names out (notes.txt, model.gguf, poem.md are
+/// NOT web targets). Ported from the ggufplay gating experiment.
+fn has_web_domain(m: &str) -> bool {
+    const WEB_TLD: &str =
+        "com|org|net|io|ai|dev|co|app|gov|edu|me|xyz|info|biz|us|uk|ca|de|fr|in|cloud|tech|news|gg|so";
+    regex::Regex::new(&format!(r"(?i)\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:{WEB_TLD})\b"))
+        .map(|re| re.is_match(m))
+        .unwrap_or(false)
+}
+
+/// Does the message ask to fetch a specific web page — a full URL, a bare
+/// domain, or an explicit "fetch/open/visit the page"?
 pub fn wants_fetch(message: &str) -> bool {
     let m = message.to_lowercase();
     m.contains("http://")
         || m.contains("https://")
         || m.contains("www.")
-        || (contains_any_word(&m, &["fetch", "download", "open", "visit", "get"])
+        || has_web_domain(&m)
+        || (contains_any_word(&m, &["fetch", "download", "open", "visit", "go to", "load", "scrape"])
             && contains_any_word(&m, &["page", "url", "site", "website", "link"]))
 }
 
@@ -917,6 +929,21 @@ mod tests {
         assert!(is_small_talk("thanks so much"));
         assert!(!is_small_talk("write a note about cats"));
         assert!(!is_small_talk("what is the capital of france and why")); // > 4 words
+    }
+
+    #[test]
+    fn fetch_gating_bare_domains_not_filenames() {
+        // bare domain (no scheme) → fetch
+        assert!(wants_fetch("summarize example.com"));
+        assert!(wants_fetch("what's on speediq.ai"));
+        assert!(wants_fetch("fetch https://x.org/page"));
+        // file names are NOT web targets
+        assert!(!wants_fetch("fix the typo in notes.md"));
+        assert!(!wants_fetch("rename model.gguf"));
+        assert!(!wants_fetch("just chatting about cats"));
+        // and via select_tools: "summarize example.com" → fetch (not a write/clear)
+        let t = select_tools("summarize example.com", true);
+        assert!(t.iter().any(|x| x["function"]["name"] == "fetch_web_page"));
     }
 
     #[test]
