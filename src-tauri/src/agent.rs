@@ -40,7 +40,7 @@ const WEB_FETCH_LIMIT: usize = 12_000;
 /// a weak model from flooding the (memory-bounded) context with stray web/search
 /// calls or describing edits in chat instead of writing them. Tool schemas are
 /// still passed separately via `tool_specs` on every request.
-pub const MYELIN_PREAMBLE: &str = "You are the assistant inside Myelin, a local notes app. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call write_note with the full result. Don't just describe the change in chat — make it with the tool.\n- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.";
+pub const MYELIN_PREAMBLE: &str = "You are the assistant inside Myelin, a local notes app. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call write_note with the full result. Don't just describe the change in chat — make it with the tool.\n- Write real Markdown. A heading is a line that starts with \"# \" (hash + space) for H1, \"## \" for H2 — an H1 is a #-prefixed line, never just bold text. Use \"**text**\" for bold and \"- \" for bullets. Do not copy the \"--- CURRENT NOTE ---\" markers into the note.\n- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.";
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
 /// order they are registered in [`build_myelin_agent`]. Used only by the startup
@@ -757,9 +757,15 @@ pub fn build_myelin_agent(
 /// Tolerant of the dash-count / spacing variants models produce (e.g. Granite
 /// emitted "--- END CURRENT NOTE --" with two trailing dashes).
 pub fn strip_prompt_markers(s: &str) -> String {
-    let cleaned = regex::Regex::new(r"(?i)-{2,}\s*(?:end\s+)?current note\s*-*")
+    let mut cleaned = regex::Regex::new(r"(?i)-{2,}\s*(?:end\s+)?current note\s*-*")
         .map(|re| re.replace_all(s, "").into_owned())
         .unwrap_or_else(|_| s.to_string());
+    // The model sometimes bleeds the "--- CURRENT NOTE ---" delimiter style into
+    // its output as a leading "--- Title" — dashes + text on one line, which is
+    // not a real Markdown rule (an HR is dashes alone). Drop that leading run.
+    if let Ok(re) = regex::Regex::new(r"^\s*-{2,}[ \t]+(?=\S)") {
+        cleaned = re.replace(&cleaned, "").into_owned();
+    }
     cleaned.trim().to_string()
 }
 
@@ -854,6 +860,10 @@ mod tests {
         assert_eq!(strip_prompt_markers("---CURRENT NOTE---\nbody"), "body");
         assert_eq!(strip_prompt_markers("body\n-- end current note ---"), "body");
         assert_eq!(strip_prompt_markers("clean note"), "clean note");
+        // Bled "--- Title" delimiter (dashes + text on one line) is stripped...
+        assert_eq!(strip_prompt_markers("--- Example Domain"), "Example Domain");
+        // ...but a real horizontal rule (dashes alone on a line) is preserved.
+        assert_eq!(strip_prompt_markers("# Title\n\n---\nmore"), "# Title\n\n---\nmore");
     }
 
     #[test]
