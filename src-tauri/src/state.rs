@@ -251,30 +251,6 @@ impl AppState {
             .unwrap_or(true)
     }
 
-    /// Precise "the user asked to write/edit the note" signal, used by the
-    /// streaming loop to decide whether to force a `write_note` call when a weak
-    /// model answered in chat without calling the tool. Unlike the guard above,
-    /// a missing question means "no write intent" (we never force blindly).
-    pub fn latest_chat_wants_note_write(&self) -> bool {
-        self.inner
-            .latest_chat_question
-            .lock()
-            .as_deref()
-            .map(crate::agent::note_write_intent)
-            .unwrap_or(false)
-    }
-
-    /// The user asked to EMPTY the note. Used to suppress the harvest backstop
-    /// (which would otherwise generate text instead of clearing).
-    pub fn latest_chat_wants_clear(&self) -> bool {
-        self.inner
-            .latest_chat_question
-            .lock()
-            .as_deref()
-            .map(crate::agent::note_clear_intent)
-            .unwrap_or(false)
-    }
-
     pub fn is_tool_approval_required(&self) -> bool {
         self.inner.require_tool_approval.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -1042,15 +1018,19 @@ impl AppState {
             let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
             self.ensure_llama_server(&config).await?;
 
+            // Per-message tool gating: hand the model ONLY the tools this message
+            // warrants so it can't misfire on one it was never given.
+            let tools = crate::agent::select_tools(&question, true);
+
             // Stream directly against llama-server (not through rig) so the note
-            // content can be surfaced token-by-token as it is generated — rig
-            // buffers tool-call arguments until complete, which makes real
-            // streaming impossible. See `stream_chat`.
+            // content can be surfaced token-by-token as it is generated. See
+            // `stream_chat`.
             crate::stream_chat::run_chat(
                 self,
                 &config,
                 crate::agent::MYELIN_PREAMBLE,
                 &prompt,
+                tools,
                 &request_id,
             )
             .await?;

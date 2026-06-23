@@ -37,13 +37,13 @@ pub async fn run_chat(
     config: &ResolvedLlamaConfig,
     preamble: &str,
     prompt: &str,
+    tools: Vec<Value>,
     request_id: &str,
 ) -> Result<()> {
     let url = format!("{}/v1/chat/completions", config.base_url());
     let model = config.model_name();
     let temperature = config.temperature;
     let max_turns = (config.max_turns.max(1)) as usize;
-    let tools = crate::agent::tool_specs();
     let note_id = state.current_note_id();
 
     let mut messages: Vec<Value> = vec![
@@ -54,13 +54,18 @@ pub async fn run_chat(
     let client = reqwest::Client::new();
 
     for _turn in 0..max_turns {
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "messages": messages,
-            "tools": tools,
             "temperature": temperature,
             "stream": true,
         });
+        // Per-message tool gating: only offer the tools this message warrants
+        // (computed by agent::select_tools). With none, the model just replies.
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+            body["tool_choice"] = json!("auto");
+        }
 
         let resp = client
             .post(&url)
@@ -222,8 +227,7 @@ pub async fn run_chat(
             log::info!("[stream_chat] assistant text preview: {preview}");
         }
 
-        // No tool calls → the streamed text is the final answer for this turn.
-        // The harvest backstop after the loop handles a stranded note-write.
+        // No tool calls → the streamed text is the final answer.
         let real_calls: Vec<&ToolAccum> =
             tool_calls.iter().filter(|t| !t.name.is_empty()).collect();
         if real_calls.is_empty() {

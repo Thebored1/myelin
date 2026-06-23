@@ -313,26 +313,96 @@ pub fn note_write_intent(message: &str) -> bool {
     false
 }
 
-/// Does the user want to EMPTY/clear the note (rather than produce content)?
-/// Used to suppress the harvest backstop, which would otherwise generate text
-/// for a "clear the note" request and leave it non-empty.
-pub fn note_clear_intent(message: &str) -> bool {
-    let m = message.trim().to_lowercase();
-    const CLEAR: &[&str] = &[
-        "clear the note", "clear this note", "clear my note", "clear everything",
-        "clear all", "clear the content", "clear all content",
-        "empty the note", "empty this note", "empty my note", "make it empty",
-        "make the note empty", "wipe the note", "blank the note",
-        "erase the note", "erase everything", "erase all",
-        "delete everything", "remove everything",
-        "delete this note", "delete the note", "delete my note",
-        "delete the whole note", "delete the entire note",
-        "remove all content", "remove all the content", "remove all of the content",
-        "delete all content", "delete all the content", "delete the content",
-        "remove the content", "remove all text", "delete all text",
-        "remove all the text", "delete all the text",
-    ];
-    CLEAR.iter().any(|p| m.contains(p))
+/// Pure greeting / acknowledgement vocabulary. If the whole message (<=4 words)
+/// is made of these, it's small talk → offer NO tools so the model can't
+/// reflexively call one. (Pattern borrowed from the ggufplay experiment.)
+const SMALL_TALK: &[&str] = &[
+    "hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "gg", "wsg", "thanks",
+    "thank", "you", "thankyou", "thx", "ty", "cheers", "ok", "okay", "k", "kk",
+    "cool", "nice", "great", "awesome", "perfect", "got", "it", "gotcha",
+    "sounds", "good", "sure", "yep", "yeah", "yup", "yes", "no", "nope", "lol",
+    "haha", "hah", "np", "problem", "welcome", "morning", "afternoon", "evening",
+    "night", "so", "much", "please", "mate", "man", "bro", "how", "are", "whats",
+    "up", "doing", "going",
+];
+
+pub fn is_small_talk(message: &str) -> bool {
+    let words: Vec<String> = message
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    if words.is_empty() {
+        return true;
+    }
+    if words.len() > 4 {
+        return false;
+    }
+    words.iter().all(|w| SMALL_TALK.contains(&w.as_str()))
+}
+
+/// Does the message refer to OTHER notes in the workspace (search/read), as
+/// opposed to the open note whose content is already in the prompt?
+pub fn wants_other_notes(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("other note")
+        || m.contains("my notes")
+        || m.contains("my other note")
+        || m.contains("search my note")
+        || m.contains("search note")
+        || m.contains("find a note")
+        || m.contains("find the note")
+        || m.contains("another note")
+        || m.contains("which note")
+        || (contains_any_word(&m, &["search", "find", "lookup", "look up"])
+            && m.contains("note")
+            && !m.contains("the note")
+            && !m.contains("this note")
+            && !m.contains("the open note"))
+}
+
+/// Does the message ask to fetch a specific web page (URL present, or an
+/// explicit "fetch/open/visit the page/url")?
+pub fn wants_fetch(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("http://")
+        || m.contains("https://")
+        || m.contains("www.")
+        || (contains_any_word(&m, &["fetch", "download", "open", "visit", "get"])
+            && contains_any_word(&m, &["page", "url", "site", "website", "link"]))
+}
+
+/// Per-message tool gating: hand the model ONLY the tools its message warrants,
+/// so a small model can't misfire on a tool it was never given. write_note is
+/// the primary action (the open note is the workspace); search_notes/read_note
+/// and fetch_web_page are opt-in by intent; small talk gets nothing.
+pub fn select_tools(message: &str, has_open_note: bool) -> Vec<Value> {
+    if is_small_talk(message) {
+        return Vec::new();
+    }
+    let mut names: Vec<&str> = Vec::new();
+    if has_open_note && note_write_intent(message) {
+        names.push("write_note");
+    }
+    if wants_other_notes(message) {
+        names.push("search_notes");
+        names.push("read_note");
+    }
+    if wants_fetch(message) {
+        names.push("fetch_web_page");
+    }
+    tool_specs()
+        .into_iter()
+        .filter(|t| {
+            t["function"]["name"]
+                .as_str()
+                .map(|n| names.contains(&n))
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -673,82 +743,6 @@ pub fn build_myelin_agent(
         .build()
 }
 
-/// Meta-commentary phrases that describe the task instead of being note content.
-/// Sentences containing these are stripped from harvested content.
-const META_PHRASES: &[&str] = &[
-    "the note should",
-    "this note should",
-    "the updated note",
-    "the note now",
-    "should be expanded",
-    "key points to cover",
-    "key points to include",
-    "to enrich the original",
-    "the current summary",
-    "this expansion",
-    "i will ",
-    "i'll ",
-    "here is the expanded",
-    "here's the expanded",
-    "expand the note",
-    "expanding the note",
-    "make the note longer",
-    "the note has been",
-    "this updated version",
-];
-
-/// Split text into rough sentences (on . ! ? followed by whitespace/EOL).
-fn split_sentences(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        cur.push(c);
-        if matches!(c, '.' | '!' | '?') && chars.peek().map_or(true, |n| n.is_whitespace()) {
-            let t = cur.trim();
-            if !t.is_empty() {
-                out.push(t.to_string());
-            }
-            cur.clear();
-        }
-    }
-    let t = cur.trim();
-    if !t.is_empty() {
-        out.push(t.to_string());
-    }
-    out
-}
-
-/// Drop sentences that are meta-commentary about the task, keeping the real
-/// on-topic content and markdown structure (processed line by line so headings
-/// and bullets survive). Fixes the "the note should be expanded…" text leaking
-/// into the saved note.
-pub fn strip_meta_sentences(text: &str) -> String {
-    text.lines()
-        .filter_map(|line| {
-            if line.trim().is_empty() {
-                return Some(String::new());
-            }
-            let kept: Vec<String> = split_sentences(line)
-                .into_iter()
-                .filter(|s| {
-                    let l = s.to_lowercase();
-                    !META_PHRASES.iter().any(|m| l.contains(m))
-                })
-                .collect();
-            let joined = kept.join(" ").trim().to_string();
-            if joined.is_empty() {
-                None
-            } else {
-                Some(joined)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
-}
-
 /// Remove the prompt's note-framing markers that some models echo into content.
 /// Tolerant of the dash-count / spacing variants models produce (e.g. Granite
 /// emitted "--- END CURRENT NOTE --" with two trailing dashes).
@@ -757,24 +751,6 @@ pub fn strip_prompt_markers(s: &str) -> String {
         .map(|re| re.replace_all(s, "").into_owned())
         .unwrap_or_else(|_| s.to_string());
     cleaned.trim().to_string()
-}
-
-/// Strip the wrappers a model tends to add around harvested note content:
-/// a leading ``` fence, echoed prompt markers, and meta-commentary sentences.
-/// Used by the harvest backstop.
-pub fn clean_note_text(s: &str) -> String {
-    let mut t = s.trim().to_string();
-    if t.starts_with("```") {
-        let rest = t.strip_prefix("```").unwrap_or("");
-        let rest = rest.splitn(2, '\n').nth(1).unwrap_or("");
-        t = rest.to_string();
-        if let Some(idx) = t.rfind("```") {
-            t = t[..idx].to_string();
-        }
-        t = t.trim().to_string();
-    }
-    t = strip_prompt_markers(&t);
-    strip_meta_sentences(t.trim())
 }
 
 pub fn normalize_web_url(raw: &str) -> Result<String, String> {
@@ -917,39 +893,32 @@ mod tests {
     }
 
     #[test]
-    fn clear_intent_detection() {
-        assert!(note_clear_intent("clear the note completely — make it empty"));
-        assert!(note_clear_intent("empty the note"));
-        // The exact phrasings from New note 14's chat that previously got
-        // harvested (content generated) instead of cleared.
-        assert!(note_clear_intent("remove all content from the note"));
-        assert!(note_clear_intent("delete this note"));
-        assert!(!note_clear_intent("expand this to 500 words with headings"));
-        assert!(!note_clear_intent("remove the second paragraph")); // a partial edit, not a clear
+    fn tool_gating_selects_by_intent() {
+        // small talk → no tools
+        assert!(select_tools("gg", true).is_empty());
+        assert!(select_tools("thanks!", true).is_empty());
+        // write intent → write_note only
+        let w = select_tools("expand this to 500 words", true);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0]["function"]["name"], "write_note");
+        // pure question → no tools (model answers in chat)
+        assert!(select_tools("what is the capital of france?", true).is_empty());
+        // other-notes intent → search + read
+        let s = select_tools("search my other notes for cats", true);
+        let names: Vec<&str> = s.iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"search_notes"));
+        assert!(names.contains(&"read_note"));
+        // url → fetch
+        let f = select_tools("fetch https://example.com", true);
+        assert!(f.iter().any(|t| t["function"]["name"] == "fetch_web_page"));
     }
 
     #[test]
-    fn clean_note_text_strips_fences_and_markers() {
-        assert_eq!(clean_note_text("```markdown\n# Hi\nbody\n```"), "# Hi\nbody");
-        assert_eq!(clean_note_text("--- CURRENT NOTE ---\nreal body"), "real body");
-    }
-
-    #[test]
-    fn strips_meta_sentences_keeps_real_content() {
-        // On-topic content with a meta sentence mixed in (the leak we saw).
-        let input = "The Mona Lisa is a portrait by Leonardo da Vinci. The note should be expanded to add more detail. It hangs in the Louvre in Paris.";
-        let out = strip_meta_sentences(input);
-        assert!(out.contains("Mona Lisa"));
-        assert!(out.contains("Louvre"));
-        assert!(!out.to_lowercase().contains("the note should"));
-    }
-
-    #[test]
-    fn strip_meta_keeps_headings_and_bullets() {
-        let input = "## Mona Lisa\n- Painted by Leonardo\n- Hangs in the Louvre";
-        let out = strip_meta_sentences(input);
-        assert!(out.contains("## Mona Lisa"));
-        assert!(out.contains("- Painted by Leonardo"));
+    fn small_talk_detection() {
+        assert!(is_small_talk("hi"));
+        assert!(is_small_talk("thanks so much"));
+        assert!(!is_small_talk("write a note about cats"));
+        assert!(!is_small_talk("what is the capital of france and why")); // > 4 words
     }
 
     #[test]
