@@ -53,7 +53,7 @@ libc = "0.2"
 
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
-rev = "master"
+branch = "master"
 
 [package.metadata.vcpkg.dependencies]
 fontconfig = ""

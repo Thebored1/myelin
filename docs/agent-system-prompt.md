@@ -80,14 +80,25 @@ Instead of sending every tool every turn and steering with the prompt, we hand
 the model **only the tools its message warrants** — a small model can't misfire
 on a tool it was never given. (Pattern proven in the `ggufplay` experiment.)
 
-`agent::select_tools(message, has_open_note)`:
+`agent::select_tools(message, has_open_note, edit_thread)`:
 - **small talk** (`is_small_talk`, ≤4 ack words) → **no tools** (just chat).
 - **write intent** (`note_write_intent` — edit verbs / transform phrasings /
   affirmations / note-targeted soft verbs) → **`write_note`**.
 - **other-notes intent** (`wants_other_notes`) → **`search_notes` + `read_note`**.
-- **fetch intent** (`wants_fetch` — a URL, or "fetch/open the page") →
-  **`fetch_web_page`**.
+- **fetch intent** (`wants_fetch` — a URL, a **bare domain** via a TLD allowlist
+  like `example.com` while excluding file names like `notes.md`, or "fetch/open
+  the page") → **`fetch_web_page`**.
 - a pure question with no action intent → **no tools** → the model answers in chat.
+
+**Edit-thread context (the "New note 18" fix).** Per-message gating looks only at
+the latest message, so a verb-less follow-up correction ("no thats wrong", a
+typo'd "formate it") would lose `write_note` and the model could only chat a fake
+"done". `in_edit_thread(recent_user_messages)` is true when any of the last few
+user turns carried write intent; `ask_ai_stream` derives it from the note's chat
+history and passes `edit_thread`. When set, `write_note` stays available even
+without a fresh verb, so corrections keep editing the note. (Granite-4.0-h-1b's
+unreliable `#`-heading syntax on terse corrections is a separate **model ceiling**,
+not a gating gap — a preamble nudge didn't move it, so the preamble stays minimal.)
 
 `run_chat` omits the `tools`/`tool_choice` fields entirely when the gated list is
 empty, so the model simply replies.
