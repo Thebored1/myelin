@@ -14,6 +14,7 @@
 		ChatMessage
 	} from '$lib/types';
 	import { onMount, onDestroy, tick } from 'svelte';
+	import { noteOpened, noteClosed } from '$lib/llamaWarm';
 	import { showSidebarToggle, noteSidebarOpen } from '$lib/stores';
 	import Vditor from 'vditor';
 	import 'vditor/dist/index.css';
@@ -1731,6 +1732,9 @@
 	}
 
 	onMount(() => {
+		// Warm llama-server for as long as a note is open (stopped in onDestroy).
+		noteOpened();
+
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
@@ -1907,6 +1911,8 @@
 	});
 
 	onDestroy(() => {
+		// Note view closing — stop llama-server (after a short grace) to free RAM/VRAM.
+		noteClosed();
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
 		if (vditorInstance) vditorInstance.destroy();

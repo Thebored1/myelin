@@ -246,6 +246,19 @@ async fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String>
     Ok(state.snapshot())
 }
 
+/// Warm the llama-server when a note is opened so the first chat is instant.
+#[tauri::command]
+async fn warm_llama_server(state: State<'_, AppState>) -> Result<(), String> {
+    state.warm_llama_server().await.map_err(|error| error.to_string())
+}
+
+/// Stop the llama-server when the open note is closed, freeing RAM/VRAM.
+#[tauri::command]
+async fn stop_llama_server(state: State<'_, AppState>) -> Result<(), String> {
+    state.stop_llama_server().await;
+    Ok(())
+}
+
 #[tauri::command]
 async fn extract_from_paste(
     _state: State<'_, AppState>,
@@ -391,6 +404,8 @@ pub fn run() {
             get_provider_status,
             rebuild_index,
             get_snapshot,
+            warm_llama_server,
+            stop_llama_server,
             get_all_note_documents,
             extract_from_paste,
             read_pdf_binary,

@@ -1394,6 +1394,26 @@ impl AppState {
             .map_err(|error| anyhow!(describe_prompt_error(&error)))
     }
 
+    /// Start (or keep) the llama-server warm for the note now open in the editor,
+    /// so the first message is instant and subsequent ones reuse the warm slot.
+    /// Called on note open. Best-effort: a failure just means the first chat pays
+    /// the cold start it already handled before.
+    pub async fn warm_llama_server(&self) -> Result<()> {
+        let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+        self.ensure_llama_server(&config).await
+    }
+
+    /// Stop the llama-server, releasing its RAM/VRAM. Called when the open note is
+    /// closed — with no note in the editor there is nothing to infer for. The
+    /// next note open warms it again. Idempotent.
+    pub async fn stop_llama_server(&self) {
+        let mut guard = self.inner.llama_server.lock().await;
+        if let Some(mut server) = guard.take() {
+            llama_server::stop_server(&mut server).await;
+            log::info!("llama-server stopped (note closed)");
+        }
+    }
+
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
         let mut guard = self.inner.llama_server.lock().await;
 
