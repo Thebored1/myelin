@@ -237,18 +237,10 @@ fn contains_any_word(haystack: &str, words: &[&str]) -> bool {
 }
 
 /// Heuristic: does this user message ask to CREATE or MODIFY the open note (as
-/// opposed to just chatting / asking a question)?
-///
-/// In Myelin the chat is a note-assistant sidebar, so virtually every edit verb
-/// refers to the open note. We use this in two places:
-///   - as a guard: `write_note` refuses when the latest message did not ask for
-///     a note change (stops a weak model from clobbering the note on a Q&A turn);
-///   - as a backstop trigger: when a turn produces chat text but NO tool call and
-///     this returns true, `stream_chat` forces a `write_note` call so the content
-///     lands in the note instead of the chat — the exact failure a 1.2B model hits.
-///
-/// Pure and unit-tested; intentionally conservative so the forced-write backstop
-/// never fires on a plain question.
+/// opposed to just chatting / asking a question)? Used by `select_tools` to
+/// decide whether to offer `write_note` this turn. In Myelin the chat is a
+/// note-assistant sidebar, so virtually every edit verb refers to the open note.
+/// Pure and unit-tested.
 pub fn note_write_intent(message: &str) -> bool {
     let m = message.trim().to_lowercase();
     if m.is_empty() {
