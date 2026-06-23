@@ -333,60 +333,57 @@ async fn run_all(
         ));
     }
 
-    // ---- HAMMER: follow-up CORRECTION in an active edit thread (the "New
-    // note 18" bug). After the note was written, complaint-style corrections
-    // with no imperative verb ("you did not format it", "no, h1 needs a # tag")
-    // produced NO write_note call. This test ATTRIBUTES the cause: run each
-    // correction through (1) the app's real per-message gating and (2) the same
-    // turn with write_note forced present. If the model lands a `# ` heading
-    // when the tool IS present but gating rarely offered it, the gating — not
-    // the model — is dropping the correction. ----
+    // ---- Gating fix (the "New note 18" bug): verb-less follow-up corrections
+    // in an ACTIVE edit thread must still get write_note. Before the fix,
+    // per-message gating stripped the tool on "no, that's wrong" / a typo'd
+    // "formate it", so the model could only chat a fake "done". Checks the
+    // gating logic deterministically (cold vs in-thread), then confirms one
+    // end-to-end round drives a real write_note call. (Granite's weak `#`
+    // heading syntax is a separate, documented model ceiling — not this.) ----
     {
-        let body0 = "**Example Domain**\n\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.";
-        let history = "User: write the example.com content on the note with proper formatting\nAssistant: Done — I've written the Example Domain content to the note.";
-        let corrections = [
-            "no h1 has a # tag as well you are supposed to be writing in md format",
-            "you did not format the title properly",
-            "the title should be a proper markdown heading not just bold",
+        let verbless = [
+            "no thats wrong",
+            "you didnt do it right",
+            "still not what i wanted",
+            "nope try again",
         ];
-        let write_tools = agent::select_tools("rewrite the note", true); // = [write_note]
-        let n = corrections.len();
-        let mut gated_offered = 0; // real gating: was write_note even offered?
-        let mut gated_h1 = 0; // real gating: tool ran AND produced a `# ` heading
-        let mut forced_h1 = 0; // write_note forced in: tool ran AND produced `# `
-        for req in &corrections {
-            let offered = agent::select_tools(req, true)
-                .iter()
-                .any(|t| t["function"]["name"] == "write_note");
-            if offered {
-                gated_offered += 1;
+        let n = verbless.len();
+        let mut cold = 0; // no edit-thread context → should get NO write_note
+        let mut warm = 0; // in an edit thread → should get write_note
+        for c in &verbless {
+            let has = |edit: bool| {
+                agent::select_tools(c, true, edit)
+                    .iter()
+                    .any(|t| t["function"]["name"] == "write_note")
+            };
+            if has(false) {
+                cold += 1;
             }
-            let mut s1 = sample_store();
-            s1.notes.get_mut(&s1.open_id).unwrap().body = body0.into();
-            let u1 = chat_h(client, base, model, req, history, &mut s1).await;
-            if u1.iter().any(|t| t == "write_note") && s1.open_body().contains("# ") {
-                gated_h1 += 1;
+            if has(true) {
+                warm += 1;
             }
-            let mut s2 = sample_store();
-            s2.notes.get_mut(&s2.open_id).unwrap().body = body0.into();
-            let u2 = chat_t(client, base, model, req, history, &mut s2, &write_tools).await;
-            let h1 = u2.iter().any(|t| t == "write_note") && s2.open_body().contains("# ");
-            if h1 {
-                forced_h1 += 1;
-            }
-            eprintln!(
-                "  h1-correction {:?}: gating_offered_write={offered} forced_made_h1={h1}",
-                trunc(req, 44)
-            );
         }
-        // PASSES when the model is capable with the tool present (forced_h1 == n).
-        // The diagnostic signal is gated_offered/gated_h1 << n: the gating, not
-        // the model, drops these corrections.
+        // End-to-end: a verb-less correction after a prior write must now drive a
+        // real write_note call (tool present via the edit-thread signal).
+        let history = "User: write a short note about the eiffel tower\nAssistant: Done — I've written it to the note.";
+        let mut store = sample_store();
+        store.notes.get_mut(&store.open_id).unwrap().body = "The Eiffel Tower is in Paris.".into();
+        let used = chat_h(
+            client,
+            base,
+            model,
+            "no thats not what i wanted, redo it",
+            history,
+            &mut store,
+        )
+        .await;
+        let e2e_wrote = used.iter().any(|t| t == "write_note");
+        eprintln!("  edit-thread gating: cold={cold}/{n} warm={warm}/{n} e2e_wrote={e2e_wrote}");
         out.push((
-            "h1 correction attribution (gating vs model)".into(),
-            forced_h1 == n,
+            "edit-thread gating keeps write_note on verb-less corrections".into(),
+            cold == 0 && warm == n && e2e_wrote,
             format!(
-                "real gating offered write_note {gated_offered}/{n} & landed #-h1 {gated_h1}/{n}; with write_note forced present, model landed #-h1 {forced_h1}/{n}"
+                "verb-less corrections offered write_note: {cold}/{n} cold vs {warm}/{n} in edit thread; e2e correction called write_note={e2e_wrote}"
             ),
         ));
     }
@@ -424,7 +421,14 @@ async fn chat_h(
     history: &str,
     store: &mut Store,
 ) -> Vec<String> {
-    let tools = agent::select_tools(request, true);
+    // Mirror state.rs: derive the edit-thread signal from prior "User:" turns in
+    // the embedded history so verb-less follow-ups keep write_note.
+    let user_lines: Vec<&str> = history
+        .lines()
+        .filter_map(|l| l.strip_prefix("User:").map(|s| s.trim()))
+        .collect();
+    let edit_thread = agent::in_edit_thread(&user_lines);
+    let tools = agent::select_tools(request, true, edit_thread);
     chat_t(client, base, model, request, history, store, &tools).await
 }
 

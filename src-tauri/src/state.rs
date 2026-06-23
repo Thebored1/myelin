@@ -1006,8 +1006,17 @@ impl AppState {
             self.ensure_llama_server(&config).await?;
 
             // Per-message tool gating: hand the model ONLY the tools this message
-            // warrants so it can't misfire on one it was never given.
-            let tools = crate::agent::select_tools(&question, true);
+            // warrants so it can't misfire on one it was never given. We also pass
+            // an edit-thread signal (did a recent user turn ask to write/edit?) so
+            // a verb-less follow-up correction still keeps write_note available.
+            let recent_user_msgs: Vec<&str> = note
+                .chat_history
+                .iter()
+                .filter(|m| m.role == "user" && m.error != Some(true))
+                .map(|m| m.content.as_str())
+                .collect();
+            let edit_thread = crate::agent::in_edit_thread(&recent_user_msgs);
+            let tools = crate::agent::select_tools(&question, true, edit_thread);
 
             // Stream directly against llama-server (not through rig) so the note
             // content can be surfaced token-by-token as it is generated. See

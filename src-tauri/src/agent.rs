@@ -385,16 +385,32 @@ pub fn wants_fetch(message: &str) -> bool {
             && contains_any_word(&m, &["page", "url", "site", "website", "link"]))
 }
 
+/// True when recent conversation shows an ACTIVE note-editing thread, so a
+/// follow-up correction that carries no fresh verb ("no, that's wrong", "you
+/// didn't do it", a typo'd "formate it") should still get write_note. Without
+/// this, per-message gating strips the tool on those turns and the model can
+/// only claim success in chat — the "New note 18" bug. Looks back over the last
+/// few user turns for any write intent. Pass recent USER messages (any order).
+pub fn in_edit_thread(recent_user_messages: &[&str]) -> bool {
+    recent_user_messages
+        .iter()
+        .rev()
+        .take(4)
+        .any(|m| note_write_intent(m))
+}
+
 /// Per-message tool gating: hand the model ONLY the tools its message warrants,
 /// so a small model can't misfire on a tool it was never given. write_note is
 /// the primary action (the open note is the workspace); search_notes/read_note
-/// and fetch_web_page are opt-in by intent; small talk gets nothing.
-pub fn select_tools(message: &str, has_open_note: bool) -> Vec<Value> {
+/// and fetch_web_page are opt-in by intent; small talk gets nothing. When
+/// `edit_thread` is set, write_note stays available even without a fresh verb so
+/// follow-up corrections keep editing the note.
+pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Vec<Value> {
     if is_small_talk(message) {
         return Vec::new();
     }
     let mut names: Vec<&str> = Vec::new();
-    if has_open_note && note_write_intent(message) {
+    if has_open_note && (note_write_intent(message) || edit_thread) {
         names.push("write_note");
     }
     if wants_other_notes(message) {
@@ -916,22 +932,37 @@ mod tests {
     #[test]
     fn tool_gating_selects_by_intent() {
         // small talk → no tools
-        assert!(select_tools("gg", true).is_empty());
-        assert!(select_tools("thanks!", true).is_empty());
+        assert!(select_tools("gg", true, false).is_empty());
+        assert!(select_tools("thanks!", true, false).is_empty());
         // write intent → write_note only
-        let w = select_tools("expand this to 500 words", true);
+        let w = select_tools("expand this to 500 words", true, false);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0]["function"]["name"], "write_note");
         // pure question → no tools (model answers in chat)
-        assert!(select_tools("what is the capital of france?", true).is_empty());
+        assert!(select_tools("what is the capital of france?", true, false).is_empty());
         // other-notes intent → search + read
-        let s = select_tools("search my other notes for cats", true);
+        let s = select_tools("search my other notes for cats", true, false);
         let names: Vec<&str> = s.iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_notes"));
         assert!(names.contains(&"read_note"));
         // url → fetch
-        let f = select_tools("fetch https://example.com", true);
+        let f = select_tools("fetch https://example.com", true, false);
         assert!(f.iter().any(|t| t["function"]["name"] == "fetch_web_page"));
+    }
+
+    #[test]
+    fn edit_thread_keeps_write_on_verbless_corrections() {
+        // A verb-less correction gets NO write_note cold...
+        let cold = select_tools("no thats wrong", true, false);
+        assert!(!cold.iter().any(|t| t["function"]["name"] == "write_note"));
+        // ...but DOES inside an active edit thread.
+        let warm = select_tools("no thats wrong", true, true);
+        assert!(warm.iter().any(|t| t["function"]["name"] == "write_note"));
+        // Small talk stays tool-free even in an edit thread.
+        assert!(select_tools("thanks!", true, true).is_empty());
+        // in_edit_thread fires when a recent user turn asked to write/edit.
+        assert!(in_edit_thread(&["write a note about cats", "no thats wrong"]));
+        assert!(!in_edit_thread(&["what is rust?", "who are you?"]));
     }
 
     #[test]
@@ -953,7 +984,7 @@ mod tests {
         assert!(!wants_fetch("rename model.gguf"));
         assert!(!wants_fetch("just chatting about cats"));
         // and via select_tools: "summarize example.com" → fetch (not a write/clear)
-        let t = select_tools("summarize example.com", true);
+        let t = select_tools("summarize example.com", true, false);
         assert!(t.iter().any(|x| x["function"]["name"] == "fetch_web_page"));
     }
 
