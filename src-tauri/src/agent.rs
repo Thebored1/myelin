@@ -762,9 +762,10 @@ pub fn strip_prompt_markers(s: &str) -> String {
         .unwrap_or_else(|_| s.to_string());
     // The model sometimes bleeds the "--- CURRENT NOTE ---" delimiter style into
     // its output as a leading "--- Title" — dashes + text on one line, which is
-    // not a real Markdown rule (an HR is dashes alone). Drop that leading run.
-    if let Ok(re) = regex::Regex::new(r"^\s*-{2,}[ \t]+(?=\S)") {
-        cleaned = re.replace(&cleaned, "").into_owned();
+    // not a real Markdown rule (an HR is dashes alone). Drop the leading dash run
+    // but keep the text. (Rust's regex has no lookahead, so capture and re-emit.)
+    if let Ok(re) = regex::Regex::new(r"^\s*-{2,}[ \t]+(\S[^\n]*)") {
+        cleaned = re.replace(&cleaned, "$1").into_owned();
     }
     cleaned.trim().to_string()
 }
