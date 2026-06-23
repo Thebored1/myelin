@@ -346,23 +346,28 @@ pub fn is_small_talk(message: &str) -> bool {
 }
 
 /// Does the message refer to OTHER notes in the workspace (search/read), as
-/// opposed to the open note whose content is already in the prompt?
+/// opposed to the open note whose content is already in the prompt? Precise on
+/// purpose: "write a note about X" (creating content in the OPEN note) must NOT
+/// match, or it would needlessly offer search/read.
 pub fn wants_other_notes(message: &str) -> bool {
     let m = message.to_lowercase();
     m.contains("other note")
         || m.contains("my notes")
-        || m.contains("my other note")
-        || m.contains("search my note")
-        || m.contains("search note")
-        || m.contains("find a note")
-        || m.contains("find the note")
         || m.contains("another note")
         || m.contains("which note")
-        || (contains_any_word(&m, &["search", "find", "lookup", "look up"])
-            && m.contains("note")
-            && !m.contains("the note")
-            && !m.contains("this note")
-            && !m.contains("the open note"))
+        || m.contains("note with id")
+        || m.contains("note id")
+        || m.contains("note titled")
+        || m.contains("note called")
+        || m.contains("read the note with")
+        || m.contains("look up")
+        || m.contains("search my note")
+        || m.contains("search note")
+        || m.contains("search for a note")
+        || m.contains("find a note")
+        || m.contains("find the note")
+        || m.contains("find my note")
+        || (contains_any_word(&m, &["search", "find"]) && m.contains("notes"))
 }
 
 /// Does the message ask to fetch a specific web page (URL present, or an
