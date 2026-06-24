@@ -15,3 +15,5 @@ Library/
 micromamba*
 *.tar.bz2
 *.log
+info/
+causal-conv1d
