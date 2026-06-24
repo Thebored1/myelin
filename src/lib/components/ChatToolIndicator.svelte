@@ -16,6 +16,17 @@
 			return 'edit';
 		return 'tool';
 	});
+
+	// A concise one-line preview of what the tool is acting on — the URL it's
+	// fetching, the search query, the note title — shown inline so you can see
+	// what it's doing (and which page it's on) without expanding.
+	let preview = $derived.by(() => {
+		const d = (tool.details || '').replace(/\s+/g, ' ').trim();
+		if (!d) return '';
+		// For a URL, drop the scheme so the domain/path reads cleanly.
+		const cleaned = d.replace(/^https?:\/\//i, '');
+		return cleaned.length > 64 ? cleaned.slice(0, 63) + '…' : cleaned;
+	});
 </script>
 
 <div class="chat-tool-indicator">
@@ -42,6 +53,9 @@
 			{/if}
 		</svg>
 		<span class="tool-name" class:web={kind === 'web'}>{tool.name}</span>
+		{#if preview}
+			<span class="tool-detail-inline" title={tool.details}>· {preview}</span>
+		{/if}
 	</button>
 	{#if expanded && tool.details}
 		<div class="indicator-content">
@@ -96,6 +110,17 @@
 	/* Web fetches stand out a touch from note tools. */
 	.tool-name.web {
 		color: var(--text-primary);
+	}
+
+	/* Inline preview of the URL / query / target — what it's doing, at a glance. */
+	.tool-detail-inline {
+		font-size: 0.75rem;
+		color: var(--text-muted);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		min-width: 0;
+		flex: 1;
 	}
 
 	.indicator-content {
