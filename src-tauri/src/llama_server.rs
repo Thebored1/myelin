@@ -727,9 +727,9 @@ fn available_ram_bytes() -> u64 {
 /// cross-platform. `None` when undeterminable — we then just request full
 /// offload and let it spill to GTT / retry on failure. Informational for now.
 pub fn free_device_local_vram() -> Option<u64> {
+    // AMD on Linux exposes true device-local VRAM (total/used) via sysfs.
     #[cfg(target_os = "linux")]
     {
-        // AMD exposes true device-local VRAM via sysfs (total/used).
         for n in 0..4u8 {
             let base = format!("/sys/class/drm/card{n}/device");
             if let Ok(total) = std::fs::read_to_string(format!("{base}/mem_info_vram_total")) {
@@ -742,29 +742,47 @@ pub fn free_device_local_vram() -> Option<u64> {
                 }
             }
         }
-        // NVIDIA via nvidia-smi (MiB).
-        if let Ok(out) = Command::new("nvidia-smi")
-            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-        {
-            if out.status.success() {
-                if let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next() {
-                    if let Ok(mib) = first.trim().parse::<u64>() {
-                        return Some(mib.saturating_mul(1024 * 1024));
-                    }
-                }
-            }
-        }
-        None
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // Windows/macOS: full-offload + retry handles fit; DXGI/Metal probing
-        // can be added later as a starting-ngl optimizer.
-        None
+    // NVIDIA via nvidia-smi — present on Linux AND Windows wherever the driver
+    // is. (macOS has no NVIDIA; AMD/Intel on Windows return None → launch ladder.)
+    nvidia_smi_free_vram()
+}
+
+/// Free VRAM (bytes) of the first NVIDIA GPU via nvidia-smi, cross-platform.
+fn nvidia_smi_free_vram() -> Option<u64> {
+    let out = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    first
+        .parse::<u64>()
+        .ok()
+        .map(|mib| mib.saturating_mul(1024 * 1024))
+}
+
+/// How many of `n_layers` layers fit in `free_vram` given the model's on-disk
+/// weight size. KV stays in system RAM (--no-kv-offload), so only the weights
+/// need VRAM; 0.85 leaves headroom for compute/activation buffers. Returns the
+/// first-launch n-gpu-layers — full offload when it all fits, a partial GPU/CPU
+/// split when it doesn't, 0 when essentially nothing fits. The degrade ladder
+/// still covers a too-optimistic estimate. 999 ("all") when geometry is unknown.
+fn fit_ngl(free_vram: u64, model_weight_bytes: u64, n_layers: u64) -> i32 {
+    if n_layers == 0 || model_weight_bytes == 0 {
+        return 999;
+    }
+    let per_layer = (model_weight_bytes / n_layers).max(1);
+    let budget = (free_vram as f64 * 0.85) as u64;
+    (budget / per_layer).min(n_layers) as i32
 }
 
 /// Largest context whose f16 KV cache fits in ~75% of available RAM (KV lives in
@@ -855,20 +873,39 @@ fn launch_plans(
 
     let target = AUTO_CTX_TARGET.max(config.context_size);
     let base_ctx = ram_safe_ctx(target, gguf);
-    let half_layers = gguf
-        .and_then(|g| g.n_layers)
-        .map(|n| (n / 2).max(1) as i32)
-        .unwrap_or(16);
+    let n_layers = gguf.and_then(|g| g.n_layers);
+    let half_layers = n_layers.map(|n| (n / 2).max(1) as i32).unwrap_or(16);
+
+    // Smart starting offload: when we can probe VRAM and know the model's weight
+    // size + layer count, compute exactly how many layers fit (the rest run on
+    // CPU — the iGPU/CPU split). When VRAM is unknown, request full offload (999)
+    // and let the ladder degrade. This makes the FIRST launch land instead of
+    // burning a failed full-offload attempt on small-VRAM machines.
+    let model_bytes = std::fs::metadata(&config.model_path).map(|m| m.len()).unwrap_or(0);
+    let primary_ngl = match (free_device_local_vram(), n_layers) {
+        (Some(vram), Some(layers)) if model_bytes > 0 => {
+            let ngl = fit_ngl(vram, model_bytes, layers);
+            log::info!(
+                "offload plan: {} MiB free VRAM, model {} MiB / {} layers -> ngl={}",
+                vram / 1_048_576,
+                model_bytes / 1_048_576,
+                layers,
+                ngl
+            );
+            ngl
+        }
+        _ => 999,
+    };
 
     let mut plans = vec![
-        LaunchPlan { ngl: 999, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
-        LaunchPlan { ngl: 999, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
+        LaunchPlan { ngl: primary_ngl, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
+        LaunchPlan { ngl: primary_ngl, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
         LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128), jinja },
     ];
     // Last resort: start without --jinja so a model with a missing/broken
     // template still runs (chat-only; tools may not work).
     if jinja {
-        plans.push(LaunchPlan { jinja: false, ngl: 999, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256) });
+        plans.push(LaunchPlan { jinja: false, ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256) });
     }
     plans
 }
@@ -1579,4 +1616,36 @@ fn find_on_path(binary_name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_ngl;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn fit_ngl_full_when_it_fits() {
+        // 4 GiB free, 856 MiB model, 40 layers → all fit.
+        assert_eq!(fit_ngl(4 * GIB, 856 * MIB, 40), 40);
+    }
+
+    #[test]
+    fn fit_ngl_partial_split() {
+        // 1 GiB free, 2 GiB model, 40 layers → a partial GPU/CPU split.
+        let ngl = fit_ngl(GIB, 2 * GIB, 40);
+        assert!(ngl > 0 && ngl < 40, "expected partial split, got {ngl}");
+    }
+
+    #[test]
+    fn fit_ngl_zero_when_nothing_fits() {
+        assert_eq!(fit_ngl(64 * MIB, 4 * GIB, 40), 0);
+    }
+
+    #[test]
+    fn fit_ngl_unknown_geometry_requests_all() {
+        assert_eq!(fit_ngl(GIB, 0, 40), 999);
+        assert_eq!(fit_ngl(GIB, 1024, 0), 999);
+    }
 }
