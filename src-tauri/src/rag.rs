@@ -162,3 +162,48 @@ pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<V
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(id: &str, idx: i32, v: f32) -> DocChunk {
+        DocChunk {
+            doc_id: id.into(),
+            source: "test".into(),
+            chunk_index: idx,
+            text: format!("chunk {idx}"),
+            vector: vec![v; DIM as usize],
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_search_and_replace_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two chunks: one near 0.1, one near 0.9.
+        upsert_document(dir.path(), "d1", vec![chunk("d1", 0, 0.1), chunk("d1", 1, 0.9)])
+            .await
+            .unwrap();
+
+        // Query closest to the 0.9 vector → chunk_index 1 ranks first.
+        let res = search(dir.path(), vec![0.9; DIM as usize], 5).await.unwrap();
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].chunk_index, 1);
+        assert_eq!(res[0].doc_id, "d1");
+
+        // Re-ingesting the same doc replaces its chunks (not append).
+        upsert_document(dir.path(), "d1", vec![chunk("d1", 0, 0.5)])
+            .await
+            .unwrap();
+        let res2 = search(dir.path(), vec![0.5; DIM as usize], 5).await.unwrap();
+        assert_eq!(res2.len(), 1);
+        assert_eq!(res2[0].chunk_index, 0);
+    }
+
+    #[tokio::test]
+    async fn search_missing_table_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let res = search(dir.path(), vec![0.0; DIM as usize], 5).await.unwrap();
+        assert!(res.is_empty());
+    }
+}

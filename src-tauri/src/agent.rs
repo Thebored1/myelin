@@ -98,6 +98,18 @@ pub fn tool_specs() -> Vec<Value> {
             }),
         ),
         spec(
+            "search_documents",
+            "Search the user's ingested source documents (PDFs, books, web pages, etc.) for passages relevant to a query, and get the most relevant excerpts with their source. Use this when the user asks about their documents, sources, a PDF, a book, or a paper — NOT for the note open in the editor (that text is already in the prompt).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for in the documents." },
+                    "count": { "type": "integer", "description": "How many passages to return (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        ),
+        spec(
             "search_notes",
             "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.",
             serde_json::json!({
@@ -404,6 +416,25 @@ pub fn wants_search(message: &str) -> bool {
             && contains_any_word(&m, &["online", "web", "internet"]))
 }
 
+/// Does the message ask about the user's ingested SOURCE documents (PDF/book/
+/// paper/source) — as opposed to the note open in the editor? Precise so it
+/// doesn't fire on "this note".
+pub fn wants_documents(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("the pdf")
+        || m.contains("this pdf")
+        || m.contains("the document")
+        || m.contains("this document")
+        || m.contains("my document")
+        || m.contains("the source")
+        || m.contains("the book")
+        || m.contains("this book")
+        || m.contains("the paper")
+        || m.contains("the article")
+        || m.contains("according to the")
+        || m.contains("in the text")
+}
+
 /// Does the message ask to fetch a specific web page — a full URL, a bare
 /// domain, or an explicit "fetch/open/visit the page"?
 pub fn wants_fetch(message: &str) -> bool {
@@ -451,6 +482,9 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
     if wants_search(message) {
         names.push("web_search");
         names.push("fetch_web_page"); // so it can open a result it found
+    }
+    if wants_documents(message) {
+        names.push("search_documents");
     }
     if wants_fetch(message) {
         names.push("fetch_web_page");
@@ -711,6 +745,63 @@ impl Tool for FetchWebPageTool {
             Ok(format!("Fetched {url}, but no readable text was found."))
         } else {
             Ok(text.chars().take(WEB_FETCH_LIMIT).collect())
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchDocumentsArgs {
+    query: String,
+    #[serde(default)]
+    count: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct SearchDocumentsTool {
+    pub state: AppState,
+}
+
+impl Tool for SearchDocumentsTool {
+    const NAME: &'static str = "search_documents";
+
+    type Error = ToolError;
+    type Args = SearchDocumentsArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "search_documents".to_string(),
+            description:
+                "Search the user's ingested source documents (PDFs, books, web pages) for passages relevant to a query. Returns the most relevant excerpts with their source."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for in the documents." },
+                    "count": { "type": "integer", "description": "How many passages (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let k = args.count.unwrap_or(5).clamp(1, 10) as usize;
+        self.state.record_chat_tool("Search Documents", args.query.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
+        );
+        match self.state.retrieve_chunks(&args.query, k).await {
+            Ok(chunks) if !chunks.is_empty() => {
+                let mut out = format!("Passages from your documents for \"{}\":\n\n", args.query);
+                for (i, c) in chunks.iter().enumerate() {
+                    out.push_str(&format!("{}. [{}]\n{}\n\n", i + 1, c.source, c.text.trim()));
+                }
+                Ok(out)
+            }
+            Ok(_) => Ok("No relevant passages found in your documents.".to_string()),
+            Err(e) => Ok(format!("Document search failed: {e}")),
         }
     }
 }
