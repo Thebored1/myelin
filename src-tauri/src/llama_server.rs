@@ -731,23 +731,38 @@ fn available_ram_bytes() -> u64 {
     sys.available_memory()
 }
 
-/// Free device-local VRAM in bytes (true fast VRAM, not GTT), best-effort and
-/// cross-platform. `None` when undeterminable — we then just request full
-/// offload and let it spill to GTT / retry on failure. Informational for now.
+/// Memory (bytes) the GPU can use for model weights, best-effort and
+/// cross-platform. For a discrete card this is free device-local VRAM; for an
+/// **integrated** GPU it also includes free **GTT** (shared system memory the
+/// iGPU runs from at full speed) — otherwise the tiny VRAM carveout would force
+/// ngl≈0 and waste a perfectly usable iGPU. `None` when undeterminable → the
+/// planner requests full offload and lets the launch ladder back off.
 pub fn free_device_local_vram() -> Option<u64> {
-    // AMD on Linux exposes true device-local VRAM (total/used) via sysfs.
+    // AMD on Linux exposes VRAM (and GTT) via sysfs.
     #[cfg(target_os = "linux")]
     {
+        let read_u64 = |path: String| -> Option<u64> {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        };
         for n in 0..4u8 {
             let base = format!("/sys/class/drm/card{n}/device");
-            if let Ok(total) = std::fs::read_to_string(format!("{base}/mem_info_vram_total")) {
-                if let Ok(t) = total.trim().parse::<u64>() {
-                    let used = std::fs::read_to_string(format!("{base}/mem_info_vram_used"))
-                        .ok()
-                        .and_then(|s| s.trim().parse::<u64>().ok())
-                        .unwrap_or(0);
-                    return Some(t.saturating_sub(used));
+            if let Some(vram_total) = read_u64(format!("{base}/mem_info_vram_total")) {
+                let vram_free = vram_total
+                    .saturating_sub(read_u64(format!("{base}/mem_info_vram_used")).unwrap_or(0));
+                // A small dedicated-VRAM carveout means an integrated GPU (APU):
+                // the model lives in GTT/shared RAM at iGPU speed, so count free
+                // GTT in the budget. A discrete card (large VRAM) must NOT — its
+                // GTT is slow PCIe-attached system RAM.
+                const INTEGRATED_VRAM_MAX: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+                if vram_total <= INTEGRATED_VRAM_MAX {
+                    let gtt_free = read_u64(format!("{base}/mem_info_gtt_total"))
+                        .unwrap_or(0)
+                        .saturating_sub(read_u64(format!("{base}/mem_info_gtt_used")).unwrap_or(0));
+                    return Some(vram_free + gtt_free);
                 }
+                return Some(vram_free);
             }
         }
     }
@@ -1133,8 +1148,17 @@ async fn try_start_candidate(
     for _ in 0..STARTUP_ATTEMPTS {
         if health_check(client, config).await {
             let log_lines = captured.lock().unwrap().clone();
-            let active_backend = detect_active_backend(&log_lines, candidate.backend);
-            let gpu_offloaded = active_backend.is_gpu();
+            // Trust the launch: a GPU candidate that came up healthy with ngl>0
+            // IS offloading — llama.cpp aborts rather than silently running GPU
+            // layers on the CPU, so a "CPU" verdict from the (build-dependent)
+            // stderr strings would be a false negative. The stderr scan only
+            // refines the label when we didn't request GPU layers ourselves.
+            let gpu_offloaded = requested_gpu && candidate.backend.is_gpu();
+            let active_backend = if gpu_offloaded {
+                candidate.backend
+            } else {
+                detect_active_backend(&log_lines, candidate.backend)
+            };
 
             let mut running = config.clone();
             running.executable_path = candidate.executable_path.clone();
@@ -1184,10 +1208,15 @@ fn detect_active_backend(lines: &[String], requested: GpuBackend) -> GpuBackend 
 
     for line in lines {
         let lower = line.to_lowercase();
-        // Backend registration lines, e.g. "loaded CUDA backend from ...".
-        if lower.contains("loaded cuda backend") {
+        // Backend registration / device-init lines. llama.cpp varies by build —
+        // CUDA: "loaded CUDA backend" / "ggml_cuda"; Vulkan: "loaded Vulkan
+        // backend" / "ggml_vulkan: Found N Vulkan devices".
+        if lower.contains("loaded cuda backend") || lower.contains("ggml_cuda") {
             detected = Some(GpuBackend::Cuda);
-        } else if lower.contains("loaded vulkan backend") {
+        } else if lower.contains("loaded vulkan backend")
+            || lower.contains("ggml_vulkan")
+            || lower.contains("vulkan devices")
+        {
             detected = Some(GpuBackend::Vulkan);
         } else if lower.contains("loaded metal backend") || lower.contains("ggml_metal_init") {
             detected = Some(GpuBackend::Metal);
