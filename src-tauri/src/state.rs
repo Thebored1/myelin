@@ -30,10 +30,6 @@ use uuid::Uuid;
 const EMBEDDING_DIM: i32 = 768;
 const INDEX_DIR_NAME: &str = "index";
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
-// How much of the open note to put in the prompt. The assistant edits this note,
-// so it must see (nearly) all of it — 400 chars left it editing blind. ~24k chars
-// (~6k tokens) fits comfortably in the 32k context alongside the preamble/tools.
-const NOTE_BODY_PROMPT_LIMIT: usize = 24_000;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
 
@@ -1012,10 +1008,23 @@ impl AppState {
             let note = self.load_note(note_id).await?;
             let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
 
-            // Truncate on a char boundary (never a raw byte slice — that panics
-            // on multi-byte UTF-8). Most notes fit well under the limit.
-            let note_body_excerpt = if note.body.chars().count() > NOTE_BODY_PROMPT_LIMIT {
-                let head: String = note.body.chars().take(NOTE_BODY_PROMPT_LIMIT).collect();
+            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+            self.ensure_llama_server(&config).await?;
+
+            // Budget the note to ~half the context window the server ACTUALLY
+            // launched with (auto-offload may run far above the configured value),
+            // leaving room for the system prompt, tools, chat history, and the
+            // reply. ~4 chars/token → a 32K-token context holds ~65K chars of note,
+            // far past the old flat 24K cap.
+            let ctx_tokens = self
+                .running_ctx_size()
+                .await
+                .unwrap_or(config.context_size) as usize;
+            let note_char_limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
+            // Truncate on a char boundary (never a raw byte slice — that panics on
+            // multi-byte UTF-8).
+            let note_body_excerpt = if note.body.chars().count() > note_char_limit {
+                let head: String = note.body.chars().take(note_char_limit).collect();
                 format!("{head}\n…[note truncated — ask me to work on a specific section]")
             } else {
                 note.body.clone()
@@ -1037,9 +1046,6 @@ impl AppState {
                 context.push_str(&format!("\n\nEarlier in this conversation:\n{}", history_text));
             }
             let prompt = format!("{}\n\nUser request: {}", context, question);
-
-            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
-            self.ensure_llama_server(&config).await?;
 
             // Per-message tool gating: hand the model ONLY the tools this message
             // warrants so it can't misfire on one it was never given. We also pass
@@ -1467,6 +1473,11 @@ impl AppState {
             .max_turns(config.max_turns as usize)
             .await
             .map_err(|error| anyhow!(describe_prompt_error(&error)))
+    }
+
+    /// Context window (tokens) the running llama-server launched with, if any.
+    async fn running_ctx_size(&self) -> Option<u32> {
+        self.inner.llama_server.lock().await.as_ref().map(|s| s.ctx_size)
     }
 
     /// The configured SearXNG base URL for web search (None → DuckDuckGo).

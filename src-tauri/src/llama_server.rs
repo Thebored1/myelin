@@ -196,6 +196,10 @@ pub struct ManagedLlamaServer {
     pub requested_gpu: bool,
     /// True when the model is actually running on a GPU.
     pub gpu_offloaded: bool,
+    /// The context window (tokens) the server actually launched with — the
+    /// adaptive offloader may have set it well above the configured value, or
+    /// degraded it. Used to budget how much of a note fits in the prompt.
+    pub ctx_size: u32,
     /// Drains the server's stderr for the process lifetime so its pipe never
     /// fills and stalls generation. Detaches; exits on child EOF.
     _stderr_reader: Option<thread::JoinHandle<()>>,
@@ -1295,6 +1299,7 @@ async fn try_start_candidate(
                 active_backend,
                 requested_gpu,
                 gpu_offloaded,
+                ctx_size: plan.ctx,
                 _stderr_reader: reader_handle,
             });
         }
