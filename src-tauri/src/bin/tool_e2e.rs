@@ -388,6 +388,136 @@ async fn run_all(
         ));
     }
 
+    // ---- Deterministic gating for the new capabilities (no model/server). These
+    // assert that `select_tools` offers the right tool set for each phrasing. Each
+    // check computes its own bool so a regression pinpoints the exact scenario. ----
+    {
+        let has = |tools: &[Value], name: &str| tools.iter().any(|t| t["function"]["name"] == name);
+
+        // Web search: an explicit "search the web" request must offer web_search
+        // and must NOT offer search_notes (it's not about the user's notes).
+        {
+            let tools = agent::select_tools("search the web for the latest rust release", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "web_search") && !has(&tools, "search_notes");
+            out.push(("gate: web search -> web_search, not search_notes".into(), ok, format!("tools={names:?}")));
+        }
+
+        // "google ..." is a web-search idiom.
+        {
+            let tools = agent::select_tools("google the weather in paris", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "web_search");
+            out.push(("gate: google ... -> web_search".into(), ok, format!("tools={names:?}")));
+        }
+
+        // Document question ("the pdf"): offer search_documents, and since there's
+        // no write intent, do NOT offer write_note.
+        {
+            let tools = agent::select_tools("what does the pdf say about transformers", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "search_documents") && !has(&tools, "write_note");
+            out.push(("gate: pdf question -> search_documents, not write_note".into(), ok, format!("tools={names:?}")));
+        }
+
+        // "according to the paper ..." is a document-grounded question.
+        {
+            let tools = agent::select_tools("according to the paper, what is attention", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "search_documents");
+            out.push(("gate: paper question -> search_documents".into(), ok, format!("tools={names:?}")));
+        }
+
+        // A full URL must offer fetch_web_page.
+        {
+            let tools = agent::select_tools("summarize https://example.com", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "fetch_web_page");
+            out.push(("gate: full url -> fetch_web_page".into(), ok, format!("tools={names:?}")));
+        }
+
+        // A bare domain (no scheme) must also offer fetch_web_page.
+        {
+            let tools = agent::select_tools("summarize example.com", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "fetch_web_page");
+            out.push(("gate: bare domain -> fetch_web_page".into(), ok, format!("tools={names:?}")));
+        }
+
+        // Small talk: no tools at all.
+        {
+            let tools = agent::select_tools("hello there", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = tools.is_empty();
+            out.push(("gate: small talk -> no tools".into(), ok, format!("tools={names:?}")));
+        }
+
+        // Note-write intent ("rewrite the note") must offer write_note.
+        {
+            let tools = agent::select_tools("rewrite the note with headings", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "write_note");
+            out.push(("gate: rewrite note -> write_note".into(), ok, format!("tools={names:?}")));
+        }
+
+        // Searching the user's OTHER notes: offer search_notes + read_note, but NOT
+        // web_search (it's a notes query, not a web query).
+        {
+            let tools = agent::select_tools("search my other notes about pasta", true, false);
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&tools, "search_notes") && has(&tools, "read_note") && !has(&tools, "web_search");
+            out.push(("gate: other notes -> search_notes+read_note, not web_search".into(), ok, format!("tools={names:?}")));
+        }
+
+        // Edit-thread: a verb-less correction gets write_note ONLY when in an active
+        // edit thread; cold (no thread) it must not.
+        {
+            let warm = agent::select_tools("no thats wrong", true, true);
+            let cold = agent::select_tools("no thats wrong", true, false);
+            let warm_names: Vec<String> = warm
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let cold_names: Vec<String> = cold
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            let ok = has(&warm, "write_note") && !has(&cold, "write_note");
+            out.push((
+                "gate: verb-less correction -> write_note only in edit thread".into(),
+                ok,
+                format!("warm={warm_names:?} cold={cold_names:?}"),
+            ));
+        }
+    }
+
     out
 }
 
