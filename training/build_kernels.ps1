@@ -27,6 +27,12 @@ $env:DISTUTILS_USE_SDK = "1"
 $env:NVCC_PREPEND_FLAGS = "-allow-unsupported-compiler"
 
 $venv = "$HERE\.venv\Scripts\python.exe"
+# Fetch + patch the source if not already present (patches make it compile on
+# Windows; see patch_causal_conv1d.py). v1.4.0 is the version mamba-ssm 2.2.4 expects.
+if (-not (Test-Path "$HERE\causal-conv1d\setup.py")) {
+    git clone --depth 1 --branch v1.4.0 https://github.com/Dao-AILab/causal-conv1d "$HERE\causal-conv1d"
+    & $venv "$HERE\patch_causal_conv1d.py" "$HERE\causal-conv1d"
+}
 Set-Location "$HERE\causal-conv1d"
 Write-Output "=== BUILD START ==="
 & $venv setup.py bdist_wheel
