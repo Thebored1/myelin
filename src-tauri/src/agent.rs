@@ -603,6 +603,19 @@ pub fn in_edit_thread(recent_user_messages: &[&str]) -> bool {
 /// `edit_thread` is set, write_note stays available even without a fresh verb so
 /// follow-up corrections keep editing the note.
 pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Vec<Value> {
+    select_tools_cfg(message, has_open_note, edit_thread, true)
+}
+
+/// Like [`select_tools`], but `deterministic` toggles the rule-based assists. When
+/// false (power user on a stronger model), structural-cleanup requests fall back
+/// to write_note and find requests are answered by the model — no format_note /
+/// find_in_note routing.
+pub fn select_tools_cfg(
+    message: &str,
+    has_open_note: bool,
+    edit_thread: bool,
+    deterministic: bool,
+) -> Vec<Value> {
     if is_small_talk(message) {
         return Vec::new();
     }
@@ -610,7 +623,7 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
     // A clean structural cleanup (remove all headings/bold/bullets) routes to the
     // deterministic format_note tool INSTEAD of write_note, so a small model can't
     // fumble the rewrite — echo the note back unchanged, or empty it.
-    if has_open_note && detect_format_op(message).is_some() {
+    if deterministic && has_open_note && detect_format_op(message).is_some() {
         names.push("format_note");
     } else if has_open_note && (note_write_intent(message) || edit_thread) {
         names.push("write_note");
@@ -626,7 +639,7 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
     if wants_documents(message) {
         names.push("search_documents");
     }
-    if has_open_note && wants_find(message) {
+    if deterministic && has_open_note && wants_find(message) {
         names.push("find_in_note");
     }
     if wants_fetch(message) {
@@ -766,7 +779,8 @@ impl Tool for WriteNoteTool {
         // replace would empty a non-empty note and the user did not actually ask
         // to clear it, refuse and tell the model to preserve the content — never
         // silently erase the user's work.
-        if plan.op == WriteOp::Replace
+        if self.state.deterministic_tools_enabled()
+            && plan.op == WriteOp::Replace
             && plan.new_body.trim().is_empty()
             && !existing.body.trim().is_empty()
             && !wants_clear(&self.state.latest_chat_question())

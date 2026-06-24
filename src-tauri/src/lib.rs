@@ -25,6 +25,14 @@ fn set_require_tool_approval(state: State<'_, AppState>, require: bool) {
 }
 
 #[tauri::command]
+async fn set_deterministic_tools(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .set_deterministic_tools(enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn resolve_tool_approval(state: State<'_, AppState>, id: String, approved: bool) {
     state.resolve_tool_approval(&id, approved);
 }
@@ -485,6 +493,7 @@ pub fn run() {
             save_pdf_annotations,
             compile_latex,
             set_require_tool_approval,
+            set_deterministic_tools,
             resolve_tool_approval
         ])
         .run(tauri::generate_context!())

@@ -104,6 +104,15 @@ pub struct WorkspaceLlamaConfig {
     /// Optional path to the embedding model GGUF (e.g. nomic-embed-text). When
     /// set, the app runs a second llama-server in embedding mode for RAG.
     pub embed_model_path: Option<String>,
+    /// Deterministic, rule-based assists (regex format_note, find_in_note word
+    /// search, the destructive-write guard). Default ON — they make a small model
+    /// reliable. Power users on a stronger model can turn them OFF to let the
+    /// model handle everything itself. None → on.
+    pub deterministic_tools: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +158,10 @@ pub struct ResolvedLlamaConfig {
     /// unknown → the capability probe decides (and caches) at first use.
     #[serde(default)]
     pub supports_tools: Option<bool>,
+    /// Deterministic rule-based assists (format_note / find_in_note / write
+    /// guard). Default true; power users on a stronger model can disable them.
+    #[serde(default = "default_true")]
+    pub deterministic_tools: bool,
     /// Ordered list of binaries to try (best first). Not serialized to the UI.
     #[serde(skip)]
     pub candidates: Vec<BackendCandidate>,
@@ -727,6 +740,7 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
             crate::model_profiles::ModelRole::Chat => "chat".to_string(),
         },
         supports_tools: profile.supports_tools,
+        deterministic_tools: app_config.deterministic_tools.unwrap_or(true),
         candidates,
     })
 }
@@ -1523,6 +1537,19 @@ pub fn set_embed_model_path(app_data_dir: &Path, path: Option<String>) -> Result
         fs::create_dir_all(parent)?;
     }
     fs::write(&cfg_path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+pub fn set_deterministic_tools(app_data_dir: &Path, enabled: bool) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.deterministic_tools = Some(enabled);
+
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string_pretty(&config)?;
+    fs::write(&path, raw)?;
     Ok(())
 }
 

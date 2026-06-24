@@ -90,6 +90,9 @@ struct InnerState {
     latest_chat_question: Mutex<Option<String>>,
     current_note_id: Mutex<Option<String>>,
     require_tool_approval: std::sync::atomic::AtomicBool,
+    /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
+    /// tools (e.g. the write guard) can read it without re-resolving the config.
+    deterministic_tools: std::sync::atomic::AtomicBool,
     pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
@@ -176,6 +179,7 @@ impl AppState {
                 latest_chat_question: Mutex::new(None),
                 current_note_id: Mutex::new(None),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
+                deterministic_tools: std::sync::atomic::AtomicBool::new(true),
                 pending_approvals: Mutex::new(HashMap::new()),
             }),
         })
@@ -258,6 +262,14 @@ impl AppState {
         self.inner.require_tool_approval.store(require, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub fn deterministic_tools_enabled(&self) -> bool {
+        self.inner.deterministic_tools.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_deterministic_tools_runtime(&self, enabled: bool) {
+        self.inner.deterministic_tools.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn register_pending_approval(&self, id: String, tx: tokio::sync::oneshot::Sender<bool>) {
         self.inner.pending_approvals.lock().insert(id, tx);
     }
@@ -309,6 +321,12 @@ impl AppState {
 
     pub async fn set_llama_executable_path(&self, executable_path: String) -> Result<()> {
         crate::llama_server::set_executable_path(&self.inner.app_data_dir, executable_path)?;
+        Ok(())
+    }
+
+    pub async fn set_deterministic_tools(&self, enabled: bool) -> Result<()> {
+        crate::llama_server::set_deterministic_tools(&self.inner.app_data_dir, enabled)?;
+        self.set_deterministic_tools_runtime(enabled);
         Ok(())
     }
 
@@ -1014,6 +1032,7 @@ impl AppState {
             let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
 
             let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+            self.set_deterministic_tools_runtime(config.deterministic_tools);
             self.ensure_llama_server(&config).await?;
 
             // Budget the note to ~half the context window the server ACTUALLY
@@ -1077,7 +1096,12 @@ impl AppState {
             )
             .await
             {
-                crate::agent::select_tools(&question, true, edit_thread)
+                crate::agent::select_tools_cfg(
+                    &question,
+                    true,
+                    edit_thread,
+                    config.deterministic_tools,
+                )
             } else {
                 Vec::new()
             };

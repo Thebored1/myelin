@@ -17,6 +17,7 @@
     let maxTurns = $state<number | null>(null);
     let thinking = $state(false);
     let autoOffload = $state(true);
+    let deterministicTools = $state(true);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
@@ -164,6 +165,7 @@
             if (!hasDedicatedGpu && backendPreference === 'gpu') backendPreference = 'vulkan';
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
+            deterministicTools = status.config?.deterministicTools ?? true;
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
             try {
@@ -595,6 +597,22 @@
                         {thinking
                             ? 'On — the model reasons before answering (slower, may be more accurate).'
                             : 'Off — faster, no hidden reasoning tokens. Works across models (Qwen, LFM, …).'}
+                    </span>
+                </span>
+            </label>
+
+            <label class="toggle-row">
+                <input
+                    type="checkbox"
+                    bind:checked={deterministicTools}
+                    onchange={() => invoke('set_deterministic_tools', { enabled: deterministicTools })}
+                />
+                <span class="toggle-text">
+                    <strong>Deterministic assists</strong>
+                    <span class="toggle-hint">
+                        {deterministicTools
+                            ? 'On — rule-based shortcuts make small models reliable: strip headings/bold/bullets in code, exact word search, and a guard against wiping a note during an edit.'
+                            : 'Off — the model handles every edit itself. Turn this off only if you run a stronger model and would rather it not be overridden.'}
                     </span>
                 </span>
             </label>
