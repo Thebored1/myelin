@@ -171,7 +171,7 @@ async fn vector_hits(table: &Table, query_vec: Vec<f32>, k: usize) -> Result<Vec
 async fn fts_hits(table: &Table, query: &str, k: usize) -> Result<Vec<RetrievedChunk>> {
     let mut stream = table
         .query()
-        .full_text_search(lancedb::query::FullTextSearchQuery::new(query.to_string()))
+        .full_text_search(lancedb::index::scalar::FullTextSearchQuery::new(query.to_string()))
         .limit(k)
         .execute()
         .await
