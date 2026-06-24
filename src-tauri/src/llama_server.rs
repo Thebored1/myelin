@@ -400,17 +400,34 @@ fn list_devices_on(exe: &Path, backend_label: &str) -> Vec<DeviceInfo> {
 /// Pick the integrated GPU's device id from a device list (for the power-saving
 /// Vulkan path on machines that also have a discrete GPU). Matches common iGPU
 /// names; returns None if none look integrated.
-fn integrated_device_id(devices: &[DeviceInfo]) -> Option<String> {
+/// Heuristic: does this GPU name look like an integrated GPU (shares system RAM)?
+fn is_integrated_gpu_name(name: &str) -> bool {
     const HINTS: [&str; 9] = [
         "uhd", "iris", "integrated", "radeon graphics", "hd graphics", "renoir",
         "cezanne", "rembrandt", "phoenix",
     ];
+    let n = name.to_lowercase();
+    HINTS.iter().any(|h| n.contains(h))
+}
+
+/// The integrated GPU's device id (for power-saving), if any.
+fn integrated_device_id(devices: &[DeviceInfo]) -> Option<String> {
     devices
         .iter()
-        .find(|d| {
-            let n = d.name.to_lowercase();
-            HINTS.iter().any(|h| n.contains(h))
-        })
+        .find(|d| is_integrated_gpu_name(&d.name))
+        .map(|d| d.id.clone())
+}
+
+/// The first DISCRETE GPU's device id, when more than one GPU is present — so a
+/// hybrid laptop uses the fast dGPU instead of Vulkan's default device 0 (often
+/// the iGPU). `None` on a single-GPU machine: there's no choice to make.
+fn discrete_device_id(devices: &[DeviceInfo]) -> Option<String> {
+    if devices.len() < 2 {
+        return None;
+    }
+    devices
+        .iter()
+        .find(|d| !is_integrated_gpu_name(&d.name))
         .map(|d| d.id.clone())
 }
 
@@ -1063,12 +1080,19 @@ async fn try_start_candidate(
             if device.to_lowercase().starts_with(prefix) {
                 command.arg("--device").arg(device);
             }
-        } else if candidate.backend == GpuBackend::Vulkan && config.backend_preference == "vulkan" {
-            // Power-saving "Vulkan" mode: prefer the integrated GPU when the
-            // machine also has a discrete one.
+        } else if candidate.backend == GpuBackend::Vulkan {
+            // Vulkan enumerates ALL GPUs and defaults to device 0 — on a hybrid
+            // laptop that's usually the iGPU. Pick deliberately: the integrated
+            // GPU in power-saving "vulkan" mode, otherwise the DISCRETE GPU for
+            // performance (auto/gpu). No-op on single-GPU machines.
             let devices = list_devices_on(&candidate.executable_path, "vulkan");
-            if let Some(id) = integrated_device_id(&devices) {
-                log::info!("vulkan power-saving: pinning integrated device {id}");
+            let pick = if config.backend_preference == "vulkan" {
+                integrated_device_id(&devices)
+            } else {
+                discrete_device_id(&devices)
+            };
+            if let Some(id) = pick {
+                log::info!("vulkan: pinning device {id} (pref={})", config.backend_preference);
                 command.arg("--device").arg(id);
             }
         }
@@ -1747,6 +1771,27 @@ mod tests {
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn picks_discrete_gpu_on_hybrid_keeps_igpu_alone() {
+        use super::{discrete_device_id, integrated_device_id, DeviceInfo};
+        let dev = |id: &str, name: &str| DeviceInfo {
+            id: id.into(),
+            name: name.into(),
+            backend: "vulkan".into(),
+        };
+        // Hybrid laptop: prefer the discrete NVIDIA, identify the Intel iGPU.
+        let hybrid = vec![
+            dev("Vulkan0", "Intel(R) UHD Graphics"),
+            dev("Vulkan1", "NVIDIA GeForce RTX 2050"),
+        ];
+        assert_eq!(discrete_device_id(&hybrid).as_deref(), Some("Vulkan1"));
+        assert_eq!(integrated_device_id(&hybrid).as_deref(), Some("Vulkan0"));
+        // Single iGPU (the Linux box): no discrete choice — use the only device.
+        let single = vec![dev("Vulkan0", "AMD Radeon Graphics (RADV RENOIR)")];
+        assert_eq!(discrete_device_id(&single), None);
+        assert_eq!(integrated_device_id(&single).as_deref(), Some("Vulkan0"));
+    }
 
     #[test]
     fn fit_ngl_full_when_it_fits() {
