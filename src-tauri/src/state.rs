@@ -25,7 +25,9 @@ use std::sync::Arc;
 use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-const EMBEDDING_DIM: i32 = 64;
+// nomic-embed-text v1.5 width. Notes use real embeddings when an embed model is
+// configured (semantic search), else a same-width lexical hashed fallback.
+const EMBEDDING_DIM: i32 = 768;
 const INDEX_DIR_NAME: &str = "index";
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
 // How much of the open note to put in the prompt. The assistant edits this note,
@@ -488,12 +490,17 @@ impl AppState {
             chat_history: Vec::new(),
         };
 
-        let vector = hashed_embedding(&format!(
-            "{}\n{}\n{}",
-            document.title,
-            document.tags.join(" "),
-            document.body
-        ));
+        let vector = self
+            .note_embedding(
+                &format!(
+                    "{}\n{}\n{}",
+                    document.title,
+                    document.tags.join(" "),
+                    document.body
+                ),
+                false,
+            )
+            .await;
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -590,12 +597,17 @@ impl AppState {
 
         let path = workspace.join(&updated.relative_path);
 
-        let vector = hashed_embedding(&format!(
-            "{}\n{}\n{}",
-            updated.title,
-            updated.tags.join(" "),
-            updated.body
-        ));
+        let vector = self
+            .note_embedding(
+                &format!(
+                    "{}\n{}\n{}",
+                    updated.title,
+                    updated.tags.join(" "),
+                    updated.body
+                ),
+                false,
+            )
+            .await;
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -784,7 +796,7 @@ impl AppState {
             runtime.notes.values().cloned().collect::<Vec<_>>()
         };
 
-        let query_vector = hashed_embedding(trimmed);
+        let query_vector = self.note_embedding(trimmed, true).await;
         let keyword_terms = tokenize(trimmed);
         let mut results = notes
             .into_iter()
@@ -1306,6 +1318,10 @@ impl AppState {
         .await
         .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
 
+        // Upgrade the hashed placeholder vectors to real embeddings (one batch)
+        // when an embed model is configured — semantic note search.
+        self.reembed_notes(&mut notes).await;
+
         let mut backlinks_map: HashMap<String, Vec<Backlink>> = HashMap::new();
         for note in &notes {
             let links = extract_links(&note.document.body);
@@ -1582,6 +1598,47 @@ impl AppState {
     /// Remove a document's chunks from the RAG store.
     pub async fn delete_document(&self, doc_id: &str) -> Result<()> {
         crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await
+    }
+
+    /// Embedding for a note / query: real nomic vectors when an embed model is
+    /// configured (semantic search), else the lexical hashed fallback. Always
+    /// EMBEDDING_DIM-wide so both paths are interchangeable.
+    async fn note_embedding(&self, text: &str, is_query: bool) -> Vec<f32> {
+        if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
+            let input: String = text.chars().take(4000).collect();
+            if let Ok(mut v) = self.embed_texts(&[input], is_query).await {
+                if let Some(vec) = v.pop() {
+                    if vec.len() == EMBEDDING_DIM as usize {
+                        return vec;
+                    }
+                }
+            }
+        }
+        hashed_embedding(text)
+    }
+
+    /// Re-embed a batch of notes with real nomic vectors when an embed model is
+    /// configured (one batched call); otherwise leaves their hashed vectors.
+    async fn reembed_notes(&self, notes: &mut [IndexedNote]) {
+        if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_none() {
+            return;
+        }
+        let inputs: Vec<String> = notes
+            .iter()
+            .map(|n| {
+                let body: String = n.document.body.chars().take(4000).collect();
+                format!("{}\n{}", n.document.title, body)
+            })
+            .collect();
+        if let Ok(vectors) = self.embed_texts(&inputs, false).await {
+            if vectors.len() == notes.len() {
+                for (n, v) in notes.iter_mut().zip(vectors) {
+                    if v.len() == EMBEDDING_DIM as usize {
+                        n.vector = v;
+                    }
+                }
+            }
+        }
     }
 
     /// Retrieve the top-K document chunks most relevant to a query.
