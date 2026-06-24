@@ -96,6 +96,15 @@ pub fn tool_specs() -> Vec<Value> {
             }),
         ),
         spec(
+            "format_note",
+            "Apply a structural cleanup to the OPEN note, performed exactly in code (not by you): remove every heading (drops the # markers, keeps the text), remove all bold, or remove all bullet markers. ALWAYS prefer this over write_note when the user asks to remove/strip all headings, bold, or bullets — it is reliable where a full rewrite is not.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "operation": { "type": "string", "enum": ["remove_headings", "remove_bold", "remove_bullets"], "description": "Which structural cleanup to apply to the open note." } },
+                "required": ["operation"]
+            }),
+        ),
+        spec(
             "fetch_web_page",
             "Fetch the text content of a public web page. Use this when the user asks to visit, open, fetch, or get details from a URL or domain.",
             serde_json::json!({
@@ -474,6 +483,61 @@ pub fn wants_clear(message: &str) -> bool {
     PHRASES.iter().any(|p| m.contains(p))
 }
 
+/// Recognize a deterministic structural edit the model is bad at but a regex
+/// nails: stripping all headings, bold, or bullets from the open note. Returns
+/// the `apply_format_op` operation name, or None. Requires a removal verb so
+/// "add a heading" or "make it bold" don't match.
+pub fn detect_format_op(message: &str) -> Option<&'static str> {
+    let m = message.to_lowercase();
+    let removal = contains_any_word(&m, &["remove", "delete", "strip", "drop", "clear", "kill"])
+        || m.contains("get rid of")
+        || m.contains("take out")
+        || m.contains("without the")
+        || m.contains("without any")
+        || m.contains("no more");
+    if !removal {
+        return None;
+    }
+    if m.contains("heading") || m.contains("header") {
+        Some("remove_headings")
+    } else if m.contains("bold") {
+        Some("remove_bold")
+    } else if m.contains("bullet") {
+        Some("remove_bullets")
+    } else {
+        None
+    }
+}
+
+/// Apply a deterministic structural cleanup to Markdown. Done in code precisely
+/// so a small model never has to (and never gets to wipe or echo the note).
+pub fn apply_format_op(body: &str, op: &str) -> String {
+    match op {
+        // Drop the leading "#"/"##"/… marker but keep the heading's text line.
+        "remove_headings" => regex::Regex::new(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
+            .unwrap()
+            .replace_all(body, "")
+            .into_owned(),
+        // Unwrap **bold** / __bold__, keeping the inner text.
+        "remove_bold" => regex::Regex::new(r"\*\*([^*\n]+)\*\*|__([^_\n]+)__")
+            .unwrap()
+            .replace_all(body, |c: &regex::Captures| {
+                c.get(1)
+                    .or_else(|| c.get(2))
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .into_owned(),
+        // Strip a leading "-"/"*"/"+"/"1." bullet marker, keep the line + indent.
+        "remove_bullets" => regex::Regex::new(r"(?m)^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+")
+            .unwrap()
+            .replace_all(body, "$1")
+            .into_owned(),
+        _ => body.to_string(),
+    }
+}
+
 /// Does the message ask whether a specific word/phrase is in the OPEN note (or
 /// to find/locate one there)? Routed to the deterministic find_in_note tool so a
 /// small model doesn't have to eyeball-scan the text and get it wrong.
@@ -543,7 +607,12 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
         return Vec::new();
     }
     let mut names: Vec<&str> = Vec::new();
-    if has_open_note && (note_write_intent(message) || edit_thread) {
+    // A clean structural cleanup (remove all headings/bold/bullets) routes to the
+    // deterministic format_note tool INSTEAD of write_note, so a small model can't
+    // fumble the rewrite — echo the note back unchanged, or empty it.
+    if has_open_note && detect_format_op(message).is_some() {
+        names.push("format_note");
+    } else if has_open_note && (note_write_intent(message) || edit_thread) {
         names.push("write_note");
     }
     if wants_other_notes(message) {
@@ -761,6 +830,92 @@ impl Tool for WriteNoteTool {
         let _ = self.state.handle.emit(
             "ai://note_written",
             serde_json::json!({ "noteId": existing.id, "content": emit_content, "mode": emit_mode }),
+        );
+        Ok(format!("Note successfully updated with ID: {}", existing.id))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FormatNoteArgs {
+    /// Which structural cleanup to apply: remove_headings | remove_bold | remove_bullets.
+    operation: String,
+}
+
+#[derive(Clone)]
+pub struct FormatNoteTool {
+    pub state: AppState,
+}
+
+impl Tool for FormatNoteTool {
+    const NAME: &'static str = "format_note";
+
+    type Error = ToolError;
+    type Args = FormatNoteArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "format_note".to_string(),
+            description:
+                "Apply a structural cleanup to the open note, performed exactly in code: remove every heading (keeps the text, drops the # markers), remove all bold, or remove all bullet markers."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "operation": { "type": "string", "enum": ["remove_headings", "remove_bold", "remove_bullets"], "description": "Which structural cleanup to apply." } },
+                "required": ["operation"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // Trust the model's operation only if it's a known op; otherwise fall back
+        // to what the user's message clearly asked for. The transform itself is
+        // deterministic either way.
+        let op = match args.operation.trim() {
+            o @ ("remove_headings" | "remove_bold" | "remove_bullets") => o.to_string(),
+            _ => detect_format_op(&self.state.latest_chat_question())
+                .unwrap_or("remove_headings")
+                .to_string(),
+        };
+
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => return Ok("No note is currently open to format.".to_string()),
+        };
+        let new_body = apply_format_op(&existing.body, &op);
+        let pretty = op.replace('_', " ");
+        if new_body == existing.body {
+            return Ok(format!("Nothing to change — no matching content to {pretty} in the note."));
+        }
+
+        let display_name = "Format Note";
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &new_body).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, pretty) }),
+        );
+        self.state
+            .save_note(
+                existing.id.clone(),
+                existing.title,
+                existing.tags,
+                new_body.clone(),
+                existing.source_pdf,
+                Some(existing.annotations),
+            )
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+        let _ = self.state.handle.emit(
+            "ai://note_written",
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );
         Ok(format!("Note successfully updated with ID: {}", existing.id))
     }
@@ -1180,6 +1335,31 @@ mod tests {
     // The "deleted the entire note" bug: "remove all headings" must NOT read as a
     // request to clear the note (the destructive-write guard relies on this), but
     // an explicit wipe must.
+    // The exact case the 1B model failed: "remove all headings" must keep every
+    // line and drop only the leading # markers — done in code, not by the model.
+    #[test]
+    fn format_op_strips_headings_keeps_text() {
+        let body = "## Intro\nPersonal computers changed everything.\n### History\nIt began in the 1970s.";
+        assert_eq!(detect_format_op("remove all headings"), Some("remove_headings"));
+        assert_eq!(
+            apply_format_op(body, "remove_headings"),
+            "Intro\nPersonal computers changed everything.\nHistory\nIt began in the 1970s."
+        );
+        // Not a removal request → don't route here.
+        assert_eq!(detect_format_op("add a heading"), None);
+        assert_eq!(detect_format_op("make the title a heading"), None);
+    }
+
+    #[test]
+    fn format_op_strips_bold_and_bullets() {
+        assert_eq!(apply_format_op("a **bold** word", "remove_bold"), "a bold word");
+        assert_eq!(
+            apply_format_op("- one\n- two", "remove_bullets"),
+            "one\ntwo"
+        );
+        assert_eq!(detect_format_op("strip the bullet points"), Some("remove_bullets"));
+    }
+
     #[test]
     fn wants_clear_is_narrow() {
         assert!(!wants_clear("remove all headings"));

@@ -11,9 +11,9 @@
 //! gating, and `note_written` save logic stay in one place.
 
 use crate::agent::{
-    FetchWebPageArgs, FetchWebPageTool, FindInNoteArgs, FindInNoteTool, ReadNoteArgs, ReadNoteTool,
-    SearchDocumentsArgs, SearchDocumentsTool, SearchNotesArgs, SearchNotesTool, WebSearchArgs,
-    WebSearchTool, WriteNoteArgs, WriteNoteTool,
+    FetchWebPageArgs, FetchWebPageTool, FindInNoteArgs, FindInNoteTool, FormatNoteArgs,
+    FormatNoteTool, ReadNoteArgs, ReadNoteTool, SearchDocumentsArgs, SearchDocumentsTool,
+    SearchNotesArgs, SearchNotesTool, WebSearchArgs, WebSearchTool, WriteNoteArgs, WriteNoteTool,
 };
 use crate::llama_server::ResolvedLlamaConfig;
 use crate::state::AppState;
@@ -326,6 +326,13 @@ async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
                 .await
                 .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid find_in_note arguments: {e}"),
+        },
+        "format_note" => match serde_json::from_value::<FormatNoteArgs>(v) {
+            Ok(a) => FormatNoteTool { state: state.clone() }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
+            Err(e) => format!("Invalid format_note arguments: {e}"),
         },
         other => format!("Unknown tool: {other}"),
     }
