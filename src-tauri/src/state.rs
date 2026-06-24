@@ -1016,7 +1016,24 @@ impl AppState {
                 .map(|m| m.content.as_str())
                 .collect();
             let edit_thread = crate::agent::in_edit_thread(&recent_user_msgs);
-            let tools = crate::agent::select_tools(&question, true, edit_thread);
+            // Capability gate: skip tools entirely for a model whose template
+            // can't do tool calls (profile-known or probed once + cached), so it
+            // works as a chat-only model instead of erroring every turn.
+            let model_id = config.model_path.to_string_lossy().to_string();
+            let tools = if crate::tool_capability::supports_tools(
+                &self.inner.llama_client,
+                &config.base_url(),
+                &self.inner.app_data_dir,
+                &config.model_path,
+                &model_id,
+                config.supports_tools,
+            )
+            .await
+            {
+                crate::agent::select_tools(&question, true, edit_thread)
+            } else {
+                Vec::new()
+            };
 
             // Stream directly against llama-server (not through rig) so the note
             // content can be surfaced token-by-token as it is generated. See

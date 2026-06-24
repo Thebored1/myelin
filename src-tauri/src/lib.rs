@@ -5,6 +5,7 @@ mod model_profiles;
 mod models;
 mod state;
 mod stream_chat;
+mod tool_capability;
 mod web_search;
 
 use models::{AppSnapshot, NoteDocument, ProviderStatus, SearchResponse};

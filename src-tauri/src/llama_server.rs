@@ -142,6 +142,10 @@ pub struct ResolvedLlamaConfig {
     /// Model role from the profile registry: "chat" (default) or "embed".
     #[serde(default)]
     pub model_role: String,
+    /// Whether the model reliably does tool-calling, from the profile. None =
+    /// unknown → the capability probe decides (and caches) at first use.
+    #[serde(default)]
+    pub supports_tools: Option<bool>,
     /// Ordered list of binaries to try (best first). Not serialized to the UI.
     #[serde(skip)]
     pub candidates: Vec<BackendCandidate>,
@@ -698,6 +702,7 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
             crate::model_profiles::ModelRole::Embed => "embed".to_string(),
             crate::model_profiles::ModelRole::Chat => "chat".to_string(),
         },
+        supports_tools: profile.supports_tools,
         candidates,
     })
 }
