@@ -108,6 +108,27 @@
     
     let enableJupyterExecution = $state(false);
 
+    // Web search + embeddings/RAG + model compatibility (Phase 5).
+    let searxngUrl = $state('');
+    let embedModelPath = $state('');
+    type ProfileInfo = { name: string; architecture?: string; namePattern?: string; role?: string; verified: boolean; notes?: string; supportsTools?: boolean };
+    let modelProfiles = $state<ProfileInfo[]>([]);
+
+    async function saveSearxng() {
+        await invoke('set_searxng_url', { url: searxngUrl.trim() || null });
+    }
+    async function pickEmbedModel() {
+        const picked = await open({ multiple: false, filters: [{ name: 'GGUF model', extensions: ['gguf'] }] });
+        if (typeof picked === 'string') {
+            embedModelPath = picked;
+            await invoke('set_embed_model_path', { path: picked });
+        }
+    }
+    async function clearEmbedModel() {
+        embedModelPath = '';
+        await invoke('set_embed_model_path', { path: null });
+    }
+
     async function refreshSnapshot() {
         const snapshot = await invoke<AppSnapshot>('get_snapshot');
         activeWorkspacePath = snapshot.workspacePath || '';
@@ -143,6 +164,13 @@
             if (!hasDedicatedGpu && backendPreference === 'gpu') backendPreference = 'vulkan';
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
+            searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
+            embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
+            try {
+                modelProfiles = await invoke<ProfileInfo[]>('list_model_profiles');
+            } catch (e) {
+                modelProfiles = [];
+            }
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
                 contextSize = status.config?.contextSize ?? status.resolved.contextSize ?? null;
@@ -457,6 +485,61 @@
                     <p class="compute-hint">
                         CPU and Vulkan ship with the app. Download CUDA for the fastest speed on NVIDIA GPUs.
                     </p>
+                </div>
+            {/if}
+
+            <br/>
+            <h2>Web Search</h2>
+            <p class="description">
+                Privacy-first web search for the assistant. Set a SearXNG instance URL, or leave blank to use the no-key DuckDuckGo fallback.
+            </p>
+            <div class="model-picker">
+                <input
+                    type="text"
+                    class="path-display"
+                    bind:value={searxngUrl}
+                    placeholder="https://searx.example.org (optional)"
+                    onchange={saveSearxng}
+                />
+            </div>
+
+            <br/>
+            <h2>Embeddings — Document Search & RAG</h2>
+            <p class="description">
+                A small embedding model (e.g. nomic-embed-text v1.5, Q8_0) powers semantic search over your notes and lets the assistant search ingested documents (PDFs, books). It runs as a second local server.
+            </p>
+            <div class="model-picker">
+                <div class="path-display" class:empty={!embedModelPath}>
+                    {embedModelPath || 'No embedding model selected — semantic search uses a lexical fallback'}
+                </div>
+                <button class="browse-btn" onclick={pickEmbedModel}>Browse...</button>
+                {#if embedModelPath}
+                    <button class="browse-btn" onclick={clearEmbedModel}>Clear</button>
+                {/if}
+            </div>
+
+            {#if modelProfiles.length > 0}
+                <br/>
+                <h2>Compatible Models</h2>
+                <p class="description">
+                    Models with a verified profile work out of the box (tool-calling and chat template tuned). Other models run on auto-detected defaults.
+                </p>
+                <div class="backends-list">
+                    {#each modelProfiles as p}
+                        <div class="backend-item">
+                            <span class="backend-name">
+                                {p.name}{#if p.role === 'embed'} <small>(embedding)</small>{/if}
+                            </span>
+                            {#if p.verified}
+                                <span class="backend-installed">✓ Verified</span>
+                            {:else}
+                                <span class="backend-progress-text">Experimental</span>
+                            {/if}
+                        </div>
+                        {#if p.notes}
+                            <p class="compute-hint">{p.notes}</p>
+                        {/if}
+                    {/each}
                 </div>
             {/if}
 

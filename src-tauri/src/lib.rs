@@ -310,6 +310,14 @@ async fn delete_document(state: State<'_, AppState>, doc_id: String) -> Result<(
     state.delete_document(&doc_id).await.map_err(|error| error.to_string())
 }
 
+/// All known model profiles (bundled + user) for the compatibility list.
+#[tauri::command]
+async fn list_model_profiles(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::model_profiles::ModelProfile>, String> {
+    Ok(state.list_model_profiles())
+}
+
 #[tauri::command]
 async fn extract_from_paste(
     _state: State<'_, AppState>,
@@ -463,6 +471,7 @@ pub fn run() {
             set_embed_model_path,
             ingest_document,
             delete_document,
+            list_model_profiles,
             get_all_note_documents,
             extract_from_paste,
             read_pdf_binary,

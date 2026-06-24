@@ -1444,6 +1444,11 @@ impl AppState {
         crate::llama_server::embed_model_path(&self.inner.app_data_dir)
     }
 
+    /// All known model profiles (bundled + user) for the compatibility list.
+    pub fn list_model_profiles(&self) -> Vec<crate::model_profiles::ModelProfile> {
+        crate::model_profiles::all_profiles(&self.inner.app_data_dir)
+    }
+
     /// Set (or clear, when empty) the embedding model GGUF path.
     pub fn set_embed_model_path(&self, path: Option<String>) -> Result<()> {
         crate::llama_server::set_embed_model_path(&self.inner.app_data_dir, path)
