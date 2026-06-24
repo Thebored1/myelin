@@ -97,10 +97,10 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         spec(
             "format_note",
-            "Apply a structural cleanup to the OPEN note, performed exactly in code (not by you): remove every heading (drops the # markers, keeps the text), remove all bold, or remove all bullet markers. ALWAYS prefer this over write_note when the user asks to remove/strip all headings, bold, or bullets — it is reliable where a full rewrite is not.",
+            "Apply a structural Markdown transform to the OPEN note, performed exactly in code (not by you): remove headings/bold/italic/bullets/numbering/links/images/code/quotes/strikethrough/dividers/blank lines, strip ALL formatting to plain text, convert headings<->bold, promote/demote headings, convert between bulleted and numbered lists, or change case. ALWAYS prefer this over write_note when the user asks to remove, strip, or convert any of these — it is reliable where a full rewrite is not.",
             serde_json::json!({
                 "type": "object",
-                "properties": { "operation": { "type": "string", "enum": ["remove_headings", "remove_bold", "remove_bullets"], "description": "Which structural cleanup to apply to the open note." } },
+                "properties": { "operation": { "type": "string", "enum": FORMAT_OPS, "description": "Which structural transform to apply to the open note." } },
                 "required": ["operation"]
             }),
         ),
@@ -483,57 +483,287 @@ pub fn wants_clear(message: &str) -> bool {
     PHRASES.iter().any(|p| m.contains(p))
 }
 
-/// Recognize a deterministic structural edit the model is bad at but a regex
-/// nails: stripping all headings, bold, or bullets from the open note. Returns
-/// the `apply_format_op` operation name, or None. Requires a removal verb so
-/// "add a heading" or "make it bold" don't match.
+/// Every operation `apply_format_op` understands. Kept in sync with the
+/// format_note tool's `operation` enum and used to validate the model's choice.
+pub const FORMAT_OPS: &[&str] = &[
+    "remove_headings",
+    "remove_bold",
+    "remove_italic",
+    "remove_emphasis",
+    "remove_bullets",
+    "remove_numbering",
+    "remove_links",
+    "remove_images",
+    "remove_code",
+    "remove_blockquotes",
+    "remove_strikethrough",
+    "remove_horizontal_rules",
+    "remove_blank_lines",
+    "strip_markdown",
+    "headings_to_bold",
+    "bold_to_headings",
+    "promote_headings",
+    "demote_headings",
+    "bullets_to_numbered",
+    "numbered_to_bullets",
+    "tasks_to_bullets",
+    "uppercase",
+    "lowercase",
+    "title_case",
+];
+
+pub fn is_format_op(op: &str) -> bool {
+    FORMAT_OPS.contains(&op)
+}
+
+/// Strip bold/italic emphasis. Bold uses doubled markers (** or __), italic
+/// single (* or _). Bold is processed first; when only italic is being removed,
+/// the doubled markers are protected so the single-marker pass can't chew them
+/// (Rust regex has no lookaround).
+fn strip_emphasis(body: &str, bold: bool, italic: bool) -> String {
+    let re = |p: &str| regex::Regex::new(p).unwrap();
+    let mut s = body.to_string();
+    if bold {
+        s = re(r"\*\*(.+?)\*\*").replace_all(&s, "$1").into_owned();
+        s = re(r"__(.+?)__").replace_all(&s, "$1").into_owned();
+    }
+    if italic {
+        let protect = !bold;
+        if protect {
+            s = s.replace("**", "\u{1}B").replace("__", "\u{1}U");
+        }
+        s = re(r"\*(.+?)\*").replace_all(&s, "$1").into_owned();
+        s = re(r"(?:^|\b)_(.+?)_(?:\b|$)").replace_all(&s, "$1").into_owned();
+        if protect {
+            s = s.replace("\u{1}B", "**").replace("\u{1}U", "__");
+        }
+    }
+    s
+}
+
+/// Renumber/convert list-item markers. `to` = "number" (1. 2. … reset per block)
+/// or "bullet" (- ). Operates on a contiguous run of list lines.
+fn convert_lists(body: &str, to: &str) -> String {
+    let bullet = regex::Regex::new(r"^(\s*)[-*+][ \t]+").unwrap();
+    let numbered = regex::Regex::new(r"^(\s*)\d+[.)][ \t]+").unwrap();
+    let mut out: Vec<String> = Vec::new();
+    let mut counter = 0u32;
+    for line in body.split('\n') {
+        let b = bullet.captures(line);
+        let n = numbered.captures(line);
+        let caps = b.as_ref().or(n.as_ref());
+        match caps {
+            Some(c) => {
+                counter += 1;
+                let whole = c.get(0).unwrap();
+                let indent = c.get(1).map(|m| m.as_str()).unwrap_or("");
+                let rest = &line[whole.end()..];
+                if to == "number" {
+                    out.push(format!("{indent}{counter}. {rest}"));
+                } else {
+                    out.push(format!("{indent}- {rest}"));
+                }
+            }
+            None => {
+                counter = 0;
+                out.push(line.to_string());
+            }
+        }
+    }
+    out.join("\n")
+}
+
+fn to_title_case(body: &str) -> String {
+    body.split('\n')
+        .map(|line| {
+            line.split(' ')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(c) => c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Recognize a deterministic Markdown transform the model is bad at but a regex
+/// nails (strip/convert headings, emphasis, lists, links, code, …). Returns the
+/// `apply_format_op` operation, or None. Never fires on a request to CREATE fresh
+/// content ("write a numbered list…") so it can't hijack a real write.
 pub fn detect_format_op(message: &str) -> Option<&'static str> {
     let m = message.to_lowercase();
+    let creating = contains_any_word(
+        &m,
+        &["write", "create", "draft", "compose", "generate", "give", "jot"],
+    );
+
+    // ---- removals (need a removal verb; very low false-positive) ----
     let removal = contains_any_word(&m, &["remove", "delete", "strip", "drop", "clear", "kill"])
         || m.contains("get rid of")
         || m.contains("take out")
         || m.contains("without the")
         || m.contains("without any")
         || m.contains("no more");
-    if !removal {
+    if removal {
+        if m.contains("all formatting") || m.contains("all markdown") || m.contains("markdown formatting") || m.contains("plain text") {
+            return Some("strip_markdown");
+        }
+        if m.contains("heading") || m.contains("header") {
+            return Some("remove_headings");
+        }
+        if (m.contains("bold") && m.contains("italic")) || m.contains("emphasis") {
+            return Some("remove_emphasis");
+        }
+        if m.contains("bold") {
+            return Some("remove_bold");
+        }
+        if m.contains("italic") {
+            return Some("remove_italic");
+        }
+        if m.contains("image") || m.contains("picture") {
+            return Some("remove_images");
+        }
+        if m.contains("link") {
+            return Some("remove_links");
+        }
+        if m.contains("code") {
+            return Some("remove_code");
+        }
+        if m.contains("quote") {
+            return Some("remove_blockquotes");
+        }
+        if m.contains("strikethrough") || m.contains("strike-through") || m.contains("strike through") {
+            return Some("remove_strikethrough");
+        }
+        if m.contains("divider") || m.contains("horizontal rule") || m.contains("horizontal line") || m.contains("separator") {
+            return Some("remove_horizontal_rules");
+        }
+        if m.contains("blank line") || m.contains("empty line") || m.contains("extra line") {
+            return Some("remove_blank_lines");
+        }
+        if m.contains("checkbox") || m.contains("check box") || m.contains("task list") {
+            return Some("tasks_to_bullets");
+        }
+        if m.contains("number") {
+            return Some("remove_numbering");
+        }
+        if m.contains("bullet") {
+            return Some("remove_bullets");
+        }
+    }
+
+    // Past here we are transforming EXISTING content; never hijack a fresh write
+    // ("write this in uppercase", "create a numbered list …").
+    if creating {
         return None;
     }
-    if m.contains("heading") || m.contains("header") {
-        Some("remove_headings")
-    } else if m.contains("bold") {
-        Some("remove_bold")
-    } else if m.contains("bullet") {
-        Some("remove_bullets")
-    } else {
-        None
+
+    // ---- case transforms ----
+    if m.contains("uppercase") || m.contains("upper case") || m.contains("all caps") || m.contains("capital letters") {
+        return Some("uppercase");
     }
+    if m.contains("lowercase") || m.contains("lower case") {
+        return Some("lowercase");
+    }
+    if m.contains("title case") || m.contains("titlecase") {
+        return Some("title_case");
+    }
+
+    // ---- conversions ----
+    if (m.contains("heading") || m.contains("header")) && m.contains("bold") {
+        let hi = m.find("head").unwrap_or(usize::MAX);
+        let bi = m.find("bold").unwrap_or(usize::MAX);
+        return Some(if hi < bi { "headings_to_bold" } else { "bold_to_headings" });
+    }
+    if m.contains("heading") || m.contains("header") {
+        if m.contains("promote") || m.contains("up a level") || m.contains("larger") {
+            return Some("promote_headings");
+        }
+        if m.contains("demote") || m.contains("down a level") || m.contains("smaller") {
+            return Some("demote_headings");
+        }
+    }
+    let convert = contains_any_word(&m, &["convert", "change", "turn", "make", "switch"])
+        || m.contains(" to ")
+        || m.contains(" into ");
+    if convert && (m.contains("bullet") || m.contains("number") || m.contains("ordered")) {
+        // The TARGET style is the one mentioned LAST ("turn the numbered list
+        // into bullets" → target = bullets → numbered_to_bullets).
+        let bullet_pos = m.rfind("bullet");
+        let number_pos = m.rfind("number").or_else(|| m.rfind("ordered"));
+        match (bullet_pos, number_pos) {
+            (Some(b), Some(n)) => {
+                return Some(if b > n { "numbered_to_bullets" } else { "bullets_to_numbered" })
+            }
+            (Some(_), None) => return Some("numbered_to_bullets"),
+            (None, Some(_)) => return Some("bullets_to_numbered"),
+            (None, None) => {}
+        }
+    }
+    None
 }
 
-/// Apply a deterministic structural cleanup to Markdown. Done in code precisely
-/// so a small model never has to (and never gets to wipe or echo the note).
+/// Apply a deterministic Markdown transform. Done in code precisely so a small
+/// model never has to (and never gets to wipe or echo the note).
 pub fn apply_format_op(body: &str, op: &str) -> String {
+    let re = |p: &str| regex::Regex::new(p).unwrap();
     match op {
-        // Drop the leading "#"/"##"/… marker but keep the heading's text line.
-        "remove_headings" => regex::Regex::new(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
-            .unwrap()
+        // ---- removals ----
+        "remove_headings" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+").replace_all(body, "").into_owned(),
+        "remove_bold" => strip_emphasis(body, true, false),
+        "remove_italic" => strip_emphasis(body, false, true),
+        "remove_emphasis" => strip_emphasis(body, true, true),
+        "remove_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+").replace_all(body, "$1").into_owned(),
+        "remove_numbering" => re(r"(?m)^([ \t]*)\d+[.)][ \t]+").replace_all(body, "$1").into_owned(),
+        // Keep link/alt text; drop the (url). Protect images during the link pass.
+        "remove_links" => {
+            let protected = body.replace("![", "\u{1}I");
+            let unlinked = re(r"\[([^\]]*)\]\([^)]*\)").replace_all(&protected, "$1").into_owned();
+            unlinked.replace("\u{1}I", "![")
+        }
+        "remove_images" => re(r"!\[[^\]]*\]\([^)]*\)").replace_all(body, "").into_owned(),
+        // Fenced blocks first (keep inner code), then inline spans.
+        "remove_code" => {
+            let no_fence = re(r"(?s)```[^\n]*\n(.*?)```").replace_all(body, "$1").into_owned();
+            re(r"`([^`\n]+)`").replace_all(&no_fence, "$1").into_owned()
+        }
+        "remove_blockquotes" => re(r"(?m)^[ \t]{0,3}>[ \t]?").replace_all(body, "").into_owned(),
+        "remove_strikethrough" => re(r"~~(.+?)~~").replace_all(body, "$1").into_owned(),
+        "remove_horizontal_rules" => re(r"(?m)^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*\n?")
             .replace_all(body, "")
             .into_owned(),
-        // Unwrap **bold** / __bold__, keeping the inner text.
-        "remove_bold" => regex::Regex::new(r"\*\*([^*\n]+)\*\*|__([^_\n]+)__")
-            .unwrap()
-            .replace_all(body, |c: &regex::Captures| {
-                c.get(1)
-                    .or_else(|| c.get(2))
-                    .map(|m| m.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .into_owned(),
-        // Strip a leading "-"/"*"/"+"/"1." bullet marker, keep the line + indent.
-        "remove_bullets" => regex::Regex::new(r"(?m)^([ \t]*)(?:[-*+]|\d+[.)])[ \t]+")
-            .unwrap()
-            .replace_all(body, "$1")
-            .into_owned(),
+        "remove_blank_lines" => re(r"\n{3,}").replace_all(body, "\n\n").into_owned(),
+        // Everything → plain text, in a safe order.
+        "strip_markdown" => {
+            let mut s = apply_format_op(body, "remove_code");
+            s = apply_format_op(&s, "remove_images");
+            s = apply_format_op(&s, "remove_links");
+            s = apply_format_op(&s, "remove_headings");
+            s = apply_format_op(&s, "remove_blockquotes");
+            s = apply_format_op(&s, "remove_horizontal_rules");
+            s = apply_format_op(&s, "remove_bullets");
+            s = apply_format_op(&s, "remove_numbering");
+            s = apply_format_op(&s, "remove_strikethrough");
+            strip_emphasis(&s, true, true)
+        }
+        // ---- conversions ----
+        "headings_to_bold" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$").replace_all(body, "**$1**").into_owned(),
+        "bold_to_headings" => re(r"(?m)^[ \t]*\*\*(.+?)\*\*[ \t]*$").replace_all(body, "# $1").into_owned(),
+        // ##→# (one level up); h1 has no second # so is left alone.
+        "promote_headings" => re(r"(?m)^#(#+[ \t])").replace_all(body, "$1").into_owned(),
+        // #→## (one level down); h6 won't match so is capped.
+        "demote_headings" => re(r"(?m)^(#{1,5})([ \t])").replace_all(body, "#$1$2").into_owned(),
+        "bullets_to_numbered" => convert_lists(body, "number"),
+        "numbered_to_bullets" => convert_lists(body, "bullet"),
+        "tasks_to_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+").replace_all(body, "$1- ").into_owned(),
+        "uppercase" => body.to_uppercase(),
+        "lowercase" => body.to_lowercase(),
+        "title_case" => to_title_case(body),
         _ => body.to_string(),
     }
 }
@@ -871,11 +1101,11 @@ impl Tool for FormatNoteTool {
         ToolDefinition {
             name: "format_note".to_string(),
             description:
-                "Apply a structural cleanup to the open note, performed exactly in code: remove every heading (keeps the text, drops the # markers), remove all bold, or remove all bullet markers."
+                "Apply a structural Markdown transform to the open note, performed exactly in code: remove headings/bold/italic/bullets/numbering/links/images/code/quotes/strikethrough/dividers/blank lines, strip all formatting, convert headings<->bold, promote/demote headings, convert bulleted<->numbered lists, or change case."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": { "operation": { "type": "string", "enum": ["remove_headings", "remove_bold", "remove_bullets"], "description": "Which structural cleanup to apply." } },
+                "properties": { "operation": { "type": "string", "enum": FORMAT_OPS, "description": "Which structural transform to apply." } },
                 "required": ["operation"]
             }),
         }
@@ -885,11 +1115,13 @@ impl Tool for FormatNoteTool {
         // Trust the model's operation only if it's a known op; otherwise fall back
         // to what the user's message clearly asked for. The transform itself is
         // deterministic either way.
-        let op = match args.operation.trim() {
-            o @ ("remove_headings" | "remove_bold" | "remove_bullets") => o.to_string(),
-            _ => detect_format_op(&self.state.latest_chat_question())
-                .unwrap_or("remove_headings")
-                .to_string(),
+        let requested = args.operation.trim();
+        let op = if is_format_op(requested) {
+            requested.to_string()
+        } else {
+            detect_format_op(&self.state.latest_chat_question())
+                .unwrap_or("strip_markdown")
+                .to_string()
         };
 
         let existing = match self.state.resolve_chat_target_note("") {
@@ -1359,19 +1591,64 @@ mod tests {
             apply_format_op(body, "remove_headings"),
             "Intro\nPersonal computers changed everything.\nHistory\nIt began in the 1970s."
         );
-        // Not a removal request → don't route here.
-        assert_eq!(detect_format_op("add a heading"), None);
         assert_eq!(detect_format_op("make the title a heading"), None);
     }
 
     #[test]
-    fn format_op_strips_bold_and_bullets() {
+    fn format_op_removals() {
         assert_eq!(apply_format_op("a **bold** word", "remove_bold"), "a bold word");
-        assert_eq!(
-            apply_format_op("- one\n- two", "remove_bullets"),
-            "one\ntwo"
-        );
-        assert_eq!(detect_format_op("strip the bullet points"), Some("remove_bullets"));
+        assert_eq!(apply_format_op("a *italic* word", "remove_italic"), "a italic word");
+        // Italic-only must leave bold markers intact.
+        assert_eq!(apply_format_op("**b** and *i*", "remove_italic"), "**b** and i");
+        assert_eq!(apply_format_op("**b** and *i*", "remove_emphasis"), "b and i");
+        assert_eq!(apply_format_op("- one\n- two", "remove_bullets"), "one\ntwo");
+        assert_eq!(apply_format_op("1. one\n2. two", "remove_numbering"), "one\ntwo");
+        assert_eq!(apply_format_op("see [Rust](https://r.org) here", "remove_links"), "see Rust here");
+        // remove_links keeps images.
+        assert_eq!(apply_format_op("![p](a.png) and [x](y)", "remove_links"), "![p](a.png) and x");
+        assert_eq!(apply_format_op("![p](a.png) text", "remove_images"), " text");
+        assert_eq!(apply_format_op("use `code` now", "remove_code"), "use code now");
+        assert_eq!(apply_format_op("> quoted\n> more", "remove_blockquotes"), "quoted\nmore");
+        assert_eq!(apply_format_op("a ~~no~~ b", "remove_strikethrough"), "a no b");
+        assert_eq!(apply_format_op("x\n\n---\n\ny", "remove_horizontal_rules"), "x\n\n\ny");
+        assert_eq!(apply_format_op("a\n\n\n\nb", "remove_blank_lines"), "a\n\nb");
+        assert_eq!(apply_format_op("# H\n- **b** [l](u)", "strip_markdown"), "H\nb l");
+    }
+
+    #[test]
+    fn format_op_conversions() {
+        assert_eq!(apply_format_op("# Title\nbody", "headings_to_bold"), "**Title**\nbody");
+        assert_eq!(apply_format_op("**Title**\nbody", "bold_to_headings"), "# Title\nbody");
+        assert_eq!(apply_format_op("## A\n# B", "promote_headings"), "# A\n# B");
+        assert_eq!(apply_format_op("# A\n## B", "demote_headings"), "## A\n### B");
+        assert_eq!(apply_format_op("- a\n- b\n- c", "bullets_to_numbered"), "1. a\n2. b\n3. c");
+        assert_eq!(apply_format_op("1. a\n2. b", "numbered_to_bullets"), "- a\n- b");
+        assert_eq!(apply_format_op("- [ ] todo\n- [x] done", "tasks_to_bullets"), "- todo\n- done");
+        assert_eq!(apply_format_op("Hi There", "uppercase"), "HI THERE");
+        assert_eq!(apply_format_op("Hi There", "lowercase"), "hi there");
+        assert_eq!(apply_format_op("hello world", "title_case"), "Hello World");
+    }
+
+    #[test]
+    fn detect_format_op_routes_and_guards() {
+        assert_eq!(detect_format_op("strip the bold"), Some("remove_bold"));
+        assert_eq!(detect_format_op("get rid of the bullet points"), Some("remove_bullets"));
+        assert_eq!(detect_format_op("remove the links"), Some("remove_links"));
+        assert_eq!(detect_format_op("remove all the images"), Some("remove_images"));
+        assert_eq!(detect_format_op("strip all formatting"), Some("strip_markdown"));
+        assert_eq!(detect_format_op("make it all uppercase"), Some("uppercase"));
+        assert_eq!(detect_format_op("convert the bullets to a numbered list"), Some("bullets_to_numbered"));
+        assert_eq!(detect_format_op("turn the numbered list into bullets"), Some("numbered_to_bullets"));
+        assert_eq!(detect_format_op("change the headings to bold"), Some("headings_to_bold"));
+        // Never hijack a request to CREATE fresh content.
+        assert_eq!(detect_format_op("write a numbered list of fruits"), None);
+        assert_eq!(detect_format_op("write this note in uppercase"), None);
+        assert_eq!(detect_format_op("make the title a heading"), None);
+        // Every op the detector returns must be applicable.
+        for op in FORMAT_OPS {
+            assert_eq!(apply_format_op("unchanged", "bogus_op"), "unchanged");
+            assert!(is_format_op(op));
+        }
     }
 
     #[test]
