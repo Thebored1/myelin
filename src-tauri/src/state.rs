@@ -1520,17 +1520,49 @@ impl AppState {
         self.inner.app_data_dir.join("rag-index")
     }
 
-    /// Ingest a document into the RAG store: chunk → embed (document prefix) →
-    /// store. Re-ingesting the same doc_id replaces its chunks. Returns the
-    /// number of chunks stored.
-    pub async fn ingest_document(&self, doc_id: &str, source: &str, text: &str) -> Result<usize> {
+    /// Ingest a document into the RAG store: chunk → embed → store. Re-ingesting
+    /// the same doc_id replaces its chunks. `contextual` (for the working doc /
+    /// "deep index") embeds each chunk with a one-sentence LLM context that
+    /// situates it in the document, while STORING the clean chunk text. Plain
+    /// (sources) skips that for speed. Returns the number of chunks stored.
+    pub async fn ingest_document(
+        &self,
+        doc_id: &str,
+        source: &str,
+        text: &str,
+        contextual: bool,
+    ) -> Result<usize> {
         let chunks = crate::embeddings::chunk_text(text, 320, 50);
         if chunks.is_empty() {
             crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await?;
             return Ok(0);
         }
-        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-        let vectors = self.embed_texts(&texts, false).await?;
+
+        // Contextual: one LLM summary of the doc, prepended to each chunk's
+        // EMBED text (not its stored text) so the vector carries document context.
+        let prefix = if contextual {
+            let excerpt: String = text.chars().take(3000).collect();
+            match self
+                .run_llama_prompt(
+                    "You write a single short sentence situating a document, for search context.",
+                    &format!(
+                        "Document:\n{excerpt}\n\nIn ONE sentence, say what this document is about (for retrieval context). Reply with only the sentence."
+                    ),
+                )
+                .await
+            {
+                Ok(s) => format!("[Context: {}] ", s.trim()),
+                Err(_) => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        let embed_input: Vec<String> = chunks
+            .iter()
+            .map(|c| format!("{prefix}{}", c.text))
+            .collect();
+        let vectors = self.embed_texts(&embed_input, false).await?;
         let docs: Vec<crate::rag::DocChunk> = chunks
             .iter()
             .zip(vectors)
@@ -1545,6 +1577,11 @@ impl AppState {
         let n = docs.len();
         crate::rag::upsert_document(&self.rag_dir(), doc_id, docs).await?;
         Ok(n)
+    }
+
+    /// Remove a document's chunks from the RAG store.
+    pub async fn delete_document(&self, doc_id: &str) -> Result<()> {
+        crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await
     }
 
     /// Retrieve the top-K document chunks most relevant to a query.

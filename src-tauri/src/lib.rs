@@ -288,6 +288,28 @@ async fn set_embed_model_path(state: State<'_, AppState>, path: Option<String>) 
     state.set_embed_model_path(path).map_err(|error| error.to_string())
 }
 
+/// Ingest a document into the RAG store (chunk → embed → store). `contextual`
+/// for the working doc / deep index; plain for bulk sources. Returns chunk count.
+#[tauri::command]
+async fn ingest_document(
+    state: State<'_, AppState>,
+    doc_id: String,
+    source: String,
+    text: String,
+    contextual: Option<bool>,
+) -> Result<usize, String> {
+    state
+        .ingest_document(&doc_id, &source, &text, contextual.unwrap_or(false))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Remove a document's chunks from the RAG store.
+#[tauri::command]
+async fn delete_document(state: State<'_, AppState>, doc_id: String) -> Result<(), String> {
+    state.delete_document(&doc_id).await.map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn extract_from_paste(
     _state: State<'_, AppState>,
@@ -439,6 +461,8 @@ pub fn run() {
             set_searxng_url,
             get_embed_model_path,
             set_embed_model_path,
+            ingest_document,
+            delete_document,
             get_all_note_documents,
             extract_from_paste,
             read_pdf_binary,
