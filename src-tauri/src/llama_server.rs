@@ -1231,6 +1231,71 @@ pub async fn stop_server(server: &mut ManagedLlamaServer) {
     let _ = server.child.wait();
 }
 
+/// A second llama-server running in embedding mode (for RAG). Lighter than the
+/// chat server: CPU, mean pooling, small context — it doesn't compete with the
+/// chat model for VRAM.
+pub struct ManagedEmbedServer {
+    pub child: Child,
+    pub port: u16,
+    pub model_path: PathBuf,
+}
+
+/// Spawn the embedding server (nomic-embed etc.) and wait until it's healthy.
+pub async fn start_embed_server(
+    client: &Client,
+    executable: &Path,
+    model_path: &Path,
+    host: &str,
+    port: u16,
+) -> Result<ManagedEmbedServer> {
+    let mut child = Command::new(executable)
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--model")
+        .arg(model_path)
+        .arg("--embedding")
+        .arg("--pooling")
+        .arg("mean")
+        .arg("--ctx-size")
+        .arg("2048")
+        .arg("--no-warmup")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn embedding server: {}", executable.display()))?;
+
+    let base = format!("http://{host}:{port}");
+    for _ in 0..80 {
+        if client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
+            log::info!("embedding server ready on port {port} ({})", model_path.display());
+            return Ok(ManagedEmbedServer {
+                child,
+                port,
+                model_path: model_path.to_path_buf(),
+            });
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            bail!("embedding server exited early ({status})");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let _ = child.kill();
+    bail!("embedding server did not become healthy")
+}
+
+pub async fn stop_embed_server(server: &mut ManagedEmbedServer) {
+    let _ = server.child.kill();
+    let _ = server.child.wait();
+}
+
 fn config_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(CONFIG_FILE_NAME)
 }

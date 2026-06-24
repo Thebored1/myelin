@@ -275,6 +275,18 @@ async fn set_searxng_url(state: State<'_, AppState>, url: Option<String>) -> Res
     state.set_searxng_url(url).map_err(|error| error.to_string())
 }
 
+/// Current embedding model GGUF path (empty = embeddings/RAG disabled).
+#[tauri::command]
+async fn get_embed_model_path(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.embed_model_path())
+}
+
+/// Set (or clear) the embedding model GGUF path.
+#[tauri::command]
+async fn set_embed_model_path(state: State<'_, AppState>, path: Option<String>) -> Result<(), String> {
+    state.set_embed_model_path(path).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn extract_from_paste(
     _state: State<'_, AppState>,
@@ -424,6 +436,8 @@ pub fn run() {
             stop_llama_server,
             get_searxng_url,
             set_searxng_url,
+            get_embed_model_path,
+            set_embed_model_path,
             get_all_note_documents,
             extract_from_paste,
             read_pdf_binary,

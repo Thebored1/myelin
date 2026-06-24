@@ -86,6 +86,7 @@ struct InnerState {
     watcher: Mutex<Option<RecommendedWatcher>>,
     index_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
+    embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
     llama_client: Client,
     chat_tools: Mutex<Vec<ChatTool>>,
     latest_chat_question: Mutex<Option<String>>,
@@ -168,6 +169,7 @@ impl AppState {
                 watcher: Mutex::new(None),
                 index_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
+                embed_server: AsyncMutex::new(None),
                 llama_client: Client::builder()
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
@@ -1421,6 +1423,16 @@ impl AppState {
         crate::llama_server::set_searxng_url(&self.inner.app_data_dir, url)
     }
 
+    /// The configured embedding model GGUF path (None → embeddings disabled).
+    pub fn embed_model_path(&self) -> Option<String> {
+        crate::llama_server::embed_model_path(&self.inner.app_data_dir)
+    }
+
+    /// Set (or clear, when empty) the embedding model GGUF path.
+    pub fn set_embed_model_path(&self, path: Option<String>) -> Result<()> {
+        crate::llama_server::set_embed_model_path(&self.inner.app_data_dir, path)
+    }
+
     /// Start (or keep) the llama-server warm for the note now open in the editor,
     /// so the first message is instant and subsequent ones reuse the warm slot.
     /// Called on note open. Best-effort: a failure just means the first chat pays
@@ -1430,15 +1442,76 @@ impl AppState {
         self.ensure_llama_server(&config).await
     }
 
-    /// Stop the llama-server, releasing its RAM/VRAM. Called when the open note is
-    /// closed — with no note in the editor there is nothing to infer for. The
-    /// next note open warms it again. Idempotent.
+    /// Stop the llama-server (and the embedding server), releasing RAM/VRAM.
+    /// Called when the open note is closed — nothing to infer for. The next note
+    /// open warms it again. Idempotent.
     pub async fn stop_llama_server(&self) {
         let mut guard = self.inner.llama_server.lock().await;
         if let Some(mut server) = guard.take() {
             llama_server::stop_server(&mut server).await;
             log::info!("llama-server stopped (note closed)");
         }
+        drop(guard);
+        let mut embed = self.inner.embed_server.lock().await;
+        if let Some(mut server) = embed.take() {
+            llama_server::stop_embed_server(&mut server).await;
+        }
+    }
+
+    /// Ensure the embedding server is running for the configured embed model and
+    /// return its base URL. The embed server runs alongside the chat server on
+    /// chat_port + 1. Errors if no embedding model is configured.
+    async fn ensure_embed_server(&self) -> Result<String> {
+        let model = llama_server::embed_model_path(&self.inner.app_data_dir)
+            .ok_or_else(|| anyhow::anyhow!("no embedding model configured (set one in Settings)"))?;
+        let model_path = std::path::PathBuf::from(&model);
+        let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+        let host = config.host.clone();
+        let port = config.port.saturating_add(1);
+        let base = format!("http://{host}:{port}");
+
+        let mut guard = self.inner.embed_server.lock().await;
+        if let Some(server) = guard.as_ref() {
+            let healthy = self
+                .inner
+                .llama_client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if server.model_path == model_path && healthy {
+                return Ok(base);
+            }
+            if let Some(mut old) = guard.take() {
+                llama_server::stop_embed_server(&mut old).await;
+            }
+        }
+        let server = llama_server::start_embed_server(
+            &self.inner.llama_client,
+            &config.executable_path,
+            &model_path,
+            &host,
+            port,
+        )
+        .await?;
+        *guard = Some(server);
+        Ok(base)
+    }
+
+    /// Embed a batch of texts via the local embedding server (starting it if
+    /// needed). `is_query` selects the nomic query vs document task prefix.
+    pub async fn embed_texts(&self, texts: &[String], is_query: bool) -> Result<Vec<Vec<f32>>> {
+        let base = self.ensure_embed_server().await?;
+        crate::embeddings::embed(
+            &self.inner.llama_client,
+            &base,
+            "nomic-embed",
+            texts,
+            is_query,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     }
 
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
