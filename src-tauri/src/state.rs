@@ -649,6 +649,21 @@ impl AppState {
         };
 
         fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+
+        // Delete the note's sidecars too — the chat session and annotations are
+        // keyed by note id and would otherwise orphan in the workspace data dir
+        // (stale sessions lingering after the note is gone).
+        let data_dir = self.workspace_data_dir(&workspace);
+        let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.json")));
+        let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.tmp")));
+        let _ = fs::remove_file(
+            data_dir
+                .join("annotations")
+                .join(format!("{note_id}.annotations.json")),
+        );
+        // Drop any RAG chunks ingested for this note from the document store.
+        let _ = self.delete_document(&note_id).await;
+
         crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))?;
         self.reindex_workspace(workspace).await?;
         Ok(self.snapshot())
@@ -1321,6 +1336,24 @@ impl AppState {
         // Upgrade the hashed placeholder vectors to real embeddings (one batch)
         // when an embed model is configured — semantic note search.
         self.reembed_notes(&mut notes).await;
+
+        // Self-heal: remove orphaned chat sessions whose note no longer exists
+        // (left behind by older deletes that didn't clean up the sidecar).
+        {
+            let live_ids: std::collections::HashSet<&str> =
+                notes.iter().map(|n| n.document.id.as_str()).collect();
+            let chats_dir = self.workspace_data_dir(&workspace).join("chats");
+            if let Ok(entries) = std::fs::read_dir(&chats_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if let Some(id) = name.strip_suffix(".chat.json") {
+                        if !live_ids.contains(id) {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
 
         let mut backlinks_map: HashMap<String, Vec<Backlink>> = HashMap::new();
         for note in &notes {
