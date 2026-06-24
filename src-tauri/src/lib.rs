@@ -1,4 +1,5 @@
 pub mod git_history;
+mod embeddings;
 mod gguf;
 mod llama_server;
 mod model_profiles;

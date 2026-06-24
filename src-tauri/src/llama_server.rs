@@ -101,6 +101,9 @@ pub struct WorkspaceLlamaConfig {
     /// Optional SearXNG instance base URL for web search (privacy-first). When
     /// empty/None the agent falls back to the no-key DuckDuckGo endpoint.
     pub searxng_url: Option<String>,
+    /// Optional path to the embedding model GGUF (e.g. nomic-embed-text). When
+    /// set, the app runs a second llama-server in embedding mode for RAG.
+    pub embed_model_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1275,6 +1278,27 @@ pub fn set_searxng_url(app_data_dir: &Path, url: Option<String>) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+/// Path to the configured embedding model GGUF, if set and non-empty.
+pub fn embed_model_path(app_data_dir: &Path) -> Option<String> {
+    load_config(app_data_dir)
+        .ok()
+        .and_then(|c| c.embed_model_path)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Set (or clear, when empty) the embedding model GGUF path.
+pub fn set_embed_model_path(app_data_dir: &Path, path: Option<String>) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.embed_model_path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let cfg_path = config_path(app_data_dir);
+    if let Some(parent) = cfg_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&cfg_path, serde_json::to_string_pretty(&config)?)?;
     Ok(())
 }
 
