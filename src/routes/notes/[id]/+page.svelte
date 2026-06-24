@@ -47,6 +47,35 @@
 
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
+
+	// Prompt-box context-usage ring: estimate fill from the open note + chat
+	// length against the working context window (~32K tokens ≈ 130K chars).
+	const RING_CIRC = 2 * Math.PI * 15.5;
+	let contextPercent = $derived.by(() => {
+		const noteChars = note?.body?.length ?? 0;
+		const histChars = chatMessages.reduce((s, m) => s + (m.content?.length ?? 0), 0);
+		const used = noteChars + histChars + chatInput.length;
+		return Math.min(100, Math.round((used / 130000) * 100));
+	});
+	let ringOffset = $derived(RING_CIRC * (1 - contextPercent / 100));
+	let ringColor = $derived(
+		contextPercent < 60 ? 'var(--accent-200, #6ea8fe)' : contextPercent < 85 ? '#e0a341' : '#e5484d'
+	);
+
+	// Upload button: attach a document (becomes a note via the PDF/EPUB import).
+	async function attachFile() {
+		const picked = await openFileDialog({
+			multiple: false,
+			filters: [{ name: 'Documents', extensions: ['pdf', 'epub'] }]
+		});
+		if (typeof picked === 'string') {
+			try {
+				await invoke('import_pdf_file', { filePath: picked });
+			} catch (e) {
+				console.error('attach failed', e);
+			}
+		}
+	}
 	let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
 	let chatMessagesEl: HTMLDivElement | undefined = $state();
 	let currentTime = $state(Date.now());
@@ -2342,35 +2371,67 @@
 							{/if}
 							
 							<div class="chat-input-area">
-								<textarea
-									bind:this={chatTextareaEl}
-									bind:value={chatInput}
-									onkeydown={(e) => {
-										if (e.key === 'Enter' && !e.shiftKey) {
-											e.preventDefault();
-											if (chatInput.trim()) sendChatMessage();
-										}
-									}}
-									oninput={(e) => {
-										const target = e.target as HTMLTextAreaElement;
-										target.style.height = 'auto';
-										target.style.height = `${Math.min(target.scrollHeight + 2, 150)}px`;
-									}}
-									placeholder="Ask AI..."
-									rows="1"
-								></textarea>
-								<label class="full-permission-toggle">
-									<div class="toggle-switch">
-										<input type="checkbox" checked={!requireToolApproval} onchange={(e) => {
-											requireToolApproval = !e.currentTarget.checked;
-											invoke('set_require_tool_approval', { require: requireToolApproval });
-										}} />
-										<span class="slider"></span>
+								<div class="prompt-box">
+									<textarea
+										bind:this={chatTextareaEl}
+										bind:value={chatInput}
+										onkeydown={(e) => {
+											if (e.key === 'Enter' && !e.shiftKey) {
+												e.preventDefault();
+												if (chatInput.trim()) sendChatMessage();
+											}
+										}}
+										oninput={(e) => {
+											const target = e.target as HTMLTextAreaElement;
+											target.style.height = 'auto';
+											target.style.height = `${Math.min(target.scrollHeight + 2, 150)}px`;
+										}}
+										placeholder="Ask AI…"
+										rows="1"
+									></textarea>
+									<div class="prompt-toolbar">
+										<button
+											type="button"
+											class="mode-pill"
+											class:auto={!requireToolApproval}
+											onclick={() => {
+												requireToolApproval = !requireToolApproval;
+												invoke('set_require_tool_approval', { require: requireToolApproval });
+											}}
+											title={requireToolApproval
+												? 'Ask: confirms before each tool action — click for Auto'
+												: 'Auto: edits freely without asking — click to require permission'}
+										>
+											{requireToolApproval ? 'Ask' : 'Auto'}
+										</button>
+										<button
+											type="button"
+											class="prompt-icon-btn"
+											onclick={attachFile}
+											title="Attach a file"
+											aria-label="Attach a file"
+										>
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+										</button>
+										<div class="prompt-spacer"></div>
+										<div class="context-ring" title={`~${contextPercent}% of the context window used`}>
+											<svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
+												<circle class="ring-track" cx="18" cy="18" r="15.5"></circle>
+												<circle class="ring-value" cx="18" cy="18" r="15.5" style={`stroke-dasharray:${RING_CIRC};stroke-dashoffset:${ringOffset};stroke:${ringColor};`}></circle>
+											</svg>
+										</div>
+										<button
+											type="button"
+											class="send-btn"
+											onclick={() => { if (chatInput.trim()) sendChatMessage(); }}
+											disabled={!chatInput.trim()}
+											aria-label="Send"
+											title="Send (Enter)"
+										>
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+										</button>
 									</div>
-									<span style="font-size: 0.7rem; color: var(--text-secondary); opacity: 0.8; margin-left: 4px;">
-										{requireToolApproval ? 'OFF (Asks for permission)' : 'ON (Edits freely)'}
-									</span>
-								</label>
+								</div>
 							</div>
 						</div>
 					{:else if activeSidebarTab === 'versions'}
@@ -4155,61 +4216,6 @@
 		flex-wrap: wrap; /* Fix responsiveness for narrow sidebars */
 	}
 	
-	.full-permission-toggle {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 0.8rem;
-		color: var(--text-secondary);
-		margin-top: 6px;
-		cursor: pointer;
-	}
-
-	.toggle-switch {
-		position: relative;
-		display: inline-block;
-		width: 34px;
-		height: 20px;
-	}
-
-	.toggle-switch input {
-		opacity: 0;
-		width: 0;
-		height: 0;
-	}
-
-	.slider {
-		position: absolute;
-		cursor: pointer;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background-color: rgba(255, 255, 255, 0.2);
-		transition: .4s;
-		border-radius: 20px;
-	}
-
-	.slider:before {
-		position: absolute;
-		content: "";
-		height: 14px;
-		width: 14px;
-		left: 3px;
-		bottom: 3px;
-		background-color: white;
-		transition: .4s;
-		border-radius: 50%;
-	}
-
-	input:checked + .slider {
-		background-color: var(--primary, #f97316);
-	}
-
-	input:checked + .slider:before {
-		transform: translateX(14px);
-	}
-
 	.pending-approval-bar {
 		display: flex;
 		justify-content: space-between;
@@ -4268,18 +4274,104 @@
 		padding-top: var(--space-3);
 		border-top: 1px solid var(--border-subtle);
 	}
-	.chat-input-area textarea {
-		width: 100%;
+	.prompt-box {
 		background: var(--bg-page);
 		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xs);
-		padding: var(--space-2) var(--space-3);
+		border-radius: var(--radius-sm, 10px);
+		padding: var(--space-2);
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+		transition: border-color 0.15s ease;
+	}
+	.prompt-box:focus-within {
+		border-color: var(--accent-200);
+	}
+	.chat-input-area textarea {
+		width: 100%;
+		background: transparent;
+		border: none;
+		border-radius: 0;
+		padding: var(--space-1) var(--space-2);
 		color: var(--text-primary);
 		outline: none;
 		resize: none;
 		font-family: inherit;
 		line-height: 1.4;
 		overflow-y: auto;
+	}
+	.prompt-toolbar {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 0 2px;
+	}
+	.prompt-spacer {
+		flex: 1;
+	}
+	.mode-pill {
+		font-size: 0.72rem;
+		font-weight: 600;
+		line-height: 1;
+		padding: 4px 10px;
+		border-radius: 999px;
+		border: 1px solid var(--border-default);
+		background: transparent;
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s;
+	}
+	.mode-pill.auto {
+		color: #1c1c1c;
+		background: #e0b341;
+		border-color: transparent;
+	}
+	.mode-pill:hover {
+		opacity: 0.88;
+	}
+	.prompt-icon-btn,
+	.send-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		border-radius: 7px;
+		border: none;
+		background: transparent;
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: background 0.15s, color 0.15s, opacity 0.15s;
+	}
+	.prompt-icon-btn:hover {
+		background: var(--bg-hover, rgba(255, 255, 255, 0.07));
+		color: var(--text-primary);
+	}
+	.send-btn {
+		color: var(--accent-200, #6ea8fe);
+	}
+	.send-btn:hover:not(:disabled) {
+		background: var(--bg-hover, rgba(255, 255, 255, 0.07));
+	}
+	.send-btn:disabled {
+		color: var(--text-muted);
+		opacity: 0.45;
+		cursor: default;
+	}
+	.context-ring svg {
+		display: block;
+		transform: rotate(-90deg);
+	}
+	.context-ring .ring-track {
+		fill: none;
+		stroke: var(--border-default);
+		stroke-width: 3;
+	}
+	.context-ring .ring-value {
+		fill: none;
+		stroke-width: 3;
+		stroke-linecap: round;
+		transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;
 	}
 	.chat-input-area textarea::-webkit-scrollbar {
 		width: 6px;
@@ -4293,9 +4385,6 @@
 	}
 	.chat-input-area textarea::-webkit-scrollbar-thumb:hover {
 		background: var(--neutral-500, #666);
-	}
-	.chat-input-area textarea:focus {
-		border-color: var(--accent-200);
 	}
 
 	.loading-dots::after {
