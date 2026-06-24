@@ -1,0 +1,7 @@
+# Generated dataset + training/model outputs — not source.
+data/
+out/
+base/
+merged/
+*.gguf
+__pycache__/

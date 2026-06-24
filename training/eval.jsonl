@@ -1,0 +1,11 @@
+{"note": "# Plants\nPlants need sunligt and water.\nThey grow in soil.", "title": "Plants", "instruction": "fix the typo", "check": {"tool": "write_note", "content_has": ["# Plants", "They grow in soil.", "sunlight"], "content_lacks": ["sunligt"]}}
+{"note": "# List\nkeep one\nremove me\nkeep two", "title": "List", "instruction": "remove the line that says remove me", "check": {"tool": "write_note", "content_has": ["keep one", "keep two"], "content_lacks": ["remove me"]}}
+{"note": "**Title**\nbody stays here.", "title": "T", "instruction": "make the title an actual heading", "check": {"tool": "write_note", "content_has": ["# Title", "body stays here."], "content_lacks": ["**Title**"]}}
+{"note": "## A\ntext\n## B\nmore", "title": "AB", "instruction": "get rid of all the headings", "check": {"tool": "format_note", "args_contains": {"operation": "remove_headings"}}}
+{"note": "# Sci\nThe nucleus stores DNA.", "title": "Sci", "instruction": "is the word nucleus in this note?", "check": {"tool": "find_in_note", "args_contains": {"query": "nucleus"}}}
+{"note": "", "title": "Tea", "instruction": "write a short note titled Tea with two bullet facts", "check": {"tool": "write_note", "content_has": ["# Tea", "- "]}}
+{"note": "# Shopping\n- milk\n- eggs", "title": "Shopping", "instruction": "add bread", "check": {"tool": "write_note", "content_has": ["- milk", "- eggs", "bread"]}}
+{"note": "# Essay\nsome text", "title": "Essay", "instruction": "what do you think makes a good essay?", "check": {"no_tool": true}}
+{"note": "# N\nx", "title": "N", "instruction": "hello!", "check": {"no_tool": true}}
+{"note": "# Now\ntasks", "title": "Now", "instruction": "look through my other notes for travel plans", "check": {"tool": "search_notes"}}
+{"note": "# Keep\nline one\nline two\nline three", "title": "Keep", "instruction": "capitalize the first line only", "check": {"tool": "write_note", "content_has": ["line two", "line three"]}}

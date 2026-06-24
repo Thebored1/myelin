@@ -1,0 +1,12 @@
+# Data generation (any machine)
+anthropic>=0.40
+
+# Training (GPU box). Granite 4.0 hybrid needs a recent transformers.
+transformers>=4.48
+datasets>=3.0
+peft>=0.14
+trl>=0.13
+accelerate>=1.2
+bitsandbytes>=0.45
+torch>=2.4
+sentencepiece
