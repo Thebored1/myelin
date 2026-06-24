@@ -750,17 +750,25 @@ pub fn free_device_local_vram() -> Option<u64> {
 /// note + tool schemas + any fetched page would then overflow). A 4096 floor
 /// keeps a usable window; the ladder still backs off if the allocation fails.
 fn ram_safe_ctx(requested: u32, gguf: Option<&crate::gguf::GgufInfo>) -> u32 {
-    let kv_per_tok = match gguf.and_then(|g| g.kv_bytes_per_token()).filter(|&k| k > 0) {
-        Some(k) => k,
-        None => return requested, // unknown geometry → trust the request
-    };
-    let budget = (available_ram_bytes() as f64 * 0.75) as u64;
-    let max_ctx = (budget / kv_per_tok).clamp(512, u32::MAX as u64) as u32;
     let model_max = gguf
         .and_then(|g| g.context_length)
         .map(|c| c.min(u32::MAX as u64) as u32)
         .unwrap_or(u32::MAX);
-    requested.min(max_ctx).min(model_max).max(4096)
+    let ceil = requested.min(model_max);
+    // Transformer KV grows with every layer → clamp context so the f16 KV cache
+    // fits in ~75% of available RAM (it lives in system RAM via --no-kv-offload).
+    // Recurrent/hybrid archs (Mamba/RWKV/Granite-h/LFM2) keep a small FIXED state
+    // — kv_bytes_per_token is None — so RAM isn't the limit; use the trained ctx
+    // (bounded by the requested target). 4096 floor keeps a usable window; the
+    // launch ladder still backs off if a too-optimistic allocation fails.
+    match gguf.and_then(|g| g.kv_bytes_per_token()).filter(|&k| k > 0) {
+        Some(kv_per_tok) => {
+            let budget = (available_ram_bytes() as f64 * 0.75) as u64;
+            let max_ctx = (budget / kv_per_tok).clamp(512, u32::MAX as u64) as u32;
+            ceil.min(max_ctx).max(4096)
+        }
+        None => ceil.max(4096),
+    }
 }
 
 /// One launch attempt's parameters.

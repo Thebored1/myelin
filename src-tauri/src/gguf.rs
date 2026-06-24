@@ -36,11 +36,33 @@ impl GgufInfo {
         }
     }
 
+    /// True for recurrent (Mamba/RWKV) or hybrid (Mamba+attention) architectures.
+    /// These keep a small FIXED recurrent state instead of a KV cache that grows
+    /// per token across every layer, so the transformer KV-size formula does not
+    /// apply and context is bounded by the model's trained length, not RAM.
+    /// Matched by GGUF `general.architecture`; substrings cover family variants
+    /// (mamba/mamba2, rwkv6/rwkv7, granitehybrid, falcon_h1, nemotron_h, …).
+    pub fn is_recurrent_or_hybrid(&self) -> bool {
+        let arch = match &self.architecture {
+            Some(a) => a.to_lowercase(),
+            None => return false,
+        };
+        const FAMILIES: &[&str] = &[
+            "mamba", "rwkv", "jamba", "granitehybrid", "falcon_h1", "falcon-h1",
+            "nemotron_h", "nemotronh", "bamba", "plamo2", "lfm2",
+        ];
+        arch.contains("hybrid") || FAMILIES.iter().any(|f| arch.contains(f))
+    }
+
     /// Conservative estimate of KV-cache bytes per token (f16 K+V). Falls back to
     /// the full embedding width (i.e. assumes no GQA) when head geometry is
     /// missing, which over-estimates — and over-estimating only makes the
-    /// context clamp *safer*.
+    /// context clamp *safer*. Returns `None` for recurrent/hybrid archs (no
+    /// per-token KV growth), so the launcher sizes context by trained length.
     pub fn kv_bytes_per_token(&self) -> Option<u64> {
+        if self.is_recurrent_or_hybrid() {
+            return None;
+        }
         let n_layers = self.n_layers?;
         let kv_dim = match (self.head_count_kv, self.head_dim()) {
             (Some(kv), Some(hd)) => kv.saturating_mul(hd),
@@ -163,6 +185,44 @@ fn skip(r: &mut impl Read, n: u64) -> io::Result<()> {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(arch: &str, n_layers: u64, kv: u64, hd: u64) -> GgufInfo {
+        GgufInfo {
+            architecture: Some(arch.into()),
+            n_layers: Some(n_layers),
+            head_count_kv: Some(kv),
+            key_length: Some(hd),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn recurrent_hybrid_detection() {
+        assert!(info("granitehybrid", 40, 4, 64).is_recurrent_or_hybrid());
+        assert!(info("lfm2", 16, 8, 64).is_recurrent_or_hybrid());
+        assert!(info("mamba2", 24, 0, 0).is_recurrent_or_hybrid());
+        assert!(info("rwkv7", 24, 0, 0).is_recurrent_or_hybrid());
+        assert!(info("falcon_h1", 36, 8, 64).is_recurrent_or_hybrid());
+        assert!(!info("llama", 32, 8, 128).is_recurrent_or_hybrid());
+        assert!(!info("qwen2", 28, 4, 128).is_recurrent_or_hybrid());
+        assert!(!GgufInfo::default().is_recurrent_or_hybrid());
+    }
+
+    #[test]
+    fn kv_none_for_recurrent_some_for_transformer() {
+        // Hybrid/recurrent → no transformer KV (context sized by trained length).
+        assert!(info("granitehybrid", 40, 4, 64).kv_bytes_per_token().is_none());
+        // Transformer → 2 (K+V) * layers * (kv_heads*head_dim) * 2 bytes (f16).
+        assert_eq!(
+            info("llama", 32, 8, 128).kv_bytes_per_token(),
+            Some(2 * 32 * (8 * 128) * 2)
+        );
+    }
 }
 
 /// Skip a GGUF array value (element type + count + elements).
