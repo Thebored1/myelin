@@ -204,6 +204,11 @@ impl AppState {
         *self.inner.latest_chat_question.lock() = None;
     }
 
+    /// The user's current chat message (for intent checks during tool calls).
+    pub fn latest_chat_question(&self) -> String {
+        self.inner.latest_chat_question.lock().clone().unwrap_or_default()
+    }
+
     pub fn set_current_note_id(&self, note_id: impl Into<String>) {
         *self.inner.current_note_id.lock() = Some(note_id.into());
     }

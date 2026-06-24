@@ -425,6 +425,36 @@ pub fn wants_search(message: &str) -> bool {
             && contains_any_word(&m, &["online", "web", "internet"]))
 }
 
+/// True only when the user explicitly asked to empty/clear/delete the WHOLE
+/// note. Deliberately narrow: "remove all headings", "delete the intro", etc.
+/// are partial edits and must NOT match — they keep the rest of the note.
+pub fn wants_clear(message: &str) -> bool {
+    let m = message.to_lowercase();
+    const PHRASES: &[&str] = &[
+        "clear the note",
+        "clear note",
+        "clear it",
+        "empty the note",
+        "empty it",
+        "make it blank",
+        "make it empty",
+        "delete the note",
+        "delete everything",
+        "delete all the text",
+        "delete all text",
+        "remove everything",
+        "remove all the text",
+        "remove all text",
+        "erase everything",
+        "erase the note",
+        "wipe the note",
+        "start over",
+        "start fresh",
+        "blank note",
+    ];
+    PHRASES.iter().any(|p| m.contains(p))
+}
+
 /// Does the message ask whether a specific word/phrase is in the OPEN note (or
 /// to find/locate one there)? Routed to the deterministic find_in_note tool so a
 /// small model doesn't have to eyeball-scan the text and get it wrong.
@@ -642,6 +672,26 @@ impl Tool for WriteNoteTool {
             Ok(p) => p,
             Err(msg) => return Ok(msg),
         };
+
+        // Destructive-write guard. A small model asked to "remove all headings"
+        // once replaced the whole essay with an EMPTY body, wiping the note. If a
+        // replace would empty a non-empty note and the user did not actually ask
+        // to clear it, refuse and tell the model to preserve the content — never
+        // silently erase the user's work.
+        if plan.op == WriteOp::Replace
+            && plan.new_body.trim().is_empty()
+            && !existing.body.trim().is_empty()
+            && !wants_clear(&self.state.latest_chat_question())
+        {
+            return Ok(
+                "Refused: that would erase the entire note, which the request did not ask for. \
+                 Keep ALL existing content and call write_note again with only the requested change \
+                 applied. For example, to remove headings, delete just the heading lines (or their \
+                 leading # markers) and keep every other line of the note unchanged."
+                    .to_string(),
+            );
+        }
+
         let content_empty = content.trim().is_empty();
         let (emit_content, emit_mode, display_name) = match plan.op {
             WriteOp::Append => (content.clone(), "append", "Append Note"),
@@ -1106,6 +1156,20 @@ mod tests {
         let plan = plan_write(NOTE, "brand new body", "replace", "").unwrap();
         assert_eq!(plan.op, WriteOp::Replace);
         assert_eq!(plan.new_body, "brand new body");
+    }
+
+    // The "deleted the entire note" bug: "remove all headings" must NOT read as a
+    // request to clear the note (the destructive-write guard relies on this), but
+    // an explicit wipe must.
+    #[test]
+    fn wants_clear_is_narrow() {
+        assert!(!wants_clear("remove all headings"));
+        assert!(!wants_clear("remove the bullet points"));
+        assert!(!wants_clear("delete the introduction"));
+        assert!(wants_clear("clear the note"));
+        assert!(wants_clear("delete everything"));
+        assert!(wants_clear("erase the note and start over"));
+        assert!(wants_clear("make it blank"));
     }
 
     // Granite echoed the prompt's note-framing markers into a direct tool call;
