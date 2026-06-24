@@ -748,13 +748,20 @@ fn available_ram_bytes() -> u64 {
     sys.available_memory()
 }
 
-/// Memory (bytes) the GPU can use for model weights, best-effort and
-/// cross-platform. For a discrete card this is free device-local VRAM; for an
-/// **integrated** GPU it also includes free **GTT** (shared system memory the
-/// iGPU runs from at full speed) — otherwise the tiny VRAM carveout would force
-/// ngl≈0 and waste a perfectly usable iGPU. `None` when undeterminable → the
-/// planner requests full offload and lets the launch ladder back off.
-pub fn free_device_local_vram() -> Option<u64> {
+/// What a GPU can hold for model weights, and whether that memory is shared RAM.
+pub struct GpuBudget {
+    /// Bytes available for offloaded weight layers — VRAM for a discrete card,
+    /// GTT / shared system memory for an integrated GPU.
+    pub bytes: u64,
+    /// True for an integrated GPU: its weight memory IS system RAM, so it
+    /// competes with the KV cache (kept in RAM via --no-kv-offload).
+    pub integrated: bool,
+}
+
+/// Probe the GPU's weight-offload budget, best-effort and cross-platform.
+/// `None` when undeterminable → the planner requests full offload and the launch
+/// ladder backs off. Generic across vendors; no per-machine assumptions.
+pub fn probe_gpu_budget() -> Option<GpuBudget> {
     // AMD on Linux exposes VRAM (and GTT) via sysfs.
     #[cfg(target_os = "linux")]
     {
@@ -769,40 +776,43 @@ pub fn free_device_local_vram() -> Option<u64> {
                 let vram_free = vram_total
                     .saturating_sub(read_u64(format!("{base}/mem_info_vram_used")).unwrap_or(0));
                 // A small dedicated-VRAM carveout means an integrated GPU (APU):
-                // the model lives in GTT/shared RAM at iGPU speed, so count free
-                // GTT in the budget. A discrete card (large VRAM) must NOT — its
-                // GTT is slow PCIe-attached system RAM.
+                // the model lives in GTT/shared RAM. A discrete card (large VRAM)
+                // keeps weights in real VRAM, separate from the KV cache.
                 const INTEGRATED_VRAM_MAX: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
                 if vram_total <= INTEGRATED_VRAM_MAX {
                     let gtt_free = read_u64(format!("{base}/mem_info_gtt_total"))
                         .unwrap_or(0)
                         .saturating_sub(read_u64(format!("{base}/mem_info_gtt_used")).unwrap_or(0));
-                    return Some(vram_free + gtt_free);
+                    return Some(GpuBudget { bytes: vram_free + gtt_free, integrated: true });
                 }
-                return Some(vram_free);
+                return Some(GpuBudget { bytes: vram_free, integrated: false });
             }
         }
     }
-    // NVIDIA via nvidia-smi — present on Linux AND Windows wherever the driver is.
+    // NVIDIA via nvidia-smi — discrete, separate VRAM (Linux + Windows).
     if let Some(v) = nvidia_smi_free_vram() {
-        return Some(v);
+        return Some(GpuBudget { bytes: v, integrated: false });
     }
-    // Windows AMD/Intel/iGPU: DXGI adapter memory (no nvidia-smi there).
+    // Windows AMD/Intel/iGPU via DXGI.
     #[cfg(target_os = "windows")]
     {
-        return dxgi_offload_budget();
+        return dxgi_gpu_budget();
     }
     #[allow(unreachable_code)]
     None
 }
 
-/// VRAM / shared-memory budget for the best GPU via DXGI (Windows AMD/Intel,
-/// including iGPUs). A discrete GPU reports `DedicatedVideoMemory`; an integrated
-/// GPU runs from shared system memory, so its budget is dedicated + shared.
-/// Best-effort — any failure returns None and the launch ladder requests full
-/// offload. Generic across vendors; no per-machine assumptions.
+/// Bytes the GPU can hold for weights (size only — see [`probe_gpu_budget`] for
+/// the integrated flag). Kept for callers that just need the number (logging).
+pub fn free_device_local_vram() -> Option<u64> {
+    probe_gpu_budget().map(|b| b.bytes)
+}
+
+/// DXGI adapter memory for the best GPU (Windows AMD/Intel, including iGPUs). A
+/// discrete GPU reports `DedicatedVideoMemory`; an integrated GPU runs from
+/// shared system memory, so its budget is dedicated + shared. Best-effort.
 #[cfg(target_os = "windows")]
-fn dxgi_offload_budget() -> Option<u64> {
+fn dxgi_gpu_budget() -> Option<GpuBudget> {
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
     };
@@ -835,10 +845,11 @@ fn dxgi_offload_budget() -> Option<u64> {
                 discrete = discrete.max(dedicated);
             }
         }
+        // Prefer the discrete GPU (real VRAM); else the integrated budget.
         if discrete > 0 {
-            Some(discrete)
+            Some(GpuBudget { bytes: discrete, integrated: false })
         } else if integrated > 0 {
-            Some(integrated)
+            Some(GpuBudget { bytes: integrated, integrated: true })
         } else {
             None
         }
@@ -880,6 +891,22 @@ fn fit_ngl(free_vram: u64, model_weight_bytes: u64, n_layers: u64) -> i32 {
     let per_layer = (model_weight_bytes / n_layers).max(1);
     let budget = (free_vram as f64 * 0.85) as u64;
     (budget / per_layer).min(n_layers) as i32
+}
+
+/// OS + app headroom kept free of model/KV allocations on an integrated GPU.
+const IGPU_RAM_RESERVE: u64 = 1536 * 1024 * 1024; // 1.5 GiB
+
+/// Weight-offload budget for an integrated GPU. Its offloaded weights (GTT) and
+/// the KV cache (--no-kv-offload) both live in system RAM, so **full context
+/// wins first**: reserve the KV cache (sized for the chosen context) plus OS
+/// headroom, then offer the remaining RAM for weights — capped by what the iGPU
+/// can actually address (its GTT budget). This maximises offload without
+/// over-committing RAM and OOM-ing, while keeping the full context window.
+fn integrated_weight_budget(available_ram: u64, kv_bytes: u64, gtt_budget: u64, reserve: u64) -> u64 {
+    available_ram
+        .saturating_sub(kv_bytes)
+        .saturating_sub(reserve)
+        .min(gtt_budget)
 }
 
 /// Largest context whose f16 KV cache fits in ~75% of available RAM (KV lives in
@@ -979,14 +1006,31 @@ fn launch_plans(
     // and let the ladder degrade. This makes the FIRST launch land instead of
     // burning a failed full-offload attempt on small-VRAM machines.
     let model_bytes = std::fs::metadata(&config.model_path).map(|m| m.len()).unwrap_or(0);
-    let primary_ngl = match (free_device_local_vram(), n_layers) {
-        (Some(vram), Some(layers)) if model_bytes > 0 => {
-            let ngl = fit_ngl(vram, model_bytes, layers);
+    // KV-cache bytes at the chosen context (0 for recurrent/hybrid archs, which
+    // keep a small fixed state — see kv_bytes_per_token).
+    let kv_bytes = gguf
+        .and_then(|g| g.kv_bytes_per_token())
+        .unwrap_or(0)
+        .saturating_mul(base_ctx as u64);
+    let primary_ngl = match (probe_gpu_budget(), n_layers) {
+        (Some(mem), Some(layers)) if model_bytes > 0 => {
+            let weight_budget = if mem.integrated {
+                // iGPU: weight memory (GTT) and the KV cache (RAM) are the same
+                // physical RAM — keep the full context, then offload the rest.
+                integrated_weight_budget(available_ram_bytes(), kv_bytes, mem.bytes, IGPU_RAM_RESERVE)
+            } else {
+                // Discrete: VRAM holds weights; the KV cache lives in separate RAM.
+                mem.bytes
+            };
+            let ngl = fit_ngl(weight_budget, model_bytes, layers);
             log::info!(
-                "offload plan: {} MiB free VRAM, model {} MiB / {} layers -> ngl={}",
-                vram / 1_048_576,
+                "offload plan: gpu {} MiB ({}), model {} MiB/{} layers, ctx {} (kv {} MiB) -> ngl={}",
+                mem.bytes / 1_048_576,
+                if mem.integrated { "integrated" } else { "discrete" },
                 model_bytes / 1_048_576,
                 layers,
+                base_ctx,
+                kv_bytes / 1_048_576,
                 ngl
             );
             ngl
@@ -1848,6 +1892,19 @@ mod tests {
         let single = vec![dev("Vulkan0", "AMD Radeon Graphics (RADV RENOIR)")];
         assert_eq!(discrete_device_id(&single), None);
         assert_eq!(integrated_device_id(&single).as_deref(), Some("Vulkan0"));
+    }
+
+    #[test]
+    fn integrated_budget_reserves_kv_then_caps_at_gtt() {
+        use super::integrated_weight_budget;
+        let g = GIB;
+        // 16 GiB RAM, 2 GiB KV, 1.5 GiB reserve, 7 GiB GTT → RAM-KV-reserve=12.5,
+        // capped at GTT → 7 GiB.
+        assert_eq!(integrated_weight_budget(16 * g, 2 * g, 7 * g, 3 * g / 2), 7 * g);
+        // Low RAM dominates: 6 GiB RAM, 3 GiB KV, 1.5 reserve → 1.5 GiB (< 7 GTT).
+        assert_eq!(integrated_weight_budget(6 * g, 3 * g, 7 * g, 3 * g / 2), 3 * g / 2);
+        // Over-committed RAM → 0 (fall to CPU), never underflows.
+        assert_eq!(integrated_weight_budget(2 * g, 3 * g, 7 * g, 3 * g / 2), 0);
     }
 
     #[test]
