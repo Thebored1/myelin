@@ -229,6 +229,13 @@ impl AppState {
             .map(|note| note.document.clone())
     }
 
+    /// Body of the note currently open in the editor (for the find_in_note tool).
+    pub fn open_note_body(&self) -> Option<String> {
+        self.current_note_id()
+            .and_then(|id| self.note_by_id(&id))
+            .map(|doc| doc.body)
+    }
+
     /// Resolve the note a chat tool should act on: always prefer the note that
     /// is currently open in the editor, regardless of the title the model
     /// passed (a small model often gets the title wrong). Fall back to an exact

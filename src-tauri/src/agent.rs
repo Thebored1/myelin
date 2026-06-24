@@ -110,6 +110,15 @@ pub fn tool_specs() -> Vec<Value> {
             }),
         ),
         spec(
+            "find_in_note",
+            "Check whether an exact word or phrase appears in the note currently open in the editor, and how many times. Use this whenever the user asks if the note contains a word, or to find/locate a specific word in the note — it searches the exact text reliably instead of you scanning by eye.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string", "description": "The exact word or phrase to look for in the open note." } },
+                "required": ["query"]
+            }),
+        ),
+        spec(
             "search_notes",
             "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.",
             serde_json::json!({
@@ -416,6 +425,19 @@ pub fn wants_search(message: &str) -> bool {
             && contains_any_word(&m, &["online", "web", "internet"]))
 }
 
+/// Does the message ask whether a specific word/phrase is in the OPEN note (or
+/// to find/locate one there)? Routed to the deterministic find_in_note tool so a
+/// small model doesn't have to eyeball-scan the text and get it wrong.
+pub fn wants_find(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("the word")
+        || m.contains("the phrase")
+        || m.contains("the term")
+        || m.contains("search the note")
+        || (contains_any_word(&m, &["find", "locate", "see", "contains", "contain", "appear", "appears", "mention", "mentioned"])
+            && contains_any_word(&m, &["note", "here", "text", "above"]))
+}
+
 /// Does the message ask about the user's ingested SOURCE documents (PDF/book/
 /// paper/source) — as opposed to the note open in the editor? Precise so it
 /// doesn't fire on "this note".
@@ -485,6 +507,9 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
     }
     if wants_documents(message) {
         names.push("search_documents");
+    }
+    if has_open_note && wants_find(message) {
+        names.push("find_in_note");
     }
     if wants_fetch(message) {
         names.push("fetch_web_page");
@@ -802,6 +827,57 @@ impl Tool for SearchDocumentsTool {
             }
             Ok(_) => Ok("No relevant passages found in your documents.".to_string()),
             Err(e) => Ok(format!("Document search failed: {e}")),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FindInNoteArgs {
+    query: String,
+}
+
+#[derive(Clone)]
+pub struct FindInNoteTool {
+    pub state: AppState,
+}
+
+impl Tool for FindInNoteTool {
+    const NAME: &'static str = "find_in_note";
+
+    type Error = ToolError;
+    type Args = FindInNoteArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "find_in_note".to_string(),
+            description:
+                "Check whether an exact word or phrase appears in the note open in the editor, and how many times."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string", "description": "The exact word or phrase to look for." } },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let q = args.query.trim().to_string();
+        self.state.record_chat_tool("Find in Note", q.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Find in Note", "details": q.clone() }),
+        );
+        if q.is_empty() {
+            return Ok("No search term was given.".to_string());
+        }
+        let body = self.state.open_note_body().unwrap_or_default();
+        let count = body.to_lowercase().matches(&q.to_lowercase()).count();
+        if count == 0 {
+            Ok(format!("The text \"{q}\" does NOT appear in the open note."))
+        } else {
+            Ok(format!("Yes — \"{q}\" appears {count} time(s) in the open note."))
         }
     }
 }
