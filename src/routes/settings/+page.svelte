@@ -1069,6 +1069,15 @@
         border-color: var(--accent-200);
     }
 
+    /* Adaptive offload manages Context Size + GPU Layers, so they're locked
+       (disabled) when it's on — show that clearly instead of looking editable. */
+    .input-group input:disabled {
+        opacity: 0.45;
+        background: var(--bg-panel);
+        color: var(--text-muted);
+        cursor: not-allowed;
+    }
+
     .success-message {
         position: fixed;
         bottom: var(--space-6);
