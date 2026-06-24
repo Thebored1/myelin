@@ -86,6 +86,18 @@ pub fn tool_specs() -> Vec<Value> {
             }),
         ),
         spec(
+            "web_search",
+            "Search the web for current information when the user asks you to look something up, search online, or find recent info and you have NO URL. Returns a ranked list of {title, url, snippet}. After searching, call fetch_web_page on the most relevant result to read it in full. Do NOT use this when the user already gave a URL — fetch that directly.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The search query." },
+                    "count": { "type": "integer", "description": "How many results to return (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        ),
+        spec(
             "search_notes",
             "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.",
             serde_json::json!({
@@ -373,6 +385,25 @@ fn has_web_domain(m: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Real intent to SEARCH the open web (no URL in hand) — kept precise (explicit
+/// search phrasing or an online/web/internet qualifier) so it doesn't fire on
+/// incidental words or clobber note-search. web_search finds pages; the model
+/// then opens one with fetch_web_page.
+pub fn wants_search(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("search the web")
+        || m.contains("search online")
+        || m.contains("web search")
+        || m.contains("search the internet")
+        || m.contains("on the internet")
+        || m.contains("browse the web")
+        || m.contains("look online")
+        || m.contains("look it up online")
+        || m.contains("google ")
+        || (contains_any_word(&m, &["search", "find", "look", "lookup"])
+            && contains_any_word(&m, &["online", "web", "internet"]))
+}
+
 /// Does the message ask to fetch a specific web page — a full URL, a bare
 /// domain, or an explicit "fetch/open/visit the page"?
 pub fn wants_fetch(message: &str) -> bool {
@@ -416,6 +447,10 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
     if wants_other_notes(message) {
         names.push("search_notes");
         names.push("read_note");
+    }
+    if wants_search(message) {
+        names.push("web_search");
+        names.push("fetch_web_page"); // so it can open a result it found
     }
     if wants_fetch(message) {
         names.push("fetch_web_page");
@@ -676,6 +711,57 @@ impl Tool for FetchWebPageTool {
             Ok(format!("Fetched {url}, but no readable text was found."))
         } else {
             Ok(text.chars().take(WEB_FETCH_LIMIT).collect())
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WebSearchArgs {
+    query: String,
+    #[serde(default)]
+    count: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct WebSearchTool {
+    pub state: AppState,
+}
+
+impl Tool for WebSearchTool {
+    const NAME: &'static str = "web_search";
+
+    type Error = ToolError;
+    type Args = WebSearchArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "web_search".to_string(),
+            description:
+                "Search the web for current information when the user asks you to look something up or find recent info and you have no URL. Returns ranked {title, url, snippet}; then call fetch_web_page on the best result."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The search query." },
+                    "count": { "type": "integer", "description": "How many results to return (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let count = args.count.unwrap_or(5).clamp(1, 10) as usize;
+        self.state.record_chat_tool("Web Search", args.query.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Web Search", "details": args.query.clone() }),
+        );
+        let searxng = self.state.searxng_url();
+        match crate::web_search::web_search(&args.query, count, searxng.as_deref()).await {
+            Ok(results) => Ok(crate::web_search::format_results(&args.query, &results)),
+            Err(e) => Ok(format!("Web search failed: {e}")),
         }
     }
 }

@@ -1394,6 +1394,16 @@ impl AppState {
             .map_err(|error| anyhow!(describe_prompt_error(&error)))
     }
 
+    /// The configured SearXNG base URL for web search (None → DuckDuckGo).
+    pub fn searxng_url(&self) -> Option<String> {
+        crate::llama_server::searxng_url(&self.inner.app_data_dir)
+    }
+
+    /// Set (or clear, when empty) the SearXNG base URL for web search.
+    pub fn set_searxng_url(&self, url: Option<String>) -> Result<()> {
+        crate::llama_server::set_searxng_url(&self.inner.app_data_dir, url)
+    }
+
     /// Start (or keep) the llama-server warm for the note now open in the editor,
     /// so the first message is instant and subsequent ones reuse the warm slot.
     /// Called on note open. Best-effort: a failure just means the first chat pays

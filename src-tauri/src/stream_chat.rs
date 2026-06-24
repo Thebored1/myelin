@@ -12,7 +12,7 @@
 
 use crate::agent::{
     FetchWebPageArgs, FetchWebPageTool, ReadNoteArgs, ReadNoteTool, SearchNotesArgs,
-    SearchNotesTool, WriteNoteArgs, WriteNoteTool,
+    SearchNotesTool, WebSearchArgs, WebSearchTool, WriteNoteArgs, WriteNoteTool,
 };
 use crate::llama_server::ResolvedLlamaConfig;
 use crate::state::AppState;
@@ -304,6 +304,13 @@ async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
                 .await
                 .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid fetch_web_page arguments: {e}"),
+        },
+        "web_search" => match serde_json::from_value::<WebSearchArgs>(v) {
+            Ok(a) => WebSearchTool { state: state.clone() }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
+            Err(e) => format!("Invalid web_search arguments: {e}"),
         },
         other => format!("Unknown tool: {other}"),
     }

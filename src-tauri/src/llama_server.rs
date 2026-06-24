@@ -98,6 +98,9 @@ pub struct WorkspaceLlamaConfig {
     pub auto_offload: Option<bool>,
     /// Max agent tool-calling turns before forcing a final answer.
     pub max_turns: Option<u32>,
+    /// Optional SearXNG instance base URL for web search (privacy-first). When
+    /// empty/None the agent falls back to the no-key DuckDuckGo endpoint.
+    pub searxng_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1185,6 +1188,27 @@ pub fn set_model_path(app_data_dir: &Path, model_path: String) -> Result<()> {
 
     let raw = serde_json::to_string_pretty(&config)?;
     fs::write(&path, raw)?;
+    Ok(())
+}
+
+/// The configured SearXNG base URL for web search, if set and non-empty.
+pub fn searxng_url(app_data_dir: &Path) -> Option<String> {
+    load_config(app_data_dir)
+        .ok()
+        .and_then(|c| c.searxng_url)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Set (or clear, when empty) the SearXNG base URL for web search.
+pub fn set_searxng_url(app_data_dir: &Path, url: Option<String>) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.searxng_url = url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
     Ok(())
 }
 

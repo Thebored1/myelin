@@ -4,6 +4,7 @@ mod llama_server;
 mod models;
 mod state;
 mod stream_chat;
+mod web_search;
 
 use models::{AppSnapshot, NoteDocument, ProviderStatus, SearchResponse};
 use state::AppState;
@@ -259,6 +260,18 @@ async fn stop_llama_server(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Current SearXNG base URL for web search (empty = DuckDuckGo fallback).
+#[tauri::command]
+async fn get_searxng_url(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.searxng_url())
+}
+
+/// Set (or clear) the SearXNG base URL for web search.
+#[tauri::command]
+async fn set_searxng_url(state: State<'_, AppState>, url: Option<String>) -> Result<(), String> {
+    state.set_searxng_url(url).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn extract_from_paste(
     _state: State<'_, AppState>,
@@ -406,6 +419,8 @@ pub fn run() {
             get_snapshot,
             warm_llama_server,
             stop_llama_server,
+            get_searxng_url,
+            set_searxng_url,
             get_all_note_documents,
             extract_from_paste,
             read_pdf_binary,
