@@ -62,6 +62,11 @@
 		contextPercent < 60 ? 'var(--accent-200, #6ea8fe)' : contextPercent < 85 ? '#e0a341' : '#e5484d'
 	);
 
+	// A chat turn is in flight while the last assistant bubble is still streaming.
+	// Sending is blocked until it finishes, but the textarea stays editable so you
+	// can compose your next prompt while the model is still answering.
+	let isChatStreaming = $derived(chatMessages.some((m) => m.isStreaming));
+
 	// Upload button: attach a document (becomes a note via the PDF/EPUB import).
 	async function attachFile() {
 		const picked = await openFileDialog({
@@ -1239,7 +1244,7 @@
 	}
 
 	async function sendChatMessage() {
-		if (!note || !chatInput.trim()) return;
+		if (!note || !chatInput.trim() || isChatStreaming) return;
 		const userText = chatInput.trim();
 		chatInput = '';
 		if (chatTextareaEl) chatTextareaEl.style.height = 'auto';
@@ -2378,7 +2383,7 @@
 										onkeydown={(e) => {
 											if (e.key === 'Enter' && !e.shiftKey) {
 												e.preventDefault();
-												if (chatInput.trim()) sendChatMessage();
+												if (chatInput.trim() && !isChatStreaming) sendChatMessage();
 											}
 										}}
 										oninput={(e) => {
@@ -2423,10 +2428,10 @@
 										<button
 											type="button"
 											class="send-btn"
-											onclick={() => { if (chatInput.trim()) sendChatMessage(); }}
-											disabled={!chatInput.trim()}
+											onclick={() => { if (chatInput.trim() && !isChatStreaming) sendChatMessage(); }}
+											disabled={!chatInput.trim() || isChatStreaming}
 											aria-label="Send"
-											title="Send (Enter)"
+											title={isChatStreaming ? 'Waiting for the current reply to finish…' : 'Send (Enter)'}
 										>
 											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
 										</button>
@@ -4304,7 +4309,11 @@
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		padding: 0 2px;
+		/* Pull to the box edges so the divider spans full width, making the
+		   controls a visually distinct section below the input. */
+		margin: 0 calc(-1 * var(--space-2)) calc(-1 * var(--space-2));
+		padding: var(--space-2);
+		border-top: 1px solid var(--border-subtle);
 	}
 	.prompt-spacer {
 		flex: 1;
