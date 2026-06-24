@@ -114,16 +114,45 @@ pub async fn upsert_document(index_dir: &Path, doc_id: &str, chunks: Vec<DocChun
         .execute()
         .await
         .context("failed to append rag chunks")?;
+
+    // Best-effort BM25 full-text index on the chunk text for hybrid retrieval.
+    // Ignored if it already exists or the build lacks FTS — vector search still works.
+    let _ = table
+        .create_index(&["text"], lancedb::index::Index::FTS(Default::default()))
+        .execute()
+        .await;
     Ok(())
 }
 
-/// Vector-search the top-K nearest chunks to a query embedding.
-pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<Vec<RetrievedChunk>> {
-    let conn = open(index_dir).await?;
-    let table = match conn.open_table(RAG_TABLE).execute().await {
-        Ok(t) => t,
-        Err(_) => return Ok(Vec::new()),
+/// Extract RetrievedChunks from one result batch.
+fn rows_from_batch(batch: &RecordBatch) -> Vec<RetrievedChunk> {
+    let str_col = |name: &str| -> Option<StringArray> {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>().cloned())
     };
+    let doc_ids = str_col("doc_id");
+    let sources = str_col("source");
+    let texts = str_col("text");
+    let indices = batch
+        .column_by_name("chunk_index")
+        .and_then(|c| c.as_any().downcast_ref::<Int32Array>().cloned());
+    let dists = batch
+        .column_by_name("_distance")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>().cloned());
+
+    (0..batch.num_rows())
+        .map(|i| RetrievedChunk {
+            doc_id: doc_ids.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+            source: sources.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+            chunk_index: indices.as_ref().map(|a| a.value(i)).unwrap_or(0),
+            text: texts.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+            distance: dists.as_ref().map(|a| a.value(i)).unwrap_or(0.0),
+        })
+        .collect()
+}
+
+async fn vector_hits(table: &Table, query_vec: Vec<f32>, k: usize) -> Result<Vec<RetrievedChunk>> {
     let mut stream = table
         .query()
         .nearest_to(query_vec)
@@ -131,36 +160,71 @@ pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<V
         .limit(k)
         .execute()
         .await
-        .context("rag search")?;
-
+        .context("rag vector search")?;
     let mut out = Vec::new();
-    while let Some(batch) = stream.try_next().await.context("rag stream")? {
-        let str_col = |name: &str| -> Option<StringArray> {
-            batch
-                .column_by_name(name)
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>().cloned())
-        };
-        let doc_ids = str_col("doc_id");
-        let sources = str_col("source");
-        let texts = str_col("text");
-        let indices = batch
-            .column_by_name("chunk_index")
-            .and_then(|c| c.as_any().downcast_ref::<Int32Array>().cloned());
-        let dists = batch
-            .column_by_name("_distance")
-            .and_then(|c| c.as_any().downcast_ref::<Float32Array>().cloned());
-
-        for i in 0..batch.num_rows() {
-            out.push(RetrievedChunk {
-                doc_id: doc_ids.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
-                source: sources.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
-                chunk_index: indices.as_ref().map(|a| a.value(i)).unwrap_or(0),
-                text: texts.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
-                distance: dists.as_ref().map(|a| a.value(i)).unwrap_or(0.0),
-            });
-        }
+    while let Some(batch) = stream.try_next().await.context("rag vector stream")? {
+        out.extend(rows_from_batch(&batch));
     }
     Ok(out)
+}
+
+async fn fts_hits(table: &Table, query: &str, k: usize) -> Result<Vec<RetrievedChunk>> {
+    let mut stream = table
+        .query()
+        .full_text_search(lancedb::query::FullTextSearchQuery::new(query.to_string()))
+        .limit(k)
+        .execute()
+        .await
+        .context("rag fts search")?;
+    let mut out = Vec::new();
+    while let Some(batch) = stream.try_next().await.context("rag fts stream")? {
+        out.extend(rows_from_batch(&batch));
+    }
+    Ok(out)
+}
+
+/// Vector-only search (kept for tests / when there is no query text).
+pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<Vec<RetrievedChunk>> {
+    let conn = open(index_dir).await?;
+    let table = match conn.open_table(RAG_TABLE).execute().await {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
+    };
+    vector_hits(&table, query_vec, k).await
+}
+
+/// Hybrid search: vector + BM25 full-text, merged with Reciprocal Rank Fusion.
+/// Vector catches meaning, BM25 catches exact terms/names/numbers. Falls back to
+/// vector-only if the FTS index isn't present.
+pub async fn search_hybrid(
+    index_dir: &Path,
+    query_vec: Vec<f32>,
+    query_text: &str,
+    k: usize,
+) -> Result<Vec<RetrievedChunk>> {
+    let conn = open(index_dir).await?;
+    let table = match conn.open_table(RAG_TABLE).execute().await {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let pool = (k * 4).max(20);
+    let vec_hits = vector_hits(&table, query_vec, pool).await.unwrap_or_default();
+    let fts = fts_hits(&table, query_text, pool).await.unwrap_or_default();
+
+    // Reciprocal Rank Fusion across the two ranked lists.
+    const RRF_K: f32 = 60.0;
+    let mut scored: std::collections::HashMap<(String, i32), (f32, RetrievedChunk)> =
+        std::collections::HashMap::new();
+    for list in [vec_hits, fts] {
+        for (rank, chunk) in list.into_iter().enumerate() {
+            let key = (chunk.doc_id.clone(), chunk.chunk_index);
+            let bump = 1.0 / (RRF_K + rank as f32 + 1.0);
+            scored.entry(key).or_insert((0.0, chunk)).0 += bump;
+        }
+    }
+    let mut merged: Vec<(f32, RetrievedChunk)> = scored.into_values().collect();
+    merged.sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok(merged.into_iter().take(k).map(|(_, c)| c).collect())
 }
 
 #[cfg(test)]
@@ -205,5 +269,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let res = search(dir.path(), vec![0.0; DIM as usize], 5).await.unwrap();
         assert!(res.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_runs_vector_plus_fts() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = vec![
+            DocChunk {
+                doc_id: "d".into(),
+                source: "s".into(),
+                chunk_index: 0,
+                text: "the eiffel tower is in paris france".into(),
+                vector: vec![0.1; DIM as usize],
+            },
+            DocChunk {
+                doc_id: "d".into(),
+                source: "s".into(),
+                chunk_index: 1,
+                text: "transformers use the attention mechanism".into(),
+                vector: vec![0.9; DIM as usize],
+            },
+        ];
+        upsert_document(dir.path(), "d", docs).await.unwrap();
+        // Hybrid: BM25 should surface chunk 1 on the text terms even though the
+        // query vector is nearer chunk 0. Just assert the merge runs and returns.
+        let res = search_hybrid(dir.path(), vec![0.1; DIM as usize], "attention transformers", 5)
+            .await
+            .unwrap();
+        assert!(!res.is_empty());
+        assert!(res.iter().any(|c| c.chunk_index == 1));
     }
 }

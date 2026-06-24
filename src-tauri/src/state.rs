@@ -1558,7 +1558,7 @@ impl AppState {
         if qvec.is_empty() {
             return Ok(Vec::new());
         }
-        crate::rag::search(&self.rag_dir(), qvec, k).await
+        crate::rag::search_hybrid(&self.rag_dir(), qvec, query, k).await
     }
 
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
