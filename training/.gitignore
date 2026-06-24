@@ -1,3 +1,6 @@
+# Secrets — never commit.
+.env
+
 # Generated dataset + training/model outputs — not source.
 data/
 out/
@@ -5,3 +8,10 @@ base/
 merged/
 *.gguf
 __pycache__/
+.venv/
+llama.cpp/
+cudaenv/
+Library/
+micromamba*
+*.tar.bz2
+*.log

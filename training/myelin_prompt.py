@@ -77,6 +77,19 @@ TOOLS = [
 ]
 
 
+def tools_for(record: dict) -> list:
+    """Minimal relevant tool set for one record. The full 7-tool schema is ~900
+    tokens and balloons every sequence to ~1.3k — too heavy for naive-Mamba
+    backprop on a 4 GB card. The app already gates tools per message, so training
+    on a tight set (write_note + whatever tool this turn uses) both fits the GPU
+    and mirrors inference."""
+    names = ["write_note"]
+    a = record["assistant"]
+    if "tool" in a and a["tool"] != "write_note":
+        names.append(a["tool"])
+    return [t for t in TOOLS if t["function"]["name"] in names]
+
+
 def build_user(note: str, instruction: str, title: str = "New note") -> str:
     """Mirror state.rs::ask_ai_stream's note framing exactly."""
     if note.strip():
