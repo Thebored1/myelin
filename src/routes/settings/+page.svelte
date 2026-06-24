@@ -6,7 +6,7 @@
     import { goto } from '$app/navigation';
     import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
 
-    type BackendPref = 'gpu' | 'vulkan' | 'cpu';
+    type BackendPref = 'auto' | 'gpu' | 'vulkan' | 'cpu';
 
     let currentModelPath = $state('');
     let contextSize = $state<number | null>(null);
@@ -21,7 +21,7 @@
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
     let activeProvider = $state('');
-    let backendPreference = $state<BackendPref>('gpu');
+    let backendPreference = $state<BackendPref>('auto');
     let downloadableBackends = $state<string[]>([]);
     let download = $state<{ backend: string; phase: string; percent: number; message: string } | null>(null);
     let activeBackend = $state<string | null>(null);
@@ -133,11 +133,13 @@
             await refreshSnapshot();
             const status = await loadProviderStatus();
             downloadableBackends = await invoke<string[]>('downloadable_backends');
-            // GPU = dedicated/fastest GPU; Vulkan = integrated GPU; CPU = most reliable.
+            // Auto = let the app pick; GPU = dedicated/fastest; Vulkan = integrated;
+            // CPU = most reliable. Anything unrecognised (or unset) means Auto.
             const sp = status.config?.backendPreference;
-            backendPreference = sp === 'cpu' ? 'cpu' : sp === 'vulkan' ? 'vulkan' : 'gpu';
-            // No dedicated GPU → the "GPU" choice is meaningless; fall to Vulkan
-            // (but respect an explicit CPU choice).
+            backendPreference =
+                sp === 'cpu' ? 'cpu' : sp === 'vulkan' ? 'vulkan' : sp === 'gpu' ? 'gpu' : 'auto';
+            // No dedicated GPU → the explicit "GPU" choice is meaningless; fall to
+            // Vulkan. (Auto needs no fixup — it adapts on its own.)
             if (!hasDedicatedGpu && backendPreference === 'gpu') backendPreference = 'vulkan';
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
@@ -368,7 +370,7 @@
             <div class="compute-device">
                 <span class="compute-label">Compute device</span>
                 <div class="segmented" role="group" aria-label="Compute device">
-                    {#each [{ value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }, { value: 'cpu', label: 'CPU' }] as opt}
+                    {#each [{ value: 'auto', label: 'Auto' }, { value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }, { value: 'cpu', label: 'CPU' }] as opt}
                         {@const disabled = opt.value === 'gpu' && !hasDedicatedGpu}
                         <button
                             type="button"
@@ -387,12 +389,14 @@
                         Most reliable: runs entirely on the CPU. Works with every model (some models give wrong output on the GPU), at the cost of speed.
                     {:else if backendPreference === 'vulkan'}
                         Power-saving: runs on the integrated GPU via Vulkan. The app still manages offload and falls back to CPU if needed.
-                    {:else}
+                    {:else if backendPreference === 'gpu'}
                         Performance: uses the fastest available GPU (the dedicated GPU where present). Falls back automatically.
+                    {:else}
+                        Recommended: detects your hardware and picks the fastest backend — dedicated GPU (CUDA), integrated GPU (Vulkan), or CPU — and falls back on its own.
                     {/if}
                 </p>
 
-                {#if !hasDedicatedGpu && backendPreference !== 'cpu'}
+                {#if !hasDedicatedGpu && backendPreference !== 'cpu' && backendPreference !== 'auto'}
                     <div class="device-issue warn">
                         <span class="issue-icon">ℹ️</span>
                         <span>No dedicated GPU detected — GPU mode is unavailable. Using the integrated GPU via Vulkan, or switch to CPU for the most reliable output.</span>
