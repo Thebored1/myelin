@@ -1,0 +1,30 @@
+[
+  {
+    "name": "IBM Granite 4.0 Hybrid",
+    "architecture": "granitehybrid",
+    "role": "chat",
+    "supportsTools": true,
+    "temperature": 0.2,
+    "topP": 0.95,
+    "verified": true,
+    "notes": "Verified for tool-calling. Hybrid Mamba/transformer — uses its full trained context."
+  },
+  {
+    "name": "LiquidAI LFM2",
+    "architecture": "lfm2",
+    "role": "chat",
+    "chatTemplate": "lfm2",
+    "supportsTools": true,
+    "temperature": 0.3,
+    "topP": 0.9,
+    "verified": false,
+    "notes": "Embedded chat template is broken for multi-turn tools; the corrected template is applied automatically."
+  },
+  {
+    "name": "Nomic Embed Text v1.5",
+    "namePattern": "nomic-embed",
+    "role": "embed",
+    "verified": true,
+    "notes": "768-dim text embedder for semantic search and document RAG."
+  }
+]

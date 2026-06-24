@@ -135,6 +135,13 @@ pub struct ResolvedLlamaConfig {
     /// Max agent tool-calling turns before forcing a final answer.
     #[serde(default)]
     pub max_turns: u32,
+    /// Chat-template override from the model profile: builtin id "lfm2" or a
+    /// file path. None → use the model's embedded template via --jinja.
+    #[serde(default)]
+    pub chat_template_override: Option<String>,
+    /// Model role from the profile registry: "chat" (default) or "embed".
+    #[serde(default)]
+    pub model_role: String,
     /// Ordered list of binaries to try (best first). Not serialized to the UI.
     #[serde(skip)]
     pub candidates: Vec<BackendCandidate>,
@@ -655,6 +662,12 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         .ok_or_else(|| anyhow!("no llama-server binary could be resolved"))?;
     let model_path = resolve_model_path(app_data_dir, &app_config)?;
 
+    // Resolve the model profile (GGUF auto ← bundled ← user) for chat-template
+    // overrides, role, and recommended sampling. Cheap header read of the GGUF.
+    let gguf = crate::gguf::read_gguf_info(&model_path).ok();
+    let model_filename = model_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let profile = crate::model_profiles::resolve(app_data_dir, gguf.as_ref(), model_filename);
+
     Ok(ResolvedLlamaConfig {
         executable_path: primary.executable_path.clone(),
         model_path,
@@ -663,8 +676,12 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         context_size: app_config.context_size.unwrap_or(4096),
         gpu_layers: app_config.gpu_layers,
         threads: app_config.threads,
-        temperature: app_config.temperature.unwrap_or(0.2),
-        top_p: app_config.top_p.unwrap_or(0.95),
+        // User config wins; otherwise the profile's recommended value; else default.
+        temperature: app_config
+            .temperature
+            .or(profile.temperature)
+            .unwrap_or(0.2),
+        top_p: app_config.top_p.or(profile.top_p).unwrap_or(0.95),
         chat_format: app_config.chat_format.clone(),
         extra_args: app_config.extra_args.clone(),
         backend: Some(primary.backend.label().to_string()),
@@ -676,6 +693,11 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         thinking: app_config.thinking.unwrap_or(false),
         auto_offload: app_config.auto_offload.unwrap_or(true),
         max_turns: app_config.max_turns.filter(|&n| n > 0).unwrap_or(4),
+        chat_template_override: profile.chat_template.clone(),
+        model_role: match profile.role {
+            crate::model_profiles::ModelRole::Embed => "embed".to_string(),
+            crate::model_profiles::ModelRole::Chat => "chat".to_string(),
+        },
         candidates,
     })
 }
@@ -883,14 +905,13 @@ pub async fn start_server(
         log::info!("free device-local VRAM ~= {} MiB", v / 1_048_576);
     }
 
-    // LFM2 ships a chat template that's broken for multi-turn tool calling; pass
-    // the corrected one via --chat-template-file. Other models use their embedded
-    // template (via --jinja) unchanged.
-    let chat_template_file = gguf
-        .as_ref()
-        .and_then(|g| g.architecture.as_deref())
-        .filter(|a| a.eq_ignore_ascii_case("lfm2"))
-        .and_then(|_| match lfm2_template_path() {
+    // Chat-template override from the model profile (data-driven, no per-model
+    // code): the builtin id "lfm2" writes the corrected LFM2 template (its
+    // embedded one breaks multi-turn tool calling); any other value is a path to
+    // a user-supplied template file. None → the model's embedded template via
+    // --jinja, unchanged.
+    let chat_template_file = match config.chat_template_override.as_deref() {
+        Some("lfm2") => match lfm2_template_path() {
             Ok(p) => {
                 log::info!("using corrected LFM2 chat template: {}", p.display());
                 Some(p)
@@ -899,7 +920,10 @@ pub async fn start_server(
                 log::warn!("failed to write LFM2 chat template: {e}");
                 None
             }
-        });
+        },
+        Some(path) if !path.trim().is_empty() => Some(PathBuf::from(path)),
+        _ => None,
+    };
 
     let mut last_error: Option<String> = None;
     for candidate in &config.candidates {
