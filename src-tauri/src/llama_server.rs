@@ -783,9 +783,66 @@ pub fn free_device_local_vram() -> Option<u64> {
             }
         }
     }
-    // NVIDIA via nvidia-smi — present on Linux AND Windows wherever the driver
-    // is. (macOS has no NVIDIA; AMD/Intel on Windows return None → launch ladder.)
-    nvidia_smi_free_vram()
+    // NVIDIA via nvidia-smi — present on Linux AND Windows wherever the driver is.
+    if let Some(v) = nvidia_smi_free_vram() {
+        return Some(v);
+    }
+    // Windows AMD/Intel/iGPU: DXGI adapter memory (no nvidia-smi there).
+    #[cfg(target_os = "windows")]
+    {
+        return dxgi_offload_budget();
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// VRAM / shared-memory budget for the best GPU via DXGI (Windows AMD/Intel,
+/// including iGPUs). A discrete GPU reports `DedicatedVideoMemory`; an integrated
+/// GPU runs from shared system memory, so its budget is dedicated + shared.
+/// Best-effort — any failure returns None and the launch ladder requests full
+/// offload. Generic across vendors; no per-machine assumptions.
+#[cfg(target_os = "windows")]
+fn dxgi_offload_budget() -> Option<u64> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
+    };
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let mut discrete: u64 = 0;
+        let mut integrated: u64 = 0;
+        let mut i = 0u32;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            i += 1;
+            let desc = match adapter.GetDesc1() {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            // Skip the software/WARP adapter.
+            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                continue;
+            }
+            let end = desc
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(desc.Description.len());
+            let name = String::from_utf16_lossy(&desc.Description[..end]);
+            let dedicated = desc.DedicatedVideoMemory as u64;
+            let shared = desc.SharedSystemMemory as u64;
+            if is_integrated_gpu_name(&name) {
+                integrated = integrated.max(dedicated.saturating_add(shared));
+            } else if dedicated > 0 {
+                discrete = discrete.max(dedicated);
+            }
+        }
+        if discrete > 0 {
+            Some(discrete)
+        } else if integrated > 0 {
+            Some(integrated)
+        } else {
+            None
+        }
+    }
 }
 
 /// Free VRAM (bytes) of the first NVIDIA GPU via nvidia-smi, cross-platform.

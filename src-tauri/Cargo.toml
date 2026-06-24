@@ -51,6 +51,15 @@ sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# DXGI adapter enumeration for VRAM/shared-memory sizing of AMD/Intel GPUs
+# (NVIDIA goes through nvidia-smi). Matches the version Tauri already pulls.
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Foundation",
+] }
+
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
 branch = "master"
