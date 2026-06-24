@@ -1514,6 +1514,53 @@ impl AppState {
         .map_err(|e| anyhow::anyhow!(e))
     }
 
+    /// LanceDB dir for the document RAG store (separate from the notes index so
+    /// re-indexing notes never wipes ingested documents).
+    fn rag_dir(&self) -> PathBuf {
+        self.inner.app_data_dir.join("rag-index")
+    }
+
+    /// Ingest a document into the RAG store: chunk → embed (document prefix) →
+    /// store. Re-ingesting the same doc_id replaces its chunks. Returns the
+    /// number of chunks stored.
+    pub async fn ingest_document(&self, doc_id: &str, source: &str, text: &str) -> Result<usize> {
+        let chunks = crate::embeddings::chunk_text(text, 320, 50);
+        if chunks.is_empty() {
+            crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await?;
+            return Ok(0);
+        }
+        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+        let vectors = self.embed_texts(&texts, false).await?;
+        let docs: Vec<crate::rag::DocChunk> = chunks
+            .iter()
+            .zip(vectors)
+            .map(|(c, v)| crate::rag::DocChunk {
+                doc_id: doc_id.to_string(),
+                source: source.to_string(),
+                chunk_index: c.index as i32,
+                text: c.text.clone(),
+                vector: v,
+            })
+            .collect();
+        let n = docs.len();
+        crate::rag::upsert_document(&self.rag_dir(), doc_id, docs).await?;
+        Ok(n)
+    }
+
+    /// Retrieve the top-K document chunks most relevant to a query.
+    pub async fn retrieve_chunks(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<crate::rag::RetrievedChunk>> {
+        let qv = self.embed_texts(&[query.to_string()], true).await?;
+        let qvec = qv.into_iter().next().unwrap_or_default();
+        if qvec.is_empty() {
+            return Ok(Vec::new());
+        }
+        crate::rag::search(&self.rag_dir(), qvec, k).await
+    }
+
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
         let mut guard = self.inner.llama_server.lock().await;
 

@@ -1,0 +1,164 @@
+//! Document RAG store: chunk vectors in LanceDB for retrieval. Keeps a whole
+//! book out of the model's context — only the top-K matching chunks are pulled
+//! in at query time. Its own table/dir, separate from the notes index, so
+//! re-indexing notes never wipes ingested documents.
+//!
+//! Phase E3a: vector search. BM25 / hybrid rerank lands in E3b.
+
+use anyhow::{Context, Result};
+use arrow_array::types::Float32Type;
+use arrow_array::{
+    Array, ArrayRef, FixedSizeListArray, Float32Array, Int32Array, RecordBatch,
+    RecordBatchIterator, StringArray,
+};
+use arrow_schema::{DataType, Field, Schema};
+use futures_util::TryStreamExt;
+use lancedb::connection::Connection;
+use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::{connect, Table};
+use std::path::Path;
+use std::sync::Arc;
+
+const RAG_TABLE: &str = "doc_chunks";
+/// nomic-embed-text v1.5 dimension.
+const DIM: i32 = 768;
+
+/// A chunk to store: which document, where in it, the text, and its embedding.
+pub struct DocChunk {
+    pub doc_id: String,
+    pub source: String,
+    pub chunk_index: i32,
+    pub text: String,
+    pub vector: Vec<f32>,
+}
+
+/// A retrieved chunk with its vector distance (smaller = closer).
+#[derive(Debug, Clone)]
+pub struct RetrievedChunk {
+    pub doc_id: String,
+    pub source: String,
+    pub chunk_index: i32,
+    pub text: String,
+    pub distance: f32,
+}
+
+fn schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("doc_id", DataType::Utf8, false),
+        Field::new("source", DataType::Utf8, false),
+        Field::new("chunk_index", DataType::Int32, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new(
+            "vector",
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), DIM),
+            true,
+        ),
+    ]))
+}
+
+async fn open(index_dir: &Path) -> Result<Connection> {
+    std::fs::create_dir_all(index_dir).ok();
+    connect(index_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .context("failed to open rag db")
+}
+
+async fn open_or_create(conn: &Connection) -> Result<Table> {
+    match conn.open_table(RAG_TABLE).execute().await {
+        Ok(t) => Ok(t),
+        Err(_) => conn
+            .create_empty_table(RAG_TABLE, schema())
+            .execute()
+            .await
+            .context("failed to create rag table"),
+    }
+}
+
+/// Replace all chunks for a document (re-ingest = replace), then append the new
+/// ones. The delete is a no-op on first ingest.
+pub async fn upsert_document(index_dir: &Path, doc_id: &str, chunks: Vec<DocChunk>) -> Result<()> {
+    let conn = open(index_dir).await?;
+    let table = open_or_create(&conn).await?;
+    let _ = table
+        .delete(&format!("doc_id = '{}'", doc_id.replace('\'', "''")))
+        .await;
+    if chunks.is_empty() {
+        return Ok(());
+    }
+
+    let doc_ids = StringArray::from_iter_values(chunks.iter().map(|c| c.doc_id.as_str()));
+    let sources = StringArray::from_iter_values(chunks.iter().map(|c| c.source.as_str()));
+    let indices = Int32Array::from_iter_values(chunks.iter().map(|c| c.chunk_index));
+    let texts = StringArray::from_iter_values(chunks.iter().map(|c| c.text.as_str()));
+    let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        chunks
+            .iter()
+            .map(|c| Some(c.vector.iter().copied().map(Some).collect::<Vec<_>>())),
+        DIM,
+    );
+    let s = schema();
+    let batch = RecordBatch::try_new(
+        s.clone(),
+        vec![
+            Arc::new(doc_ids) as ArrayRef,
+            Arc::new(sources) as ArrayRef,
+            Arc::new(indices) as ArrayRef,
+            Arc::new(texts) as ArrayRef,
+            Arc::new(vectors) as ArrayRef,
+        ],
+    )?;
+    let data = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), s);
+    table
+        .add(Box::new(data))
+        .execute()
+        .await
+        .context("failed to append rag chunks")?;
+    Ok(())
+}
+
+/// Vector-search the top-K nearest chunks to a query embedding.
+pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<Vec<RetrievedChunk>> {
+    let conn = open(index_dir).await?;
+    let table = match conn.open_table(RAG_TABLE).execute().await {
+        Ok(t) => t,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut stream = table
+        .query()
+        .nearest_to(query_vec)
+        .context("rag nearest_to")?
+        .limit(k)
+        .execute()
+        .await
+        .context("rag search")?;
+
+    let mut out = Vec::new();
+    while let Some(batch) = stream.try_next().await.context("rag stream")? {
+        let str_col = |name: &str| -> Option<StringArray> {
+            batch
+                .column_by_name(name)
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>().cloned())
+        };
+        let doc_ids = str_col("doc_id");
+        let sources = str_col("source");
+        let texts = str_col("text");
+        let indices = batch
+            .column_by_name("chunk_index")
+            .and_then(|c| c.as_any().downcast_ref::<Int32Array>().cloned());
+        let dists = batch
+            .column_by_name("_distance")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>().cloned());
+
+        for i in 0..batch.num_rows() {
+            out.push(RetrievedChunk {
+                doc_id: doc_ids.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+                source: sources.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+                chunk_index: indices.as_ref().map(|a| a.value(i)).unwrap_or(0),
+                text: texts.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+                distance: dists.as_ref().map(|a| a.value(i)).unwrap_or(0.0),
+            });
+        }
+    }
+    Ok(out)
+}
