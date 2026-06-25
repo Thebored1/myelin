@@ -17,10 +17,12 @@ from myelin_prompt import SYSTEM_PROMPT, TOOLS, build_user
 HERE = pathlib.Path(__file__).parent
 
 
-def ask(base_url, note, title, instruction):
-    # No system preamble — the tuned model owns the behavior intrinsically.
-    payload = {"messages": [{"role": "user", "content": build_user(note, instruction, title)}],
-               "tools": TOOLS, "temperature": 0.2, "stream": False}
+def ask(base_url, note, title, instruction, system=None):
+    msgs = []
+    if system:
+        msgs.append({"role": "system", "content": system})
+    msgs.append({"role": "user", "content": build_user(note, instruction, title)})
+    payload = {"messages": msgs, "tools": TOOLS, "temperature": 0.2, "stream": False}
     req = urllib.request.Request(base_url + "/v1/chat/completions",
                                  json.dumps(payload).encode(), {"Content-Type": "application/json"})
     m = json.loads(urllib.request.urlopen(req, timeout=120).read())["choices"][0]["message"]
@@ -58,11 +60,11 @@ def grade(resp, check):
     return True
 
 
-def run(url, cases):
+def run(url, cases, system=None):
     passed = []
     for c in cases:
         try:
-            ok = grade(ask(url, c["note"], c.get("title", "New note"), c["instruction"]), c["check"])
+            ok = grade(ask(url, c["note"], c.get("title", "New note"), c["instruction"], system), c["check"])
         except Exception as e:
             print(f"  ! {c['instruction'][:40]}: {e}"); ok = False
         passed.append(ok)
@@ -74,11 +76,13 @@ def main():
     ap.add_argument("--base-url")
     ap.add_argument("--tuned-url", required=True)
     ap.add_argument("--cases", default=str(HERE / "eval.jsonl"))
+    ap.add_argument("--base-system-file", help="preamble sent to the BASE server only (tuned gets none)")
     a = ap.parse_args()
     cases = [json.loads(l) for l in pathlib.Path(a.cases).read_text(encoding="utf-8").splitlines() if l.strip()]
+    base_sys = pathlib.Path(a.base_system_file).read_text(encoding="utf-8") if a.base_system_file else None
 
-    tuned = run(a.tuned_url, cases)
-    base = run(a.base_url, cases) if a.base_url else None
+    tuned = run(a.tuned_url, cases)  # no preamble — owns behavior intrinsically
+    base = run(a.base_url, cases, system=base_sys) if a.base_url else None
     print(f"\n{'instruction':42} {'base' if base else '':>6} tuned")
     for i, c in enumerate(cases):
         b = ("PASS" if base[i] else "fail") if base else ""

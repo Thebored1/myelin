@@ -19,6 +19,6 @@ foreach ($port in 8120, 8121) {
     Write-Output "port $port ready: $ok"
 }
 
-& "$HERE\.venv\Scripts\python.exe" eval.py --base-url http://127.0.0.1:8120 --tuned-url http://127.0.0.1:8121
+& "$HERE\.venv\Scripts\python.exe" eval.py --base-url http://127.0.0.1:8120 --tuned-url http://127.0.0.1:8121 --base-system-file "$HERE\app_preamble.txt"
 Stop-Process -Id $p1.Id, $p2.Id -Force -ErrorAction SilentlyContinue
 Write-Output "=== EVAL DONE ==="
