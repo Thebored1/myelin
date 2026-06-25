@@ -4,7 +4,7 @@ $HERE = "C:\Users\Paper\StudioProjects\myelin\training"
 Set-Location $HERE
 $srv = "C:\Users\Paper\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama-server.exe"
 $base = "C:\Users\Paper\Downloads\granite-4.0-h-1b-Q4_K_M.gguf"
-$tuned = "$HERE\out\granite-myelin-Q4_K_M.gguf"
+$tuned = if ($args.Count -ge 1) { "$HERE\out\$($args[0])-Q4_K_M.gguf" } else { "$HERE\out\granite-myelin2-Q4_K_M.gguf" }
 
 $p1 = Start-Process $srv -ArgumentList "-m `"$base`" --host 127.0.0.1 --port 8120 --jinja -ngl 99 -c 2048" -PassThru -WindowStyle Hidden
 $p2 = Start-Process $srv -ArgumentList "-m `"$tuned`" --host 127.0.0.1 --port 8121 --jinja -ngl 99 -c 2048" -PassThru -WindowStyle Hidden
