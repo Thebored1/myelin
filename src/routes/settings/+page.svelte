@@ -611,8 +611,8 @@
                     <strong>Deterministic assists</strong>
                     <span class="toggle-hint">
                         {deterministicTools
-                            ? 'On — rule-based shortcuts make small models reliable: strip headings/bold/bullets in code, exact word search, and a guard against wiping a note during an edit.'
-                            : 'Off — the model handles every edit itself. Turn this off only if you run a stronger model and would rather it not be overridden.'}
+                            ? 'On — rule-based help for small models: per-message tool gating (only the relevant tools are offered), in-code format ops (strip headings/bold/bullets) and exact word search, and a guard against wiping a note during an edit.'
+                            : 'Off — no gating, no in-code tools, no write-guard. The model gets the full toolset every turn and decides for itself. Best with a larger model.'}
                     </span>
                 </span>
             </label>

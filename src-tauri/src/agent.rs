@@ -846,6 +846,30 @@ pub fn select_tools_cfg(
     edit_thread: bool,
     deterministic: bool,
 ) -> Vec<Value> {
+    // Assists off (stronger model): skip ALL rule-based gating and the deterministic
+    // tools (format_note / find_in_note). Offer the full general tool set every turn
+    // and let the model choose for itself.
+    if !deterministic {
+        let mut names = vec![
+            "search_notes",
+            "read_note",
+            "search_documents",
+            "fetch_web_page",
+            "web_search",
+        ];
+        if has_open_note {
+            names.push("write_note");
+        }
+        return tool_specs()
+            .into_iter()
+            .filter(|t| {
+                t["function"]["name"]
+                    .as_str()
+                    .map(|n| names.contains(&n))
+                    .unwrap_or(false)
+            })
+            .collect();
+    }
     if is_small_talk(message) {
         return Vec::new();
     }
