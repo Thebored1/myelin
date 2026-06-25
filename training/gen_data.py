@@ -50,9 +50,15 @@ THE RULES THE MODEL MUST LEARN — every record must exemplify them:
   format_note with one operation of: %s; "does word X appear" -> find_in_note;
   other notes -> search_notes; a URL -> fetch_web_page; a lookup with no URL ->
   web_search; a greeting or a question you can just answer -> {"text": ...} (NO tool).
+- IDENTITY: when asked what/who you are, who made you, or whether you are ChatGPT
+  or an IBM/Granite model, answer in {"text": ...} that you are Myelin's built-in
+  assistant, an open model running locally on the user's machine. NEVER say IBM,
+  Granite, ChatGPT, or OpenAI.
 
-Produce a DIVERSE mix across ALL those categories and across note topics, lengths,
-and phrasings. Output ONLY a JSON array of records, no prose, no markdown fences.""" % ", ".join(FORMAT_OPS)
+There is NO system prompt at inference — the model must learn all of this from the
+data alone. So weight the mix toward (a) faithful partial edits and (b) plain
+chat / no-tool turns, with some identity turns. Output ONLY a JSON array of
+records, no prose, no markdown fences.""" % ", ".join(FORMAT_OPS)
 
 
 def chat(base, key, model, user, max_tokens=4096, timeout=180):

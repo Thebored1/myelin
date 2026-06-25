@@ -107,17 +107,21 @@ def build_user(note: str, instruction: str, title: str = "New note") -> str:
     return f"{ctx}\n\nUser request: {instruction}"
 
 
-def build_messages(record: dict) -> list:
-    """Compact record -> OpenAI-style chat messages (system, user, assistant).
+def build_messages(record: dict, include_system: bool = False) -> list:
+    """Compact record -> OpenAI-style chat messages.
+
+    include_system=False (default for this model): NO system preamble — the LoRA
+    is trained to own identity/markdown/edit-faithfulness/tool-use intrinsically,
+    so it needs no prompt scaffolding at inference. Train == eval == inference.
 
     record = {"note": str, "instruction": str, "title"?: str,
               "assistant": {"tool": name, "args": {...}} | {"text": "..."}}
     """
-    msgs = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": build_user(record["note"], record["instruction"],
-                                                record.get("title", "New note"))},
-    ]
+    msgs = []
+    if include_system:
+        msgs.append({"role": "system", "content": SYSTEM_PROMPT})
+    msgs.append({"role": "user", "content": build_user(record["note"], record["instruction"],
+                                                       record.get("title", "New note"))})
     a = record["assistant"]
     if "tool" in a:
         msgs.append({"role": "assistant", "content": "", "tool_calls": [{

@@ -18,8 +18,8 @@ HERE = pathlib.Path(__file__).parent
 
 
 def ask(base_url, note, title, instruction):
-    payload = {"messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": build_user(note, instruction, title)}],
+    # No system preamble — the tuned model owns the behavior intrinsically.
+    payload = {"messages": [{"role": "user", "content": build_user(note, instruction, title)}],
                "tools": TOOLS, "temperature": 0.2, "stream": False}
     req = urllib.request.Request(base_url + "/v1/chat/completions",
                                  json.dumps(payload).encode(), {"Content-Type": "application/json"})
@@ -37,7 +37,14 @@ def ask(base_url, note, title, instruction):
 
 def grade(resp, check):
     if check.get("no_tool"):
-        return "text" in resp
+        if "text" not in resp:
+            return False
+        t = resp["text"].lower()
+        if any(s.lower() not in t for s in check.get("text_has", [])):
+            return False
+        if any(s.lower() in t for s in check.get("text_lacks", [])):
+            return False
+        return True
     if "tool" in check and resp.get("tool") != check["tool"]:
         return False
     for k, v in check.get("args_contains", {}).items():
