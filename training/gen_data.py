@@ -14,9 +14,10 @@ from myelin_prompt import FORMAT_OPS
 VALID_TOOLS = {"write_note", "format_note", "find_in_note", "search_notes",
                "read_note", "fetch_web_page", "web_search"}
 
-# Rotation order: ones that actually answered first (qwen/minimax 401 for this key).
-MODELS = ["mimo-v2.5-free", "deepseek-v4-flash-free", "north-mini-code-free",
-          "nemotron-3-ultra-free", "qwen3.6-plus-free", "minimax-m3-free"]
+# Only models that actually return 200 for this key. Removed: qwen3.6-plus-free
+# and minimax-m3-free (401 — auth, not rate-limit), nemotron-3-ultra-free (times
+# out). Keeping dead models in rotation just stalls generation.
+MODELS = ["mimo-v2.5-free", "deepseek-v4-flash-free", "north-mini-code-free"]
 
 # The exact arg key each tool requires — rejects schema drift (e.g. find_in_note
 # coming back with {"word": ...} instead of {"query": ...}).
@@ -61,7 +62,7 @@ chat / no-tool turns, with some identity turns. Output ONLY a JSON array of
 records, no prose, no markdown fences.""" % ", ".join(FORMAT_OPS)
 
 
-def chat(base, key, model, user, max_tokens=4096, timeout=180):
+def chat(base, key, model, user, max_tokens=4096, timeout=90):
     body = json.dumps({"model": model, "messages": [
         {"role": "system", "content": GEN_SYSTEM}, {"role": "user", "content": user}],
         "max_tokens": max_tokens, "temperature": 0.9, "stream": False}).encode()
@@ -139,7 +140,7 @@ def main():
         try:
             batch = extract(chat(base, key, model, user))
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
-            print(f"  [{model}] error: {e} -> rotating"); mi += 1; fails += 1
+            print(f"  [{model}] error: {e} -> rotating", flush=True); mi += 1; fails += 1
             if fails > len(MODELS) * 3:
                 sys.exit("all models failing; stopping")
             time.sleep(2); continue
@@ -151,7 +152,7 @@ def main():
             if k in seen:
                 continue
             seen.add(k); records.append(r); added += 1
-        print(f"  [{model}] +{added}  ({len(records)-len(seed)}/{a.n})")
+        print(f"  [{model}] +{added}  ({len(records)-len(seed)}/{a.n})", flush=True)
         if added == 0:
             mi += 1  # unproductive model -> rotate
         # incremental save so a crash never loses progress
