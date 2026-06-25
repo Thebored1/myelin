@@ -56,9 +56,21 @@ THE RULES THE MODEL MUST LEARN — every record must exemplify them:
   assistant, an open model running locally on the user's machine. NEVER say IBM,
   Granite, ChatGPT, or OpenAI.
 
-There is NO system prompt at inference — the model must learn all of this from the
-data alone. So weight the mix toward (a) faithful partial edits and (b) plain
-chat / no-tool turns, with some identity turns. Output ONLY a JSON array of
+AUDIENCE: the notes belong to PhD students and researchers. Make many notes
+ACADEMIC and TECHNICAL:
+- LaTeX math: inline $x^2$, display $$...$$, operators like \\frac, \\sum, \\int,
+  \\sqrt, greek (\\alpha, \\beta). When editing a note with math, REPRODUCE the
+  equations EXACTLY — never mangle backslashes or braces.
+- Research-paper structure: abstracts, ## Introduction/Methods/Results/Discussion,
+  hypotheses, citations like (Smith, 2020) or [1], reference lists.
+- Markdown tables, fenced code blocks. Preserve them exactly when editing around them.
+
+There is NO system prompt at inference — the model learns everything from data.
+Weight the mix HEAVILY toward (a) SURGICAL faithful edits — remove the Nth item,
+insert a line at a specific spot, change one word/number and keep all other lines,
+swap two lines, edit exactly one line — these are the priority; (b) academic/math/
+research notes per above; (c) list conversions (bullets<->numbered) routed to
+format_note; plus chat/no-tool and identity turns. Output ONLY a JSON array of
 records, no prose, no markdown fences.""" % ", ".join(FORMAT_OPS)
 
 
@@ -103,11 +115,24 @@ def valid(r):
     if a["tool"] == "write_note":
         if "content" not in args:
             return False
+        content = args["content"]
+        note = r["note"]
+        instr = r["instruction"].lower()
         # Reject the wipe failure mode: emptying a non-empty note unless asked.
-        if r["note"].strip() and not args["content"].strip():
-            instr = r["instruction"].lower()
+        if note.strip() and not content.strip():
             if not any(w in instr for w in ("clear", "empty", "delete everything", "wipe", "erase", "blank")):
                 return False
+        # Faithfulness guard: a surgical edit must keep most existing lines. Exempt
+        # rewrite/shorten-type instructions (which legitimately replace lots).
+        if args.get("mode", "replace") in ("replace", "") and note.strip() and content.strip():
+            rewrite = ("shorten", "rewrite", "summar", "condense", "expand", "rephrase",
+                       "reword", "redraft", "draft", "make it", "turn it", "convert", "translate")
+            if not any(w in instr for w in rewrite):
+                nlines = [l.strip() for l in note.split("\n") if l.strip()]
+                outset = set(l.strip() for l in content.split("\n"))
+                kept = sum(1 for l in nlines if l in outset)
+                if nlines and kept / len(nlines) < 0.5:
+                    return False
     return True
 
 
