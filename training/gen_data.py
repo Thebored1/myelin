@@ -145,6 +145,7 @@ def main():
     ap.add_argument("--n", type=int, default=800)
     ap.add_argument("--batch", type=int, default=12)
     ap.add_argument("--out", default=str(HERE / "data" / "train.jsonl"))
+    ap.add_argument("--resume", action="store_true", help="keep existing --out records and add to them")
     a = ap.parse_args()
 
     key, base = load_env()
@@ -156,6 +157,18 @@ def main():
 
     records = list(seed)
     seen = {json.dumps([r["note"], r["instruction"]], sort_keys=True) for r in seed}
+    # --resume: keep prior output as a starting point so repeated runs (as free
+    # rate limits reset over hours/days) accumulate toward the target.
+    if a.resume and out_path.exists():
+        pre = 0
+        for line in out_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            k = json.dumps([r["note"], r["instruction"]], sort_keys=True)
+            if k not in seen:
+                seen.add(k); records.append(r); pre += 1
+        print(f"resumed: loaded {pre} existing generated records", flush=True)
     mi, fails = 0, 0
     while len(records) - len(seed) < a.n:
         model = MODELS[mi % len(MODELS)]
