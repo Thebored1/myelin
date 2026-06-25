@@ -19,7 +19,18 @@ for fn in sources:
     for line in p.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        r = json.loads(line)
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # tolerate a truncated final line from a killed generator
+        # coerce nulls a generator may have emitted (note: null) to "" so the
+        # training render never crashes on None.
+        r["note"] = r.get("note") or ""
+        r["instruction"] = r.get("instruction") or ""
+        if "title" in r:
+            r["title"] = r.get("title") or "New note"
+        if not isinstance(r.get("assistant"), dict):
+            continue
         k = json.dumps([r["note"], r["instruction"]], sort_keys=True)
         if k in seen:
             continue
