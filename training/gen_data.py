@@ -25,7 +25,7 @@ REQUIRED_ARG = {"find_in_note": "query", "search_notes": "query",
                 "read_note": "note_id", "fetch_web_page": "url", "web_search": "query"}
 
 
-def load_env():
+def load_env(key_var="OPENCODE_ZEN_KEY"):
     env = {}
     p = HERE / ".env"
     if p.exists():
@@ -33,7 +33,7 @@ def load_env():
             if "=" in line and not line.strip().startswith("#"):
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
-    return (os.environ.get("OPENCODE_ZEN_KEY") or env.get("OPENCODE_ZEN_KEY"),
+    return (os.environ.get(key_var) or env.get(key_var),
             os.environ.get("OPENCODE_ZEN_BASE") or env.get("OPENCODE_ZEN_BASE", "https://opencode.ai/zen/v1"))
 
 
@@ -146,9 +146,10 @@ def main():
     ap.add_argument("--batch", type=int, default=12)
     ap.add_argument("--out", default=str(HERE / "data" / "train.jsonl"))
     ap.add_argument("--resume", action="store_true", help="keep existing --out records and add to them")
+    ap.add_argument("--key-var", default="OPENCODE_ZEN_KEY", help="which .env key to use (for parallel keys)")
     a = ap.parse_args()
 
-    key, base = load_env()
+    key, base = load_env(a.key_var)
     if not key:
         sys.exit("set OPENCODE_ZEN_KEY (training/.env)")
     seed = load_seed()

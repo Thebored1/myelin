@@ -7,7 +7,7 @@ from gen_data import valid
 
 H = pathlib.Path(__file__).parent
 out = H / "data" / "train_combined.jsonl"
-sources = ["data/train.jsonl", "data/train_iter2.jsonl"]  # iter3 first (priority on dup)
+sources = ["data/train.jsonl", "data/train_k2.jsonl", "data/train_iter2.jsonl"]  # iter3 (both keys) + iter2
 
 seen, recs, dropped = set(), [], 0
 for fn in sources:
