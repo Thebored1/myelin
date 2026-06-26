@@ -48,6 +48,19 @@
 
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
+	let copiedIdx = $state<number | null>(null);
+
+	async function copyMessage(idx: number, text: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			copiedIdx = idx;
+			setTimeout(() => {
+				if (copiedIdx === idx) copiedIdx = null;
+			}, 1200);
+		} catch {
+			/* clipboard unavailable */
+		}
+	}
 	// The editor selection the user has "armed" for the AI. Persists across sends
 	// (cleared only by the ✕ pill or by deselecting inside the editor). Captured in
 	// source-markdown coordinates with surrounding context so the backend can pin
@@ -2601,6 +2614,20 @@
 														>
 													</div>
 												{/if}
+												{#if msg.role === 'assistant' && msg.content && !msg.isStreaming}
+													<div class="chat-msg-actions assistant">
+														<button
+															class="rewind-btn copy-btn"
+															onclick={() => copyMessage(i, msg.content)}
+															title="Copy response"
+															aria-label="Copy response"
+														>
+															{#if copiedIdx === i}✓{:else}
+																<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+															{/if}
+														</button>
+													</div>
+												{/if}
 											</div>
 										{/if}
 									{/each}
@@ -4551,7 +4578,7 @@
 	.prompt-box {
 		background: var(--neutral-1000);
 		border: 1px solid var(--border-default);
-		border-radius: var(--radius-3xl);
+		border-radius: var(--radius-md);
 		padding: var(--space-2);
 		display: flex;
 		flex-direction: column;
@@ -4609,7 +4636,7 @@
 		background: transparent;
 		color: var(--text-secondary);
 		cursor: pointer;
-		border-radius: var(--radius-xl);
+		border-radius: var(--radius-md);
 		white-space: nowrap;
 		transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease,
 			box-shadow 0.14s ease, opacity 0.14s ease;
@@ -4751,6 +4778,14 @@
 		gap: var(--space-1);
 		margin-top: 3px;
 		justify-content: flex-end;
+	}
+	.chat-msg-actions.assistant {
+		justify-content: flex-start;
+	}
+	.copy-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
 	}
 	.rewind-btn {
 		padding: 1px 6px;
