@@ -658,7 +658,7 @@
                     <strong>Deterministic format &amp; find</strong>
                     <span class="toggle-hint">
                         {deterministicTools
-                            ? 'On — formatting requests (strip headings/bold/bullets, change case, convert lists) are applied by exact in-code rules instead of the model rewriting the note, and exact-word lookups use a reliable search. Also guards against accidentally wiping a note during an edit. Recommended — works independently of gating.'
+                            ? 'On — formatting requests (strip headings/bold/bullets, change case, convert lists) are applied by exact in-code rules instead of the model rewriting the note; removals (delete a paragraph/heading/section) are applied surgically so the rest of the note is untouched; and exact-word lookups use a reliable search. Also guards against accidentally wiping a note during an edit. Recommended — works independently of gating.'
                             : 'Off — the model handles formatting, search and edits entirely on its own.'}
                     </span>
                 </span>

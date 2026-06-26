@@ -484,6 +484,33 @@ pub fn wants_clear(message: &str) -> bool {
     PHRASES.iter().any(|p| m.contains(p))
 }
 
+/// True for a request to remove PART of the open note (a paragraph, heading,
+/// section, line, sentence, etc.) and nothing else — as opposed to a whole-note
+/// clear ([`wants_clear`]) or a removal mixed with new content. Used by
+/// `write_note` to do a surgical deletion from the real body instead of trusting
+/// the model's `content` (which models tend to fill with the whole regenerated
+/// note — slow, and a truncation risk on long notes).
+pub fn wants_partial_removal(message: &str) -> bool {
+    if wants_clear(message) {
+        return false;
+    }
+    let m = message.to_lowercase();
+    let has_remove = contains_any_word(&m, &["remove", "delete", "erase", "cut", "drop", "omit"])
+        || m.contains("get rid of")
+        || m.contains("take out")
+        || m.contains("strip out");
+    // A removal mixed with new/changed content ("delete X and add Y", "replace the
+    // intro") is a real edit, not a pure deletion — leave it to the model's content.
+    let has_add = contains_any_word(
+        &m,
+        &[
+            "add", "insert", "append", "include", "put", "write", "replace", "change",
+            "rewrite", "rename", "make", "turn",
+        ],
+    );
+    has_remove && !has_add
+}
+
 /// Every operation `apply_format_op` understands. Kept in sync with the
 /// format_note tool's `operation` enum and used to validate the model's choice.
 pub const FORMAT_OPS: &[&str] = &[
@@ -1035,6 +1062,23 @@ impl Tool for WriteNoteTool {
             None => {
                 return Ok("No note is currently open to write to. Creating new notes from the sidebar chat is not allowed.".to_string());
             }
+        };
+
+        // Surgical deletion. Models reliably identify WHAT to remove (the `find`
+        // text) but unreliably fill `content` with the whole regenerated note —
+        // which plan_write then turns into a full-body replace (the "it rewrote my
+        // entire note" complaint, plus a truncation risk on long notes). On a
+        // pure-removal request where the model's `find` matches the note, trust
+        // `find` and delete it from the REAL body: an empty `content` makes
+        // plan_write do a faithful, surgical snippet delete — nothing else changes.
+        let (mode, content) = if self.state.deterministic_tools_enabled()
+            && !find.trim().is_empty()
+            && find_tolerant(&existing.body, &find).is_some()
+            && wants_partial_removal(&self.state.latest_chat_question())
+        {
+            ("edit".to_string(), String::new())
+        } else {
+            (mode, content)
         };
 
         // Decide the new body (and how the UI should apply it) using the pure,
@@ -1701,6 +1745,35 @@ mod tests {
         assert!(wants_clear("delete everything"));
         assert!(wants_clear("erase the note and start over"));
         assert!(wants_clear("make it blank"));
+    }
+
+    #[test]
+    fn wants_partial_removal_pure_deletes_only() {
+        // Pure removals of a part → true.
+        assert!(wants_partial_removal("remove the My Take section"));
+        assert!(wants_partial_removal("delete the second paragraph"));
+        assert!(wants_partial_removal("get rid of the bulleted list"));
+        assert!(wants_partial_removal("take out the heading"));
+        // Whole-note clears are handled elsewhere → false.
+        assert!(!wants_partial_removal("delete everything"));
+        assert!(!wants_partial_removal("clear the note"));
+        // Removal mixed with new/changed content is a real edit → false.
+        assert!(!wants_partial_removal("delete the intro and add a conclusion"));
+        assert!(!wants_partial_removal("replace the first paragraph"));
+        assert!(!wants_partial_removal("rewrite the summary without the last line"));
+        // Non-removal requests → false.
+        assert!(!wants_partial_removal("make the title a heading"));
+        assert!(!wants_partial_removal("what does this note say"));
+    }
+
+    #[test]
+    fn surgical_delete_removes_only_find_from_real_body() {
+        // The path the override produces: mode "edit", empty content, find = the
+        // block to remove. plan_write must delete exactly that, byte-faithfully.
+        let body = "# Title\n\nKeep this paragraph.\n\n**My Take:**\nRemove me.";
+        let plan = plan_write(body, "", "edit", "**My Take:**\nRemove me.").unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
+        assert_eq!(plan.new_body, "# Title\n\nKeep this paragraph.\n\n");
     }
 
     // Some models echo the prompt's note-framing markers into a direct tool call;
