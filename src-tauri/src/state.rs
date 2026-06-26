@@ -91,6 +91,9 @@ struct InnerState {
     /// The editor text selection the user armed for the current chat turn, if any.
     /// Read by the write_note tool to scope an edit to just that span.
     current_selection: Mutex<Option<crate::agent::SelectionArg>>,
+    /// The working-doc type of the open document this turn: "md" | "tex" | "ipynb".
+    /// Steers the prompt (LaTeX/notebook vs Markdown) and notebook-aware tools.
+    current_doc_type: Mutex<Option<String>>,
     current_note_id: Mutex<Option<String>>,
     require_tool_approval: std::sync::atomic::AtomicBool,
     /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
@@ -191,6 +194,7 @@ impl AppState {
                 chat_tools: Mutex::new(Vec::new()),
                 latest_chat_question: Mutex::new(None),
                 current_selection: Mutex::new(None),
+                current_doc_type: Mutex::new(None),
                 current_note_id: Mutex::new(None),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
@@ -235,6 +239,18 @@ impl AppState {
 
     pub fn current_selection(&self) -> Option<crate::agent::SelectionArg> {
         self.inner.current_selection.lock().clone()
+    }
+
+    pub fn set_current_doc_type(&self, doc_type: Option<String>) {
+        *self.inner.current_doc_type.lock() = doc_type;
+    }
+
+    pub fn current_doc_type(&self) -> String {
+        self.inner
+            .current_doc_type
+            .lock()
+            .clone()
+            .unwrap_or_else(|| "md".to_string())
     }
 
     pub fn set_current_note_id(&self, note_id: impl Into<String>) {
@@ -1092,12 +1108,15 @@ impl AppState {
         question: String,
         request_id: String,
         selection: Option<crate::agent::SelectionArg>,
+        doc_type: Option<String>,
     ) -> Result<()> {
         self.reset_chat_tools();
         self.set_latest_chat_question(question.clone());
         // An armed selection is only meaningful if it carries text; ignore empties.
         let selection = selection.filter(|s| !s.text.trim().is_empty());
         self.set_current_selection(selection.clone());
+        let doc_type = doc_type.unwrap_or_else(|| "md".to_string());
+        self.set_current_doc_type(Some(doc_type.clone()));
         self.set_current_note_id(note_id.clone());
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
@@ -1137,6 +1156,17 @@ impl AppState {
                     "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---",
                     note_body_excerpt
                 ));
+            }
+            // The open document isn't always Markdown — tell the model so it edits
+            // in the right language instead of defaulting to Markdown headings/lists.
+            if doc_type == "tex" {
+                context.push_str(
+                    "\n\nIMPORTANT: This open document is a LaTeX (.tex) source file, NOT Markdown. \
+                     Write and edit it using LaTeX syntax only — e.g. \\section{...}, \\subsection{...}, \
+                     \\textbf{...}, \\emph{...}, \\begin{itemize}\\item ...\\end{itemize}, $...$ for math, \
+                     \\begin{equation}...\\end{equation}. Do NOT use Markdown (#, **, -). Preserve the \
+                     document's preamble and \\begin{document}/\\end{document} structure.",
+                );
             }
             // If the user armed an editor selection, show the model EXACTLY what is
             // selected and scope the request to it. The deterministic write path

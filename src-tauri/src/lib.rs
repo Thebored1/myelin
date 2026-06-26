@@ -383,9 +383,10 @@ async fn ask_ai_stream(
     question: String,
     request_id: String,
     selection: Option<crate::agent::SelectionArg>,
+    doc_type: Option<String>,
 ) -> Result<(), String> {
     state
-        .ask_ai_stream(note_id, question, request_id, selection)
+        .ask_ai_stream(note_id, question, request_id, selection, doc_type)
         .await
         .map_err(|error| error.to_string())
 }

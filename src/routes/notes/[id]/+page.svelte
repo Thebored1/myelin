@@ -1468,6 +1468,8 @@
 				noteId: note.id,
 				question: userText,
 				requestId,
+				// Working-doc type so the model edits as LaTeX / notebook, not Markdown.
+				docType: workingDocType,
 				// Armed selection persists across sends (cleared only by the ✕ pill),
 				// so several edits can target the same span.
 				selection: armedSelection
