@@ -965,8 +965,12 @@ fn ram_safe_ctx(requested: u32, gguf: Option<&crate::gguf::GgufInfo>) -> u32 {
     // launch ladder still backs off if a too-optimistic allocation fails.
     match gguf.and_then(|g| g.kv_bytes_per_token()).filter(|&k| k > 0) {
         Some(kv_per_tok) => {
+            // The adaptive path stores KV as q8_0 (~half of f16), so the same RAM
+            // holds ~2x the context — budget against the quantized size so we can
+            // actually reach the 32k target on 8 GB-class machines.
+            let kv_q8 = (kv_per_tok / 2).max(1);
             let budget = (available_ram_bytes() as f64 * 0.75) as u64;
-            let max_ctx = (budget / kv_per_tok).clamp(512, u32::MAX as u64) as u32;
+            let max_ctx = (budget / kv_q8).clamp(512, u32::MAX as u64) as u32;
             ceil.min(max_ctx).max(4096)
         }
         None => ceil.max(4096),
@@ -981,6 +985,10 @@ struct LaunchPlan {
     no_kv_offload: bool,
     flash_attn: bool,
     ubatch: Option<u32>,
+    /// KV cache quantization (`--cache-type-k/v`), e.g. "q8_0" to halve the KV so
+    /// a 32k context fits in RAM. None = f16 (also the fallback if a model/backend
+    /// rejects quantized KV). Requires flash attention.
+    cache_type: Option<&'static str>,
     /// Pass `--jinja` (use the model's embedded chat template; needed for tool
     /// calling). Off for models without an embedded template, or as a final
     /// fallback so the server still starts.
@@ -1005,7 +1013,9 @@ fn launch_plans(
     // instruct models have one); a no-jinja fallback below covers the rest.
     let jinja = gguf.map(|g| g.has_chat_template).unwrap_or(true);
 
-    if !config.auto_offload || !is_gpu {
+    // Advanced/manual: adaptive offload off → use the configured context + GPU
+    // layers verbatim, no automatic KV/ctx management (the user is in control).
+    if !config.auto_offload {
         let ngl = if forced_cpu {
             0
         } else {
@@ -1019,6 +1029,7 @@ fn launch_plans(
             no_kv_offload: false,
             flash_attn: false,
             ubatch: None,
+            cache_type: None,
             jinja,
         }];
         // If we tried with --jinja, add a no-jinja fallback so the server still
@@ -1047,7 +1058,10 @@ fn launch_plans(
         .and_then(|g| g.kv_bytes_per_token())
         .unwrap_or(0)
         .saturating_mul(base_ctx as u64);
-    let primary_ngl = match (probe_gpu_budget(), n_layers) {
+    let primary_ngl = if forced_cpu {
+        0
+    } else {
+        match (probe_gpu_budget(), n_layers) {
         (Some(mem), Some(layers)) if model_bytes > 0 => {
             let weight_budget = if mem.integrated {
                 // iGPU: weight memory (GTT) and the KV cache (RAM) are the same
@@ -1081,18 +1095,31 @@ fn launch_plans(
             );
             ngl
         }
-        _ => 999,
+            _ => 999,
+        }
     };
 
+    // Quantize the KV cache to q8_0 (near-lossless, ~half of f16) so the 32k
+    // target fits in RAM on all systems — CPU included. Only for transformer KV;
+    // recurrent/hybrid archs keep a tiny fixed state (no KV to quantize).
+    let cache_type: Option<&'static str> = gguf
+        .and_then(|g| g.kv_bytes_per_token())
+        .map(|_| "q8_0");
+
     let mut plans = vec![
-        LaunchPlan { ngl: primary_ngl, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
-        LaunchPlan { ngl: primary_ngl, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), jinja },
-        LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128), jinja },
+        LaunchPlan { ngl: primary_ngl, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256), cache_type, jinja },
+        LaunchPlan { ngl: primary_ngl, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), cache_type, jinja },
+        LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128), cache_type, jinja },
     ];
+    // If a model/backend rejects quantized KV (rare), retry once with f16 KV at a
+    // reduced context before falling back further.
+    if cache_type.is_some() {
+        plans.push(LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128), cache_type: None, jinja });
+    }
     // Last resort: start without --jinja so a model with a missing/broken
     // template still runs (chat-only; tools may not work).
     if jinja {
-        plans.push(LaunchPlan { jinja: false, ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256) });
+        plans.push(LaunchPlan { jinja: false, ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), cache_type: None });
     }
     plans
 }
@@ -1213,6 +1240,16 @@ async fn try_start_candidate(
     }
     if plan.flash_attn {
         command.arg("--flash-attn").arg("on");
+    }
+    // Quantized KV cache (requires flash attention, set above) — halves the KV so
+    // a 32k context fits in RAM. Falls back to f16 via the launch ladder if a
+    // backend rejects it.
+    if let Some(ct) = plan.cache_type {
+        command
+            .arg("--cache-type-k")
+            .arg(ct)
+            .arg("--cache-type-v")
+            .arg(ct);
     }
     if let Some(ub) = plan.ubatch {
         command.arg("--ubatch-size").arg(ub.to_string());

@@ -126,17 +126,25 @@ runs on a 512 MB iGPU and a 24 GB dGPU without manual tuning. The principle is
 
 How it works (`llama_server.rs`):
 
+- **Aim for 32k context on *all* systems — CPU included.** Adaptive offload is
+  not GPU-only: with it on (default), the launcher targets a 32k window whether
+  the model runs on a GPU or pure CPU. (Turn it off to set Context Size / GPU
+  Layers manually — the advanced/manual path uses your values verbatim.)
+- **Quantize the KV cache to `q8_0`** (`--cache-type-k/v q8_0`, requires
+  `--flash-attn on`) — near-lossless and ~half the size of f16, so a 32k window
+  fits in RAM on an 8 GB machine. (Skipped for recurrent/hybrid archs, which keep
+  a tiny fixed state; falls back to f16 via the ladder if a backend rejects it.)
 - **Keep the KV cache in RAM** (`--no-kv-offload`) so context size doesn't
-  compete for VRAM — a large (32k) window fits on any GPU. `--flash-attn on` and
-  a small `--ubatch-size` keep the GPU compute buffer bounded.
+  compete for VRAM — a large (32k) window fits on any GPU. A small `--ubatch-size`
+  keeps the compute buffer bounded.
 - **Take all the VRAM** (`--n-gpu-layers 999`); weights that don't fit spill to
   GTT/system RAM. On a dGPU this fills real VRAM (big win); on an iGPU it's
   mostly GTT (modest win) — both work, neither is hard-coded.
 - **Clamp context to fit RAM**, not VRAM: the launcher reads the model's KV
   geometry from the GGUF header (a tiny built-in parser in `gguf.rs`) and the
-  system's available RAM (`sysinfo`), then caps the 32k target so the KV cache
-  fits ~60% of free RAM. This is what prevents the "huge prompt → out-of-memory →
-  GPU device-lost" crash.
+  system's available RAM (`sysinfo`), then caps the 32k target so the (q8) KV
+  cache fits ~75% of free RAM. This is what prevents the "huge prompt →
+  out-of-memory → GPU device-lost" crash.
 - **Retry instead of predict**: if a launch fails (OOM at load), it relaunches
   the same backend with a smaller context, then fewer GPU layers, before falling
   through to the next backend (ultimately CPU). A crash mid-reply is detected and
