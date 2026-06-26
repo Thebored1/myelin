@@ -322,7 +322,9 @@
 		--hover-overlay-strong: rgba(0, 0, 0, 0.07);
 		--overlay-faint: rgba(0, 0, 0, 0.025);
 		--bg-elevated: #ffffff;
-		--bg-elevated-hover: #f3f0ec;
+		/* Card hover stays a faint off-white just below pure white — going darker
+		   drops it to the page color and the white card visually "sinks". */
+		--bg-elevated-hover: #f8f6f3;
 		--bg-input: #ffffff;
 		--bg-modal: #ffffff;
 		--scrim: rgba(40, 32, 24, 0.25);

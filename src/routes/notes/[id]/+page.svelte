@@ -992,7 +992,7 @@
 			draftBody = existingScratchpad?.body ?? '';
 			draftTags = loadedNote.tags.join(', ');
 			activeSourceId = loadedNote.id;
-			const bytes = await invoke<number[]>('read_file_binary', { noteId: loadedNote.id });
+			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			scratchpadSavedId = existingScratchpad?.id ?? null;
 			showAttachedNote = draftBody.trim().length > 0;
@@ -1005,7 +1005,7 @@
 
 			if (loadedNote.sourcePdf) {
 				activeSourceId = loadedNote.sourcePdf;
-				const bytes = await invoke<number[]>('read_file_binary', { noteId: loadedNote.sourcePdf });
+				const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
 				activeSourceBytes = new Uint8Array(bytes);
 				showAttachedNote = draftBody.trim().length > 0;
 				// If a working document has a sourcePdf, we need to know its type. 
@@ -1783,7 +1783,7 @@
 			});
 			note = saved;
 			activeSourceId = pdfNote.id;
-			const bytes = await invoke<number[]>('read_file_binary', { noteId: pdfNote.id });
+			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: pdfNote.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			showAttachedNote = true;
 			saveStatus = 'saved';

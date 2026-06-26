@@ -989,8 +989,12 @@ pub fn select_tools_cfg(
     }
 
     // Gating off: offer the full general tool set every turn and let the model
-    // decide. find_in_note is still added when the deterministic layer is on,
-    // since it is a correctness assist rather than gating.
+    // decide. Read/search tools are harmless on a misfire, so they're always on
+    // (this is what keeps web search working — gating's brittle keyword routing
+    // was the thing that broke it). The DESTRUCTIVE write tool is the exception:
+    // it still needs edit intent, so a small model can't misfire it on a question
+    // or greeting and clobber the note (the "what can you do" → wrote the title
+    // bug). find_in_note rides along when the deterministic layer is on.
     if !gating {
         let mut names = vec![
             "search_notes",
@@ -999,7 +1003,7 @@ pub fn select_tools_cfg(
             "fetch_web_page",
             "web_search",
         ];
-        if has_open_note {
+        if has_open_note && (note_write_intent(message) || edit_thread) {
             names.push("write_note");
         }
         if deterministic && has_open_note && wants_find(message) {
@@ -1974,6 +1978,29 @@ mod tests {
         let plan = plan_write(body, "", "edit", "**My Take:**\nRemove me.").unwrap();
         assert_eq!(plan.op, WriteOp::EditSnippet);
         assert_eq!(plan.new_body, "# Title\n\nKeep this paragraph.\n\n");
+    }
+
+    #[test]
+    fn gating_off_protects_write_note_but_keeps_search() {
+        let has = |v: &[Value], name: &str| {
+            v.iter().any(|t| t["function"]["name"].as_str() == Some(name))
+        };
+        // gating OFF (default), deterministic ON.
+        // A capability question must NOT get write_note (the "what can you do →
+        // wrote the title" misfire), but read/search stay available.
+        let q = select_tools_cfg("what can you do", true, false, false, true);
+        assert!(!has(&q, "write_note"), "a question must not offer write_note");
+        assert!(has(&q, "web_search"), "read/search stay on with gating off");
+        // An explicit edit request still gets write_note.
+        let e = select_tools_cfg("rewrite the introduction", true, false, false, true);
+        assert!(has(&e, "write_note"));
+        // A verb-less follow-up in an edit thread keeps write_note.
+        let f = select_tools_cfg("no, shorter", true, true, false, true);
+        assert!(has(&f, "write_note"));
+        // Web search is never withheld (the thing brittle gating used to break).
+        let s = select_tools_cfg("search the web for the latest rust release", true, false, false, true);
+        assert!(has(&s, "web_search"));
+        assert!(!has(&s, "write_note"));
     }
 
     #[test]

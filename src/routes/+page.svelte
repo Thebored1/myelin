@@ -6,6 +6,7 @@
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { sidebarOpen } from '$lib/stores';
 	import { theme, toggleTheme } from '$lib/theme';
+	import { appCache } from '$lib/appCache';
 	import type {
 		AppSnapshot,
 		NoteDocument,
@@ -217,7 +218,17 @@
 		} else {
 			searchResults = null;
 		}
+		appCache.app = app;
+		appCache.provider = provider;
 	}
+
+	// Keep the cross-navigation cache in sync with any path that reassigns the
+	// snapshot (create / delete / rebuild / workspace change), so a later return
+	// to Home paints current data, not a stale copy.
+	$effect(() => {
+		if (app) appCache.app = app;
+		if (provider) appCache.provider = provider;
+	});
 
 	function folderFromRelativePath(relativePath: string) {
 		const segments = relativePath.split('/').filter(Boolean);
@@ -338,10 +349,29 @@
 	onMount(() => {
 		let unlistenChanged = () => {};
 		let unlistenStatus = () => {};
+
+		// Paint instantly from the last-known snapshot so coming back from a note
+		// doesn't blank the UI while the backend responds.
+		if (appCache.app) {
+			app = appCache.app;
+			provider = appCache.provider;
+			appVersion = appCache.appVersion;
+			ready = true;
+		}
+
 		void (async () => {
-			getVersion().then((v) => { appVersion = v; }).catch(() => {});
+			if (!appVersion) {
+				getVersion().then((v) => { appVersion = v; appCache.appVersion = v; }).catch(() => {});
+			}
 			try {
-				app = await invoke<AppSnapshot>('bootstrap');
+				if (!appCache.bootstrapped) {
+					// One-time heavy init: git repo, file watcher, full workspace reindex.
+					// Later Home visits skip this and rely on the cheap get_snapshot below
+					// plus the live file watcher.
+					app = await invoke<AppSnapshot>('bootstrap');
+					appCache.bootstrapped = true;
+					appCache.app = app;
+				}
 				await refreshApp();
 			} finally {
 				ready = true;
@@ -448,6 +478,25 @@
 	<aside class="rail">
 		<div class="rail-top">
 			<span class="wordmark">myelin</span>
+			<button
+				class="theme-toggle-btn"
+				onclick={toggleTheme}
+				title={$theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+				aria-label="Toggle theme"
+			>
+				{#if $theme === 'light'}
+					<!-- moon: click to go dark -->
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+					</svg>
+				{:else}
+					<!-- sun: click to go light -->
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<circle cx="12" cy="12" r="4"></circle>
+						<path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+					</svg>
+				{/if}
+			</button>
 		</div>
 
 		<div class="rail-list">
@@ -885,6 +934,26 @@
 		padding: var(--space-5) var(--space-5) var(--space-4);
 		gap: var(--space-3);
 		flex-shrink: 0;
+	}
+
+	.theme-toggle-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 30px;
+		height: 30px;
+		flex-shrink: 0;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: color 0.15s, background 0.15s, border-color 0.15s;
+	}
+	.theme-toggle-btn:hover {
+		color: var(--accent-100);
+		background: var(--hover-overlay);
+		border-color: var(--border-default);
 	}
 
 	.wordmark {
