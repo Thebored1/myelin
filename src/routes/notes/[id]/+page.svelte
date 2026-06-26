@@ -309,26 +309,119 @@
 		};
 	}
 
+	// Paint the armed selection with the CSS Custom Highlight API so it stays
+	// visible even when focus leaves the editor (e.g. while typing in the prompt).
+	// It's independent of the browser's native selection, which collapses on blur.
+	const HIGHLIGHT_SUPPORTED =
+		typeof CSS !== 'undefined' && !!(CSS as any).highlights && typeof (window as any).Highlight !== 'undefined';
+
+	function setArmedHighlight(range: Range | null) {
+		if (!HIGHLIGHT_SUPPORTED) return;
+		const reg = (CSS as any).highlights as Map<string, unknown>;
+		if (range) reg.set('ai-armed', new (window as any).Highlight(range));
+		else reg.delete('ai-armed');
+	}
+
+	function clearArmedSelection() {
+		armedSelection = null;
+		setArmedHighlight(null);
+	}
+
+	// Build a DOM Range from rendered-text offsets (inverse of textOffsetOf) so we
+	// can re-highlight a span the user can no longer natively select.
+	function rangeFromRenderedOffsets(
+		editorEl: HTMLElement,
+		startOff: number,
+		endOff: number
+	): Range | null {
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		let acc = 0;
+		let startNode: Node | null = null;
+		let startNodeOff = 0;
+		let endNode: Node | null = null;
+		let endNodeOff = 0;
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			const len = node.textContent?.length ?? 0;
+			if (startNode === null && startOff <= acc + len) {
+				startNode = node;
+				startNodeOff = startOff - acc;
+			}
+			if (endOff <= acc + len) {
+				endNode = node;
+				endNodeOff = endOff - acc;
+				break;
+			}
+			acc += len;
+		}
+		if (!startNode || !endNode) return null;
+		try {
+			const range = document.createRange();
+			range.setStart(startNode, Math.max(0, startNodeOff));
+			range.setEnd(endNode, Math.max(0, endNodeOff));
+			return range;
+		} catch {
+			return null;
+		}
+	}
+
 	function captureEditorSelection() {
 		if (!vditorContainer) return;
 		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		if (!editorEl) return;
 		const sel = window.getSelection();
-		if (!sel || sel.rangeCount === 0) return;
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
 		const range = sel.getRangeAt(0);
-		// Selection moved OUT of the editor (e.g. into the chat box) — keep the
-		// armed selection so the user can ask about it.
 		if (!editorEl.contains(range.commonAncestorContainer)) return;
-		// Deliberate click/deselect inside the editor — clear it.
-		if (sel.isCollapsed) {
-			armedSelection = null;
-			return;
-		}
 		const computed = computeSourceSelection();
 		if (computed) {
 			const words = computed.text.trim().split(/\s+/).filter(Boolean).length;
 			armedSelection = { ...computed, chars: computed.text.length, words };
+			setArmedHighlight(range.cloneRange());
 		}
+	}
+
+	// After the AI edits the armed selection, re-select the MODIFIED text: it now
+	// sits between the unchanged context anchors, so re-locate it, re-arm, and
+	// re-highlight (best-effort for the visual range on formatted content).
+	function reselectAfterEdit() {
+		if (!armedSelection || !vditorInstance || !vditorContainer) return;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return;
+		const source = vditorInstance.getValue();
+		const before = armedSelection.before;
+		const after = armedSelection.after;
+		let s = 0;
+		let e = source.length;
+		if (before) {
+			const bi = source.indexOf(before);
+			if (bi >= 0) s = bi + before.length;
+		}
+		if (after) {
+			const ai = source.indexOf(after, s);
+			if (ai >= 0) e = ai;
+		}
+		if (e <= s) return;
+		const newText = source.slice(s, e);
+		if (!newText.trim()) return;
+		const words = newText.trim().split(/\s+/).filter(Boolean).length;
+		armedSelection = {
+			text: newText,
+			before: source.slice(Math.max(0, s - 40), s),
+			after: source.slice(e, Math.min(source.length, e + 40)),
+			chars: newText.length,
+			words
+		};
+		setArmedHighlight(rangeFromRenderedOffsets(editorEl, s, e));
+	}
+
+	// Clear the armed selection on any click OUTSIDE the prompt box (by choice via
+	// the ✕, or accidentally). Clicks inside the prompt box keep it; a fresh drag
+	// in the editor re-arms via selectionchange.
+	function onDocMouseDown(e: MouseEvent) {
+		const target = e.target as HTMLElement | null;
+		if (target && target.closest('.chat-input-area')) return;
+		if (armedSelection) clearArmedSelection();
 	}
 
 	function onSelectionChange() {
@@ -1921,6 +2014,9 @@
 		};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
+		// Clear the armed selection on clicks outside the prompt box (capture phase
+		// so it runs before the click lands).
+		document.addEventListener('mousedown', onDocMouseDown, true);
 
 		let unlistenTool: () => void;
 
@@ -1931,6 +2027,9 @@
 				const { noteId, content, mode } = event.payload;
 				if (!note || note.id !== noteId) return;
 				applyNoteWrite(content, mode);
+				// If a selection was armed, re-select the modified span once the
+				// editor has re-rendered, so follow-up edits target the new text.
+				if (armedSelection) setTimeout(reselectAfterEdit, 60);
 			}
 		).then((fn) => (unlistenNoteWritten = fn));
 
@@ -2045,6 +2144,7 @@
 		return () => {
 			mql.removeEventListener('change', handleMediaChange);
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
+			document.removeEventListener('mousedown', onDocMouseDown, true);
 			window.removeEventListener('mousemove', handleGlobalMouseMove);
 			window.removeEventListener('mouseup', stopResizing);
 			window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -2072,6 +2172,7 @@
 		if (vditorInstance) vditorInstance.destroy();
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
+			document.removeEventListener('mousedown', onDocMouseDown, true);
 		}
 	});
 
@@ -2545,7 +2646,7 @@
 												<button
 													type="button"
 													class="selection-pill"
-													onclick={() => (armedSelection = null)}
+													onclick={() => clearArmedSelection()}
 													title={`The AI will edit only your selection — ${armedSelection.chars} chars, ${armedSelection.words} word${armedSelection.words === 1 ? '' : 's'}. Click to clear.`}
 												>
 													<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/></svg>
@@ -4440,6 +4541,13 @@
 		line-height: 1.4;
 		overflow-y: auto;
 	}
+	/* The armed-selection highlight (CSS Custom Highlight API). Global because the
+	   ::highlight() pseudo applies to document-registered ranges, not scoped DOM. */
+	:global(::highlight(ai-armed)) {
+		background-color: color-mix(in srgb, var(--accent, #6366f1) 32%, transparent);
+		border-radius: 2px;
+	}
+
 	.selection-pill {
 		display: inline-flex;
 		align-items: center;
