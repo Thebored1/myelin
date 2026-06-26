@@ -16,7 +16,7 @@
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { noteOpened, noteClosed } from '$lib/llamaWarm';
 	import { showSidebarToggle, noteSidebarOpen } from '$lib/stores';
-	import { theme, toggleTheme } from '$lib/theme';
+	import { theme } from '$lib/theme';
 	import Vditor from 'vditor';
 	import 'vditor/dist/index.css';
 	import 'mathlive';
@@ -1101,7 +1101,11 @@
 				value: draftBody,
 				placeholder: isSourceMaterial ? 'Scratchpad for notes...' : 'Start typing here...',
 				mode: 'ir',
-				theme: 'dark',
+				// Vditor ships its own skin; 'classic' is its light theme. We mirror the
+				// app theme here and keep it in sync via the $effect below. Pass only the
+				// skin (no content/code theme) so Vditor doesn't fetch theme CSS from a CDN
+				// — the editor's bg/text colors come from our own var overrides anyway.
+				theme: $theme === 'light' ? 'classic' : 'dark',
 				icon: 'material',
 				lang: 'en_US',
 				tab: '\t',
@@ -1260,6 +1264,12 @@
 		if (shouldInitEditor && vditorContainer && !vditorInstance) {
 			initVditor();
 		}
+	});
+
+	// Keep Vditor's skin in sync when the app theme is toggled while a note is open.
+	$effect(() => {
+		const skin = $theme === 'light' ? 'classic' : 'dark';
+		if (vditorInstance) vditorInstance.setTheme(skin);
 	});
 
 	function parseBacklinkContext(context: string): string {
@@ -2476,25 +2486,6 @@
 							fetchNoteHistory();
 						}}>History</button
 					>
-					<button
-						class="theme-toggle-btn"
-						onclick={toggleTheme}
-						title={$theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
-						aria-label="Toggle theme"
-					>
-						{#if $theme === 'light'}
-							<!-- moon: click to go dark -->
-							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-								<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-							</svg>
-						{:else}
-							<!-- sun: click to go light -->
-							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-								<circle cx="12" cy="12" r="4"></circle>
-								<path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
-							</svg>
-						{/if}
-					</button>
 				</div>
 
 				<div class="sidebar-content">
@@ -3186,7 +3177,7 @@
 	.ai-modal-overlay {
 		position: fixed;
 		inset: 0;
-		background: rgba(0, 0, 0, 0.5);
+		background: var(--scrim-soft);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -3223,10 +3214,10 @@
 		display: block;
 		padding: 12px 14px;
 		margin: 8px 0;
-		border-left: 3px solid var(--accent, #f37021);
-		color: rgba(255, 255, 255, 0.6);
+		border-left: 3px solid var(--accent-200);
+		color: var(--text-secondary);
 		font-style: italic;
-		background: rgba(0, 0, 0, 0.2);
+		background: var(--bg-code);
 		border-radius: 4px;
 		font-size: 0.9em;
 	}
@@ -3236,7 +3227,7 @@
 		font-weight: 600;
 		font-style: normal;
 		margin-bottom: 6px;
-		color: rgba(255, 255, 255, 0.8);
+		color: var(--text-primary);
 		font-size: 0.85rem;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
@@ -3256,7 +3247,7 @@
 		align-items: center;
 		padding: var(--space-4) var(--space-6) var(--space-4) var(--space-8);
 		border-bottom: 1px solid var(--border-default);
-		background: rgba(16, 16, 16, 0.94);
+		background: var(--bg-panel-blur);
 		backdrop-filter: blur(var(--blur-md));
 		position: relative;
 		z-index: 1;
@@ -3428,14 +3419,14 @@
 	}
 
 	.danger {
-		border: 1px solid rgba(239, 68, 68, 0.35);
-		background: rgba(239, 68, 68, 0.12);
-		color: #fecaca;
+		border: 1px solid var(--danger-border);
+		background: var(--danger-bg);
+		color: var(--danger-text);
 	}
 
 	.danger:hover:not(:disabled) {
-		background: rgba(239, 68, 68, 0.18);
-		color: #fee2e2;
+		background: var(--danger-bg-strong);
+		color: var(--danger-text);
 	}
 
 	.content-area {
@@ -3487,8 +3478,8 @@
 	}
 
 	.toolbar-close-note-btn:hover:not(:disabled) {
-		background: rgba(239, 68, 68, 0.18);
-		color: #fee2e2;
+		background: var(--danger-bg-strong);
+		color: var(--danger-text);
 	}
 
 	.toolbar-attach-pdf-btn {
@@ -3530,7 +3521,7 @@
 	}
 	.toolbar-overlay-toggle:hover {
 		color: var(--text-primary);
-		background: rgba(255, 255, 255, 0.05);
+		background: var(--hover-overlay);
 	}
 	.toolbar-overlay-toggle.expanded svg {
 		transform: rotate(180deg);
@@ -3557,7 +3548,7 @@
 		top: auto !important;
 		bottom: -5px !important;
 		border-top-color: transparent !important;
-		border-bottom-color: #3b3e43 !important;
+		border-bottom-color: var(--neutral-800) !important;
 	}
 
 	:global(.vditor) {
@@ -3568,7 +3559,7 @@
 		flex-direction: column !important;
 		--panel-background-color: var(--bg-page) !important;
 		--textarea-background-color: var(--bg-page) !important;
-		--toolbar-background-color: rgba(18, 18, 18, 0.96) !important;
+		--toolbar-background-color: var(--bg-panel-blur) !important;
 	}
 
 	:global(.vditor-content) {
@@ -3689,7 +3680,7 @@
 			margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 		border-left: 1px solid var(--border-default);
 		border-radius: 0 !important;
-		box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
+		box-shadow: -4px 0 24px var(--shadow-color);
 		font-family: var(--font-mono);
 	}
 
@@ -3700,7 +3691,7 @@
 	.sidebar-backdrop {
 		position: absolute;
 		inset: 0;
-		background: rgba(0, 0, 0, 0.4);
+		background: var(--scrim-soft);
 		backdrop-filter: blur(var(--blur-sm));
 		z-index: 90;
 		animation: fade-in var(--duration-fast) ease-out;
@@ -3765,7 +3756,7 @@
 		font-size: 0.65rem;
 		color: var(--neutral-400);
 		font-family: var(--font-mono);
-		background: rgba(255, 255, 255, 0.02);
+		background: var(--overlay-faint);
 		flex-shrink: 0;
 		white-space: nowrap;
 	}
@@ -3871,7 +3862,7 @@
 		box-shadow: none;
 	}
 	.math-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(var(--blur-sm));
 	}
 	.dialog-content {
@@ -3920,7 +3911,7 @@
 		box-shadow: none;
 	}
 	.link-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(var(--blur-sm));
 	}
 	.link-search-input {
@@ -3974,7 +3965,7 @@
 	}
 	.link-result-btn:hover,
 	.link-result-btn.selected {
-		background: rgba(238, 96, 24, 0.12);
+		background: var(--accent-tint);
 	}
 
 	.folder-badge {
@@ -3999,10 +3990,10 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md);
 		color: var(--text-primary);
-		box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+		box-shadow: 0 10px 30px var(--shadow-color-strong);
 	}
 	.pdf-attach-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(2px);
 	}
 	.pdf-attach-dialog .dialog-content {
@@ -4040,7 +4031,7 @@
 	}
 
 	.pdf-grid-upload-card {
-		background: rgba(255, 255, 255, 0.02);
+		background: var(--overlay-faint);
 		border: 1px dashed var(--border-default);
 		border-radius: var(--radius-sm);
 		padding: 24px 16px;
@@ -4056,7 +4047,7 @@
 		font-family: inherit;
 	}
 	.pdf-grid-upload-card:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.05);
+		background: var(--hover-overlay);
 		border-color: var(--accent-300);
 	}
 	.pdf-grid-upload-card:disabled {
@@ -4077,7 +4068,7 @@
 	}
 
 	.pdf-grid-card {
-		background: rgba(255, 255, 255, 0.03);
+		background: var(--overlay-faint);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		padding: 16px;
@@ -4092,12 +4083,12 @@
 		color: inherit;
 	}
 	.pdf-grid-card:hover {
-		background: rgba(255, 255, 255, 0.06);
+		background: var(--hover-overlay-strong);
 		border-color: var(--border-default);
 		transform: translateY(-2px);
 	}
 	.pdf-card-icon {
-		background: rgba(0, 0, 0, 0.2);
+		background: var(--bg-code);
 		padding: 12px;
 		border-radius: 8px;
 		display: flex;
@@ -4136,7 +4127,7 @@
 		outline: none;
 	}
 	.preview-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.4);
+		background: var(--scrim-soft);
 		backdrop-filter: blur(var(--blur-sm));
 	}
 	.preview-layout {
@@ -4153,7 +4144,7 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-		box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+		box-shadow: 0 12px 48px var(--shadow-color-strong);
 	}
 	.preview-header {
 		padding: var(--space-6) var(--space-8);
@@ -4236,7 +4227,7 @@
 	:global(.transclusion-wrapper.force-expand),
 	:global(.transclusion-wrapper.vditor-ir__node--expand) {
 		padding: 0.25rem 0.5rem !important;
-		background: rgba(238, 96, 24, 0.06) !important;
+		background: var(--accent-tint) !important;
 		border-left: 3px solid var(--accent-200) !important;
 		border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
 		display: inline-block !important;
@@ -4255,7 +4246,7 @@
 		display: block;
 		margin-top: 0.5rem;
 		padding: var(--space-3) 1rem;
-		background: rgba(238, 96, 24, 0.05);
+		background: var(--accent-tint);
 		border-left: 3px solid var(--accent-200);
 		border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 		color: var(--text-secondary);
@@ -4298,7 +4289,7 @@
 		position: fixed;
 		bottom: var(--space-8);
 		right: var(--space-8);
-		background: rgba(18, 18, 18, 0.85);
+		background: var(--bg-panel-blur);
 		color: var(--text-secondary);
 		padding: var(--space-2) var(--space-4);
 		border-radius: var(--radius-full);
@@ -4360,17 +4351,6 @@
 	}
 	.sidebar-tabs button:hover:not(.active) {
 		color: var(--text-primary);
-	}
-	/* The theme toggle sits at the end of the tab row but stays icon-sized
-	   instead of stretching like the flex:1 tabs. */
-	.sidebar-tabs button.theme-toggle-btn {
-		flex: 0 0 auto;
-		width: 44px;
-		border-bottom-color: transparent;
-		color: var(--text-secondary);
-	}
-	.sidebar-tabs button.theme-toggle-btn:hover {
-		color: var(--accent-100);
 	}
 
 	.sidebar-content {
@@ -4437,7 +4417,7 @@
 	}
 	.chat-message.user .chat-bubble {
 		background: var(--accent-200);
-		color: var(--bg-page);
+		color: var(--on-accent);
 	}
 	.chat-message.assistant .chat-bubble {
 		background: var(--bg-panel);
@@ -4452,13 +4432,13 @@
 		background: color-mix(in srgb, var(--bg-panel) 82%, var(--accent-200));
 	}
 	.chat-bubble.error {
-		border-left: 3px solid var(--error-color, #e53e3e);
-		background-color: var(--error-bg, rgba(229, 62, 62, 0.1));
+		border-left: 3px solid var(--danger);
+		background-color: var(--danger-bg);
 	}
 	
 	.approval-card {
-		background: rgba(0, 0, 0, 0.2);
-		border: 1px solid var(--accent);
+		background: var(--bg-code);
+		border: 1px solid var(--accent-200);
 		border-radius: var(--radius-md);
 		padding: var(--space-3);
 		margin: var(--space-2) 0;
@@ -4469,11 +4449,11 @@
 		box-sizing: border-box;
 	}
 	.approval-card.rejected {
-		border-color: rgba(239, 68, 68, 0.4);
-		background: rgba(239, 68, 68, 0.05);
+		border-color: var(--danger-border);
+		background: var(--danger-bg);
 	}
 	.approval-card.rejected .title {
-		color: #fca5a5;
+		color: var(--danger-text);
 	}
 	
 	.approval-card .title {
@@ -4483,7 +4463,7 @@
 	}
 	
 	.approval-card pre {
-		background: rgba(0, 0, 0, 0.3);
+		background: var(--bg-code);
 		padding: var(--space-2);
 		border-radius: var(--radius-sm);
 		font-size: 0.75rem;
@@ -4647,7 +4627,7 @@
 		padding: 0 11px 0 9px;
 		font-size: 0.72rem;
 		font-weight: 600;
-		border-radius: 999px;
+		border-radius: var(--radius-md);
 		border: 1px solid var(--border-default);
 	}
 	.mode-pill::before {
@@ -4679,7 +4659,7 @@
 	.selection-pill {
 		gap: 6px;
 		padding: 0 5px 0 9px;
-		border-radius: 999px;
+		border-radius: var(--radius-md);
 		font-size: 0.72rem;
 		font-weight: 600;
 		color: var(--accent-100);
@@ -4711,7 +4691,7 @@
 	}
 	.send-btn:not(:disabled) {
 		background: var(--accent-200);
-		color: #fff;
+		color: var(--on-accent);
 	}
 	.send-btn:hover:not(:disabled) {
 		background: var(--accent-100);

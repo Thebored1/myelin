@@ -276,6 +276,11 @@
 		--info-fill: rgba(100, 181, 246, 0.06);
 		--success-border: rgba(129, 199, 132, 0.3);
 		--success-fill: rgba(129, 199, 132, 0.06);
+		--bg-panel-blur: rgba(16, 16, 16, 0.94); /* frosted header / editor toolbar */
+		--danger-text: #fecaca; /* readable text on a danger tint */
+		--danger-bg: rgba(239, 68, 68, 0.12);
+		--danger-bg-strong: rgba(239, 68, 68, 0.18);
+		--danger-border: rgba(239, 68, 68, 0.35);
 	}
 
 	/* ── Light theme ──
@@ -325,6 +330,11 @@
 		--shadow-color: rgba(60, 50, 40, 0.12);
 		--shadow-color-strong: rgba(60, 50, 40, 0.2);
 		--accent-tint: rgba(238, 96, 24, 0.1);
+		--bg-panel-blur: rgba(255, 255, 255, 0.9);
+		--danger-text: #b42318;
+		--danger-bg: rgba(239, 68, 68, 0.1);
+		--danger-bg-strong: rgba(239, 68, 68, 0.16);
+		--danger-border: rgba(239, 68, 68, 0.4);
 		/* --danger / --success / --on-accent stay readable on both themes */
 	}
 

@@ -5,6 +5,7 @@
 	import { resolve } from '$app/paths';
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { sidebarOpen } from '$lib/stores';
+	import { theme, toggleTheme } from '$lib/theme';
 	import type {
 		AppSnapshot,
 		NoteDocument,
