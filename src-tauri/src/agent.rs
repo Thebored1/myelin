@@ -223,16 +223,24 @@ pub struct SelectionArg {
 /// so it survives repeats and edits elsewhere. None if the text no longer occurs
 /// (the user changed that span — caller falls back to normal planning).
 pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)> {
-    if sel.text.is_empty() {
+    // The selection captured from the rendered editor often has leading/trailing
+    // whitespace that isn't in the source (e.g. it ran past a paragraph), so trim
+    // before matching — we only ever want to replace the text itself.
+    let text = sel.text.trim();
+    if text.is_empty() {
         return None;
     }
+    // Compare anchors whitespace-tolerantly: the captured selection's boundaries
+    // rarely line up byte-for-byte with the source (markers, stray newlines).
+    let before = sel.before.trim();
+    let after = sel.after.trim();
     let mut best: Option<(u8, usize, usize)> = None; // (context score, start, end)
     let mut from = 0;
-    while let Some(rel) = body[from..].find(&sel.text) {
+    while let Some(rel) = body[from..].find(text) {
         let start = from + rel;
-        let end = start + sel.text.len();
-        let before_ok = sel.before.is_empty() || body[..start].ends_with(&sel.before);
-        let after_ok = sel.after.is_empty() || body[end..].starts_with(&sel.after);
+        let end = start + text.len();
+        let before_ok = before.is_empty() || body[..start].trim_end().ends_with(before);
+        let after_ok = after.is_empty() || body[end..].trim_start().starts_with(after);
         let score = before_ok as u8 + after_ok as u8;
         if best.map(|(s, _, _)| score > s).unwrap_or(true) {
             best = Some((score, start, end));
@@ -242,7 +250,11 @@ pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)
         }
         from = start + 1;
     }
-    best.map(|(_, s, e)| (s, e))
+    // Fallback for a selection that doesn't match the source verbatim — most often
+    // a FORMATTED span where the rendered selection dropped the markdown markers
+    // (**bold**, `code`, a heading's `# `). find_tolerant matches the inner words
+    // (whitespace-tolerant), so we splice inside the markers and keep them.
+    best.map(|(_, s, e)| (s, e)).or_else(|| find_tolerant(body, text))
 }
 
 /// If the user armed a selection, build a plan that replaces ONLY that span with
@@ -1870,6 +1882,26 @@ mod tests {
         let (s, e) = locate_selection(body, &sel).unwrap();
         assert_eq!(s, body.rfind("Cats are nice.").unwrap());
         assert_eq!(&body[s..e], "Cats are nice.");
+    }
+
+    #[test]
+    fn locate_selection_tolerates_markers_and_trailing_whitespace() {
+        // Real failure from "New note 8": the user selected a BOLD paragraph, so
+        // the captured text dropped the ** markers and ran past with newlines.
+        let body = "# Food\n\n## Intro\n\n**Food is essential and good.**\n\n## More\n\n- a";
+        let sel = SelectionArg {
+            text: "Food is essential and good.\n\n".into(),
+            before: "Intro\n\n**".into(),
+            after: "**\n\n## More".into(),
+        };
+        let (s, e) = locate_selection(body, &sel).unwrap();
+        assert_eq!(&body[s..e], "Food is essential and good.");
+        // Splicing keeps the surrounding ** and the rest of the note.
+        let plan = selection_scoped_plan(body, "Food is vital, nutritious, and cultural.", &sel).unwrap();
+        assert_eq!(
+            plan.new_body,
+            "# Food\n\n## Intro\n\n**Food is vital, nutritious, and cultural.**\n\n## More\n\n- a"
+        );
     }
 
     #[test]
