@@ -438,6 +438,19 @@ impl AppState {
         let _ = fs::remove_dir_all(&staging);
         fs::create_dir_all(&staging)?;
 
+        // Backend archives are hundreds of MB and can take minutes. The shared
+        // `llama_client` has a 120s TOTAL timeout tuned for chat/health requests,
+        // which aborts a large download mid-body — surfacing as the misleading
+        // "error decoding response body". Use a dedicated client with a per-read
+        // idle timeout (catches stalled/dead connections) but NO overall cap, so a
+        // slow-but-progressing download isn't killed.
+        let download_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(120))
+            .user_agent("Myelin")
+            .build()
+            .unwrap_or_else(|_| self.inner.llama_client.clone());
+
         let result: Result<()> = async {
             let total_assets = assets.len() as f64;
             for (i, asset) in assets.iter().enumerate() {
@@ -445,7 +458,7 @@ impl AppState {
                 self.emit_download(&backend, "downloading", (i as f64 / total_assets) * 100.0,
                     &format!("Downloading {} ({}/{})", asset, i + 1, assets.len()));
 
-                let resp = self.inner.llama_client.get(&url).send().await
+                let resp = download_client.get(&url).send().await
                     .with_context(|| format!("failed to download {asset}"))?;
                 if !resp.status().is_success() {
                     anyhow::bail!("download failed for {asset}: HTTP {}", resp.status());
@@ -457,7 +470,9 @@ impl AppState {
                 let mut last_pct: i32 = -1;
                 let mut stream = resp.bytes_stream();
                 while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
+                    let chunk = chunk.with_context(|| {
+                        format!("download stream interrupted for {asset} (network stalled or connection dropped)")
+                    })?;
                     std::io::Write::write_all(&mut file, &chunk)?;
                     downloaded += chunk.len() as u64;
                     if total > 0 {
