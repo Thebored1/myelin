@@ -47,6 +47,18 @@
 
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
+	// The editor selection the user has "armed" for the AI. Persists across sends
+	// (cleared only by the ✕ pill or by deselecting inside the editor). Captured in
+	// source-markdown coordinates with surrounding context so the backend can pin
+	// the exact span even as the note drifts.
+	let armedSelection = $state<{
+		text: string;
+		before: string;
+		after: string;
+		chars: number;
+		words: number;
+	} | null>(null);
+	let selDebounce: ReturnType<typeof setTimeout> | undefined;
 
 	// Prompt-box context-usage ring: estimate fill from the open note + chat
 	// length against the working context window (~32K tokens ≈ 130K chars).
@@ -228,6 +240,100 @@
 		}
 
 		return offset;
+	}
+
+	// Text offset of a (container, offset) point within the editor's rendered text.
+	function textOffsetOf(editorEl: HTMLElement, container: Node, offset: number): number | null {
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		let acc = 0;
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			if (node === container) return acc + offset;
+			acc += node.textContent?.length ?? 0;
+		}
+		return null;
+	}
+
+	// Occurrence of `needle` in `hay` whose start is closest to `hint` (disambiguates repeats).
+	function nearestIndexOf(hay: string, needle: string, hint: number): number {
+		let best = -1;
+		let bestDist = Infinity;
+		let from = 0;
+		let i: number;
+		while ((i = hay.indexOf(needle, from)) >= 0) {
+			const d = Math.abs(i - hint);
+			if (d < bestDist) {
+				bestDist = d;
+				best = i;
+			}
+			from = i + 1;
+		}
+		return best;
+	}
+
+	// Map the current editor selection to a source-markdown span + surrounding
+	// context. In Vditor IR mode the rendered text ≈ the source for prose, so the
+	// tree-walked offsets usually map straight in; we validate and fall back to a
+	// proximity text-search when formatting markers skew them.
+	function computeSourceSelection(): { text: string; before: string; after: string } | null {
+		if (!vditorInstance || !vditorContainer) return null;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return null;
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+		const range = sel.getRangeAt(0);
+		if (!editorEl.contains(range.commonAncestorContainer)) return null;
+		const selText = sel.toString();
+		if (!selText.trim()) return null;
+
+		const source = vditorInstance.getValue();
+		const startOff = textOffsetOf(editorEl, range.startContainer, range.startOffset);
+		const endOff = textOffsetOf(editorEl, range.endContainer, range.endOffset);
+
+		let s = -1;
+		let e = -1;
+		if (startOff != null && endOff != null && source.slice(startOff, endOff) === selText) {
+			s = startOff;
+			e = endOff;
+		} else {
+			s = nearestIndexOf(source, selText, startOff ?? 0);
+			if (s >= 0) e = s + selText.length;
+		}
+		if (s < 0) return null;
+
+		const N = 40;
+		return {
+			text: source.slice(s, e),
+			before: source.slice(Math.max(0, s - N), s),
+			after: source.slice(e, Math.min(source.length, e + N))
+		};
+	}
+
+	function captureEditorSelection() {
+		if (!vditorContainer) return;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return;
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0) return;
+		const range = sel.getRangeAt(0);
+		// Selection moved OUT of the editor (e.g. into the chat box) — keep the
+		// armed selection so the user can ask about it.
+		if (!editorEl.contains(range.commonAncestorContainer)) return;
+		// Deliberate click/deselect inside the editor — clear it.
+		if (sel.isCollapsed) {
+			armedSelection = null;
+			return;
+		}
+		const computed = computeSourceSelection();
+		if (computed) {
+			const words = computed.text.trim().split(/\s+/).filter(Boolean).length;
+			armedSelection = { ...computed, chars: computed.text.length, words };
+		}
+	}
+
+	function onSelectionChange() {
+		clearTimeout(selDebounce);
+		selDebounce = setTimeout(captureEditorSelection, 120);
 	}
 
 	function restoreSelectionTextOffset(editorEl: HTMLElement, targetOffset: number) {
@@ -1265,7 +1371,16 @@
 		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true, startTime }];
 		setTimeout(() => scrollChatToBottom(true), 50);
 		try {
-			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId });
+			await invoke('ask_ai_stream', {
+				noteId: note.id,
+				question: userText,
+				requestId,
+				// Armed selection persists across sends (cleared only by the ✕ pill),
+				// so several edits can target the same span.
+				selection: armedSelection
+					? { text: armedSelection.text, before: armedSelection.before, after: armedSelection.after }
+					: null
+			});
 		} catch (e) {
 			console.error('AI Error:', e);
 			failStreamingChatMessage(extractChatErrorMessage(e));
@@ -1763,6 +1878,9 @@
 				link.classList.add('force-expand');
 			}
 		});
+
+		// Arm/refresh the editor selection for the AI (debounced).
+		onSelectionChange();
 	}
 
 	onMount(() => {
@@ -2423,7 +2541,19 @@
 										>
 											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
 										</button>
-										<div class="prompt-spacer"></div>
+										{#if armedSelection}
+												<button
+													type="button"
+													class="selection-pill"
+													onclick={() => (armedSelection = null)}
+													title={`The AI will edit only your selection — ${armedSelection.chars} chars, ${armedSelection.words} word${armedSelection.words === 1 ? '' : 's'}. Click to clear.`}
+												>
+													<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/></svg>
+													<span>{armedSelection.chars} sel</span>
+													<span class="sel-x">✕</span>
+												</button>
+											{/if}
+											<div class="prompt-spacer"></div>
 										<div class="context-ring" title={`~${contextPercent}% of the context window used`}>
 											<svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
 												<circle class="ring-track" cx="18" cy="18" r="15.5"></circle>
@@ -4310,6 +4440,33 @@
 		line-height: 1.4;
 		overflow-y: auto;
 	}
+	.selection-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		height: 24px;
+		padding: 0 8px;
+		border-radius: 12px;
+		border: 1px solid var(--accent, #6366f1);
+		background: color-mix(in srgb, var(--accent, #6366f1) 16%, transparent);
+		color: var(--accent, #6366f1);
+		font-size: 0.72rem;
+		font-weight: 600;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: background 0.12s ease;
+	}
+	.selection-pill:hover {
+		background: color-mix(in srgb, var(--accent, #6366f1) 26%, transparent);
+	}
+	.selection-pill .sel-x {
+		opacity: 0.6;
+		font-size: 0.7rem;
+	}
+	.selection-pill:hover .sel-x {
+		opacity: 1;
+	}
+
 	.prompt-toolbar {
 		display: flex;
 		align-items: center;

@@ -88,6 +88,9 @@ struct InnerState {
     llama_client: Client,
     chat_tools: Mutex<Vec<ChatTool>>,
     latest_chat_question: Mutex<Option<String>>,
+    /// The editor text selection the user armed for the current chat turn, if any.
+    /// Read by the write_note tool to scope an edit to just that span.
+    current_selection: Mutex<Option<crate::agent::SelectionArg>>,
     current_note_id: Mutex<Option<String>>,
     require_tool_approval: std::sync::atomic::AtomicBool,
     /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
@@ -187,6 +190,7 @@ impl AppState {
                     .context("failed to create llama HTTP client")?,
                 chat_tools: Mutex::new(Vec::new()),
                 latest_chat_question: Mutex::new(None),
+                current_selection: Mutex::new(None),
                 current_note_id: Mutex::new(None),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
@@ -223,6 +227,14 @@ impl AppState {
     /// The user's current chat message (for intent checks during tool calls).
     pub fn latest_chat_question(&self) -> String {
         self.inner.latest_chat_question.lock().clone().unwrap_or_default()
+    }
+
+    pub fn set_current_selection(&self, selection: Option<crate::agent::SelectionArg>) {
+        *self.inner.current_selection.lock() = selection;
+    }
+
+    pub fn current_selection(&self) -> Option<crate::agent::SelectionArg> {
+        self.inner.current_selection.lock().clone()
     }
 
     pub fn set_current_note_id(&self, note_id: impl Into<String>) {
@@ -1079,9 +1091,13 @@ impl AppState {
         note_id: String,
         question: String,
         request_id: String,
+        selection: Option<crate::agent::SelectionArg>,
     ) -> Result<()> {
         self.reset_chat_tools();
         self.set_latest_chat_question(question.clone());
+        // An armed selection is only meaningful if it carries text; ignore empties.
+        let selection = selection.filter(|s| !s.text.trim().is_empty());
+        self.set_current_selection(selection.clone());
         self.set_current_note_id(note_id.clone());
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
@@ -1120,6 +1136,16 @@ impl AppState {
                 context.push_str(&format!(
                     "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---",
                     note_body_excerpt
+                ));
+            }
+            // If the user armed an editor selection, show the model EXACTLY what is
+            // selected and scope the request to it. The deterministic write path
+            // (selection_scoped_plan) enforces "selection only" regardless, but the
+            // model still needs to see the selected text to rewrite it well.
+            if let Some(sel) = &selection {
+                context.push_str(&format!(
+                    "\n\nThe user has SELECTED the following part of the note, and their request applies to the SELECTION ONLY — rewrite/edit just this text and leave the rest of the note unchanged:\n\"\"\"\n{}\n\"\"\"",
+                    sel.text
                 ));
             }
             // The note context (current note) goes in THIS turn's user message;

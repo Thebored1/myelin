@@ -203,6 +203,75 @@ fn find_tolerant(body: &str, find: &str) -> Option<(usize, usize)> {
     re.find(body).map(|m| (m.start(), m.end()))
 }
 
+/// An editor text selection the user armed, sent alongside the chat request.
+/// `text` is the selected source markdown; `before`/`after` are short surrounding
+/// context snippets used to pin the exact occurrence so repeats — and a body that
+/// drifts between turns — don't move the target. Sent as text+context rather than
+/// raw offsets to avoid the JS-UTF16 vs Rust-UTF8 index mismatch.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionArg {
+    pub text: String,
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub after: String,
+}
+
+/// Locate the byte range in `body` an armed selection refers to. Picks the
+/// occurrence of `text` whose surrounding context best matches `before`/`after`,
+/// so it survives repeats and edits elsewhere. None if the text no longer occurs
+/// (the user changed that span — caller falls back to normal planning).
+pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)> {
+    if sel.text.is_empty() {
+        return None;
+    }
+    let mut best: Option<(u8, usize, usize)> = None; // (context score, start, end)
+    let mut from = 0;
+    while let Some(rel) = body[from..].find(&sel.text) {
+        let start = from + rel;
+        let end = start + sel.text.len();
+        let before_ok = sel.before.is_empty() || body[..start].ends_with(&sel.before);
+        let after_ok = sel.after.is_empty() || body[end..].starts_with(&sel.after);
+        let score = before_ok as u8 + after_ok as u8;
+        if best.map(|(s, _, _)| score > s).unwrap_or(true) {
+            best = Some((score, start, end));
+            if score == 2 {
+                break; // both anchors match — definitely the right occurrence
+            }
+        }
+        from = start + 1;
+    }
+    best.map(|(_, s, e)| (s, e))
+}
+
+/// If the user armed a selection, build a plan that replaces ONLY that span with
+/// the model's `content`, keeping the rest of the note byte-identical. Returns
+/// None (caller falls through to normal planning) when there's no usable span,
+/// the content is empty (deletion is handled separately), or the model
+/// regenerated the surrounding note (its content already contains the text just
+/// before/after the selection → it did a full rewrite, which we honor instead).
+pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> Option<WritePlan> {
+    let content = strip_prompt_markers(content);
+    if content.trim().is_empty() {
+        return None;
+    }
+    let (start, end) = locate_selection(body, sel)?;
+    let regenerated_whole = (!sel.after.trim().is_empty() && content.contains(sel.after.trim()))
+        || (!sel.before.trim().is_empty() && content.contains(sel.before.trim()));
+    if regenerated_whole {
+        return None;
+    }
+    let mut new_body = String::with_capacity(body.len() + content.len());
+    new_body.push_str(&body[..start]);
+    new_body.push_str(&content);
+    new_body.push_str(&body[end..]);
+    Some(WritePlan {
+        new_body,
+        op: WriteOp::EditSnippet,
+    })
+}
+
 /// How the editor should apply a write (drives the streaming UI and chip label).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum WriteOp {
@@ -1064,30 +1133,43 @@ impl Tool for WriteNoteTool {
             }
         };
 
-        // Surgical deletion (always on — a model-agnostic correctness win, not a
-        // crutch: a full-rewrite-to-delete risks drift/truncation at ANY model
-        // size). Models reliably identify WHAT to remove (the `find` text) but
-        // unreliably fill `content` with the whole regenerated note — which
-        // plan_write then turns into a full-body replace (the "it rewrote my
-        // entire note" complaint). On a pure-removal request where the model's
-        // `find` matches the note, trust `find` and delete it from the REAL body:
-        // an empty `content` makes plan_write do a faithful, surgical snippet
-        // delete — nothing else changes.
-        let (mode, content) = if !find.trim().is_empty()
-            && find_tolerant(&existing.body, &find).is_some()
-            && wants_partial_removal(&self.state.latest_chat_question())
-        {
-            ("edit".to_string(), String::new())
-        } else {
-            (mode, content)
-        };
+        // Selection-scoped edit takes precedence: if the user armed an editor
+        // selection, the model's `content` rewrites JUST that span. Splice it into
+        // the located range and keep the rest of the note byte-identical (unless
+        // the model regenerated the surrounding note — then it's a full rewrite,
+        // handled by normal planning below).
+        let scoped = self
+            .state
+            .current_selection()
+            .and_then(|sel| selection_scoped_plan(&existing.body, &content, &sel));
 
-        // Decide the new body (and how the UI should apply it) using the pure,
-        // unit-tested planner. A refusal comes back as Err and is relayed to the
-        // model verbatim so it can correct itself.
-        let plan = match plan_write(&existing.body, &content, &mode, &find) {
-            Ok(p) => p,
-            Err(msg) => return Ok(msg),
+        let (plan, content_empty) = if let Some(p) = scoped {
+            // A selection rewrite always supplies replacement content.
+            (p, false)
+        } else {
+            // Surgical deletion (always on — a model-agnostic correctness win, not
+            // a crutch: a full-rewrite-to-delete risks drift/truncation at ANY
+            // model size). Models reliably identify WHAT to remove (the `find`
+            // text) but unreliably fill `content` with the whole regenerated note —
+            // which plan_write then turns into a full-body replace (the "it rewrote
+            // my entire note" complaint). On a pure-removal request where the
+            // model's `find` matches the note, trust `find` and delete it from the
+            // REAL body: an empty `content` makes plan_write do a faithful, surgical
+            // snippet delete — nothing else changes.
+            let surgical = !find.trim().is_empty()
+                && find_tolerant(&existing.body, &find).is_some()
+                && wants_partial_removal(&self.state.latest_chat_question());
+            let eff_mode = if surgical { "edit" } else { mode.as_str() };
+            let eff_content = if surgical { "" } else { content.as_str() };
+
+            // Decide the new body (and how the UI should apply it) using the pure,
+            // unit-tested planner. A refusal comes back as Err and is relayed to the
+            // model verbatim so it can correct itself.
+            let content_empty = eff_content.trim().is_empty();
+            match plan_write(&existing.body, eff_content, eff_mode, &find) {
+                Ok(p) => (p, content_empty),
+                Err(msg) => return Ok(msg),
+            }
         };
 
         // Destructive-write guard. A model asked to "remove all headings"
@@ -1110,7 +1192,6 @@ impl Tool for WriteNoteTool {
             );
         }
 
-        let content_empty = content.trim().is_empty();
         let (emit_content, emit_mode, display_name) = match plan.op {
             WriteOp::Append => (content.clone(), "append", "Append Note"),
             WriteOp::EditSnippet => (
@@ -1775,6 +1856,47 @@ mod tests {
         let plan = plan_write(body, "", "edit", "**My Take:**\nRemove me.").unwrap();
         assert_eq!(plan.op, WriteOp::EditSnippet);
         assert_eq!(plan.new_body, "# Title\n\nKeep this paragraph.\n\n");
+    }
+
+    #[test]
+    fn locate_selection_disambiguates_repeats_via_context() {
+        let body = "Cats are nice.\n\nDogs are loyal.\n\nCats are nice.";
+        // The phrase occurs twice; the `before` anchor pins the SECOND one.
+        let sel = SelectionArg {
+            text: "Cats are nice.".into(),
+            before: "loyal.\n\n".into(),
+            after: "".into(),
+        };
+        let (s, e) = locate_selection(body, &sel).unwrap();
+        assert_eq!(s, body.rfind("Cats are nice.").unwrap());
+        assert_eq!(&body[s..e], "Cats are nice.");
+    }
+
+    #[test]
+    fn selection_scoped_plan_replaces_only_the_selected_span() {
+        let body = "Intro line.\n\nOld paragraph here.\n\nClosing line.";
+        let sel = SelectionArg {
+            text: "Old paragraph here.".into(),
+            before: "Intro line.\n\n".into(),
+            after: "\n\nClosing line.".into(),
+        };
+        let plan = selection_scoped_plan(body, "New paragraph.", &sel).unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
+        assert_eq!(plan.new_body, "Intro line.\n\nNew paragraph.\n\nClosing line.");
+    }
+
+    #[test]
+    fn selection_scoped_plan_defers_when_model_regenerated_whole_note() {
+        let body = "Intro line.\n\nOld paragraph here.\n\nClosing line.";
+        let sel = SelectionArg {
+            text: "Old paragraph here.".into(),
+            before: "Intro line.\n\n".into(),
+            after: "\n\nClosing line.".into(),
+        };
+        // Model returned the WHOLE note (contains the after-anchor text) → fall
+        // through to normal planning (None) instead of splicing the whole note in.
+        let whole = "Intro line.\n\nNew paragraph.\n\nClosing line.";
+        assert!(selection_scoped_plan(body, whole, &sel).is_none());
     }
 
     // Some models echo the prompt's note-framing markers into a direct tool call;
