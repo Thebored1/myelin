@@ -11,9 +11,10 @@
 //! gating, and `note_written` save logic stay in one place.
 
 use crate::agent::{
-    FetchWebPageArgs, FetchWebPageTool, FindInNoteArgs, FindInNoteTool, FormatNoteArgs,
-    FormatNoteTool, ReadNoteArgs, ReadNoteTool, SearchDocumentsArgs, SearchDocumentsTool,
-    SearchNotesArgs, SearchNotesTool, WebSearchArgs, WebSearchTool, WriteNoteArgs, WriteNoteTool,
+    EditNotebookArgs, EditNotebookTool, FetchWebPageArgs, FetchWebPageTool, FindInNoteArgs,
+    FindInNoteTool, FormatNoteArgs, FormatNoteTool, ReadNoteArgs, ReadNoteTool, SearchDocumentsArgs,
+    SearchDocumentsTool, SearchNotesArgs, SearchNotesTool, WebSearchArgs, WebSearchTool,
+    WriteNoteArgs, WriteNoteTool,
 };
 use crate::llama_server::ResolvedLlamaConfig;
 use crate::state::AppState;
@@ -165,7 +166,10 @@ pub async fn run_chat(
                                 // A note edit is incoming — stop echoing the model's
                                 // prose for the rest of this exchange (it duplicates
                                 // the note). See `suppress_prose`.
-                                if name == "write_note" || name == "format_note" {
+                                if name == "write_note"
+                                    || name == "format_note"
+                                    || name == "edit_notebook"
+                                {
                                     suppress_prose = true;
                                 }
                             }
@@ -262,7 +266,10 @@ pub async fn run_chat(
             // in both cases the visible bubble would otherwise be empty.
             if assistant_text.trim().is_empty() || suppress_prose {
                 let msg = if suppress_prose
-                    || matches!(last_tool.as_deref(), Some("write_note") | Some("format_note"))
+                    || matches!(
+                        last_tool.as_deref(),
+                        Some("write_note") | Some("format_note") | Some("edit_notebook")
+                    )
                 {
                     "Done — I've updated your note."
                 } else if last_tool.is_some() {
@@ -389,6 +396,13 @@ async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
                 .await
                 .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid format_note arguments: {e}"),
+        },
+        "edit_notebook" => match serde_json::from_value::<EditNotebookArgs>(v) {
+            Ok(a) => EditNotebookTool { state: state.clone() }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
+            Err(e) => format!("Invalid edit_notebook arguments: {e}"),
         },
         other => format!("Unknown tool: {other}"),
     }

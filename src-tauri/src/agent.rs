@@ -156,6 +156,11 @@ pub fn tool_specs() -> Vec<Value> {
                 "required": ["query"]
             }),
         ),
+        spec(
+            "edit_notebook",
+            "Edit the OPEN Jupyter notebook (.ipynb) one cell at a time. operation \"edit\" replaces cell `index`'s source with `content`; \"insert\" adds a new `cell_type` cell BEFORE `index`; \"delete\" removes cell `index`. Cells are 0-indexed as shown in the notebook listing. Use this for notebooks INSTEAD of write_note.",
+            edit_notebook_params(),
+        ),
     ]
 }
 
@@ -1343,6 +1348,107 @@ impl Tool for FormatNoteTool {
             serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );
         Ok(format!("Note successfully updated with ID: {}", existing.id))
+    }
+}
+
+fn edit_notebook_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": { "type": "string", "enum": ["edit", "insert", "delete"], "description": "edit: replace cell `index`'s source with `content`. insert: add a new cell BEFORE `index`. delete: remove cell `index`." },
+            "index": { "type": "integer", "description": "0-based cell index, as shown in the notebook listing." },
+            "cell_type": { "type": "string", "enum": ["code", "markdown"], "description": "For insert only: the kind of cell to add (code = Python, markdown = Markdown)." },
+            "content": { "type": "string", "description": "The cell's source text (for edit/insert). Markdown cells use Markdown; code cells use Python." }
+        },
+        "required": ["operation", "index"]
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EditNotebookArgs {
+    pub operation: String,
+    #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
+    pub cell_type: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct EditNotebookTool {
+    pub state: AppState,
+}
+
+impl Tool for EditNotebookTool {
+    const NAME: &'static str = "edit_notebook";
+
+    type Error = ToolError;
+    type Args = EditNotebookArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "edit_notebook".to_string(),
+            description:
+                "Edit the open Jupyter notebook (.ipynb) by cell: edit a cell's source, insert a new cell, or delete a cell. Use this for notebooks instead of write_note."
+                    .to_string(),
+            parameters: edit_notebook_params(),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => return Ok("No notebook is currently open to edit.".to_string()),
+        };
+        let op = crate::notebook::NotebookOp {
+            operation: args.operation.trim(),
+            index: args.index,
+            cell_type: args.cell_type.as_deref().unwrap_or("code"),
+            content: args.content.as_deref().unwrap_or(""),
+        };
+        let new_body = match crate::notebook::apply(&existing.body, &op) {
+            Ok(b) => b,
+            Err(msg) => return Ok(msg),
+        };
+        let display_name = match op.operation {
+            "insert" => "Add Cell",
+            "delete" => "Delete Cell",
+            _ => "Edit Cell",
+        };
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &new_body).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Cell {} · {}", args.index, existing.title), "mutatesNote": true }),
+        );
+        self.state
+            .save_note(
+                existing.id.clone(),
+                existing.title,
+                existing.tags,
+                new_body.clone(),
+                existing.source_pdf,
+                Some(existing.annotations),
+            )
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+        let _ = self.state.handle.emit(
+            "ai://note_written",
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
+        );
+        Ok(format!(
+            "Notebook updated (cell {} {}).",
+            args.index, op.operation
+        ))
     }
 }
 

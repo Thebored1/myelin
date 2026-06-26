@@ -5,6 +5,7 @@
     import { open } from '@tauri-apps/plugin-dialog';
     import { goto } from '$app/navigation';
     import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
+    import { theme, toggleTheme } from '$lib/theme';
 
     type BackendPref = 'auto' | 'gpu' | 'vulkan' | 'cpu';
 
@@ -674,6 +675,19 @@
                     </span>
                 </span>
             </label>
+        </section>
+
+        <section class="settings-section">
+            <h2>Appearance</h2>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">Theme</h3>
+                    <p class="description" style="margin-top: 4px;">Switch between the dark and light interface. Your choice is remembered across sessions.</p>
+                </div>
+                <button class="browse-btn" onclick={toggleTheme}>
+                    {$theme === 'light' ? 'Light' : 'Dark'}
+                </button>
+            </div>
         </section>
 
         <section class="settings-section">

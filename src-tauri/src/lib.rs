@@ -4,6 +4,7 @@ mod gguf;
 mod llama_server;
 mod model_profiles;
 mod models;
+mod notebook;
 mod rag;
 mod state;
 mod stream_chat;

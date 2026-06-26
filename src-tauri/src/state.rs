@@ -1149,7 +1149,16 @@ impl AppState {
             // could neither see nor feel allowed to modify existing content, so it
             // could only write fresh, never edit/format/shorten/delete.
             let mut context = format!("The note currently open is titled \"{}\".", note.title);
-            if note_body_excerpt.trim().is_empty() {
+            // For a notebook, present readable CELLS (not the raw JSON body) so the
+            // model edits via edit_notebook instead of trying to rewrite JSON.
+            let notebook_cells = if doc_type == "ipynb" {
+                crate::notebook::present(&note.body)
+            } else {
+                None
+            };
+            if let Some(cells) = &notebook_cells {
+                context.push_str(&format!("\n\n{cells}"));
+            } else if note_body_excerpt.trim().is_empty() {
                 context.push_str(" It is currently empty.");
             } else {
                 context.push_str(&format!(
@@ -1198,7 +1207,7 @@ impl AppState {
             // can't do tool calls (profile-known or probed once + cached), so it
             // works as a chat-only model instead of erroring every turn.
             let model_id = config.model_path.to_string_lossy().to_string();
-            let tools = if crate::tool_capability::supports_tools(
+            let mut tools = if crate::tool_capability::supports_tools(
                 &self.inner.llama_client,
                 &config.base_url(),
                 &self.inner.app_data_dir,
@@ -1218,6 +1227,32 @@ impl AppState {
             } else {
                 Vec::new()
             };
+
+            // A notebook is edited cell-by-cell via edit_notebook, never with the
+            // text tools (write_note/format_note/find_in_note would mangle the JSON).
+            // Swap them out when an edit was warranted; read tools stay.
+            if doc_type == "ipynb" && !tools.is_empty() {
+                let wanted_edit = tools.iter().any(|t| {
+                    matches!(
+                        t["function"]["name"].as_str(),
+                        Some("write_note") | Some("format_note")
+                    )
+                });
+                tools.retain(|t| {
+                    !matches!(
+                        t["function"]["name"].as_str(),
+                        Some("write_note") | Some("format_note") | Some("find_in_note")
+                    )
+                });
+                if wanted_edit {
+                    if let Some(nb) = crate::agent::tool_specs()
+                        .into_iter()
+                        .find(|t| t["function"]["name"].as_str() == Some("edit_notebook"))
+                    {
+                        tools.push(nb);
+                    }
+                }
+            }
 
             // Stream directly against llama-server (not through rig) so the note
             // content can be surfaced token-by-token as it is generated. See

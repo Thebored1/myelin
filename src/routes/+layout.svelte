@@ -3,6 +3,7 @@
 	import { onMount } from 'svelte';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 	import { sidebarOpen, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
+	import '$lib/theme';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 
@@ -248,6 +249,83 @@
 		--blur-sm: 8px;
 		--blur-md: 12px;
 		--blur-xl: 24px;
+
+		/* ── Theme-aware semantic tokens ──
+		   These have a dark default here and are overridden under
+		   [data-theme='light'] below. Components should use these instead of
+		   hardcoding rgba(255,255,255,…) overlays or opaque dark hexes, so that
+		   both themes stay consistent. */
+		--hover-overlay: rgba(255, 255, 255, 0.04); /* subtle row/button hover */
+		--hover-overlay-strong: rgba(255, 255, 255, 0.08); /* icon-button hover */
+		--overlay-faint: rgba(255, 255, 255, 0.02); /* faint chip/badge fill */
+		--bg-elevated: #262626; /* raised card (e.g. note tiles) */
+		--bg-elevated-hover: #333333;
+		--bg-input: #1e1e1e; /* search / input surface that differs from panel */
+		--bg-modal: #151515; /* modal sheet surface */
+		--scrim: rgba(0, 0, 0, 0.6); /* modal backdrop */
+		--scrim-soft: rgba(0, 0, 0, 0.5);
+		--shadow-color: rgba(0, 0, 0, 0.4);
+		--shadow-color-strong: rgba(0, 0, 0, 0.8);
+		--accent-tint: rgba(238, 96, 24, 0.12); /* selected/hover accent wash */
+		--danger: #e05555;
+		--danger-tint: rgba(224, 85, 85, 0.1);
+		--success: #4caf50;
+		--on-accent: #ffffff; /* text/icons sitting on an accent fill */
+		/* Status tints — translucent, so they read on either theme. */
+		--info-border: rgba(100, 181, 246, 0.3);
+		--info-fill: rgba(100, 181, 246, 0.06);
+		--success-border: rgba(129, 199, 132, 0.3);
+		--success-fill: rgba(129, 199, 132, 0.06);
+	}
+
+	/* ── Light theme ──
+	   Warm off-white surfaces with the same orange accent, matching the
+	   reference. The neutral scale is inverted (100 was lightest in dark; here
+	   it's darkest) so existing var(--neutral-*) usages keep their semantic
+	   meaning: low numbers = prominent text, high numbers = faint borders. */
+	:global(:root[data-theme='light']) {
+		--surface-dark-primary: #ffffff;
+		--surface-dark-secondary: #f4f2ef;
+		--surface-light-primary: #1f1d1c;
+		--surface-light-secondary: #2e2c2b;
+
+		--neutral-100: #1f1d1c;
+		--neutral-200: #2e2c2b;
+		--neutral-300: #3d3a39;
+		--neutral-400: #4d4947;
+		--neutral-500: #5c5855;
+		--neutral-600: #8a8380;
+		--neutral-700: #a49d9a;
+		--neutral-800: #ccc9c7;
+		--neutral-900: #ddd9d5;
+		--neutral-1000: #e8e4e0;
+
+		--text-primary: #1f1d1c;
+		--text-secondary: #6e6a67;
+		--text-inverse: #ffffff;
+		--text-hero: #1a1714;
+
+		--border-default: #e2ded9;
+		--border-subtle: #ece9e5;
+
+		--bg-page: #f4f2ef;
+		--bg-panel: #ffffff;
+		--bg-code: #f0ede9;
+		/* --bg-selection / accent stay the same orange */
+
+		--hover-overlay: rgba(0, 0, 0, 0.04);
+		--hover-overlay-strong: rgba(0, 0, 0, 0.07);
+		--overlay-faint: rgba(0, 0, 0, 0.025);
+		--bg-elevated: #ffffff;
+		--bg-elevated-hover: #f3f0ec;
+		--bg-input: #ffffff;
+		--bg-modal: #ffffff;
+		--scrim: rgba(40, 32, 24, 0.25);
+		--scrim-soft: rgba(40, 32, 24, 0.2);
+		--shadow-color: rgba(60, 50, 40, 0.12);
+		--shadow-color-strong: rgba(60, 50, 40, 0.2);
+		--accent-tint: rgba(238, 96, 24, 0.1);
+		/* --danger / --success / --on-accent stay readable on both themes */
 	}
 
 	:global(html) {
@@ -268,6 +346,20 @@
 		-webkit-font-smoothing: antialiased;
 		height: 100vh;
 		overflow: hidden;
+	}
+
+	/* Light: warm off-white with a faint diagonal hatch (matches the reference). */
+	:global(:root[data-theme='light'] body) {
+		background:
+			repeating-linear-gradient(
+				135deg,
+				rgba(120, 100, 80, 0.022) 0,
+				rgba(120, 100, 80, 0.022) 1px,
+				transparent 1px,
+				transparent 7px
+			),
+			radial-gradient(circle at top right, rgba(239, 111, 46, 0.06), transparent 22rem),
+			linear-gradient(180deg, #f6f4f1 0%, #f1eee9 100%);
 	}
 
 	:global(input),
@@ -441,7 +533,7 @@
 	}
 
 	.control-btn:hover {
-		background: rgba(255, 255, 255, 0.08);
+		background: var(--hover-overlay-strong);
 		color: var(--text-primary);
 	}
 
