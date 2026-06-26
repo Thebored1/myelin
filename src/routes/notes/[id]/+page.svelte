@@ -4516,17 +4516,18 @@
 		border-top: 1px solid var(--border-subtle);
 	}
 	.prompt-box {
-		background: var(--bg-page);
+		background: var(--neutral-1000);
 		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm, 10px);
+		border-radius: var(--radius-3xl);
 		padding: var(--space-2);
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-1);
-		transition: border-color 0.15s ease;
+		gap: 2px;
+		transition: border-color 0.15s ease, box-shadow 0.15s ease;
 	}
 	.prompt-box:focus-within {
-		border-color: var(--accent-200);
+		border-color: color-mix(in srgb, var(--accent-200) 55%, var(--border-default));
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-200) 12%, transparent);
 	}
 	.chat-input-area textarea {
 		width: 100%;
@@ -4538,104 +4539,133 @@
 		outline: none;
 		resize: none;
 		font-family: inherit;
-		line-height: 1.4;
+		font-size: 0.875rem;
+		line-height: 1.45;
 		overflow-y: auto;
+	}
+	.chat-input-area textarea::placeholder {
+		color: var(--neutral-500);
 	}
 	/* The armed-selection highlight (CSS Custom Highlight API). Global because the
 	   ::highlight() pseudo applies to document-registered ranges, not scoped DOM. */
 	:global(::highlight(ai-armed)) {
-		background-color: color-mix(in srgb, var(--accent, #6366f1) 32%, transparent);
+		background-color: color-mix(in srgb, var(--accent-100) 24%, transparent);
 		border-radius: 2px;
-	}
-
-	.selection-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		height: 24px;
-		padding: 0 8px;
-		border-radius: 12px;
-		border: 1px solid var(--accent, #6366f1);
-		background: color-mix(in srgb, var(--accent, #6366f1) 16%, transparent);
-		color: var(--accent, #6366f1);
-		font-size: 0.72rem;
-		font-weight: 600;
-		cursor: pointer;
-		white-space: nowrap;
-		transition: background 0.12s ease;
-	}
-	.selection-pill:hover {
-		background: color-mix(in srgb, var(--accent, #6366f1) 26%, transparent);
-	}
-	.selection-pill .sel-x {
-		opacity: 0.6;
-		font-size: 0.7rem;
-	}
-	.selection-pill:hover .sel-x {
-		opacity: 1;
 	}
 
 	.prompt-toolbar {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		/* Pull to the box edges so the divider spans full width, making the
-		   controls a visually distinct section below the input. */
-		margin: 0 calc(-1 * var(--space-2)) calc(-1 * var(--space-2));
-		padding: var(--space-2);
-		border-top: 1px solid var(--border-subtle);
+		gap: 5px;
+		padding: 2px;
 	}
 	.prompt-spacer {
 		flex: 1;
 	}
-	.mode-pill {
-		font-size: 0.72rem;
-		font-weight: 600;
-		line-height: 1;
-		padding: 4px 10px;
-		border-radius: 999px;
-		border: 1px solid var(--border-default);
-		background: transparent;
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: background 0.15s, color 0.15s, border-color 0.15s, opacity 0.15s;
-	}
-	.mode-pill.auto {
-		color: #1c1c1c;
-		background: #e0b341;
-		border-color: transparent;
-	}
-	.mode-pill:hover {
-		opacity: 0.88;
-	}
+
+	/* Shared control baseline: same height, calm by default, theme-consistent. */
+	.mode-pill,
 	.prompt-icon-btn,
-	.send-btn {
+	.send-btn,
+	.selection-pill {
+		height: 28px;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: 28px;
-		height: 28px;
-		border-radius: 7px;
 		border: none;
 		background: transparent;
 		color: var(--text-secondary);
 		cursor: pointer;
-		transition: background 0.15s, color 0.15s, opacity 0.15s;
+		border-radius: var(--radius-xl);
+		white-space: nowrap;
+		transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease,
+			box-shadow 0.14s ease, opacity 0.14s ease;
+	}
+
+	.mode-pill {
+		gap: 6px;
+		padding: 0 11px 0 9px;
+		font-size: 0.72rem;
+		font-weight: 600;
+		border-radius: 999px;
+		border: 1px solid var(--border-default);
+	}
+	.mode-pill::before {
+		content: '';
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--neutral-500);
+		transition: background 0.14s ease, box-shadow 0.14s ease;
+	}
+	.mode-pill.auto::before {
+		background: var(--accent-100);
+		box-shadow: 0 0 6px color-mix(in srgb, var(--accent-100) 75%, transparent);
+	}
+	.mode-pill:hover {
+		background: var(--neutral-900);
+		color: var(--text-primary);
+		border-color: var(--border-subtle);
+	}
+
+	.prompt-icon-btn {
+		width: 28px;
 	}
 	.prompt-icon-btn:hover {
-		background: var(--bg-hover, rgba(255, 255, 255, 0.07));
+		background: var(--neutral-900);
 		color: var(--text-primary);
 	}
+
+	.selection-pill {
+		gap: 6px;
+		padding: 0 5px 0 9px;
+		border-radius: 999px;
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--accent-100);
+		background: color-mix(in srgb, var(--accent-100) 9%, transparent);
+	}
+	.selection-pill:hover {
+		background: color-mix(in srgb, var(--accent-100) 15%, transparent);
+	}
+	.selection-pill svg {
+		opacity: 0.75;
+	}
+	.selection-pill .sel-x {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		opacity: 0.5;
+		font-size: 0.66rem;
+	}
+	.selection-pill:hover .sel-x {
+		opacity: 0.95;
+		background: color-mix(in srgb, var(--accent-100) 22%, transparent);
+	}
+
 	.send-btn {
-		color: var(--accent-200, #6ea8fe);
+		width: 28px;
+	}
+	.send-btn:not(:disabled) {
+		background: var(--accent-200);
+		color: #fff;
 	}
 	.send-btn:hover:not(:disabled) {
-		background: var(--bg-hover, rgba(255, 255, 255, 0.07));
+		background: var(--accent-100);
 	}
 	.send-btn:disabled {
-		color: var(--text-muted);
-		opacity: 0.45;
+		background: transparent;
+		color: var(--neutral-600);
 		cursor: default;
+	}
+
+	.context-ring {
+		display: inline-flex;
+		align-items: center;
+		padding: 0 2px;
 	}
 	.context-ring svg {
 		display: block;
