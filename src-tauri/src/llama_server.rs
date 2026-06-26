@@ -104,11 +104,16 @@ pub struct WorkspaceLlamaConfig {
     /// Optional path to the embedding model GGUF (e.g. nomic-embed-text). When
     /// set, the app runs a second llama-server in embedding mode for RAG.
     pub embed_model_path: Option<String>,
-    /// Deterministic, rule-based assists (regex format_note, find_in_note word
-    /// search, the destructive-write guard). Default ON — they make a small model
-    /// reliable. Power users on a stronger model can turn them OFF to let the
-    /// model handle everything itself. None → on.
+    /// Deterministic correctness tools: regex format_note, find_in_note word
+    /// search, and the destructive-write guard. Default ON — they make tool use
+    /// more reliable. None → on.
     pub deterministic_tools: Option<bool>,
+    /// Per-message tool gating: offer the model only the tools its message
+    /// warrants. Default ON (best for smaller models); turn OFF on a larger,
+    /// more capable model to offer the full toolset every turn. None → falls
+    /// back to `deterministic_tools` (so configs from before the split keep
+    /// their original bundled behavior), else on.
+    pub tool_gating: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -158,10 +163,14 @@ pub struct ResolvedLlamaConfig {
     /// unknown → the capability probe decides (and caches) at first use.
     #[serde(default)]
     pub supports_tools: Option<bool>,
-    /// Deterministic rule-based assists (format_note / find_in_note / write
-    /// guard). Default true; power users on a stronger model can disable them.
+    /// Deterministic correctness tools (format_note / find_in_note / write
+    /// guard). Default true; on a more capable model they can be disabled.
     #[serde(default = "default_true")]
     pub deterministic_tools: bool,
+    /// Per-message tool gating (offer only the tools a message warrants).
+    /// Default true; turn off on a larger model to offer the full toolset.
+    #[serde(default = "default_true")]
+    pub tool_gating: bool,
     /// Ordered list of binaries to try (best first). Not serialized to the UI.
     #[serde(skip)]
     pub candidates: Vec<BackendCandidate>,
@@ -741,6 +750,13 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         },
         supports_tools: profile.supports_tools,
         deterministic_tools: app_config.deterministic_tools.unwrap_or(true),
+        // Migration: a config from before the gating/deterministic split has no
+        // tool_gating field — fall back to the old deterministic_tools value so
+        // existing behavior is preserved; otherwise default on.
+        tool_gating: app_config
+            .tool_gating
+            .or(app_config.deterministic_tools)
+            .unwrap_or(true),
         candidates,
     })
 }
@@ -1040,7 +1056,18 @@ fn launch_plans(
                 // Discrete: VRAM holds weights; the KV cache lives in separate RAM.
                 mem.bytes
             };
-            let ngl = fit_ngl(weight_budget, model_bytes, layers);
+            // A model whose weights fit the GPU's addressable budget is FULLY
+            // offloaded: a partial GPU/CPU split is both unnecessary and crashes
+            // llama.cpp's scheduler (GGML_ASSERT n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)
+            // on some backends (notably Vulkan/RADV iGPUs). The KV cache stays in
+            // RAM via --no-kv-offload, so it does NOT compete for this budget —
+            // only the weights need to fit. Fall back to a computed split only
+            // when the model genuinely can't fit the GPU.
+            let ngl = if model_bytes <= (mem.bytes as f64 * 0.9) as u64 {
+                layers as i32
+            } else {
+                fit_ngl(weight_budget, model_bytes, layers)
+            };
             log::info!(
                 "offload plan: gpu {} MiB ({}), model {} MiB/{} layers, ctx {} (kv {} MiB) -> ngl={}",
                 mem.bytes / 1_048_576,
@@ -1543,6 +1570,19 @@ pub fn set_embed_model_path(app_data_dir: &Path, path: Option<String>) -> Result
 pub fn set_deterministic_tools(app_data_dir: &Path, enabled: bool) -> Result<()> {
     let mut config = load_config(app_data_dir).unwrap_or_default();
     config.deterministic_tools = Some(enabled);
+
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string_pretty(&config)?;
+    fs::write(&path, raw)?;
+    Ok(())
+}
+
+pub fn set_tool_gating(app_data_dir: &Path, enabled: bool) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.tool_gating = Some(enabled);
 
     let path = config_path(app_data_dir);
     if let Some(parent) = path.parent() {

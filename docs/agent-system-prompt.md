@@ -1,10 +1,11 @@
 # Myelin note assistant — system prompt & tool-calling reference
 
-How the local model is driven for the in-app chat. Tuned for **Granite-4.0-h-1b**
-(reliable agentic tool-calling), the implementation is deliberately small: a
-minimal preamble, **per-message tool gating**, and a plain streaming tool loop.
-The earlier LFM-1.2B-era machinery (harvest backstop, forced-write, meta/clear
-overrides) was deleted — Granite calls tools reliably, so none of it is needed.
+How the local model is driven for the in-app chat. The app is **model-agnostic**
+— it runs any capable local GGUF model — and the implementation is deliberately
+small: a minimal preamble, **per-message tool gating** (toggleable), and a plain
+streaming tool loop. Earlier, heavier machinery (harvest backstop, forced-write,
+meta/clear overrides) was deleted once it proved unnecessary with a model that
+calls tools reliably.
 
 Source of truth:
 - Preamble + tools + gating: [`agent.rs`](../src-tauri/src/agent.rs)
@@ -67,17 +68,18 @@ Four tools (defined in `agent.rs`; the same OpenAI specs are mirrored in
 - **`append`** — add `content` to the end.
 - **`edit`** — replace the exact `find` snippet with `content` (empty deletes it).
 
-`plan_write` is tolerant of small-model slips: it infers intent from the fields
+`plan_write` is tolerant of model slips: it infers intent from the fields
 (an explicit `replace` ignores a stray `find`; a `find` with no mode is a
 snippet edit), does a whitespace-tolerant `find` match, and **strips prompt
-markers** the model may echo into content (e.g. Granite's `--- CURRENT NOTE ---`).
+markers** the model may echo into content (e.g. a model echoing the prompt's
+`--- CURRENT NOTE ---` framing).
 
 ---
 
 ## 3. Per-message tool gating (the key idea)
 
 Instead of sending every tool every turn and steering with the prompt, we hand
-the model **only the tools its message warrants** — a small model can't misfire
+the model **only the tools its message warrants** — the model can't misfire
 on a tool it was never given. (Pattern proven in the `ggufplay` experiment.)
 
 `agent::select_tools(message, has_open_note, edit_thread)`:
@@ -90,13 +92,32 @@ on a tool it was never given. (Pattern proven in the `ggufplay` experiment.)
   the page") → **`fetch_web_page`**.
 - a pure question with no action intent → **no tools** → the model answers in chat.
 
+### Two independent toggles (Settings → Assistant Tooling)
+
+Gating and the deterministic correctness tools are **separate** switches, so each
+can suit the model in use (`select_tools_cfg(message, has_open_note, edit_thread,
+gating, deterministic)`):
+
+- **Per-message tool gating** (`gating`) — the selection above. Off → the model
+  gets the full general toolset every turn and decides for itself (suited to
+  larger, more capable models).
+- **Deterministic format & find** (`deterministic`) — routes a clean structural
+  cleanup to the regex **`format_note`** tool (instead of an LLM rewrite) and a
+  word lookup to **`find_in_note`**, and enables the destructive-write guard.
+  These are *correctness* assists, not a gating crutch, so the format override
+  applies **whether or not gating is on** — formatting stays reliable even with
+  the full toolset offered.
+
+(Configs from before the split have no `tool_gating` field; it falls back to the
+old combined `deterministic_tools` value so existing behavior is preserved.)
+
 **Edit-thread context (the "New note 18" fix).** Per-message gating looks only at
 the latest message, so a verb-less follow-up correction ("no thats wrong", a
 typo'd "formate it") would lose `write_note` and the model could only chat a fake
 "done". `in_edit_thread(recent_user_messages)` is true when any of the last few
 user turns carried write intent; `ask_ai_stream` derives it from the note's chat
 history and passes `edit_thread`. When set, `write_note` stays available even
-without a fresh verb, so corrections keep editing the note. (Granite-4.0-h-1b's
+without a fresh verb, so corrections keep editing the note. (Some small models'
 unreliable `#`-heading syntax on terse corrections is a separate **model ceiling**,
 not a gating gap — a preamble nudge didn't move it, so the preamble stays minimal.)
 

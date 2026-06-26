@@ -186,7 +186,7 @@ async fn run_all(
     // ---- HAMMER: the screenshot bug. A follow-up "expand + format" on an
     // existing note must actually change the note, not just claim success in
     // chat. This is the multi-turn case (note already has content + prior chat
-    // history saying it was written) where a weak model tends to chat a fake
+    // history saying it was written) where a model can chat a fake
     // "updated, 498 words" with no tool call. Run it several times — flaky =
     // fail. ----
     {
@@ -338,7 +338,7 @@ async fn run_all(
     // per-message gating stripped the tool on "no, that's wrong" / a typo'd
     // "formate it", so the model could only chat a fake "done". Checks the
     // gating logic deterministically (cold vs in-thread), then confirms one
-    // end-to-end round drives a real write_note call. (Granite's weak `#`
+    // end-to-end round drives a real write_note call. (Some models' weak `#`
     // heading syntax is a separate, documented model ceiling — not this.) ----
     {
         let verbless = [

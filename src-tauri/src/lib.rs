@@ -33,6 +33,14 @@ async fn set_deterministic_tools(state: State<'_, AppState>, enabled: bool) -> R
 }
 
 #[tauri::command]
+async fn set_tool_gating(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state
+        .set_tool_gating(enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn resolve_tool_approval(state: State<'_, AppState>, id: String, approved: bool) {
     state.resolve_tool_approval(&id, approved);
 }
@@ -494,6 +502,7 @@ pub fn run() {
             compile_latex,
             set_require_tool_approval,
             set_deterministic_tools,
+            set_tool_gating,
             resolve_tool_approval
         ])
         .run(tauri::generate_context!())

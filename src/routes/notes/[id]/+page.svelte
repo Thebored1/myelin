@@ -2336,7 +2336,10 @@
 														{msg.content}
 													{/if}
 													{#if msg.isStreaming && msg.startTime}
-														<span class="chat-time-taken live">{((currentTime - msg.startTime) / 1000).toFixed(1)}s</span>
+														{#if !msg.content}
+									<span class="chat-working" aria-label="Working"><span></span><span></span><span></span></span>
+								{/if}
+								<span class="chat-time-taken live">{((currentTime - msg.startTime) / 1000).toFixed(1)}s</span>
 													{:else if msg.endTime && msg.startTime}
 														<span class="chat-time-taken">{((msg.endTime - msg.startTime) / 1000).toFixed(1)}s</span>
 													{/if}
@@ -4498,5 +4501,44 @@
 	.chat-time-taken.live {
 		color: var(--accent);
 		opacity: 0.9;
+	}
+
+	/* Animated "working" dots shown while a turn is running but has produced no
+	   text yet (model thinking, or a tool like web search/fetch executing) — so a
+	   slow turn reads as alive, not frozen. */
+	.chat-working {
+		display: inline-flex;
+		gap: 4px;
+		align-items: center;
+		margin-top: var(--space-2);
+		margin-right: var(--space-2);
+		vertical-align: middle;
+	}
+
+	.chat-working span {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: var(--accent);
+		animation: chat-working-pulse 1.2s ease-in-out infinite;
+	}
+
+	.chat-working span:nth-child(2) {
+		animation-delay: 0.2s;
+	}
+
+	.chat-working span:nth-child(3) {
+		animation-delay: 0.4s;
+	}
+
+	@keyframes chat-working-pulse {
+		0%, 80%, 100% {
+			opacity: 0.25;
+			transform: scale(0.8);
+		}
+		40% {
+			opacity: 1;
+			transform: scale(1);
+		}
 	}
 </style>

@@ -32,33 +32,34 @@ async fn check_tool_approval(state: &AppState, tool_name: &str, title: &str, con
     }
 }
 
-const WEB_FETCH_LIMIT: usize = 12_000;
+const WEB_FETCH_LIMIT: usize = 6_000;
 
 /// System preamble for the note assistant. Kept as a single source of truth so
 /// the startup cache warm-up replays the exact same prefix the live agent uses.
 /// Deliberately small: a role line plus the minimum tool guidance needed to keep
-/// a weak model from flooding the (memory-bounded) context with stray web/search
+/// the model from flooding the (memory-bounded) context with stray web/search
 /// calls or describing edits in chat instead of writing them. Tool schemas are
 /// still passed separately via `tool_specs` on every request.
 pub const MYELIN_PREAMBLE: &str = concat!(
     "You are the assistant inside Myelin, a local notes app, powered by an open model running locally on the user's own machine. If asked what or who you are, identify yourself as Myelin's built-in AI assistant — do not claim to be proprietary or commercial software. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n",
-    "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call write_note with the full result. Don't just describe the change in chat — make it with the tool.\n",
+    "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call the write_note tool with the full result in `content`. The ONLY way to change the note is that tool call: never describe the edit, print the new note text, or type \"write_note\" or \"content:\" in your chat reply.\n",
     "- Write real Markdown: a heading line starts with \"# \" (a hash then a space), \"## \" for a sub-heading; bullets start with \"- \". \"**bold**\" is NOT a heading.\n",
     "- When editing, reproduce every line that should stay and change only what was asked. Never return an empty or much-shorter note unless the user explicitly asked to clear or shorten it.\n",
+    "- When the user asks you to write what you found, researched, learned, or understood, put the ACTUAL information into the note as a finished, self-contained note — the real facts, perspectives, and details (use what you found in the conversation plus what you reliably know about the topic). NEVER write a question, an offer to do more (e.g. \"Would you like me to fetch the full text?\"), or a promise to act later (e.g. \"I will now fetch...\") as the note's content — the note holds finished information, not conversation. If you lack some detail, still write the best complete note you can from what you know rather than asking or deferring.\n",
     "- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.\n\n",
-    "Worked examples — copy this editing style exactly:\n\n",
+    "Worked examples show only the editing style — the resulting note text you must pass as write_note's `content` (always via the tool call, never printed in chat):\n\n",
     "Example 1\n",
     "NOTE:\n**Cars**\nThey have engines.\n",
     "USER: make the title a heading\n",
-    "write_note content:\n# Cars\nThey have engines.\n\n",
+    "(resulting note)\n# Cars\nThey have engines.\n\n",
     "Example 2\n",
     "NOTE:\n## Intro\nPersonal computers changed everything.\n## History\nIt began in the 1970s.\n",
     "USER: remove all headings\n",
-    "write_note content:\nIntro\nPersonal computers changed everything.\nHistory\nIt began in the 1970s.\n\n",
+    "(resulting note)\nIntro\nPersonal computers changed everything.\nHistory\nIt began in the 1970s.\n\n",
     "Example 3\n",
     "NOTE: (empty)\n",
     "USER: write a short note titled Sea\n",
-    "write_note content:\n# Sea\nThe sea is vast and restless."
+    "(resulting note)\n# Sea\nThe sea is vast and restless."
 );
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
@@ -218,7 +219,7 @@ pub struct WritePlan {
 
 /// Pure decision for `write_note`: given the note's current body and the tool
 /// args, produce the new full body — or an `Err` message to relay back to the
-/// model. Decided from intent, tolerant of the mislabelling small models do:
+/// model. Decided from intent, tolerant of the mislabelling models can do:
 ///   - explicit `mode == "append"` -> append `content`
 ///   - explicit `mode == "replace"` -> whole-body replace, IGNORING any stray
 ///     `find` (models often send mode:"replace" with the full note in `content`
@@ -233,9 +234,9 @@ pub fn plan_write(
     mode: &str,
     find: &str,
 ) -> Result<WritePlan, String> {
-    // Some models echo the prompt's note-framing markers into the tool content
-    // (seen with Granite). Strip them so they never land in the saved note. This
-    // runs before the intent logic so the absorb-check can still clean an edit.
+    // Some models echo the prompt's note-framing markers into the tool content.
+    // Strip them so they never land in the saved note. This runs before the
+    // intent logic so the absorb-check can still clean an edit.
     let content = strip_prompt_markers(content);
     let content = content.as_str();
     let m = mode.trim().to_lowercase();
@@ -708,7 +709,7 @@ pub fn detect_format_op(message: &str) -> Option<&'static str> {
     None
 }
 
-/// Apply a deterministic Markdown transform. Done in code precisely so a small
+/// Apply a deterministic Markdown transform. Done in code precisely so the
 /// model never has to (and never gets to wipe or echo the note).
 pub fn apply_format_op(body: &str, op: &str) -> String {
     let re = |p: &str| regex::Regex::new(p).unwrap();
@@ -769,8 +770,8 @@ pub fn apply_format_op(body: &str, op: &str) -> String {
 }
 
 /// Does the message ask whether a specific word/phrase is in the OPEN note (or
-/// to find/locate one there)? Routed to the deterministic find_in_note tool so a
-/// small model doesn't have to eyeball-scan the text and get it wrong.
+/// to find/locate one there)? Routed to the deterministic find_in_note tool so
+/// the model doesn't have to eyeball-scan the text and get it wrong.
 pub fn wants_find(message: &str) -> bool {
     let m = message.to_lowercase();
     m.contains("the word")
@@ -827,29 +828,57 @@ pub fn in_edit_thread(recent_user_messages: &[&str]) -> bool {
 }
 
 /// Per-message tool gating: hand the model ONLY the tools its message warrants,
-/// so a small model can't misfire on a tool it was never given. write_note is
+/// so the model can't misfire on a tool it was never given. write_note is
 /// the primary action (the open note is the workspace); search_notes/read_note
 /// and fetch_web_page are opt-in by intent; small talk gets nothing. When
 /// `edit_thread` is set, write_note stays available even without a fresh verb so
 /// follow-up corrections keep editing the note.
 pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Vec<Value> {
-    select_tools_cfg(message, has_open_note, edit_thread, true)
+    select_tools_cfg(message, has_open_note, edit_thread, true, true)
 }
 
-/// Like [`select_tools`], but `deterministic` toggles the rule-based assists. When
-/// false (power user on a stronger model), structural-cleanup requests fall back
-/// to write_note and find requests are answered by the model — no format_note /
-/// find_in_note routing.
+/// Filter the full tool spec list down to a set of tool names.
+fn specs_for(names: &[&str]) -> Vec<Value> {
+    tool_specs()
+        .into_iter()
+        .filter(|t| {
+            t["function"]["name"]
+                .as_str()
+                .map(|n| names.contains(&n))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Like [`select_tools`], but with the two assist layers toggled independently:
+///
+/// - `gating` — per-message tool gating: hand the model only the tools its
+///   message warrants. Off → the full general tool set is offered every turn and
+///   the model chooses for itself (suited to larger, more capable models).
+/// - `deterministic` — the deterministic correctness tools: route structural
+///   cleanups to the regex `format_note` tool (instead of an LLM rewrite) and
+///   word lookups to `find_in_note`. These are *correctness* assists, not a
+///   gating crutch, so they apply whether or not gating is on.
 pub fn select_tools_cfg(
     message: &str,
     has_open_note: bool,
     edit_thread: bool,
+    gating: bool,
     deterministic: bool,
 ) -> Vec<Value> {
-    // Assists off (stronger model): skip ALL rule-based gating and the deterministic
-    // tools (format_note / find_in_note). Offer the full general tool set every turn
-    // and let the model choose for itself.
-    if !deterministic {
+    // Deterministic format override (independent of gating): a clean whole-doc
+    // structural cleanup (remove all headings/bold/bullets) goes to the regex
+    // format_note tool, exclusively, so the model can't fumble the rewrite —
+    // echo the note back unchanged, or empty it. Regex beats an LLM rewrite at
+    // this for any model size, which is why it sits above gating.
+    if deterministic && has_open_note && detect_format_op(message).is_some() {
+        return specs_for(&["format_note"]);
+    }
+
+    // Gating off: offer the full general tool set every turn and let the model
+    // decide. find_in_note is still added when the deterministic layer is on,
+    // since it is a correctness assist rather than gating.
+    if !gating {
         let mut names = vec![
             "search_notes",
             "read_note",
@@ -860,26 +889,22 @@ pub fn select_tools_cfg(
         if has_open_note {
             names.push("write_note");
         }
-        return tool_specs()
-            .into_iter()
-            .filter(|t| {
-                t["function"]["name"]
-                    .as_str()
-                    .map(|n| names.contains(&n))
-                    .unwrap_or(false)
-            })
-            .collect();
+        if deterministic && has_open_note && wants_find(message) {
+            names.push("find_in_note");
+        }
+        return specs_for(&names);
     }
+
+    // Gating on: hand the model ONLY the tools its message warrants.
     if is_small_talk(message) {
         return Vec::new();
     }
     let mut names: Vec<&str> = Vec::new();
-    // A clean structural cleanup (remove all headings/bold/bullets) routes to the
-    // deterministic format_note tool INSTEAD of write_note, so a small model can't
-    // fumble the rewrite — echo the note back unchanged, or empty it.
-    if deterministic && has_open_note && detect_format_op(message).is_some() {
-        names.push("format_note");
-    } else if has_open_note && (note_write_intent(message) || edit_thread) {
+    // detect_format_op is included so a format request still gets write_note when
+    // the deterministic format path is OFF (when it's on, we returned above).
+    if has_open_note
+        && (note_write_intent(message) || edit_thread || detect_format_op(message).is_some())
+    {
         names.push("write_note");
     }
     if wants_other_notes(message) {
@@ -899,15 +924,7 @@ pub fn select_tools_cfg(
     if wants_fetch(message) {
         names.push("fetch_web_page");
     }
-    tool_specs()
-        .into_iter()
-        .filter(|t| {
-            t["function"]["name"]
-                .as_str()
-                .map(|n| names.contains(&n))
-                .unwrap_or(false)
-        })
-        .collect()
+    specs_for(&names)
 }
 
 #[derive(Clone)]
@@ -1028,7 +1045,7 @@ impl Tool for WriteNoteTool {
             Err(msg) => return Ok(msg),
         };
 
-        // Destructive-write guard. A small model asked to "remove all headings"
+        // Destructive-write guard. A model asked to "remove all headings"
         // once replaced the whole essay with an EMPTY body, wiping the note. If a
         // replace would empty a non-empty note and the user did not actually ask
         // to clear it, refuse and tell the model to preserve the content — never
@@ -1237,7 +1254,7 @@ impl Tool for FetchWebPageTool {
             serde_json::json!({ "tool": "Fetch Web Page", "details": url }),
         );
 
-        let response = reqwest::Client::new()
+        let response = crate::web_search::web_client()
             .get(&url)
             .header(
                 reqwest::header::USER_AGENT,
@@ -1499,7 +1516,7 @@ pub fn build_myelin_agent(
     let model = client.completion_model(model_name);
     rig_core::agent::AgentBuilder::new(model)
         .preamble(preamble)
-        // Low temperature keeps a small model decisive and on-task instead of
+        // Low temperature keeps the model decisive and on-task instead of
         // rambling or asking the same clarifying question repeatedly.
         .temperature(temperature)
         .default_max_turns(max_turns)
@@ -1517,8 +1534,8 @@ pub fn build_myelin_agent(
 }
 
 /// Remove the prompt's note-framing markers that some models echo into content.
-/// Tolerant of the dash-count / spacing variants models produce (e.g. Granite
-/// emitted "--- END CURRENT NOTE --" with two trailing dashes).
+/// Tolerant of the dash-count / spacing variants models produce (e.g. some
+/// models emit "--- END CURRENT NOTE --" with two trailing dashes).
 pub fn strip_prompt_markers(s: &str) -> String {
     let mut cleaned = regex::Regex::new(r"(?i)-{2,}\s*(?:end\s+)?current note\s*-*")
         .map(|re| re.replace_all(s, "").into_owned())
@@ -1686,7 +1703,7 @@ mod tests {
         assert!(wants_clear("make it blank"));
     }
 
-    // Granite echoed the prompt's note-framing markers into a direct tool call;
+    // Some models echo the prompt's note-framing markers into a direct tool call;
     // they must never reach the saved note.
     #[test]
     fn strips_echoed_prompt_markers_from_content() {

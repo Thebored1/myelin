@@ -95,6 +95,7 @@ export type ProviderStatus = {
 		autoOffload?: boolean;
 		maxTurns?: number;
 		deterministicTools?: boolean;
+		toolGating?: boolean;
 	};
 	resolved?: {
 		executablePath: string;

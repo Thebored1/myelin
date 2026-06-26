@@ -18,6 +18,7 @@
     let thinking = $state(false);
     let autoOffload = $state(true);
     let deterministicTools = $state(true);
+    let toolGating = $state(true);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
@@ -166,6 +167,9 @@
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
             deterministicTools = status.config?.deterministicTools ?? true;
+            // No toolGating field means a config from before the gating/deterministic
+            // split — fall back to the old deterministicTools value (matches backend).
+            toolGating = status.config?.toolGating ?? status.config?.deterministicTools ?? true;
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
             try {
@@ -596,26 +600,11 @@
                     <span class="toggle-hint">
                         {thinking
                             ? 'On — the model reasons before answering (slower, may be more accurate).'
-                            : 'Off — faster, no hidden reasoning tokens. Works across models (Qwen, LFM, …).'}
+                            : 'Off — faster, no hidden reasoning tokens. Works across models.'}
                     </span>
                 </span>
             </label>
 
-            <label class="toggle-row">
-                <input
-                    type="checkbox"
-                    bind:checked={deterministicTools}
-                    onchange={() => invoke('set_deterministic_tools', { enabled: deterministicTools })}
-                />
-                <span class="toggle-text">
-                    <strong>Deterministic assists</strong>
-                    <span class="toggle-hint">
-                        {deterministicTools
-                            ? 'On — rule-based help for small models: per-message tool gating (only the relevant tools are offered), in-code format ops (strip headings/bold/bullets) and exact word search, and a guard against wiping a note during an edit.'
-                            : 'Off — no gating, no in-code tools, no write-guard. The model gets the full toolset every turn and decides for itself. Best with a larger model.'}
-                    </span>
-                </span>
-            </label>
             <div class="input-group full-width" style="margin-top: 1rem;">
                 <label>
                     Extra Arguments
@@ -635,6 +624,45 @@
                     + Add Argument
                 </button>
             </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>Assistant Tooling</h2>
+            <p class="description">
+                How the assistant is helped to use its tools reliably. Smaller models benefit from both; on a larger, more capable model you can turn them off and let the model decide for itself.
+            </p>
+
+            <label class="toggle-row">
+                <input
+                    type="checkbox"
+                    bind:checked={toolGating}
+                    onchange={() => invoke('set_tool_gating', { enabled: toolGating })}
+                />
+                <span class="toggle-text">
+                    <strong>Per-message tool gating</strong>
+                    <span class="toggle-hint">
+                        {toolGating
+                            ? 'On — only the tools your message needs are offered each turn (e.g. an edit request gets just the note-editing tool). Stops a model from misfiring on an unrelated tool — best for smaller models.'
+                            : 'Off — the model gets the full toolset every turn and decides for itself. Best for larger, more capable models.'}
+                    </span>
+                </span>
+            </label>
+
+            <label class="toggle-row">
+                <input
+                    type="checkbox"
+                    bind:checked={deterministicTools}
+                    onchange={() => invoke('set_deterministic_tools', { enabled: deterministicTools })}
+                />
+                <span class="toggle-text">
+                    <strong>Deterministic format &amp; find</strong>
+                    <span class="toggle-hint">
+                        {deterministicTools
+                            ? 'On — formatting requests (strip headings/bold/bullets, change case, convert lists) are applied by exact in-code rules instead of the model rewriting the note, and exact-word lookups use a reliable search. Also guards against accidentally wiping a note during an edit. Recommended — works independently of gating.'
+                            : 'Off — the model handles formatting, search and edits entirely on its own.'}
+                    </span>
+                </span>
+            </label>
         </section>
 
         <section class="settings-section">

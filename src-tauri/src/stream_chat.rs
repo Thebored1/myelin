@@ -36,23 +36,27 @@ struct ToolAccum {
 pub async fn run_chat(
     state: &AppState,
     config: &ResolvedLlamaConfig,
-    preamble: &str,
-    prompt: &str,
-    tools: Vec<Value>,
+    mut messages: Vec<Value>,
+    mut tools: Vec<Value>,
     request_id: &str,
-) -> Result<()> {
+) -> Result<Vec<Value>> {
     let url = format!("{}/v1/chat/completions", config.base_url());
     let model = config.model_name();
     let temperature = config.temperature;
     let max_turns = (config.max_turns.max(1)) as usize;
     let note_id = state.current_note_id();
 
-    let mut messages: Vec<Value> = vec![
-        json!({ "role": "system", "content": preamble }),
-        json!({ "role": "user", "content": prompt }),
-    ];
-
     let client = reqwest::Client::new();
+    // The most recent tool executed. If the model ends its final turn with no
+    // closing text (some models return an empty turn after a successful
+    // tool call), we use this to emit a short confirmation instead of a silent,
+    // empty bubble.
+    let mut last_tool: Option<String> = None;
+    // A model will otherwise fetch a full page for every search result,
+    // burying itself in tens of thousands of characters and never reaching the
+    // write. Cap fetches, then stop offering the tool.
+    let mut fetch_count = 0usize;
+    const MAX_WEB_FETCHES: usize = 2;
 
     for _turn in 0..max_turns {
         let mut body = json!({
@@ -67,6 +71,12 @@ pub async fn run_chat(
             body["tools"] = json!(tools);
             body["tool_choice"] = json!("auto");
         }
+        // DEBUG (temporary): dump each turn's exact request so the failing flow
+        // can be replayed verbatim as a test fixture.
+        let _ = std::fs::write(
+            std::env::temp_dir().join(format!("myelin-req-turn{_turn}.json")),
+            serde_json::to_vec_pretty(&body).unwrap_or_default(),
+        );
 
         let resp = client
             .post(&url)
@@ -232,6 +242,20 @@ pub async fn run_chat(
         let real_calls: Vec<&ToolAccum> =
             tool_calls.iter().filter(|t| !t.name.is_empty()).collect();
         if real_calls.is_empty() {
+            // The model acted but produced no closing text — surface a short
+            // confirmation so the turn never ends on a silent, empty bubble.
+            if assistant_text.trim().is_empty() {
+                if let Some(tool) = last_tool.as_deref() {
+                    let msg = match tool {
+                        "write_note" | "format_note" => "Done — I've updated your note.",
+                        _ => "Done.",
+                    };
+                    let _ = state.handle.emit(
+                        "ai://chat_chunk",
+                        json!({ "requestId": request_id, "delta": msg }),
+                    );
+                }
+            }
             break;
         }
 
@@ -255,6 +279,10 @@ pub async fn run_chat(
 
         for t in &real_calls {
             let result = execute_tool(state, &t.name, &t.args).await;
+            last_tool = Some(t.name.clone());
+            if t.name == "fetch_web_page" {
+                fetch_count += 1;
+            }
             let args_preview: String = t.args.chars().take(300).collect();
             let result_preview: String = result.chars().take(200).collect();
             log::info!(
@@ -267,9 +295,16 @@ pub async fn run_chat(
                 "content": result,
             }));
         }
+
+        // Once the fetch budget is spent, stop offering fetch_web_page so the
+        // model synthesises from the search snippets + pages it already pulled
+        // instead of looping on fetches forever (models drown otherwise).
+        if fetch_count >= MAX_WEB_FETCHES {
+            tools.retain(|t| t["function"]["name"].as_str() != Some("fetch_web_page"));
+        }
     }
 
-    Ok(())
+    Ok(messages)
 }
 
 /// Deserialize the arguments for a named tool and run the matching rig `Tool`,

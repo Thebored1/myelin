@@ -93,7 +93,17 @@ struct InnerState {
     /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
     /// tools (e.g. the write guard) can read it without re-resolving the config.
     deterministic_tools: std::sync::atomic::AtomicBool,
+    /// Runtime mirror of config.tool_gating (per-message tool gating), refreshed
+    /// each chat turn alongside `deterministic_tools`.
+    tool_gating: std::sync::atomic::AtomicBool,
     pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// Per-note live conversation as the REAL message array (system-less): user
+    /// turns, assistant turns with tool_calls, and the tool RESULTS. The frontend's
+    /// chat_history keeps only text replies, so this is what lets the model keep
+    /// coherent context across turns — search/fetch results stay as real `tool`
+    /// messages instead of being flattened to a vague summary and lost. Re-sent each
+    /// turn so llama-server reuses the cached prefix (KV cache). Keyed by note id.
+    conversations: Mutex<HashMap<String, Vec<serde_json::Value>>>,
 }
 
 #[derive(Default)]
@@ -180,7 +190,9 @@ impl AppState {
                 current_note_id: Mutex::new(None),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
+                tool_gating: std::sync::atomic::AtomicBool::new(true),
                 pending_approvals: Mutex::new(HashMap::new()),
+                conversations: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -225,6 +237,21 @@ impl AppState {
         self.inner.current_note_id.lock().clone()
     }
 
+    /// The live conversation (real message array) for a note — empty if none yet.
+    pub fn conversation(&self, note_id: &str) -> Vec<serde_json::Value> {
+        self.inner.conversations.lock().get(note_id).cloned().unwrap_or_default()
+    }
+
+    /// Replace a note's live conversation after a turn (already trimmed by caller).
+    pub fn save_conversation(&self, note_id: &str, msgs: Vec<serde_json::Value>) {
+        self.inner.conversations.lock().insert(note_id.to_string(), msgs);
+    }
+
+    /// Forget a note's live conversation (e.g. when the user clears chat).
+    pub fn clear_conversation(&self, note_id: &str) {
+        self.inner.conversations.lock().remove(note_id);
+    }
+
     fn note_by_id(&self, id: &str) -> Option<NoteDocument> {
         self.inner
             .runtime
@@ -243,7 +270,7 @@ impl AppState {
 
     /// Resolve the note a chat tool should act on: always prefer the note that
     /// is currently open in the editor, regardless of the title the model
-    /// passed (a small model often gets the title wrong). Fall back to an exact
+    /// passed (a model can get the title wrong). Fall back to an exact
     /// title match only when no note is open.
     pub fn resolve_chat_target_note(&self, title: &str) -> Option<NoteDocument> {
         if let Some(id) = self.current_note_id() {
@@ -268,6 +295,14 @@ impl AppState {
 
     pub fn set_deterministic_tools_runtime(&self, enabled: bool) {
         self.inner.deterministic_tools.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn tool_gating_enabled(&self) -> bool {
+        self.inner.tool_gating.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_tool_gating_runtime(&self, enabled: bool) {
+        self.inner.tool_gating.store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn register_pending_approval(&self, id: String, tx: tokio::sync::oneshot::Sender<bool>) {
@@ -327,6 +362,12 @@ impl AppState {
     pub async fn set_deterministic_tools(&self, enabled: bool) -> Result<()> {
         crate::llama_server::set_deterministic_tools(&self.inner.app_data_dir, enabled)?;
         self.set_deterministic_tools_runtime(enabled);
+        Ok(())
+    }
+
+    pub async fn set_tool_gating(&self, enabled: bool) -> Result<()> {
+        crate::llama_server::set_tool_gating(&self.inner.app_data_dir, enabled)?;
+        self.set_tool_gating_runtime(enabled);
         Ok(())
     }
 
@@ -1029,10 +1070,10 @@ impl AppState {
         self.set_current_note_id(note_id.clone());
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
-            let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
 
             let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
             self.set_deterministic_tools_runtime(config.deterministic_tools);
+            self.set_tool_gating_runtime(config.tool_gating);
             self.ensure_llama_server(&config).await?;
 
             // Budget the note to ~half the context window the server ACTUALLY
@@ -1066,10 +1107,10 @@ impl AppState {
                     note_body_excerpt
                 ));
             }
-            if !history_text.trim().is_empty() {
-                context.push_str(&format!("\n\nEarlier in this conversation:\n{}", history_text));
-            }
-            let prompt = format!("{}\n\nUser request: {}", context, question);
+            // The note context (current note) goes in THIS turn's user message;
+            // prior turns (incl. tool results) come from the live conversation array
+            // built below — not flattened to a lossy text summary.
+            let user_content = format!("{}\n\nUser request: {}", context, question);
 
             // Per-message tool gating: hand the model ONLY the tools this message
             // warrants so it can't misfire on one it was never given. We also pass
@@ -1100,6 +1141,7 @@ impl AppState {
                     &question,
                     true,
                     edit_thread,
+                    config.tool_gating,
                     config.deterministic_tools,
                 )
             } else {
@@ -1109,15 +1151,38 @@ impl AppState {
             // Stream directly against llama-server (not through rig) so the note
             // content can be surfaced token-by-token as it is generated. See
             // `stream_chat`.
-            crate::stream_chat::run_chat(
-                self,
-                &config,
-                crate::agent::MYELIN_PREAMBLE,
-                &prompt,
-                tools,
-                &request_id,
-            )
-            .await?;
+            // Build the send array as REAL messages: system preamble + the note's
+            // live conversation (prior user/assistant turns AND tool results) + this
+            // turn's user message. Re-sent each turn so llama-server reuses the
+            // cached prefix (KV cache); the retained tool messages are what let a
+            // later "write what you found" actually have the search results.
+            let nid = self.current_note_id().unwrap_or_default();
+            let mut convo = self.conversation(&nid);
+            if convo.is_empty() {
+                // First turn this session: seed from the saved text history (no tool
+                // results — those were never persisted) so we don't lose continuity.
+                convo = chat_history_to_messages(&note.chat_history);
+            }
+            let mut messages = vec![serde_json::json!({
+                "role": "system",
+                "content": crate::agent::MYELIN_PREAMBLE,
+            })];
+            messages.extend(convo.iter().cloned());
+            messages.push(serde_json::json!({ "role": "user", "content": user_content }));
+            let sent_len = messages.len();
+
+            let final_messages =
+                crate::stream_chat::run_chat(self, &config, messages, tools, &request_id).await?;
+
+            // Persist the conversation for the next turn: prior turns + the RAW user
+            // question (the note context is rebuilt fresh each turn, so it is not
+            // stored) + this turn's new assistant/tool messages (incl. results).
+            convo.push(serde_json::json!({ "role": "user", "content": question }));
+            if final_messages.len() > sent_len {
+                convo.extend(final_messages[sent_len..].iter().cloned());
+            }
+            let convo = trim_conversation(convo, 24_000);
+            self.save_conversation(&nid, convo);
 
             Ok(())
         }
@@ -1873,6 +1938,70 @@ fn format_chat_history_for_prompt(
     } else {
         messages.join("\n")
     }
+}
+
+/// Seed a live conversation from the frontend's saved chat history on the first
+/// turn of a session. Only text turns survive (tool results were never persisted),
+/// but it keeps continuity after an app restart instead of starting blank.
+fn chat_history_to_messages(
+    chat_history: &[crate::models::ChatMessage],
+) -> Vec<serde_json::Value> {
+    chat_history
+        .iter()
+        .filter(|m| m.error != Some(true) && m.is_streaming != Some(true))
+        .filter(|m| !m.content.trim().is_empty())
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .rev()
+        .take(MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect()
+}
+
+/// Keep the most recent whole turns of a live conversation under a rough char
+/// budget. A "turn" starts at a `user` message and includes the assistant/tool
+/// messages that follow it, so trimming never orphans a tool result from its
+/// assistant tool_call (which llama-server would reject).
+fn trim_conversation(
+    msgs: Vec<serde_json::Value>,
+    max_chars: usize,
+) -> Vec<serde_json::Value> {
+    let mut groups: Vec<Vec<serde_json::Value>> = Vec::new();
+    for m in msgs {
+        if m["role"] == "user" || groups.is_empty() {
+            groups.push(vec![m]);
+        } else {
+            groups.last_mut().unwrap().push(m);
+        }
+    }
+    let cost = |m: &serde_json::Value| -> usize {
+        let c = m["content"].as_str().map(|s| s.len()).unwrap_or(0);
+        let a = m["tool_calls"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|t| {
+                        t["function"]["arguments"].as_str().map(|s| s.len()).unwrap_or(0)
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        c + a
+    };
+    let mut kept: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut total = 0usize;
+    for g in groups.into_iter().rev() {
+        let g_cost: usize = g.iter().map(&cost).sum();
+        if !kept.is_empty() && total + g_cost > max_chars {
+            break;
+        }
+        total += g_cost;
+        kept.push(g);
+    }
+    kept.reverse();
+    kept.into_iter().flatten().collect()
 }
 
 fn is_simple_greeting(question: &str) -> bool {

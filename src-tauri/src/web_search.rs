@@ -15,6 +15,21 @@ pub struct SearchResult {
 
 const UA: &str = "Mozilla/5.0 (compatible; Myelin/0.1; local notes web search)";
 
+/// Shared HTTP client for outbound web calls (search + fetch). Two safeguards for
+/// flaky/slow networks: bounded timeouts so a stalled connection can't hang a chat
+/// turn, and binding the socket to an IPv4 local address so a broken IPv6 path
+/// (common on mobile/hotspot links — exactly what made `fetch_web_page` fail with
+/// "error sending request") can't sink a request. Falls back to a default client
+/// if the builder ever fails.
+pub fn web_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(6))
+        .timeout(std::time::Duration::from_secs(20))
+        .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// Run a web search. Uses SearXNG (`searxng_url`, JSON API) when provided,
 /// else the no-key DuckDuckGo HTML endpoint. Caps to `count` results.
 pub async fn web_search(
@@ -69,7 +84,7 @@ struct SearxResult {
 
 async fn searxng_search(base: &str, query: &str) -> Result<Vec<SearchResult>, String> {
     let url = format!("{}/search", base.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
+    let resp = web_client()
         .get(&url)
         .query(&[("q", query), ("format", "json"), ("safesearch", "0")])
         .header(reqwest::header::USER_AGENT, UA)
@@ -99,7 +114,7 @@ async fn searxng_search(base: &str, query: &str) -> Result<Vec<SearchResult>, St
 }
 
 async fn duckduckgo_search(query: &str) -> Result<Vec<SearchResult>, String> {
-    let resp = reqwest::Client::new()
+    let resp = web_client()
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", query)])
         .header(reqwest::header::USER_AGENT, UA)
