@@ -190,7 +190,7 @@ impl AppState {
                 current_note_id: Mutex::new(None),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
-                tool_gating: std::sync::atomic::AtomicBool::new(true),
+                tool_gating: std::sync::atomic::AtomicBool::new(false),
                 pending_approvals: Mutex::new(HashMap::new()),
                 conversations: Mutex::new(HashMap::new()),
             }),

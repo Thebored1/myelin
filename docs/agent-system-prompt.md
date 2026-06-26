@@ -98,18 +98,25 @@ Gating and the deterministic correctness tools are **separate** switches, so eac
 can suit the model in use (`select_tools_cfg(message, has_open_note, edit_thread,
 gating, deterministic)`):
 
-- **Per-message tool gating** (`gating`) — the selection above. Off → the model
-  gets the full general toolset every turn and decides for itself (suited to
-  larger, more capable models).
-- **Deterministic format & find** (`deterministic`) — routes a clean structural
-  cleanup to the regex **`format_note`** tool (instead of an LLM rewrite) and a
-  word lookup to **`find_in_note`**, and enables the destructive-write guard.
-  These are *correctness* assists, not a gating crutch, so the format override
-  applies **whether or not gating is on** — formatting stays reliable even with
-  the full toolset offered.
+- **Per-message tool gating** (`gating`) — the selection above. **Default OFF.**
+  The heuristics are keyword-based and brittle: they can *withhold* a tool the
+  model would have used (e.g. "search for the latest news" isn't recognised as a
+  web search, so the model can't search). With gating off the model gets the full
+  general toolset every turn and decides for itself — the standard, model-agnostic
+  agent approach. Gating is opt-in only for sub-2B models that misfire on tools.
+- **Deterministic format & find** (`deterministic`) — **default ON.** Routes a
+  clean structural cleanup to the regex **`format_note`** tool (instead of an LLM
+  rewrite) and a word lookup to **`find_in_note`**, and enables the
+  destructive-write guard. These are *correctness* assists, not a gating crutch,
+  so they apply **whether or not gating is on** — formatting stays reliable even
+  with the full toolset offered.
 
-(Configs from before the split have no `tool_gating` field; it falls back to the
-old combined `deterministic_tools` value so existing behavior is preserved.)
+**Surgical deletion is always on** (independent of both toggles): on a pure-removal
+request, when the model's `find` matches the note, `write_note` deletes `find` from
+the real body and ignores the model's regenerated `content` — a faithful,
+truncation-proof delete instead of a full-note rewrite. A correctness win at any
+model size. The capability probe (chat-only fallback for models that can't emit
+tool calls) is the one genuinely model-agnostic gate and always applies.
 
 **Edit-thread context (the "New note 18" fix).** Per-message gating looks only at
 the latest message, so a verb-less follow-up correction ("no thats wrong", a

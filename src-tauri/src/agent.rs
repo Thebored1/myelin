@@ -1064,15 +1064,16 @@ impl Tool for WriteNoteTool {
             }
         };
 
-        // Surgical deletion. Models reliably identify WHAT to remove (the `find`
-        // text) but unreliably fill `content` with the whole regenerated note —
-        // which plan_write then turns into a full-body replace (the "it rewrote my
-        // entire note" complaint, plus a truncation risk on long notes). On a
-        // pure-removal request where the model's `find` matches the note, trust
-        // `find` and delete it from the REAL body: an empty `content` makes
-        // plan_write do a faithful, surgical snippet delete — nothing else changes.
-        let (mode, content) = if self.state.deterministic_tools_enabled()
-            && !find.trim().is_empty()
+        // Surgical deletion (always on — a model-agnostic correctness win, not a
+        // crutch: a full-rewrite-to-delete risks drift/truncation at ANY model
+        // size). Models reliably identify WHAT to remove (the `find` text) but
+        // unreliably fill `content` with the whole regenerated note — which
+        // plan_write then turns into a full-body replace (the "it rewrote my
+        // entire note" complaint). On a pure-removal request where the model's
+        // `find` matches the note, trust `find` and delete it from the REAL body:
+        // an empty `content` makes plan_write do a faithful, surgical snippet
+        // delete — nothing else changes.
+        let (mode, content) = if !find.trim().is_empty()
             && find_tolerant(&existing.body, &find).is_some()
             && wants_partial_removal(&self.state.latest_chat_question())
         {

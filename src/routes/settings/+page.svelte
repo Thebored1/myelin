@@ -18,7 +18,7 @@
     let thinking = $state(false);
     let autoOffload = $state(true);
     let deterministicTools = $state(true);
-    let toolGating = $state(true);
+    let toolGating = $state(false);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
@@ -167,9 +167,8 @@
             thinking = status.config?.thinking ?? false;
             autoOffload = status.config?.autoOffload ?? true;
             deterministicTools = status.config?.deterministicTools ?? true;
-            // No toolGating field means a config from before the gating/deterministic
-            // split — fall back to the old deterministicTools value (matches backend).
-            toolGating = status.config?.toolGating ?? status.config?.deterministicTools ?? true;
+            // Gating is opt-in and off by default (model-agnostic full toolset).
+            toolGating = status.config?.toolGating ?? false;
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
             try {
@@ -629,7 +628,7 @@
         <section class="settings-section">
             <h2>Assistant Tooling</h2>
             <p class="description">
-                How the assistant is helped to use its tools reliably. Smaller models benefit from both; on a larger, more capable model you can turn them off and let the model decide for itself.
+                Two independent assists for how the model uses tools. Hover each <span class="info-dot">i</span> for details and caveats.
             </p>
 
             <label class="toggle-row">
@@ -639,11 +638,17 @@
                     onchange={() => invoke('set_tool_gating', { enabled: toolGating })}
                 />
                 <span class="toggle-text">
-                    <strong>Per-message tool gating</strong>
+                    <span class="toggle-label">
+                        <strong>Per-message tool gating</strong>
+                        <span class="info" tabindex="0" role="note" aria-label="About per-message tool gating">
+                            <span class="info-dot">i</span>
+                            <span class="info-pop">Offers the model only the tools its message seems to need, chosen by keyword heuristics — brittle and not model-agnostic. It can <strong>withhold a tool the model would have used</strong>: e.g. “search for the latest news” isn’t recognised as a web search, so the model can’t search at all. <strong>Off by default</strong> — only useful for sub-2B models that misfire on tools they shouldn’t touch.</span>
+                        </span>
+                    </span>
                     <span class="toggle-hint">
                         {toolGating
-                            ? 'On — only the tools your message needs are offered each turn (e.g. an edit request gets just the note-editing tool). Stops a model from misfiring on an unrelated tool — best for smaller models.'
-                            : 'Off — the model gets the full toolset every turn and decides for itself. Best for larger, more capable models.'}
+                            ? 'On — only the tools your message seems to need are offered each turn.'
+                            : 'Off — full toolset every turn, the model decides (recommended).'}
                     </span>
                 </span>
             </label>
@@ -655,11 +660,17 @@
                     onchange={() => invoke('set_deterministic_tools', { enabled: deterministicTools })}
                 />
                 <span class="toggle-text">
-                    <strong>Deterministic format &amp; find</strong>
+                    <span class="toggle-label">
+                        <strong>Deterministic format &amp; find</strong>
+                        <span class="info" tabindex="0" role="note" aria-label="About deterministic format and find">
+                            <span class="info-dot">i</span>
+                            <span class="info-pop">In-code correctness assists that don’t withhold tools — they make the result reliable: formatting (strip headings/bold/bullets, change case, convert lists) is applied by exact rules instead of the model rewriting the whole note; exact-word lookups use a reliable search; and a guard prevents accidentally wiping a note during an edit. <strong>On by default.</strong> (Surgical deletes — remove a paragraph/heading/section — always apply, regardless of this toggle.)</span>
+                        </span>
+                    </span>
                     <span class="toggle-hint">
                         {deterministicTools
-                            ? 'On — formatting requests (strip headings/bold/bullets, change case, convert lists) are applied by exact in-code rules instead of the model rewriting the note; removals (delete a paragraph/heading/section) are applied surgically so the rest of the note is untouched; and exact-word lookups use a reliable search. Also guards against accidentally wiping a note during an edit. Recommended — works independently of gating.'
-                            : 'Off — the model handles formatting, search and edits entirely on its own.'}
+                            ? 'On — reliable in-code formatting, search & a wipe guard.'
+                            : 'Off — the model handles formatting & edits on its own.'}
                     </span>
                 </span>
             </label>
@@ -1075,6 +1086,78 @@
         font-size: 0.8rem;
         color: var(--text-secondary);
         line-height: 1.4;
+    }
+
+    .toggle-label {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    /* Little circled "i" that reveals detail/caveats on hover or focus, so the
+       long explanation isn't pasted under every toggle. */
+    .info {
+        position: relative;
+        display: inline-flex;
+        outline: none;
+    }
+
+    .info-dot {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 1px solid var(--text-secondary);
+        color: var(--text-secondary);
+        font-size: 0.62rem;
+        font-style: italic;
+        font-weight: 700;
+        line-height: 1;
+        cursor: help;
+        user-select: none;
+    }
+
+    .info:hover .info-dot,
+    .info:focus .info-dot {
+        border-color: var(--text-primary);
+        color: var(--text-primary);
+    }
+
+    .info-pop {
+        position: absolute;
+        bottom: calc(100% + 8px);
+        left: 0;
+        z-index: 20;
+        width: 320px;
+        max-width: 60vw;
+        padding: 0.6rem 0.7rem;
+        background: var(--bg-elevated, #1e1e1e);
+        border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        color: var(--text-secondary);
+        font-size: 0.78rem;
+        font-weight: 400;
+        line-height: 1.45;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(4px);
+        transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+        pointer-events: none;
+    }
+
+    .info-pop strong {
+        color: var(--text-primary);
+        font-size: inherit;
+    }
+
+    .info:hover .info-pop,
+    .info:focus .info-pop {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
     }
 
     .advanced-grid {

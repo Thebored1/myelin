@@ -109,15 +109,20 @@ pub struct WorkspaceLlamaConfig {
     /// more reliable. None → on.
     pub deterministic_tools: Option<bool>,
     /// Per-message tool gating: offer the model only the tools its message
-    /// warrants. Default ON (best for smaller models); turn OFF on a larger,
-    /// more capable model to offer the full toolset every turn. None → falls
-    /// back to `deterministic_tools` (so configs from before the split keep
-    /// their original bundled behavior), else on.
+    /// warrants, via keyword intent heuristics. **Default OFF** — the model gets
+    /// the full toolset every turn and decides for itself (model-agnostic, the
+    /// standard agent approach). Opt-in only for sub-2B models that misfire on
+    /// tools they shouldn't touch; the heuristics are brittle and can withhold a
+    /// valid tool (e.g. block a web search the model would have run). None → off.
     pub tool_gating: Option<bool>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,8 +173,8 @@ pub struct ResolvedLlamaConfig {
     #[serde(default = "default_true")]
     pub deterministic_tools: bool,
     /// Per-message tool gating (offer only the tools a message warrants).
-    /// Default true; turn off on a larger model to offer the full toolset.
-    #[serde(default = "default_true")]
+    /// Default OFF — the model gets the full toolset every turn (model-agnostic).
+    #[serde(default = "default_false")]
     pub tool_gating: bool,
     /// Ordered list of binaries to try (best first). Not serialized to the UI.
     #[serde(skip)]
@@ -750,13 +755,9 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         },
         supports_tools: profile.supports_tools,
         deterministic_tools: app_config.deterministic_tools.unwrap_or(true),
-        // Migration: a config from before the gating/deterministic split has no
-        // tool_gating field — fall back to the old deterministic_tools value so
-        // existing behavior is preserved; otherwise default on.
-        tool_gating: app_config
-            .tool_gating
-            .or(app_config.deterministic_tools)
-            .unwrap_or(true),
+        // Default OFF: the model gets the full toolset every turn (model-agnostic).
+        // Gating is opt-in only for sub-2B models that misfire on tools.
+        tool_gating: app_config.tool_gating.unwrap_or(false),
         candidates,
     })
 }
