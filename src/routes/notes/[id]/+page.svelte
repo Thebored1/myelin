@@ -1831,12 +1831,14 @@
 			cancelNoteStream();
 		}).then((fn) => (unlistenNoteStreamCancel = fn));
 
-		listen<{ tool: string; details: string }>('ai://chat_tool', (event) => {
+		listen<{ tool: string; details: string; mutatesNote?: boolean }>('ai://chat_tool', (event) => {
 			let lastStartTime = Date.now();
 			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) {
 					lastStartTime = m.startTime || lastStartTime;
-					return { ...m, isStreaming: false };
+					// On a note edit, drop the model's pre-tool prose — it tends to
+					// duplicate the note content that's already shown in the editor.
+					return { ...m, isStreaming: false, content: event.payload.mutatesNote ? '' : m.content };
 				}
 				return m;
 			});

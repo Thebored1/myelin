@@ -1141,7 +1141,7 @@ impl Tool for WriteNoteTool {
             .record_chat_tool(display_name, existing.title.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, preview) }),
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, preview), "mutatesNote": true }),
         );
 
         self.state
@@ -1230,7 +1230,7 @@ impl Tool for FormatNoteTool {
             .record_chat_tool(display_name, existing.title.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, pretty) }),
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, pretty), "mutatesNote": true }),
         );
         self.state
             .save_note(

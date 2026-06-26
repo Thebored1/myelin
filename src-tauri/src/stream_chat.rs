@@ -52,6 +52,12 @@ pub async fn run_chat(
     // tool call), we use this to emit a short confirmation instead of a silent,
     // empty bubble.
     let mut last_tool: Option<String> = None;
+    // Once a note-mutating tool (write_note/format_note) runs this exchange, stop
+    // echoing the model's prose to chat: models — especially small ones — tend to
+    // ALSO paste the note's content (or a play-by-play of it) into the reply,
+    // duplicating what's already in the editor. Model-agnostic: the note + tool
+    // chip are the record, and a concise confirmation replaces the prose.
+    let mut suppress_prose = false;
     // A model will otherwise fetch a full page for every search result,
     // burying itself in tens of thousands of characters and never reaching the
     // write. Cap fetches, then stop offering the tool.
@@ -132,10 +138,12 @@ pub async fn run_chat(
                 if let Some(t) = delta["content"].as_str() {
                     if !t.is_empty() {
                         assistant_text.push_str(t);
-                        let _ = state.handle.emit(
-                            "ai://chat_chunk",
-                            json!({ "requestId": request_id, "delta": t }),
-                        );
+                        if !suppress_prose {
+                            let _ = state.handle.emit(
+                                "ai://chat_chunk",
+                                json!({ "requestId": request_id, "delta": t }),
+                            );
+                        }
                     }
                 }
 
@@ -154,6 +162,12 @@ pub async fn run_chat(
                         if let Some(name) = tc["function"]["name"].as_str() {
                             if !name.is_empty() {
                                 slot.name = name.to_string();
+                                // A note edit is incoming — stop echoing the model's
+                                // prose for the rest of this exchange (it duplicates
+                                // the note). See `suppress_prose`.
+                                if name == "write_note" || name == "format_note" {
+                                    suppress_prose = true;
+                                }
                             }
                         }
                         if let Some(args) = tc["function"]["arguments"].as_str() {
@@ -242,14 +256,21 @@ pub async fn run_chat(
         let real_calls: Vec<&ToolAccum> =
             tool_calls.iter().filter(|t| !t.name.is_empty()).collect();
         if real_calls.is_empty() {
-            // The model acted but produced no closing text — surface a short
-            // confirmation so the turn never ends on a silent, empty bubble.
-            if assistant_text.trim().is_empty() {
-                if let Some(tool) = last_tool.as_deref() {
-                    let msg = match tool {
-                        "write_note" | "format_note" => "Done — I've updated your note.",
-                        _ => "Done.",
-                    };
+            // Surface a short confirmation so the turn never ends on a silent,
+            // empty bubble. Fires when the model returned no text OR when we
+            // suppressed its note-duplicating prose this exchange (suppress_prose) —
+            // in both cases the visible bubble would otherwise be empty.
+            if assistant_text.trim().is_empty() || suppress_prose {
+                let msg = if suppress_prose
+                    || matches!(last_tool.as_deref(), Some("write_note") | Some("format_note"))
+                {
+                    "Done — I've updated your note."
+                } else if last_tool.is_some() {
+                    "Done."
+                } else {
+                    ""
+                };
+                if !msg.is_empty() {
                     let _ = state.handle.emit(
                         "ai://chat_chunk",
                         json!({ "requestId": request_id, "delta": msg }),
