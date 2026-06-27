@@ -33,3 +33,9 @@ design-token.html
 scratch/
 src-tauri/test_rig.rs
 test_git.rs
+
+# Stray root clutter — not part of the app
+/Selections.pdf
+/select.txt
+/design-token.html
+/Here is a complete module-by-module.txt
