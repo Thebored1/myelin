@@ -159,6 +159,15 @@
         return status;
     }
 
+    // Back: return to the page the user came from, not always home.
+    function goBack() {
+        if (typeof window !== 'undefined' && window.history.length > 1) {
+            history.back();
+        } else {
+            goto('/');
+        }
+    }
+
     onMount(async () => {
         try {
             await refreshSnapshot();
@@ -389,7 +398,7 @@
 
 <div class="settings-container">
     <header class="settings-header">
-        <button class="back-btn" onclick={() => goto('/')}>
+        <button class="back-btn" onclick={goBack}>
             <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="19" y1="12" x2="5" y2="12"></line>
                 <polyline points="12 19 5 12 12 5"></polyline>
