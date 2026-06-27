@@ -93,10 +93,35 @@ impl tectonic::status::StatusBackend for CapturingStatus {
     }
 }
 
+/// Delete the cached LaTeX format(s) so Tectonic rebuilds them. Used to recover
+/// from a corrupt format whose catcode table breaks every compile.
+fn clear_tectonic_format_cache() {
+    if let Ok(dir) = std::env::var("TECTONIC_CACHE_DIR") {
+        let _ = fs::remove_dir_all(Path::new(&dir).join("formats"));
+    }
+}
+
+/// Compile `tex` to PDF bytes. Self-heals a corrupt format cache: if the engine
+/// claims `\begin{document}` is missing even though our input contains it (the
+/// classic symptom of a broken cached format), drop the format cache and retry.
+fn compile_with_tectonic(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
+    match run_tectonic_session(tex) {
+        Ok(pdf) => Ok(pdf),
+        Err(failure)
+            if tex.contains("\\begin{document}")
+                && failure.message.contains("Missing \\begin{document}") =>
+        {
+            clear_tectonic_format_cache();
+            run_tectonic_session(tex)
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
 /// Compile `tex` to PDF bytes, capturing the TeX log on failure. Runs the
 /// Tectonic driver directly (vs. latex_to_pdf) so we can attach a capturing
 /// status backend. Honours TECTONIC_CACHE_DIR set at startup.
-fn compile_with_tectonic(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
+fn run_tectonic_session(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
     use tectonic::config::PersistentConfig;
     use tectonic::driver::{OutputFormat, ProcessingSessionBuilder};
 
@@ -295,6 +320,9 @@ struct InnerState {
     runtime: RwLock<RuntimeState>,
     watcher: Mutex<Option<RecommendedWatcher>>,
     index_lock: AsyncMutex<()>,
+    // Serialises Tectonic runs: concurrent compiles share one format-cache dir and
+    // would corrupt it if they built the format at the same time.
+    tectonic_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
     embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
     llama_client: Client,
@@ -404,6 +432,7 @@ impl AppState {
                 }),
                 watcher: Mutex::new(None),
                 index_lock: AsyncMutex::new(()),
+                tectonic_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
                 embed_server: AsyncMutex::new(None),
                 llama_client: Client::builder()
@@ -1773,6 +1802,9 @@ impl AppState {
     /// can show a real download indicator instead of a generic spinner.
     async fn run_tectonic(&self, tex: String, body_line_offset: usize) -> Result<Vec<u8>> {
         use std::sync::atomic::{AtomicBool, Ordering};
+
+        // One Tectonic run at a time — concurrent runs corrupt the format cache.
+        let _tectonic_guard = self.inner.tectonic_lock.lock().await;
 
         let needs_fetch = !self.is_tectonic_warmed();
         let cache_dir = self.tectonic_cache_dir();
