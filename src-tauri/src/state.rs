@@ -38,6 +38,25 @@ const TABLE_NAME: &str = "notes";
 const TECTONIC_CACHE_DIR_NAME: &str = "tectonic-cache";
 const TECTONIC_WARMED_MARKER: &str = ".myelin_warmed";
 
+// Preamble used to wrap bare .tex notes that lack their own \documentclass. Kept
+// deliberately broad so typical documents (math, figures, tables, links, colour,
+// sensible margins) compile without the user hand-rolling a preamble. The prewarm
+// stub uses the SAME preamble so "Download now" caches exactly these packages.
+const DEFAULT_TEX_PREAMBLE: &str = "\\documentclass[11pt]{article}\n\
+     \\usepackage[margin=1in]{geometry}\n\
+     \\usepackage{amsmath,amssymb,amsfonts,mathtools}\n\
+     \\usepackage{graphicx}\n\
+     \\usepackage{booktabs}\n\
+     \\usepackage{enumitem}\n\
+     \\usepackage{xcolor}\n\
+     \\usepackage{hyperref}\n\
+     \\begin{document}";
+
+/// Wrap bare LaTeX body text (no `\documentclass`) in the default preamble.
+fn wrap_bare_latex(body: &str) -> String {
+    format!("{DEFAULT_TEX_PREAMBLE}\n{body}\n\\end{{document}}")
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TectonicCacheStatus {
@@ -1667,7 +1686,7 @@ impl AppState {
         let mut tex_content = fs::read_to_string(&path)?;
 
         if !tex_content.contains("\\documentclass") {
-            tex_content = format!("\\documentclass{{article}}\n\\usepackage{{amsmath}}\n\\begin{{document}}\n{}\n\\end{{document}}", tex_content);
+            tex_content = wrap_bare_latex(&tex_content);
         }
 
         self.run_tectonic(tex_content).await
@@ -1677,7 +1696,7 @@ impl AppState {
     /// so users can warm the cache from Settings instead of paying the first-run
     /// fetch when they hit "Compile to PDF".
     pub async fn prewarm_tectonic(&self) -> Result<()> {
-        let stub = "\\documentclass{article}\n\\usepackage{amsmath}\n\\begin{document}\nMyelin LaTeX warm-up: $E = mc^2$.\n\\end{document}".to_string();
+        let stub = wrap_bare_latex("Myelin LaTeX warm-up: $E = mc^2$, \\textbf{ready}.");
         self.run_tectonic(stub).await.map(|_| ())
     }
 

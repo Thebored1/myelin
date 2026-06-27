@@ -362,10 +362,16 @@ async fn get_all_note_documents(state: State<'_, AppState>) -> Result<Vec<NoteDo
 }
 
 #[tauri::command]
-async fn read_pdf_binary(state: State<'_, AppState>, note_id: String) -> Result<Vec<u8>, String> {
+async fn read_pdf_binary(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    // Return raw bytes over IPC (ArrayBuffer on the JS side) instead of a JSON
+    // number[] — a PDF as JSON integers is several times its real size to encode.
     state
         .read_pdf_binary(note_id)
         .await
+        .map(tauri::ipc::Response::new)
         .map_err(|error| error.to_string())
 }
 
@@ -440,10 +446,15 @@ async fn get_note_version(
 }
 
 #[tauri::command]
-async fn compile_latex(state: State<'_, AppState>, note_id: String) -> Result<Vec<u8>, String> {
+async fn compile_latex(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    // Raw bytes over IPC (see read_pdf_binary) — the compiled PDF can be large.
     state
         .compile_latex(note_id)
         .await
+        .map(tauri::ipc::Response::new)
         .map_err(|e| e.to_string())
 }
 

@@ -21,6 +21,7 @@
 	import 'vditor/dist/index.css';
 	import 'mathlive';
 	import 'mathlive/fonts.css';
+	import katex from 'katex';
 	import PdfViewer from '$lib/components/PdfViewer.svelte';
 	import EpubViewer from '$lib/components/EpubViewer.svelte';
 	import HtmlViewer from '$lib/components/HtmlViewer.svelte';
@@ -515,6 +516,29 @@
 
 	let mathDialog: HTMLDialogElement | undefined = $state();
 	let mathValue = $state('');
+	// Non-empty when the current formula won't render in KaTeX (the engine Vditor
+	// uses for $$…$$). Surfaced in the dialog so a bad formula isn't inserted only
+	// to silently fail — or render as a red error — later in the note.
+	let mathError = $state('');
+
+	function mathToKatex(raw: string): string {
+		// MathLive emits \placeholder tokens KaTeX doesn't know; map them to a box.
+		return raw.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
+	}
+
+	$effect(() => {
+		const v = mathValue;
+		if (!v.trim()) {
+			mathError = '';
+			return;
+		}
+		try {
+			katex.renderToString(mathToKatex(v), { throwOnError: true, displayMode: true });
+			mathError = '';
+		} catch (e: any) {
+			mathError = e?.message ? String(e.message) : 'KaTeX cannot render this formula.';
+		}
+	});
 
 	let linkNoteDialog: HTMLDialogElement | undefined = $state();
 	let linkSearchQuery = $state('');
@@ -611,8 +635,10 @@
 
 	function insertMath() {
 		if (vditorInstance && mathValue) {
-			// Replace MathLive specific placeholders with standard KaTeX squares
-			const cleanMath = mathValue.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
+			const cleanMath = mathToKatex(mathValue);
+			if (mathError && !confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)) {
+				return; // keep the dialog open so the user can fix it
+			}
 			vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 		}
 		mathDialog?.close();
@@ -1003,7 +1029,7 @@
 			draftBody = existingScratchpad?.body ?? '';
 			draftTags = loadedNote.tags.join(', ');
 			activeSourceId = loadedNote.id;
-			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.id });
+			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			scratchpadSavedId = existingScratchpad?.id ?? null;
 			showAttachedNote = draftBody.trim().length > 0;
@@ -1016,7 +1042,7 @@
 
 			if (loadedNote.sourcePdf) {
 				activeSourceId = loadedNote.sourcePdf;
-				const bytes = await invoke<number[]>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
+				const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
 				activeSourceBytes = new Uint8Array(bytes);
 				showAttachedNote = draftBody.trim().length > 0;
 				// If a working document has a sourcePdf, we need to know its type. 
@@ -1821,7 +1847,7 @@
 			});
 			note = saved;
 			activeSourceId = pdfNote.id;
-			const bytes = await invoke<number[]>('read_pdf_binary', { noteId: pdfNote.id });
+			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: pdfNote.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			showAttachedNote = true;
 			saveStatus = 'saved';
@@ -2428,7 +2454,7 @@
 									isBusy = true;
 									await saveNote();
 									try {
-										const pdfBytes = await invoke<number[]>('compile_latex', { noteId: note?.id });
+										const pdfBytes = await invoke<ArrayBuffer>('compile_latex', { noteId: note?.id });
 										activeSourceBytes = new Uint8Array(pdfBytes);
 										sourceMaterialType = 'pdf';
 									} catch(e) {
@@ -2838,7 +2864,7 @@
 	</div>
 </dialog>
 
-<dialog bind:this={mathDialog} class="math-dialog" onclose={() => (mathValue = '')}>
+<dialog bind:this={mathDialog} class="math-dialog" onclose={() => { mathValue = ''; mathError = ''; }}>
 	<div class="dialog-content">
 		<h3>Insert Math</h3>
 		<div class="math-container">
@@ -2849,9 +2875,14 @@
 				>{mathValue}</svelte:element
 			>
 		</div>
+		{#if mathError}
+			<p style="margin: 8px 0 0; font-size: 0.8rem; color: var(--danger, #e5534b);">
+				⚠ Won't render in the note: {mathError}
+			</p>
+		{/if}
 		<div class="dialog-actions">
 			<button class="secondary" onclick={() => mathDialog?.close()}>Cancel</button>
-			<button class="primary" onclick={insertMath} disabled={!mathValue}>Insert</button>
+			<button class="primary" onclick={insertMath} disabled={!mathValue}>{mathError ? 'Insert anyway' : 'Insert'}</button>
 		</div>
 	</div>
 </dialog>
