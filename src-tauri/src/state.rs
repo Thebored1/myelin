@@ -574,6 +574,7 @@ impl AppState {
         title: String,
         source_pdf: Option<String>,
         extension: Option<String>,
+        notebook: Option<String>,
     ) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let now = timestamp_now();
@@ -583,7 +584,18 @@ impl AppState {
         let safe_slug = slugify(&unique_title);
         let ext = extension.unwrap_or_else(|| "md".to_string());
         let file_name = format!("{safe_slug}--{}.{ext}", &id[..8]);
-        let path = unique_note_path(&workspace, &file_name);
+        // When a notebook (folder) is given, create the note inside it.
+        let target_dir = match notebook {
+            Some(name) if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") => {
+                let safe = sanitize_relative_folder(&name)?;
+                let dir = workspace.join(folder_to_relative_path(&safe));
+                fs::create_dir_all(&dir)
+                    .with_context(|| format!("failed to open notebook {}", dir.display()))?;
+                dir
+            }
+            _ => workspace.clone(),
+        };
+        let path = unique_note_path(&target_dir, &file_name);
         let relative_path = relative_to_workspace(&workspace, &path);
 
         let document = NoteDocument {
@@ -641,6 +653,46 @@ impl AppState {
         });
 
         Ok(document)
+    }
+
+    /// Create a notebook — a top-level folder in the workspace that holds notes
+    /// of any kind. Returns the updated list of notebooks.
+    pub fn create_notebook(&self, name: String) -> Result<Vec<String>> {
+        let workspace = self.require_workspace()?;
+        let safe = sanitize_relative_folder(&name)?;
+        if safe == "Root" {
+            return Err(anyhow!("notebook name cannot be empty"));
+        }
+        let dir = workspace.join(folder_to_relative_path(&safe));
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create notebook {}", dir.display()))?;
+        self.list_notebooks()
+    }
+
+    /// List notebooks: the top-level folders in the workspace (filesystem is the
+    /// source of truth), excluding hidden/ignored dirs. Includes empty ones.
+    pub fn list_notebooks(&self) -> Result<Vec<String>> {
+        let workspace = self.require_workspace()?;
+        let mut names = Vec::new();
+        if let Ok(entries) = fs::read_dir(&workspace) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.')
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == "dist"
+                    || name == "build"
+                {
+                    continue;
+                }
+                names.push(name);
+            }
+        }
+        names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        Ok(names)
     }
 
     pub async fn load_note(&self, note_id: String) -> Result<NoteDocument> {

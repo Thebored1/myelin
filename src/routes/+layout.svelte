@@ -193,6 +193,8 @@
 
 <style>
 	:global(:root) {
+		/* Drives native control rendering (checkboxes, scrollbars) to match the theme. */
+		color-scheme: dark;
 		--accent-100: #ef6f2e;
 		--accent-200: #ee6018;
 		--accent-300: #d15010;
@@ -289,6 +291,7 @@
 	   it's darkest) so existing var(--neutral-*) usages keep their semantic
 	   meaning: low numbers = prominent text, high numbers = faint borders. */
 	:global(:root[data-theme='light']) {
+		color-scheme: light;
 		--surface-dark-primary: #ffffff;
 		--surface-dark-secondary: #f4f2ef;
 		--surface-light-primary: #1f1d1c;
@@ -358,6 +361,10 @@
 		-webkit-font-smoothing: antialiased;
 		height: 100vh;
 		overflow: hidden;
+		/* App-like feel: text isn't selectable by default. Editable surfaces
+		   re-enable it below (form fields, the note editor, the PDF text layer). */
+		user-select: none;
+		-webkit-user-select: none;
 	}
 
 	/* Light: warm off-white with a faint diagonal hatch (matches the reference). */
@@ -387,6 +394,29 @@
 	:global(*::before),
 	:global(*::after) {
 		box-sizing: border-box;
+	}
+
+	/* Re-enable text selection only where it's genuinely needed: form fields, any
+	   contenteditable, the Vditor note editor, math fields, and the PDF text layer
+	   (selection there powers quote/highlight/copy). Everything else stays
+	   unselectable so the app doesn't feel like a web page. */
+	:global(input),
+	:global(textarea),
+	:global([contenteditable]:not([contenteditable='false'])),
+	:global(.vditor-ir),
+	:global(.vditor-ir *),
+	:global(.vditor-sv),
+	:global(.vditor-sv *),
+	:global(.vditor-wysiwyg),
+	:global(.vditor-wysiwyg *),
+	:global(.vditor-reset),
+	:global(.vditor-reset *),
+	:global(.vditor-textarea),
+	:global(math-field),
+	:global(.textLayer),
+	:global(.textLayer *) {
+		user-select: text;
+		-webkit-user-select: text;
 	}
 
 	:global(::selection) {

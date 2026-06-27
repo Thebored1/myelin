@@ -142,11 +142,22 @@ async fn create_note(
     title: String,
     source_pdf: Option<String>,
     extension: Option<String>,
+    notebook: Option<String>,
 ) -> Result<NoteDocument, String> {
     state
-        .create_note(title, source_pdf, extension)
+        .create_note(title, source_pdf, extension, notebook)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn create_notebook(state: State<'_, AppState>, name: String) -> Result<Vec<String>, String> {
+    state.create_notebook(name).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_notebooks(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    state.list_notebooks().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -472,6 +483,8 @@ pub fn run() {
             downloadable_backends,
             download_llama_backend,
             create_note,
+            create_notebook,
+            list_notebooks,
             load_note,
             save_note,
             delete_note,
