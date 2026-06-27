@@ -1901,7 +1901,11 @@ impl AppState {
             let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
-        let tex_content = fs::read_to_string(&path)?;
+        let raw = fs::read_to_string(&path)?;
+        // The .tex file on disk carries YAML frontmatter (id/title/tags/…). Strip
+        // it before compiling — otherwise that metadata block is text BEFORE
+        // \documentclass and LaTeX fails with "Missing \begin{document}" at line 1.
+        let tex_content = split_frontmatter(&raw).1;
 
         // For bare notes we prepend the default preamble; tell run_tectonic how
         // many lines that adds so it can map TeX error lines back to the editor.
