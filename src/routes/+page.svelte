@@ -22,6 +22,7 @@
 	// True once the initial snapshot has loaded — prevents the "no workspace"
 	// welcome screen from flashing before we know if a workspace is connected.
 	let ready = $state(false);
+	let indexing = $state(false);
 	let provider = $state<ProviderStatus | null>(null);
 	let query = $state('');
 	let isBusy = $state(false);
@@ -203,8 +204,9 @@
 		else if (f === 'documents') base = base.filter((n) => DOC_GROUP.includes(noteType(n)));
 		else if (f !== 'all') base = base.filter((n) => noteType(n) === f);
 		if (activeTag !== null) base = base.filter((n) => n.tags.includes(activeTag!));
-		if (activeNotebook !== null)
-			base = base.filter((n) => n.folder === activeNotebook || n.folder.startsWith(activeNotebook + '/'));
+		// null notebook = "uncategorized" (notes not in any notebook / workspace root).
+		if (activeNotebook === null) base = base.filter((n) => notebookOf(n) === null);
+		else base = base.filter((n) => n.folder === activeNotebook || n.folder.startsWith(activeNotebook + '/'));
 		return [...base].sort(
 			(a, b) =>
 				(pinnedNoteIds.includes(b.id) ? 1 : 0) - (pinnedNoteIds.includes(a.id) ? 1 : 0)
@@ -354,7 +356,7 @@
 		}
 	}
 
-	async function createNote(extension: string = 'md', notebook: string | null = activeNotebook) {
+	async function createNote(extension: string = 'md', notebook: string | null = createTarget) {
 		pendingCreateCount += 1;
 		if (createLoopRunning) return;
 		createLoopRunning = true;
@@ -413,6 +415,12 @@
 		if (!note.folder || note.folder === 'Root') return null;
 		return note.folder.split('/')[0];
 	}
+	let uncategorizedCount = $derived(dashNotes.filter((n) => notebookOf(n) === null).length);
+
+	// Where new notes / uploads land — inferred, never asked: the open note's
+	// notebook if one is selected, otherwise the notebook you're viewing. null =
+	// uncategorized (workspace root).
+	let createTarget = $derived(selectedNote ? notebookOf(selectedNote) : activeNotebook);
 
 	// Upload a document (PDF/EPUB) into the workspace from the notebook "+" menu.
 	async function importFile() {
@@ -424,7 +432,7 @@
 		if (typeof picked !== 'string') return;
 		isBusy = true;
 		try {
-			await invoke('import_pdf_file', { filePath: picked });
+			await invoke('import_pdf_file', { filePath: picked, notebook: createTarget });
 			await refreshApp();
 		} catch (e) {
 			console.error('import failed', e);
@@ -519,23 +527,40 @@
 			if (!appVersion) {
 				getVersion().then((v) => { appVersion = v; appCache.appVersion = v; }).catch(() => {});
 			}
+
+			// Cold start: paint the shell immediately from the cheap in-memory snapshot
+			// (workspace + whatever's already indexed) so the window never sits blank.
+			if (!appCache.app) {
+				try {
+					app = await invoke<AppSnapshot>('get_snapshot');
+					provider = await invoke<ProviderStatus>('get_provider_status');
+					appCache.app = app;
+					appCache.provider = provider;
+				} catch (e) {
+					console.error(e);
+				}
+				ready = true;
+			}
+
+			// Heavy one-time init (git, watcher, full reindex) now runs with the UI
+			// already up; the index events refresh the list when it finishes.
 			try {
 				if (!appCache.bootstrapped) {
-					// One-time heavy init: git repo, file watcher, full workspace reindex.
-					// Later Home visits skip this and rely on the cheap get_snapshot below
-					// plus the live file watcher.
+					indexing = true;
 					app = await invoke<AppSnapshot>('bootstrap');
 					appCache.bootstrapped = true;
 					appCache.app = app;
+					indexing = false;
 				}
 				await refreshApp();
 			} finally {
 				ready = true;
+				indexing = false;
 			}
 			unlistenChanged = await listen('index://changed', () => { message = 'Reindexing…'; });
 			unlistenStatus = await listen<string>('index://status', (event) => {
-				if (event.payload === 'started') message = 'Indexing…';
-				else if (event.payload === 'completed') { message = ''; void refreshApp(); }
+				if (event.payload === 'started') { message = 'Indexing…'; indexing = true; }
+				else if (event.payload === 'completed') { message = ''; indexing = false; void refreshApp(); }
 			});
 		})();
 		return () => { unlistenChanged(); unlistenStatus(); };
@@ -757,6 +782,10 @@
 						<span class="ov-val">{notebooks.length}</span>
 					</button>
 					{#if notebooksExpanded}
+						<button class="ov-row ov-sub ov-clickable" class:active={activeNotebook === null} onclick={() => (activeNotebook = null)} title="Notes not in a notebook">
+							<span class="ov-key ov-ellipsis">uncategorized</span>
+							<span class="ov-val">{uncategorizedCount}</span>
+						</button>
 						{#each notebooks as nb (nb)}
 							<button class="ov-row ov-sub ov-clickable" class:active={activeNotebook === nb} onclick={() => toggleNotebook(nb)} title={nb}>
 								<span class="ov-key ov-ellipsis">{nb}</span>
@@ -880,15 +909,15 @@
 				<header class="dashboard-header">
 					<div class="nb-switcher">
 						<button class="nb-switch-btn" onclick={(e) => { e.stopPropagation(); showNotebookMenu = !showNotebookMenu; }}>
-							<h2>{activeNotebook ?? (app?.workspacePath ? workspaceLabel(app.workspacePath) : 'workspace')}</h2>
+							<h2>{activeNotebook ?? 'Uncategorized'}</h2>
 							<svg class="nb-switch-caret" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
 						</button>
 						{#if showNotebookMenu}
 							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 							<div class="nb-switch-menu" onclick={(e) => e.stopPropagation()}>
 								<button class="nb-switch-item" class:active={activeNotebook === null} onclick={() => { activeNotebook = null; showNotebookMenu = false; }}>
-									<span>All notes</span>
-									{#if activeNotebook === null}<span class="nb-switch-check">✓</span>{/if}
+									<span>Uncategorized</span>
+									<span class="nb-switch-count">{uncategorizedCount}</span>
 								</button>
 								{#each notebooks as nb (nb)}
 									<button class="nb-switch-item" class:active={activeNotebook === nb} onclick={() => { activeNotebook = nb; showNotebookMenu = false; }}>
@@ -904,6 +933,12 @@
 							</div>
 						{/if}
 					</div>
+						{#if indexing}
+							<span class="indexing-pill" title="Indexing your workspace">
+								<svg class="nb-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+								indexing
+							</span>
+						{/if}
 					<div style="display: flex; gap: var(--space-2); align-items: center;">
 						<button
 							class="header-toggle-btn"
@@ -995,7 +1030,14 @@
 									</div>
 								{/each}
 								{#if filteredNotebook.length === 0}
-									<div class="nb-empty">No {activeTypeFilter === 'all' ? '' : activeTypeFilter + ' '}notes yet.</div>
+									{#if indexing}
+										<div class="nb-empty nb-indexing">
+											<svg class="nb-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+											Indexing your workspace…
+										</div>
+									{:else}
+										<div class="nb-empty">No {activeTypeFilter === 'all' ? '' : activeTypeFilter + ' '}notes yet.</div>
+									{/if}
 								{/if}
 							</div>
 						</section>
@@ -2039,6 +2081,31 @@
 		font-size: 0.85rem;
 		color: var(--neutral-600);
 		padding: var(--space-4) var(--space-2);
+	}
+	.nb-indexing {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--text-secondary);
+	}
+	.nb-spin {
+		animation: nb-spin 0.8s linear infinite;
+	}
+	@keyframes nb-spin {
+		to { transform: rotate(360deg); }
+	}
+	.indexing-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		color: var(--accent-100);
+		background: var(--accent-tint);
+		border: 1px solid var(--accent-300);
+		border-radius: 999px;
+		padding: 2px 10px;
+		white-space: nowrap;
 	}
 	/* ── Right panel (tasks) ── */
 	.dash-panel {

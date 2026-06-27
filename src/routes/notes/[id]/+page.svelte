@@ -38,6 +38,8 @@
 	let draftTags = $state('');
 	let isBusy = $state(false);
 	let message = $state('');
+	// First LaTeX compile fetches Tectonic's ~50 MB bundle; show real progress.
+	let latexDownloadMsg = $state<string | null>(null);
 
 	let activeSidebarTab = $state<'info' | 'chat' | 'versions'>('info');
 	let noteHistory = $state<GitCommit[]>([]);
@@ -93,6 +95,14 @@
 	// can compose your next prompt while the model is still answering.
 	let isChatStreaming = $derived(chatMessages.some((m) => m.isStreaming));
 
+	// The notebook (top-level folder) the open note lives in. Anything created or
+	// uploaded while it's open inherits it, so docs stay with their note.
+	function openNoteNotebook(): string | null {
+		if (!note) return null;
+		const segs = note.relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
+		return segs.length > 1 ? segs[0] : null;
+	}
+
 	// Upload button: attach a document (becomes a note via the PDF/EPUB import).
 	async function attachFile() {
 		const picked = await openFileDialog({
@@ -101,7 +111,7 @@
 		});
 		if (typeof picked === 'string') {
 			try {
-				await invoke('import_pdf_file', { filePath: picked });
+				await invoke('import_pdf_file', { filePath: picked, notebook: openNoteNotebook() });
 			} catch (e) {
 				console.error('attach failed', e);
 			}
@@ -1397,7 +1407,8 @@
 				if (!scratchpadSavedId) {
 					const newNote = await invoke<NoteDocument>('create_note', {
 						title: draftTitle,
-						sourcePdf: activeSourceId
+						sourcePdf: activeSourceId,
+						notebook: openNoteNotebook()
 					});
 					scratchpadSavedId = newNote.id;
 				}
@@ -1868,7 +1879,7 @@
 		attachPdfDialog?.close();
 		isBusy = true;
 		try {
-			const pdfNote = await invoke<NoteDocument>('import_pdf_file', { filePath });
+			const pdfNote = await invoke<NoteDocument>('import_pdf_file', { filePath, notebook: openNoteNotebook() });
 			await attachPdf(pdfNote);
 		} catch (err) {
 			message = `Failed to import PDF: ${err}`;
@@ -2057,6 +2068,7 @@
 		let unlistenNoteStreamStart: UnlistenFn;
 		let unlistenNoteDelta: UnlistenFn;
 		let unlistenNoteStreamCancel: UnlistenFn;
+		let unlistenLatex: UnlistenFn;
 
 		$showSidebarToggle = true;
 		if (window.innerWidth > 1200) {
@@ -2196,6 +2208,19 @@
 			}
 		).then((fn) => (unlistenError = fn));
 
+		// LaTeX support bundle download progress (first compile only).
+		listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
+			const p = event.payload;
+			const mb = ((p.bytes ?? 0) / (1024 * 1024)).toFixed(1);
+			if (p.phase === 'start' || p.phase === 'progress') {
+				latexDownloadMsg = `Downloading LaTeX support files (first run)… ${mb} MB`;
+			} else if (p.phase === 'done') {
+				latexDownloadMsg = null;
+			} else if (p.phase === 'error') {
+				latexDownloadMsg = null;
+			}
+		}).then((fn) => (unlistenLatex = fn));
+
 		window.addEventListener('mousemove', handleGlobalMouseMove);
 		window.addEventListener('mouseup', stopResizing);
 		window.addEventListener('beforeunload', handleBeforeUnload);
@@ -2220,6 +2245,7 @@
 			if (unlistenNoteStreamStart) unlistenNoteStreamStart();
 			if (unlistenNoteDelta) unlistenNoteDelta();
 			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
+			if (unlistenLatex) unlistenLatex();
 		};
 	});
 
@@ -2394,8 +2420,11 @@
 						</div>
 					{:else if workingDocType === 'tex'}
 						<div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-							<div style="padding: 4px; background: var(--bg-body); border-bottom: 1px solid var(--border-default); display: flex; justify-content: flex-end;">
-								<button class="primary" onclick={async () => {
+							<div style="padding: 4px; background: var(--bg-body); border-bottom: 1px solid var(--border-default); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+								<span style="font-size: 0.8rem; color: var(--text-secondary); padding-left: 4px;">
+									{#if latexDownloadMsg}{latexDownloadMsg}{/if}
+								</span>
+								<button class="primary" disabled={isBusy} onclick={async () => {
 									isBusy = true;
 									await saveNote();
 									try {
@@ -2406,8 +2435,9 @@
 										message = `Compile error: ${e}`;
 									} finally {
 										isBusy = false;
+										latexDownloadMsg = null;
 									}
-								}}>Compile to PDF</button>
+								}}>{latexDownloadMsg ? 'Downloading…' : 'Compile to PDF'}</button>
 							</div>
 							<div style="flex: 1;">
 								<TexEditor

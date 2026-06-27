@@ -72,14 +72,26 @@
 			}
 		};
 
+		// Global: clicking outside any modal <dialog> closes it. A click whose target
+		// is the <dialog> element itself landed on its backdrop (the content sits in
+		// child nodes), so close it.
+		const handleGlobalDialogClick = (e: MouseEvent) => {
+			const target = e.target as HTMLElement;
+			if (target instanceof HTMLDialogElement && target.open) {
+				target.close();
+			}
+		};
+
 		if (typeof window !== 'undefined') {
 			window.addEventListener('keydown', handleGlobalKeydown, { passive: false });
 			window.addEventListener('wheel', handleGlobalWheel, { passive: false });
 			window.addEventListener('contextmenu', handleGlobalContextMenu, { passive: false });
+			window.addEventListener('click', handleGlobalDialogClick);
 			return () => {
 				window.removeEventListener('keydown', handleGlobalKeydown);
 				window.removeEventListener('wheel', handleGlobalWheel);
 				window.removeEventListener('contextmenu', handleGlobalContextMenu);
+				window.removeEventListener('click', handleGlobalDialogClick);
 			};
 		}
 	});

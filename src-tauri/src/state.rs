@@ -32,6 +32,33 @@ const INDEX_DIR_NAME: &str = "index";
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
+// Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
+// We pin that package cache to a directory we own under app data so it lands in
+// a known place we can measure, pre-warm from Settings, and report on.
+const TECTONIC_CACHE_DIR_NAME: &str = "tectonic-cache";
+const TECTONIC_WARMED_MARKER: &str = ".myelin_warmed";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TectonicCacheStatus {
+    pub warmed: bool,
+    pub size_bytes: u64,
+}
+
+/// Total size of every file under `path` (recursive). Missing dir ⇒ 0.
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            match entry.metadata() {
+                Ok(meta) if meta.is_dir() => total += dir_size(&entry.path()),
+                Ok(meta) => total += meta.len(),
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
 
 fn describe_completion_error(error: &CompletionError) -> String {
     match error {
@@ -155,6 +182,13 @@ impl AppState {
                 app_data_dir.display()
             )
         })?;
+
+        // Pin Tectonic's package cache under app data (see TECTONIC_CACHE_DIR_NAME).
+        // Honoured by tectonic via the TECTONIC_CACHE_DIR env var (>= v0.9). Set
+        // here at startup, before any compile, so the bundle lands where we expect.
+        let tectonic_cache = app_data_dir.join(TECTONIC_CACHE_DIR_NAME);
+        let _ = fs::create_dir_all(&tectonic_cache);
+        std::env::set_var("TECTONIC_CACHE_DIR", &tectonic_cache);
 
         // Register the bundled-binary directory (shipped CPU/Vulkan builds) so
         // the backend resolver finds them automatically in a packaged app.
@@ -1448,7 +1482,11 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn import_pdf_file(&self, file_path: String) -> Result<NoteDocument> {
+    pub async fn import_pdf_file(
+        &self,
+        file_path: String,
+        notebook: Option<String>,
+    ) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let src = PathBuf::from(&file_path);
 
@@ -1462,7 +1500,20 @@ impl AppState {
             let file_name = src
                 .file_name()
                 .ok_or_else(|| anyhow!("invalid file path: no filename"))?;
-            let dest = workspace.join(file_name);
+            // Place the import inside the given notebook (folder), else workspace root.
+            let target_dir = match &notebook {
+                Some(name)
+                    if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") =>
+                {
+                    let safe = sanitize_relative_folder(name)?;
+                    let dir = workspace.join(folder_to_relative_path(&safe));
+                    fs::create_dir_all(&dir)
+                        .map_err(|e| anyhow!("failed to open notebook: {}", e))?;
+                    dir
+                }
+                _ => workspace.clone(),
+            };
+            let dest = target_dir.join(file_name);
             if !dest.exists() {
                 fs::copy(&src, &dest)
                     .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
@@ -1505,6 +1556,107 @@ impl AppState {
         }
     }
 
+    fn tectonic_cache_dir(&self) -> PathBuf {
+        self.inner.app_data_dir.join(TECTONIC_CACHE_DIR_NAME)
+    }
+
+    fn tectonic_warmed_marker(&self) -> PathBuf {
+        self.tectonic_cache_dir().join(TECTONIC_WARMED_MARKER)
+    }
+
+    fn is_tectonic_warmed(&self) -> bool {
+        self.tectonic_warmed_marker().exists()
+    }
+
+    fn mark_tectonic_warmed(&self) {
+        let _ = fs::write(self.tectonic_warmed_marker(), b"1");
+    }
+
+    /// Cache state for the Settings UI: whether the support bundle has been
+    /// fetched at least once, and how much disk the cache currently occupies.
+    pub fn tectonic_cache_status(&self) -> TectonicCacheStatus {
+        TectonicCacheStatus {
+            warmed: self.is_tectonic_warmed(),
+            size_bytes: dir_size(&self.tectonic_cache_dir()),
+        }
+    }
+
+    /// Compile `tex` to PDF bytes. The heavy Tectonic call runs on a blocking
+    /// thread so it never stalls the async runtime. When the package cache hasn't
+    /// been warmed yet (first run ⇒ ~50 MB bundle fetch) we emit `latex://download`
+    /// events (`start` / `progress` with byte counts / `done` / `error`) so the UI
+    /// can show a real download indicator instead of a generic spinner.
+    async fn run_tectonic(&self, tex: String) -> Result<Vec<u8>> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let needs_fetch = !self.is_tectonic_warmed();
+        let cache_dir = self.tectonic_cache_dir();
+        let handle = self.handle.clone();
+
+        // While the (blocking) compile downloads the bundle, a side thread polls
+        // the cache directory size and streams real progress to the frontend.
+        let stop = Arc::new(AtomicBool::new(false));
+        let poller = if needs_fetch {
+            let _ = handle.emit(
+                "latex://download",
+                serde_json::json!({ "phase": "start", "bytes": dir_size(&cache_dir) }),
+            );
+            let stop_poll = stop.clone();
+            let poll_handle = handle.clone();
+            let poll_dir = cache_dir.clone();
+            Some(std::thread::spawn(move || {
+                while !stop_poll.load(Ordering::Relaxed) {
+                    let _ = poll_handle.emit(
+                        "latex://download",
+                        serde_json::json!({ "phase": "progress", "bytes": dir_size(&poll_dir) }),
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                }
+            }))
+        } else {
+            None
+        };
+
+        let result =
+            tauri::async_runtime::spawn_blocking(move || tectonic::latex_to_pdf(tex)).await;
+
+        stop.store(true, Ordering::Relaxed);
+        if let Some(p) = poller {
+            let _ = p.join();
+        }
+
+        match result {
+            Ok(Ok(pdf)) => {
+                self.mark_tectonic_warmed();
+                if needs_fetch {
+                    let _ = handle.emit(
+                        "latex://download",
+                        serde_json::json!({ "phase": "done", "bytes": dir_size(&cache_dir) }),
+                    );
+                }
+                Ok(pdf)
+            }
+            Ok(Err(e)) => {
+                if needs_fetch {
+                    let _ = handle.emit(
+                        "latex://download",
+                        serde_json::json!({ "phase": "error", "message": e.to_string() }),
+                    );
+                }
+                Err(anyhow!("Failed to compile LaTeX using Tectonic: {}", e))
+            }
+            Err(e) => {
+                if needs_fetch {
+                    let _ = handle.emit(
+                        "latex://download",
+                        serde_json::json!({ "phase": "error", "message": e.to_string() }),
+                    );
+                }
+                Err(anyhow!("LaTeX compile task failed: {}", e))
+            }
+        }
+    }
+
     pub async fn compile_latex(&self, note_id: String) -> Result<Vec<u8>> {
         let workspace = self.require_workspace()?;
         let path = {
@@ -1513,15 +1665,20 @@ impl AppState {
             workspace.join(&note.document.relative_path)
         };
         let mut tex_content = fs::read_to_string(&path)?;
-        
+
         if !tex_content.contains("\\documentclass") {
             tex_content = format!("\\documentclass{{article}}\n\\usepackage{{amsmath}}\n\\begin{{document}}\n{}\n\\end{{document}}", tex_content);
         }
-        
-        let pdf_data = tectonic::latex_to_pdf(tex_content)
-            .map_err(|e| anyhow!("Failed to compile LaTeX using Tectonic: {}", e))?;
-            
-        Ok(pdf_data)
+
+        self.run_tectonic(tex_content).await
+    }
+
+    /// Pre-download Tectonic's support bundle by compiling a tiny stub document,
+    /// so users can warm the cache from Settings instead of paying the first-run
+    /// fetch when they hit "Compile to PDF".
+    pub async fn prewarm_tectonic(&self) -> Result<()> {
+        let stub = "\\documentclass{article}\n\\usepackage{amsmath}\n\\begin{document}\nMyelin LaTeX warm-up: $E = mc^2$.\n\\end{document}".to_string();
+        self.run_tectonic(stub).await.map(|_| ())
     }
 
     pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {

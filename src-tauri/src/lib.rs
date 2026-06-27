@@ -255,9 +255,10 @@ async fn rebuild_index(state: State<'_, AppState>) -> Result<AppSnapshot, String
 async fn import_pdf_file(
     state: State<'_, AppState>,
     file_path: String,
+    notebook: Option<String>,
 ) -> Result<NoteDocument, String> {
     state
-        .import_pdf_file(file_path)
+        .import_pdf_file(file_path, notebook)
         .await
         .map_err(|error| error.to_string())
 }
@@ -446,6 +447,16 @@ async fn compile_latex(state: State<'_, AppState>, note_id: String) -> Result<Ve
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn tectonic_cache_status(state: State<'_, AppState>) -> crate::state::TectonicCacheStatus {
+    state.tectonic_cache_status()
+}
+
+#[tauri::command]
+async fn prewarm_tectonic(state: State<'_, AppState>) -> Result<(), String> {
+    state.prewarm_tectonic().await.map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -516,6 +527,8 @@ pub fn run() {
             import_pdf_file,
             save_pdf_annotations,
             compile_latex,
+            tectonic_cache_status,
+            prewarm_tectonic,
             set_require_tool_approval,
             set_deterministic_tools,
             set_tool_gating,

@@ -36,6 +36,13 @@
     let providerHealthy = $state(true);
     let providerDetail = $state('');
 
+    // LaTeX → PDF support bundle (Tectonic) cache state.
+    let latexCache = $state<{ warmed: boolean; sizeBytes: number } | null>(null);
+    let latexDownloading = $state(false);
+    let latexDownloadBytes = $state(0);
+    let latexError = $state('');
+    const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+
     const hasGpuBuild = () => installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
     const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
 
@@ -199,6 +206,25 @@
             
             enableJupyterExecution = localStorage.getItem('myelin_jupyter_exec') === 'true';
 
+            // LaTeX support bundle: current cache state + live download progress.
+            try { latexCache = await invoke('tectonic_cache_status'); } catch (e) { console.error(e); }
+            await listen<{ phase: string; bytes?: number; message?: string }>(
+                'latex://download',
+                async (event) => {
+                    const p = event.payload;
+                    if (p.phase === 'start') {
+                        latexDownloading = true; latexError = ''; latexDownloadBytes = p.bytes ?? 0;
+                    } else if (p.phase === 'progress') {
+                        latexDownloading = true; latexDownloadBytes = p.bytes ?? latexDownloadBytes;
+                    } else if (p.phase === 'done') {
+                        latexDownloading = false; latexDownloadBytes = p.bytes ?? latexDownloadBytes;
+                        try { latexCache = await invoke('tectonic_cache_status'); } catch (e) { console.error(e); }
+                    } else if (p.phase === 'error') {
+                        latexDownloading = false; latexError = p.message ?? 'Download failed';
+                    }
+                }
+            );
+
             // Live-update the backend badge when a server actually starts.
             await listen<{ backend: string; gpuOffloaded: boolean; fellBackToCpu: boolean }>(
                 'ai://llama_backend',
@@ -231,6 +257,19 @@
             console.error('Failed to load provider status:', e);
         }
     });
+
+    async function downloadLatexSupport() {
+        latexError = '';
+        latexDownloading = true;
+        try {
+            await invoke('prewarm_tectonic');
+        } catch (e) {
+            // The backend also emits a `latex://download` error event, but guard
+            // against the invoke itself rejecting (e.g. no network at all).
+            latexError = String(e);
+            latexDownloading = false;
+        }
+    }
 
     async function downloadBackend(backend: string) {
         try {
@@ -699,6 +738,44 @@
                 </div>
                 <button class="browse-btn" onclick={toggleJupyterExecution}>
                     {enableJupyterExecution ? 'Enabled' : 'Disabled'}
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>LaTeX → PDF</h2>
+            <p class="description">
+                Compiling <code>.tex</code> notes to PDF uses Tectonic, which downloads a
+                LaTeX support bundle (~50&nbsp;MB) on first use. Download it now to make the
+                first compile instant and to work fully offline afterwards.
+            </p>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; gap: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">LaTeX support files</h3>
+                    <p class="description" style="margin-top: 4px;">
+                        {#if latexDownloading}
+                            Downloading… {formatMB(latexDownloadBytes)}
+                        {:else if latexError}
+                            <span style="color: var(--danger, #e5534b);">Error: {latexError}</span>
+                        {:else if latexCache?.warmed}
+                            Ready — {formatMB(latexCache.sizeBytes)} cached.
+                        {:else}
+                            Not downloaded yet.
+                        {/if}
+                    </p>
+                </div>
+                <button
+                    class="browse-btn"
+                    onclick={downloadLatexSupport}
+                    disabled={latexDownloading || latexCache?.warmed}
+                >
+                    {#if latexDownloading}
+                        Downloading…
+                    {:else if latexCache?.warmed}
+                        Downloaded
+                    {:else}
+                        Download now
+                    {/if}
                 </button>
             </div>
         </section>
