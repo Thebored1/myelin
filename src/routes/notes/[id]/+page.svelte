@@ -555,6 +555,7 @@
 		deleteMainNoteDialog?.showModal();
 	}
 	let pendingNavigationUrl = $state('');
+	let pendingBack = $state(false);
 
 	let attachPdfDialog: HTMLDialogElement | undefined = $state();
 	let pdfSearchQuery = $state('');
@@ -1709,6 +1710,32 @@
 		void goto(url);
 	}
 
+	// Back button: go to the page the user actually came from (browser history),
+	// not always home. A deliberate ?returnTo= still wins, and the unsaved-changes
+	// guard is respected (warn first, then go back on confirm).
+	function goBack() {
+		if (page.url.searchParams.has('returnTo')) {
+			safeNavigate(backUrl);
+			return;
+		}
+		if (saveStatus === 'saving' || saveStatus === 'unsaved') {
+			pendingBack = true;
+			navigationWarningDialog?.showModal();
+			return;
+		}
+		navigateBack();
+	}
+
+	function navigateBack() {
+		// Mark programmatic so beforeNavigate doesn't re-prompt on the popstate.
+		isProgrammaticNavigation = true;
+		if (typeof window !== 'undefined' && window.history.length > 1) {
+			history.back();
+		} else {
+			void goto('/');
+		}
+	}
+
 	function requestDeleteAttachedNote() {
 		deleteAttachedNoteDialog?.showModal();
 	}
@@ -1898,6 +1925,11 @@
 
 	function confirmNavigation() {
 		navigationWarningDialog?.close();
+		if (pendingBack) {
+			pendingBack = false;
+			navigateBack();
+			return;
+		}
 		if (pendingNavigationUrl) {
 			isProgrammaticNavigation = true;
 			void goto(pendingNavigationUrl);
@@ -1908,6 +1940,7 @@
 	function cancelNavigation() {
 		navigationWarningDialog?.close();
 		pendingNavigationUrl = '';
+		pendingBack = false;
 	}
 
 	// AI Actions
@@ -2234,7 +2267,7 @@
 		<div class="header-copy">
 			<button
 				class="back-link"
-				onclick={() => safeNavigate(backUrl)}
+				onclick={goBack}
 				aria-label="Go back"
 				title="Go back"
 			>
