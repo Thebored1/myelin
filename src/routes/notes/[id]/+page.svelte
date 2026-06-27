@@ -41,6 +41,11 @@
 	let message = $state('');
 	// First LaTeX compile fetches Tectonic's ~50 MB bundle; show real progress.
 	let latexDownloadMsg = $state<string | null>(null);
+	// .tex live-preview state.
+	let texAutoCompile = $state(false);
+	let texCompiling = $state(false);
+	let texDiagnostics = $state<{ line: number; message: string; severity?: 'error' | 'warning' }[]>([]);
+	let texAutoTimer: ReturnType<typeof setTimeout> | undefined;
 
 	let activeSidebarTab = $state<'info' | 'chat' | 'versions'>('info');
 	let noteHistory = $state<GitCommit[]>([]);
@@ -643,6 +648,68 @@
 		}
 		mathDialog?.close();
 	}
+
+	// Compile the open .tex note to PDF and show it in the split preview pane.
+	// Shared by the manual button and the debounced auto-compile.
+	async function compileTex(_opts: { manual?: boolean } = {}) {
+		if (!note || texCompiling) return;
+		texCompiling = true;
+		isBusy = true;
+		try {
+			await saveNote();
+			const pdfBytes = await invoke<ArrayBuffer>('compile_latex', { noteId: note.id });
+			activeSourceBytes = new Uint8Array(pdfBytes);
+			sourceMaterialType = 'pdf';
+			showAttachedNote = true;
+			texDiagnostics = [];
+			message = '';
+		} catch (e) {
+			const info = parseLatexError(e);
+			texDiagnostics = info.diagnostics;
+			message = info.diagnostics.length
+				? `LaTeX: ${info.diagnostics.length} error${info.diagnostics.length > 1 ? 's' : ''} — see editor markers.`
+				: `Compile error: ${info.message}`;
+		} finally {
+			texCompiling = false;
+			isBusy = false;
+			latexDownloadMsg = null;
+		}
+	}
+
+	// The backend serialises compile failures as JSON { message, log, diagnostics }
+	// (line numbers already mapped to editor coordinates). Fall back to plain text.
+	function parseLatexError(e: unknown): {
+		message: string;
+		diagnostics: { line: number; message: string; severity?: 'error' | 'warning' }[];
+	} {
+		const raw = typeof e === 'string' ? e : ((e as any)?.message ?? String(e));
+		try {
+			const parsed = JSON.parse(raw);
+			if (parsed && Array.isArray(parsed.diagnostics)) {
+				return { message: parsed.message ?? 'LaTeX compilation failed', diagnostics: parsed.diagnostics };
+			}
+		} catch {
+			/* not structured — show the raw string */
+		}
+		return { message: raw, diagnostics: [] };
+	}
+
+	function closeTexPreview() {
+		activeSourceBytes = null;
+		showAttachedNote = false;
+	}
+
+	// Debounced auto-compile: a couple of seconds after typing stops, when armed.
+	$effect(() => {
+		void draftBody;
+		const armed = texAutoCompile && workingDocType === 'tex';
+		if (!armed) return;
+		if (texAutoTimer) clearTimeout(texAutoTimer);
+		texAutoTimer = setTimeout(() => void compileTex(), 2000);
+		return () => {
+			if (texAutoTimer) clearTimeout(texAutoTimer);
+		};
+	});
 
 	$effect(() => {
 		const query = linkSearchQuery;
@@ -2394,7 +2461,7 @@
 						onQuote={handlePdfQuote}
 						onAnnotationsChange={handleAnnotationsChange}
 						onImageExtract={handleImageExtract}
-						onClosePdf={(activeSourceBytes !== null && showAttachedNote) ? requestDetachPdf : undefined}
+						onClosePdf={workingDocType === 'tex' ? closeTexPreview : ((activeSourceBytes !== null && showAttachedNote) ? requestDetachPdf : undefined)}
 						onAttachNote={() => {
 							showAttachedNote = true;
 							setTimeout(() => initVditor(), 100);
@@ -2448,27 +2515,25 @@
 						<div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
 							<div style="padding: 4px; background: var(--bg-body); border-bottom: 1px solid var(--border-default); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
 								<span style="font-size: 0.8rem; color: var(--text-secondary); padding-left: 4px;">
-									{#if latexDownloadMsg}{latexDownloadMsg}{/if}
+									{#if latexDownloadMsg}{latexDownloadMsg}{:else if texCompiling}Compiling…{/if}
 								</span>
-								<button class="primary" disabled={isBusy} onclick={async () => {
-									isBusy = true;
-									await saveNote();
-									try {
-										const pdfBytes = await invoke<ArrayBuffer>('compile_latex', { noteId: note?.id });
-										activeSourceBytes = new Uint8Array(pdfBytes);
-										sourceMaterialType = 'pdf';
-									} catch(e) {
-										message = `Compile error: ${e}`;
-									} finally {
-										isBusy = false;
-										latexDownloadMsg = null;
-									}
-								}}>{latexDownloadMsg ? 'Downloading…' : 'Compile to PDF'}</button>
+								<div style="display: flex; gap: 6px; align-items: center;">
+									<button
+										class="btn-ghost"
+										style="font-size: 0.78rem; padding: 4px 8px; {texAutoCompile ? 'color: var(--accent-200); border-color: var(--accent-200);' : ''}"
+										title="Recompile automatically a couple of seconds after you stop typing"
+										onclick={() => (texAutoCompile = !texAutoCompile)}
+									>Auto: {texAutoCompile ? 'on' : 'off'}</button>
+									<button class="primary" disabled={isBusy} onclick={() => compileTex({ manual: true })}>
+										{latexDownloadMsg ? 'Downloading…' : 'Compile to PDF'}
+									</button>
+								</div>
 							</div>
-							<div style="flex: 1;">
+							<div style="flex: 1; min-height: 0;">
 								<TexEditor
 									value={draftBody}
 									onInput={(val) => { draftBody = val; triggerAutoSave(); }}
+									diagnostics={texDiagnostics}
 								/>
 							</div>
 						</div>

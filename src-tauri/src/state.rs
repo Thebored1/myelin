@@ -57,6 +57,172 @@ fn wrap_bare_latex(body: &str) -> String {
     format!("{DEFAULT_TEX_PREAMBLE}\n{body}\n\\end{{document}}")
 }
 
+/// A failed Tectonic run: the engine's high-level message plus the raw TeX log
+/// (which carries the `l.NN` line markers we parse into editor diagnostics).
+struct TexFailure {
+    message: String,
+    log: String,
+}
+
+/// StatusBackend that captures the TeX error log instead of printing it. The
+/// one-shot `tectonic::latex_to_pdf` uses a Noop backend that throws this away,
+/// so we drive the session ourselves to get line-level diagnostics.
+#[derive(Default, Clone)]
+struct CapturingStatus {
+    log: Arc<Mutex<Vec<u8>>>,
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl tectonic::status::StatusBackend for CapturingStatus {
+    fn report(
+        &mut self,
+        kind: tectonic::status::MessageKind,
+        args: std::fmt::Arguments,
+        _err: Option<&anyhow::Error>,
+    ) {
+        if matches!(
+            kind,
+            tectonic::status::MessageKind::Error | tectonic::status::MessageKind::Warning
+        ) {
+            self.messages.lock().push(format!("{args}"));
+        }
+    }
+
+    fn dump_error_logs(&mut self, output: &[u8]) {
+        self.log.lock().extend_from_slice(output);
+    }
+}
+
+/// Compile `tex` to PDF bytes, capturing the TeX log on failure. Runs the
+/// Tectonic driver directly (vs. latex_to_pdf) so we can attach a capturing
+/// status backend. Honours TECTONIC_CACHE_DIR set at startup.
+fn compile_with_tectonic(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
+    use tectonic::config::PersistentConfig;
+    use tectonic::driver::{OutputFormat, ProcessingSessionBuilder};
+
+    let mut status = CapturingStatus::default();
+    let log_handle = status.log.clone();
+    let messages_handle = status.messages.clone();
+    let read_log = |h: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&h.lock()).into_owned();
+
+    let config = match PersistentConfig::open(false) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("Tectonic config error: {e}"),
+                log: String::new(),
+            })
+        }
+    };
+    let bundle = match config.default_bundle(false) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("Could not load the LaTeX support bundle: {e}"),
+                log: read_log(&log_handle),
+            })
+        }
+    };
+    let format_cache_path = match config.format_cache_path() {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("Tectonic format cache error: {e}"),
+                log: read_log(&log_handle),
+            })
+        }
+    };
+
+    let mut sb = ProcessingSessionBuilder::default();
+    sb.bundle(bundle)
+        .primary_input_buffer(tex.as_bytes())
+        .tex_input_name("texput.tex")
+        .format_name("latex")
+        .format_cache_path(format_cache_path)
+        .keep_logs(false)
+        .keep_intermediates(false)
+        .print_stdout(false)
+        .output_format(OutputFormat::Pdf)
+        .do_not_write_output_files();
+
+    let mut sess = match sb.create(&mut status) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("{e}"),
+                log: read_log(&log_handle),
+            })
+        }
+    };
+    if let Err(e) = sess.run(&mut status) {
+        // Prefer the engine's first reported error line over the generic wrapper.
+        let message = messages_handle
+            .lock()
+            .iter()
+            .find(|m| !m.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("{e}"));
+        return Err(TexFailure {
+            message,
+            log: read_log(&log_handle),
+        });
+    }
+
+    let mut files = sess.into_file_data();
+    match files.remove("texput.pdf") {
+        Some(file) => Ok(file.data),
+        None => Err(TexFailure {
+            message: "LaTeX reported success but produced no PDF.".into(),
+            log: read_log(&log_handle),
+        }),
+    }
+}
+
+/// Parse a TeX error log into editor diagnostics. TeX reports the offending line
+/// as `l.NN`; LaTeX package errors as `... on input line NN`. Line numbers are in
+/// the compiled document's coordinates, so subtract `body_line_offset` (the
+/// preamble length we prepended for bare notes) to map back to the editor.
+fn parse_tex_log(log: &str, body_line_offset: usize) -> Vec<serde_json::Value> {
+    let mut diagnostics = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut current_msg: Option<String> = None;
+
+    let map_line = |n: usize| -> usize { n.saturating_sub(body_line_offset).max(1) };
+    let leading_number = |s: &str| -> Option<usize> {
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<usize>().ok()
+    };
+
+    for raw_line in log.lines() {
+        let line = raw_line.trim_end();
+        if let Some(rest) = line.strip_prefix("! ") {
+            current_msg = Some(rest.trim_end_matches('.').trim().to_string());
+        }
+        let mut push = |line_no: usize, msg: String| {
+            let editor_line = map_line(line_no);
+            if seen.insert((editor_line, msg.clone())) {
+                diagnostics.push(serde_json::json!({
+                    "line": editor_line,
+                    "message": msg,
+                    "severity": "error",
+                }));
+            }
+        };
+        if let Some(num) = line.strip_prefix("l.").and_then(leading_number) {
+            let msg = current_msg.take().unwrap_or_else(|| "LaTeX error".to_string());
+            push(num, msg);
+        } else if let Some(idx) = line.find("on input line ") {
+            if let Some(num) = leading_number(&line[idx + "on input line ".len()..]) {
+                let msg = current_msg
+                    .clone()
+                    .unwrap_or_else(|| line.trim().trim_start_matches('!').trim().to_string());
+                push(num, msg);
+            }
+        }
+    }
+    diagnostics
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TectonicCacheStatus {
@@ -1605,7 +1771,7 @@ impl AppState {
     /// been warmed yet (first run ⇒ ~50 MB bundle fetch) we emit `latex://download`
     /// events (`start` / `progress` with byte counts / `done` / `error`) so the UI
     /// can show a real download indicator instead of a generic spinner.
-    async fn run_tectonic(&self, tex: String) -> Result<Vec<u8>> {
+    async fn run_tectonic(&self, tex: String, body_line_offset: usize) -> Result<Vec<u8>> {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let needs_fetch = !self.is_tectonic_warmed();
@@ -1637,7 +1803,7 @@ impl AppState {
         };
 
         let result =
-            tauri::async_runtime::spawn_blocking(move || tectonic::latex_to_pdf(tex)).await;
+            tauri::async_runtime::spawn_blocking(move || compile_with_tectonic(&tex)).await;
 
         stop.store(true, Ordering::Relaxed);
         if let Some(p) = poller {
@@ -1655,14 +1821,34 @@ impl AppState {
                 }
                 Ok(pdf)
             }
-            Ok(Err(e)) => {
+            Ok(Err(failure)) => {
+                // A non-empty TeX log means the engine actually ran (bundle present),
+                // so a LaTeX *content* error shouldn't keep re-triggering the
+                // first-run download UI. An empty log ⇒ the bundle fetch itself
+                // failed (e.g. offline) — surface that as a download error.
+                let engine_ran = !failure.log.is_empty();
+                if engine_ran {
+                    self.mark_tectonic_warmed();
+                }
                 if needs_fetch {
+                    let phase = if engine_ran { "done" } else { "error" };
                     let _ = handle.emit(
                         "latex://download",
-                        serde_json::json!({ "phase": "error", "message": e.to_string() }),
+                        serde_json::json!({
+                            "phase": phase,
+                            "bytes": dir_size(&cache_dir),
+                            "message": failure.message,
+                        }),
                     );
                 }
-                Err(anyhow!("Failed to compile LaTeX using Tectonic: {}", e))
+                // Serialise as JSON so the frontend can place line markers in the
+                // editor; it falls back to showing the message verbatim otherwise.
+                let payload = serde_json::json!({
+                    "message": failure.message,
+                    "log": failure.log,
+                    "diagnostics": parse_tex_log(&failure.log, body_line_offset),
+                });
+                Err(anyhow!("{payload}"))
             }
             Err(e) => {
                 if needs_fetch {
@@ -1683,13 +1869,17 @@ impl AppState {
             let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
-        let mut tex_content = fs::read_to_string(&path)?;
+        let tex_content = fs::read_to_string(&path)?;
 
-        if !tex_content.contains("\\documentclass") {
-            tex_content = wrap_bare_latex(&tex_content);
-        }
+        // For bare notes we prepend the default preamble; tell run_tectonic how
+        // many lines that adds so it can map TeX error lines back to the editor.
+        let (wrapped, offset) = if !tex_content.contains("\\documentclass") {
+            (wrap_bare_latex(&tex_content), DEFAULT_TEX_PREAMBLE.lines().count())
+        } else {
+            (tex_content, 0)
+        };
 
-        self.run_tectonic(tex_content).await
+        self.run_tectonic(wrapped, offset).await
     }
 
     /// Pre-download Tectonic's support bundle by compiling a tiny stub document,
@@ -1697,7 +1887,7 @@ impl AppState {
     /// fetch when they hit "Compile to PDF".
     pub async fn prewarm_tectonic(&self) -> Result<()> {
         let stub = wrap_bare_latex("Myelin LaTeX warm-up: $E = mc^2$, \\textbf{ready}.");
-        self.run_tectonic(stub).await.map(|_| ())
+        self.run_tectonic(stub, 0).await.map(|_| ())
     }
 
     pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {
