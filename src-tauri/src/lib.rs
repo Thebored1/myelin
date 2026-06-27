@@ -6,7 +6,7 @@ mod model_profiles;
 mod models;
 mod notebook;
 mod rag;
-mod state;
+pub mod state;
 mod stream_chat;
 mod tool_capability;
 mod web_search;

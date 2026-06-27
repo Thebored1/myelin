@@ -57,6 +57,65 @@ fn wrap_bare_latex(body: &str) -> String {
     format!("{DEFAULT_TEX_PREAMBLE}\n{body}\n\\end{{document}}")
 }
 
+/// Faithful test entrypoint mirroring [`AppState::compile_latex`]'s transform
+/// (frontmatter strip → preamble wrap / package injection → compile) for a raw
+/// note file. Used by the `texcheck` diagnostic bin. Returns PDF bytes or the
+/// first-line error message.
+pub fn compile_tex_source(raw: &str) -> std::result::Result<Vec<u8>, String> {
+    let body = split_frontmatter(raw).1;
+    if body.trim().is_empty() {
+        return Err("This note is empty — add some LaTeX before compiling.".to_string());
+    }
+    let final_tex = if !body.contains("\\documentclass") {
+        wrap_bare_latex(&body)
+    } else {
+        ensure_packages(&body).0
+    };
+    compile_with_tectonic(&final_tex).map_err(|f| f.message)
+}
+
+// Packages commonly used in notes that we make sure are available even when the
+// note brings its own (often thin) preamble — e.g. AI/template notes that use
+// \mathbb but only load amsmath. geometry/inputenc are intentionally excluded:
+// they change layout, and a note with its own preamble may set them itself.
+const ENSURE_PACKAGES: &[&str] = &[
+    "amsmath", "amssymb", "amsfonts", "mathtools", "graphicx", "booktabs", "enumitem", "xcolor",
+    "hyperref",
+];
+
+/// For a document that has its own `\documentclass`, inject `\usepackage{…}` lines
+/// for any [`ENSURE_PACKAGES`] not already referenced, right after the
+/// `\documentclass` line. Returns the new source and how many lines were inserted
+/// (so TeX error lines can be mapped back to the editor). Skipping already-present
+/// packages avoids LaTeX "option clash" errors.
+fn ensure_packages(src: &str) -> (String, usize) {
+    let missing: Vec<&str> = ENSURE_PACKAGES
+        .iter()
+        .copied()
+        .filter(|pkg| !src.contains(pkg))
+        .collect();
+    if missing.is_empty() {
+        return (src.to_string(), 0);
+    }
+    let Some(dc) = src.find("\\documentclass") else {
+        return (src.to_string(), 0);
+    };
+    // Insert after the end of the \documentclass line.
+    let insert_at = src[dc..]
+        .find('\n')
+        .map(|i| dc + i + 1)
+        .unwrap_or(src.len());
+    let injected: String = missing
+        .iter()
+        .map(|pkg| format!("\\usepackage{{{pkg}}}\n"))
+        .collect();
+    let mut out = String::with_capacity(src.len() + injected.len());
+    out.push_str(&src[..insert_at]);
+    out.push_str(&injected);
+    out.push_str(&src[insert_at..]);
+    (out, missing.len())
+}
+
 /// A failed Tectonic run: the engine's high-level message plus the raw TeX log
 /// (which carries the `l.NN` line markers we parse into editor diagnostics).
 struct TexFailure {
@@ -1906,16 +1965,21 @@ impl AppState {
         // it before compiling — otherwise that metadata block is text BEFORE
         // \documentclass and LaTeX fails with "Missing \begin{document}" at line 1.
         let tex_content = split_frontmatter(&raw).1;
+        if tex_content.trim().is_empty() {
+            return Err(anyhow!("This note is empty — add some LaTeX before compiling."));
+        }
 
-        // For bare notes we prepend the default preamble; tell run_tectonic how
-        // many lines that adds so it can map TeX error lines back to the editor.
-        let (wrapped, offset) = if !tex_content.contains("\\documentclass") {
+        // Bare notes get the full default preamble prepended; notes with their own
+        // \documentclass get any missing common packages injected. Either way the
+        // returned offset is how many lines we added before the body, so TeX error
+        // lines map back to what the editor shows.
+        let (final_tex, offset) = if !tex_content.contains("\\documentclass") {
             (wrap_bare_latex(&tex_content), DEFAULT_TEX_PREAMBLE.lines().count())
         } else {
-            (tex_content, 0)
+            ensure_packages(&tex_content)
         };
 
-        self.run_tectonic(wrapped, offset).await
+        self.run_tectonic(final_tex, offset).await
     }
 
     /// Pre-download Tectonic's support bundle by compiling a tiny stub document,
