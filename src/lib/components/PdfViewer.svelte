@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import * as pdfjsLib from 'pdfjs-dist';
 	import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 	import 'pdfjs-dist/web/pdf_viewer.css';
@@ -74,6 +74,11 @@
 			
 			pdfDoc = doc;
 			numPages = doc.numPages;
+
+			// Fit to the pane width as soon as the PDF renders, so it isn't cropped
+			// on narrow/split windows. Wait for the viewer div to mount + lay out.
+			await tick();
+			requestAnimationFrame(() => fitToScreen());
 		} catch (error: any) {
 			console.error('Error loading PDF:', error);
 			errorMessage = error?.message || String(error);

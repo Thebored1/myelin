@@ -102,7 +102,6 @@
 					syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
 					keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
 					themeCompartment.of(makeThemeExt($theme === 'light')),
-					EditorView.lineWrapping,
 					EditorView.updateListener.of((u) => {
 						if (u.docChanged) onInput(u.state.doc.toString());
 					})
@@ -140,7 +139,6 @@
 <div style="width: 100%; height: 100%; display: flex; flex-direction: column;">
 	<div class="tex-toolbar">
 		<div class="tex-tools">
-			<span class="tex-label">LaTeX</span>
 			<button class="btn-ghost tex-btn" style="font-weight: bold;" onclick={() => insertText('\\textbf{', '}')} title="Bold">B</button>
 			<button class="btn-ghost tex-btn" style="font-style: italic;" onclick={() => insertText('\\textit{', '}')} title="Italic">I</button>
 			<button class="btn-ghost tex-btn" onclick={() => insertText('\\section{', '}')} title="Section">§</button>
@@ -178,12 +176,6 @@
 		display: flex;
 		gap: 4px;
 		align-items: center;
-	}
-	.tex-label {
-		font-size: 0.8rem;
-		color: var(--text-secondary);
-		font-family: var(--font-mono);
-		margin-right: 8px;
 	}
 	.tex-btn {
 		padding: 4px 8px;

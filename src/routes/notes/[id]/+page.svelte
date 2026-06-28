@@ -2164,18 +2164,11 @@
 		let unlistenLatex: UnlistenFn;
 
 		$showSidebarToggle = true;
-		if (window.innerWidth > 1200) {
-			$noteSidebarOpen = true;
-		}
+		// The note sidebar's open/closed state is remembered across sessions via the
+		// persisted noteSidebarOpen store, so we intentionally don't force it here.
 
 		const mql = window.matchMedia('(max-width: 1200px)');
-		const handleMediaChange = (e: MediaQueryListEvent) => {
-			if (e.matches) {
-				$noteSidebarOpen = false;
-			} else {
-				$noteSidebarOpen = true;
-			}
-		};
+		const handleMediaChange = (_e: MediaQueryListEvent) => {};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
 		// Clear the armed selection on clicks outside the prompt box (capture phase
