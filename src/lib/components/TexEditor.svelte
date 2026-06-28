@@ -162,47 +162,51 @@
 </div>
 
 <style>
-	/* Match the markdown (Vditor) editor toolbar: frosted bar, subtle bottom
-	   border, flat borderless buttons that highlight on hover. */
 	.tex-toolbar {
-		padding: var(--space-2) var(--space-4);
-		background: var(--bg-panel-blur);
-		border-bottom: 1px solid var(--border-subtle);
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		gap: 8px;
-		row-gap: 6px;
-		flex-wrap: wrap;
+		gap: 0.4rem;
+		padding: 0 var(--space-4);
+		height: 48px;
+		box-sizing: border-box;
+		background: var(--bg-panel);
+		border-bottom: 1px solid var(--border-default);
+		font-family: var(--font-mono);
+		font-size: 0.85rem;
+		z-index: 100;
+		overflow-x: auto;
+		scrollbar-width: none;
 	}
-	/* Keep the two groups intact and let them wrap to a new row when the pane is
-	   narrow, rather than shrinking and overlapping each other. */
+	.tex-toolbar::-webkit-scrollbar {
+		display: none;
+	}
 	.tex-tools,
 	.tex-compile {
 		display: flex;
-		gap: 6px;
+		gap: 0.25rem;
 		align-items: center;
 		flex-shrink: 0;
 	}
-	.tex-tools {
-		gap: 2px;
-	}
 	.tex-btn,
 	.tex-auto {
-		background: transparent;
-		border: none;
-		color: var(--text-secondary);
-		padding: 6px 8px;
+		background: var(--bg-surface);
+		border: 1px solid var(--border-default);
+		color: var(--text-primary);
+		padding: 0 0.35rem;
 		border-radius: var(--radius-sm);
-		font-size: 0.85rem;
-		line-height: 1;
 		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		flex-shrink: 0;
+		height: 28px;
+		min-width: 28px;
+		box-sizing: border-box;
 	}
 	.tex-btn:hover,
 	.tex-auto:hover {
 		background: var(--bg-hover);
-		color: var(--text-primary);
 	}
 	.tex-status {
 		font-size: 0.78rem;

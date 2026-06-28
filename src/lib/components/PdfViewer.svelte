@@ -593,13 +593,16 @@
 		background: var(--bg-surface);
 		border: 1px solid var(--border-default);
 		color: var(--text-primary);
-		padding: 0.25rem 0.5rem;
+		padding: 0 0.35rem;
 		border-radius: var(--radius-sm);
 		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		flex-shrink: 0;
+		height: 28px;
+		min-width: 28px;
+		box-sizing: border-box;
 	}
 
 	/* Close button: neutral toolbar styling (not a red standout), turns red on hover. */
