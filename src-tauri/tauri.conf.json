@@ -27,7 +27,7 @@
 				"title": "Quick Capture",
 				"url": "/quick",
 				"width": 660,
-				"height": 220,
+				"height": 600,
 				"resizable": false,
 				"decorations": false,
 				"transparent": true,

@@ -10,10 +10,35 @@
 	let inputEl: HTMLInputElement | undefined = $state();
 	const win = getCurrentWebviewWindow();
 
+	let tasks = $state<{ id: number; text: string; done: boolean }[]>([]);
+	let activeFilter = $state<'all' | 'active' | 'done'>('all');
+
+	let filteredTasks = $derived.by(() => {
+		if (activeFilter === 'active') return tasks.filter(t => !t.done);
+		if (activeFilter === 'done') return tasks.filter(t => t.done);
+		return tasks;
+	});
+
+	function loadTasks() {
+		if (!workspacePath) return;
+		try {
+			tasks = JSON.parse(localStorage.getItem(`tasks_${workspacePath}`) || '[]');
+		} catch {
+			tasks = [];
+		}
+	}
+
+	function saveTasks() {
+		if (!workspacePath) return;
+		localStorage.setItem(`tasks_${workspacePath}`, JSON.stringify(tasks));
+		emit('tasks://added');
+	}
+
 	async function loadWorkspace() {
 		try {
 			const snap = await invoke<{ workspacePath?: string }>('get_snapshot');
 			workspacePath = snap.workspacePath ?? null;
+			loadTasks();
 		} catch {
 			/* ignore */
 		}
@@ -22,23 +47,20 @@
 	function addTask() {
 		const t = text.trim();
 		if (!t || !workspacePath) return;
-		const key = `tasks_${workspacePath}`;
-		let tasks: { id: number; text: string; done: boolean }[] = [];
-		try {
-			tasks = JSON.parse(localStorage.getItem(key) || '[]');
-		} catch {
-			tasks = [];
-		}
+		
 		tasks.push({ id: Date.now(), text: t, done: false });
-		localStorage.setItem(key, JSON.stringify(tasks));
-		// Tell the main window to refresh its task list.
-		emit('tasks://added');
+		saveTasks();
+		
 		text = '';
 		saved = true;
 		setTimeout(() => {
 			saved = false;
-			void win.hide();
-		}, 450);
+		}, 1000);
+	}
+
+	function toggleTask(task: { id: number; text: string; done: boolean }) {
+		task.done = !task.done;
+		saveTasks();
 	}
 
 	function onKey(e: KeyboardEvent) {
@@ -109,6 +131,24 @@
 			{/if}
 		</div>
 	</div>
+
+	{#if workspacePath && tasks.length > 0}
+		<div class="quick-tasks-card">
+			<div class="filters">
+				<button class:active={activeFilter === 'all'} onclick={() => activeFilter = 'all'}>All</button>
+				<button class:active={activeFilter === 'active'} onclick={() => activeFilter = 'active'}>Active</button>
+				<button class:active={activeFilter === 'done'} onclick={() => activeFilter = 'done'}>Done</button>
+			</div>
+			<div class="task-list">
+				{#each filteredTasks as task}
+					<label class="task-item" class:done={task.done}>
+						<input type="checkbox" checked={task.done} onchange={() => toggleTask(task)} />
+						<span class="task-text">{task.text}</span>
+					</label>
+				{/each}
+			</div>
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -122,21 +162,78 @@
 		height: 100vh;
 		width: 100vw;
 		display: flex;
+		flex-direction: column;
 		align-items: center;
-		justify-content: center;
+		justify-content: flex-start;
+		gap: 16px;
 		/* Generous padding (in the transparent area) so the card's soft drop shadow
 		   renders fully instead of being clipped at the window edges. */
 		padding: 40px 44px 52px;
 		box-sizing: border-box;
 		background: transparent;
 	}
-	.quick-card {
+	.quick-card,
+	.quick-tasks-card {
 		width: 100%;
 		background: var(--bg-panel);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-xl);
 		padding: 16px 18px;
 		box-shadow: 0 12px 40px var(--shadow-color-strong);
+	}
+	.quick-tasks-card {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		max-height: 400px;
+	}
+	.filters {
+		display: flex;
+		gap: 8px;
+		border-bottom: 1px solid var(--border-subtle);
+		padding-bottom: 8px;
+	}
+	.filters button {
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		cursor: pointer;
+		font-size: 0.85rem;
+		padding: 4px 8px;
+		border-radius: var(--radius-sm);
+	}
+	.filters button:hover {
+		background: var(--bg-hover);
+	}
+	.filters button.active {
+		color: var(--text-primary);
+		background: var(--bg-surface);
+		border: 1px solid var(--border-default);
+	}
+	.task-list {
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.task-item {
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+		cursor: pointer;
+		padding: 4px 0;
+	}
+	.task-item input[type="checkbox"] {
+		margin-top: 4px;
+	}
+	.task-text {
+		color: var(--text-primary);
+		font-size: 0.9rem;
+		line-height: 1.4;
+	}
+	.task-item.done .task-text {
+		color: var(--text-secondary);
+		text-decoration: line-through;
 	}
 	.quick-row {
 		display: flex;

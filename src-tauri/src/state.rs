@@ -1,7 +1,7 @@
 use crate::llama_server::{self, ManagedLlamaServer};
 use crate::models::{
     AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult,
+    ProviderStatus, SearchResponse, SearchResult, Task,
 };
 use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
@@ -992,6 +992,7 @@ impl AppState {
                     || name == "target"
                     || name == "dist"
                     || name == "build"
+                    || name == "tasks"
                 {
                     continue;
                 }
@@ -2008,6 +2009,89 @@ impl AppState {
         )
     }
 
+    // ── Tasks ──
+    // Each task is a self-contained JSON file (file-per-item: portable, separately
+    // copyable, Drive-syncable). Default location is `<workspace>/tasks/<id>.json`;
+    // a task assigned to a notebook lives at `<workspace>/<notebook>/tasks/<id>.json`.
+    // The note indexer ignores them (not a note extension).
+
+    pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        let workspace = self.require_workspace()?;
+        let mut tasks = Vec::new();
+        for entry in walkdir::WalkDir::new(&workspace)
+            .into_iter()
+            .filter_entry(|e| !is_hidden_or_ignored(e))
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if !is_task_file(path) {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(mut task) = serde_json::from_str::<Task>(&raw) else {
+                continue;
+            };
+            // The file's location is the source of truth for the notebook (a task
+            // file copied into another notebook folder belongs to that notebook).
+            task.notebook = notebook_from_task_path(&workspace, path);
+            tasks.push(task);
+        }
+        tasks.sort_by(|a, b| match (a.position, b.position) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.created_at.cmp(&b.created_at),
+        });
+        Ok(tasks)
+    }
+
+    /// Create (empty id) or update a task, writing its JSON file. Moving it between
+    /// notebooks (changing `notebook`) relocates the file. Returns the saved task.
+    pub fn save_task(&self, mut task: Task) -> Result<Task> {
+        let workspace = self.require_workspace()?;
+        task.notebook = task
+            .notebook
+            .map(|s| s.trim().replace('\\', "/"))
+            .filter(|s| !s.is_empty());
+        if let Some(nb) = &task.notebook {
+            validate_relative_dir(nb)?;
+        }
+        if task.id.trim().is_empty() {
+            task.id = Uuid::new_v4().to_string();
+        }
+        validate_task_id(&task.id)?;
+        let now = Utc::now().to_rfc3339();
+        if task.created_at.trim().is_empty() {
+            task.created_at = now.clone();
+        }
+        task.updated_at = now;
+        for sub in task.subtasks.iter_mut() {
+            if sub.id.trim().is_empty() {
+                sub.id = Uuid::new_v4().to_string();
+            }
+        }
+        let dir = task_dir_for(&workspace, task.notebook.as_deref());
+        fs::create_dir_all(&dir)?;
+        let target = dir.join(format!("{}.json", task.id));
+        // Drop any existing file for this id elsewhere (handles notebook moves).
+        remove_task_files(&workspace, &task.id, Some(target.as_path()));
+        let tmp = dir.join(format!("{}.tmp", task.id));
+        fs::write(&tmp, serde_json::to_string_pretty(&task)?)?;
+        fs::rename(&tmp, &target)?;
+        let _ = self.handle.emit("tasks://changed", ());
+        Ok(task)
+    }
+
+    pub fn delete_task(&self, id: String) -> Result<()> {
+        let workspace = self.require_workspace()?;
+        validate_task_id(&id)?;
+        remove_task_files(&workspace, &id, None);
+        let _ = self.handle.emit("tasks://changed", ());
+        Ok(())
+    }
+
     fn require_workspace(&self) -> Result<PathBuf> {
         self.inner
             .runtime
@@ -3010,6 +3094,88 @@ fn relative_to_workspace(workspace: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// Directory holding a task's file for a given notebook (None = workspace root).
+fn task_dir_for(workspace: &Path, notebook: Option<&str>) -> PathBuf {
+    match notebook.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(nb) => workspace.join(nb).join("tasks"),
+        None => workspace.join("tasks"),
+    }
+}
+
+/// True for a `.../tasks/<name>.json` file (a task file we own).
+fn is_task_file(path: &Path) -> bool {
+    let is_json = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(|e| e.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    let in_tasks_dir = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(OsStr::to_str)
+        .map(|n| n == "tasks")
+        .unwrap_or(false);
+    is_json && in_tasks_dir
+}
+
+/// Notebook a task file belongs to, derived from its path. None = root tasks.
+fn notebook_from_task_path(workspace: &Path, path: &Path) -> Option<String> {
+    let holder = path.parent()?.parent()?; // the folder that contains the `tasks` dir
+    let rel = relative_to_workspace(workspace, holder);
+    if rel.is_empty() || rel == "." {
+        None
+    } else {
+        Some(rel)
+    }
+}
+
+/// Delete every `<id>.json` task file across the workspace except `keep`.
+fn remove_task_files(workspace: &Path, id: &str, keep: Option<&Path>) {
+    let target = format!("{id}.json");
+    for entry in walkdir::WalkDir::new(workspace)
+        .into_iter()
+        .filter_entry(|e| !is_hidden_or_ignored(e))
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if is_task_file(path)
+            && path.file_name().and_then(OsStr::to_str) == Some(target.as_str())
+            && keep != Some(path)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn validate_task_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow!("invalid task id"));
+    }
+    Ok(())
+}
+
+/// Reject notebook paths that could escape the workspace (absolute, `..`, roots).
+fn validate_relative_dir(dir: &str) -> Result<()> {
+    let p = Path::new(dir);
+    let bad = p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+            )
+        });
+    if bad {
+        return Err(anyhow!("invalid notebook path"));
+    }
+    Ok(())
 }
 
 fn folder_from_relative_path(relative_path: &str) -> String {

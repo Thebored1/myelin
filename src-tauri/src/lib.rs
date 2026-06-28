@@ -505,6 +505,21 @@ fn set_quick_shortcut(
     Ok(())
 }
 
+#[tauri::command]
+fn list_tasks(state: State<'_, AppState>) -> Result<Vec<models::Task>, String> {
+    state.list_tasks().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_task(state: State<'_, AppState>, task: models::Task) -> Result<models::Task, String> {
+    state.save_task(task).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_task(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.delete_task(id).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -598,6 +613,9 @@ pub fn run() {
             prewarm_tectonic,
             get_quick_shortcut,
             set_quick_shortcut,
+            list_tasks,
+            save_task,
+            delete_task,
             set_require_tool_approval,
             set_deterministic_tools,
             set_tool_gating,
