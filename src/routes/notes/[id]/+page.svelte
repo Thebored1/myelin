@@ -2447,7 +2447,7 @@
 		{#if activeSourceBytes}
 			<section class="pdf-pane" class:tex-pane={workingDocType === 'tex'} style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
 				{#if workingDocType === 'tex'}
-					<div class="tex-pane-badge">Left: compiled PDF (preview, read-only) · Right: your LaTeX editor — edit there, then Compile</div>
+					<div class="tex-pane-badge">PDF preview</div>
 				{/if}
 				{#if sourceMaterialType === 'pdf'}
 					<PdfViewer

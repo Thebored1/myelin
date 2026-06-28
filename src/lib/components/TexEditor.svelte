@@ -170,25 +170,35 @@
 		justify-content: space-between;
 		align-items: center;
 		gap: 8px;
+		row-gap: 6px;
 		flex-wrap: wrap;
 	}
-	.tex-tools {
-		display: flex;
-		gap: 4px;
-		align-items: center;
-	}
-	.tex-btn {
-		padding: 4px 8px;
-		font-size: 0.8rem;
-	}
+	/* Keep the two groups intact and let them wrap to a new row when the pane is
+	   narrow, rather than shrinking and overlapping each other. */
+	.tex-tools,
 	.tex-compile {
 		display: flex;
 		gap: 6px;
 		align-items: center;
+		flex-shrink: 0;
+	}
+	.tex-tools {
+		gap: 4px;
+	}
+	.tex-btn {
+		padding: 4px 8px;
+		font-size: 0.8rem;
+		flex-shrink: 0;
 	}
 	.tex-status {
 		font-size: 0.78rem;
 		color: var(--text-secondary);
+		flex-shrink: 1;
+		min-width: 0;
+		max-width: 16rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.tex-auto.on {
 		color: var(--accent-200);
