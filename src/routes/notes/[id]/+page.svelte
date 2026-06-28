@@ -169,10 +169,10 @@
 	function handleGlobalMouseMove(e: MouseEvent) {
 		if (isResizing && mainLayoutEl) {
 			const rect = mainLayoutEl.getBoundingClientRect();
-			let newRatio = ((e.clientX - rect.left) / rect.width) * 100;
-			if (workingDocType === 'tex') {
-				newRatio = 100 - newRatio;
-			}
+			// splitRatio is the LEFT (PDF) pane's width %, and the panes are in
+			// natural order (PDF left, editor right), so the cursor's fraction from
+			// the left edge is the ratio directly — no per-doc-type inversion.
+			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
 			if (newRatio > 20 && newRatio < 80) {
 				splitRatio = newRatio;
 			}
