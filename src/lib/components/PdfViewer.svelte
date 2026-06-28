@@ -87,11 +87,15 @@
 
 	function fitToScreen() {
 		if (!defaultViewport || !pdfViewerDiv) return;
+		// Reserve space for the 2rem container padding AND a vertical scrollbar that
+		// appears once tall content renders — otherwise the page is a hair too wide
+		// and leaves a stray horizontal scrollbar.
+		const SCROLLBAR = 18;
 		if (spreadMode !== 'none') {
-			const targetWidth = pdfViewerDiv.clientWidth - 96;
+			const targetWidth = pdfViewerDiv.clientWidth - 96 - SCROLLBAR;
 			if (targetWidth > 0) scale = targetWidth / (defaultViewport.width * 2);
 		} else {
-			const targetWidth = pdfViewerDiv.clientWidth - 64;
+			const targetWidth = pdfViewerDiv.clientWidth - 64 - SCROLLBAR;
 			if (targetWidth > 0) scale = targetWidth / defaultViewport.width;
 		}
 	}

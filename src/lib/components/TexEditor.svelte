@@ -136,7 +136,7 @@
 	});
 </script>
 
-<div style="width: 100%; height: 100%; display: flex; flex-direction: column;">
+<div style="width: 100%; height: 100%; min-width: 0; display: flex; flex-direction: column;">
 	<div class="tex-toolbar">
 		<div class="tex-tools">
 			<button class="btn-ghost tex-btn" style="font-weight: bold;" onclick={() => insertText('\\textbf{', '}')} title="Bold">B</button>
@@ -197,9 +197,16 @@
 	.cm-host {
 		flex: 1;
 		min-height: 0;
+		min-width: 0; /* let the editor shrink so its scroller can scroll, not the pane clip */
 		overflow: hidden;
 	}
 	.cm-host :global(.cm-editor) {
 		height: 100%;
+		width: 100%;
+		max-width: 100%;
+	}
+	/* Long lines (no wrap) scroll horizontally within the editor. */
+	.cm-host :global(.cm-scroller) {
+		overflow-x: auto;
 	}
 </style>
