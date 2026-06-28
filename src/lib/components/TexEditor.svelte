@@ -139,17 +139,17 @@
 <div style="width: 100%; height: 100%; min-width: 0; display: flex; flex-direction: column;">
 	<div class="tex-toolbar">
 		<div class="tex-tools">
-			<button class="btn-ghost tex-btn" style="font-weight: bold;" onclick={() => insertText('\\textbf{', '}')} title="Bold">B</button>
-			<button class="btn-ghost tex-btn" style="font-style: italic;" onclick={() => insertText('\\textit{', '}')} title="Italic">I</button>
-			<button class="btn-ghost tex-btn" onclick={() => insertText('\\section{', '}')} title="Section">§</button>
-			<button class="btn-ghost tex-btn" style="font-family: serif;" onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')} title="Equation">∑</button>
-			<button class="btn-ghost tex-btn" onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')} title="Itemize">•=</button>
+			<button class="tex-btn" style="font-weight: bold;" onclick={() => insertText('\\textbf{', '}')} title="Bold">B</button>
+			<button class="tex-btn" style="font-style: italic;" onclick={() => insertText('\\textit{', '}')} title="Italic">I</button>
+			<button class="tex-btn" onclick={() => insertText('\\section{', '}')} title="Section">§</button>
+			<button class="tex-btn" style="font-family: serif;" onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')} title="Equation">∑</button>
+			<button class="tex-btn" onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')} title="Itemize">•=</button>
 		</div>
 		{#if onCompile}
 			<div class="tex-compile">
 				{#if statusMsg}<span class="tex-status">{statusMsg}</span>{/if}
 				<button
-					class="btn-ghost tex-auto"
+					class="tex-auto"
 					class:on={autoCompile}
 					title="Recompile automatically a couple of seconds after you stop typing"
 					onclick={onToggleAuto}
@@ -162,10 +162,12 @@
 </div>
 
 <style>
+	/* Match the markdown (Vditor) editor toolbar: frosted bar, subtle bottom
+	   border, flat borderless buttons that highlight on hover. */
 	.tex-toolbar {
-		padding: 6px 8px;
-		background: var(--bg-panel);
-		border-bottom: 1px solid var(--border-default);
+		padding: var(--space-2) var(--space-4);
+		background: var(--bg-panel-blur);
+		border-bottom: 1px solid var(--border-subtle);
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
@@ -183,12 +185,24 @@
 		flex-shrink: 0;
 	}
 	.tex-tools {
-		gap: 4px;
+		gap: 2px;
 	}
-	.tex-btn {
-		padding: 4px 8px;
-		font-size: 0.8rem;
+	.tex-btn,
+	.tex-auto {
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		padding: 6px 8px;
+		border-radius: var(--radius-sm);
+		font-size: 0.85rem;
+		line-height: 1;
+		cursor: pointer;
 		flex-shrink: 0;
+	}
+	.tex-btn:hover,
+	.tex-auto:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
 	}
 	.tex-status {
 		font-size: 0.78rem;
