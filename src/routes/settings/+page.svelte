@@ -43,6 +43,51 @@
     let latexError = $state('');
     const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 
+    // Quick-capture global shortcut.
+    let quickShortcut = $state('Ctrl+Space');
+    let quickRecording = $state(false);
+    let quickShortcutError = $state('');
+    const prettyShortcut = (s: string) =>
+        s
+            .replace(/\bKey([A-Z])\b/g, '$1')
+            .replace(/\bDigit(\d)\b/g, '$1')
+            .replace(/\+/g, ' + ');
+
+    async function applyShortcut(combo: string) {
+        try {
+            await invoke('set_quick_shortcut', { shortcut: combo });
+            quickShortcut = combo;
+            quickShortcutError = '';
+        } catch (e) {
+            quickShortcutError = String(e);
+        }
+    }
+    function startRecording() {
+        if (quickRecording) return;
+        quickRecording = true;
+        quickShortcutError = '';
+        const MODS = ['ControlLeft','ControlRight','AltLeft','AltRight','ShiftLeft','ShiftRight','MetaLeft','MetaRight','OSLeft','OSRight'];
+        const cleanup = () => {
+            quickRecording = false;
+            window.removeEventListener('keydown', onKey, true);
+        };
+        const onKey = (e: KeyboardEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (MODS.includes(e.code)) return; // wait for a non-modifier key
+            if (e.code === 'Escape') { cleanup(); return; } // Esc cancels
+            const parts: string[] = [];
+            if (e.ctrlKey) parts.push('Ctrl');
+            if (e.altKey) parts.push('Alt');
+            if (e.shiftKey) parts.push('Shift');
+            if (e.metaKey) parts.push('Super');
+            parts.push(e.code);
+            cleanup();
+            void applyShortcut(parts.join('+'));
+        };
+        window.addEventListener('keydown', onKey, true);
+    }
+
     const hasGpuBuild = () => installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
     const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
 
@@ -188,6 +233,7 @@
             toolGating = status.config?.toolGating ?? false;
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
+            quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
             try {
                 modelProfiles = await invoke<ProfileInfo[]>('list_model_profiles');
             } catch (e) {
@@ -747,6 +793,28 @@
                 </div>
                 <button class="browse-btn" onclick={toggleJupyterExecution}>
                     {enableJupyterExecution ? 'Enabled' : 'Disabled'}
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>Quick Capture</h2>
+            <p class="description">A global shortcut opens a small window to jot down a task from anywhere — even when Myelin isn't focused.</p>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; gap: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">Global shortcut</h3>
+                    <p class="description" style="margin-top: 4px;">
+                        {#if quickShortcutError}
+                            <span style="color: var(--danger, #e5534b);">{quickShortcutError}</span>
+                        {:else if quickRecording}
+                            Press your shortcut… (Esc to cancel)
+                        {:else}
+                            Current: <strong>{prettyShortcut(quickShortcut)}</strong>
+                        {/if}
+                    </p>
+                </div>
+                <button class="browse-btn" onclick={startRecording} disabled={quickRecording}>
+                    {quickRecording ? 'Recording…' : 'Change'}
                 </button>
             </div>
         </section>

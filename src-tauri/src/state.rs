@@ -2209,6 +2209,14 @@ impl AppState {
     }
 
     /// The configured embedding model GGUF path (None → embeddings disabled).
+    pub fn quick_shortcut(&self) -> String {
+        crate::llama_server::quick_capture_shortcut(&self.inner.app_data_dir)
+    }
+
+    pub fn set_quick_shortcut(&self, shortcut: String) -> Result<()> {
+        crate::llama_server::set_quick_capture_shortcut(&self.inner.app_data_dir, shortcut)
+    }
+
     pub fn embed_model_path(&self) -> Option<String> {
         crate::llama_server::embed_model_path(&self.inner.app_data_dir)
     }

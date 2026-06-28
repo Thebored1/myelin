@@ -12,6 +12,7 @@
 	"app": {
 		"windows": [
 			{
+				"label": "main",
 				"title": "myelin",
 				"width": 1440,
 				"height": 900,
@@ -20,6 +21,20 @@
 				"resizable": true,
 				"fullscreen": false,
 				"decorations": false
+			},
+			{
+				"label": "quick",
+				"title": "Quick Capture",
+				"url": "/quick",
+				"width": 600,
+				"height": 168,
+				"resizable": false,
+				"decorations": false,
+				"transparent": true,
+				"alwaysOnTop": true,
+				"center": true,
+				"skipTaskbar": true,
+				"visible": false
 			}
 		],
 		"security": {

@@ -468,6 +468,43 @@ async fn prewarm_tectonic(state: State<'_, AppState>) -> Result<(), String> {
     state.prewarm_tectonic().await.map_err(|e| e.to_string())
 }
 
+/// Show (and focus) the always-on-top quick-capture window, or hide it if it's
+/// already visible — toggled by the global shortcut.
+fn toggle_quick_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("quick") {
+        if win.is_visible().unwrap_or(false) {
+            let _ = win.hide();
+        } else {
+            let _ = win.center();
+            let _ = win.show();
+            let _ = win.set_focus();
+            let _ = win.emit("quick://focus", ());
+        }
+    }
+}
+
+#[tauri::command]
+fn get_quick_shortcut(state: State<'_, AppState>) -> String {
+    state.quick_shortcut()
+}
+
+#[tauri::command]
+fn set_quick_shortcut(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    shortcut: String,
+) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let parsed: tauri_plugin_global_shortcut::Shortcut = shortcut
+        .parse()
+        .map_err(|_| format!("Invalid shortcut: {shortcut}"))?;
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    gs.register(parsed).map_err(|e| e.to_string())?;
+    state.set_quick_shortcut(shortcut).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -490,6 +527,25 @@ pub fn run() {
                         .level_for("lance_io", log::LevelFilter::Warn)
                         .build(),
                 )?;
+            }
+
+            // Quick-capture global shortcut: register the plugin with a handler that
+            // toggles the capture window, then register the user's configured combo.
+            app.handle().plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(|app, _shortcut, event| {
+                        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                            toggle_quick_window(app);
+                        }
+                    })
+                    .build(),
+            )?;
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                let sc = app.state::<AppState>().quick_shortcut();
+                if let Ok(parsed) = sc.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                    let _ = app.global_shortcut().register(parsed);
+                }
             }
 
             app.emit("app://ready", "ready")?;
@@ -540,6 +596,8 @@ pub fn run() {
             compile_latex,
             tectonic_cache_status,
             prewarm_tectonic,
+            get_quick_shortcut,
+            set_quick_shortcut,
             set_require_tool_approval,
             set_deterministic_tools,
             set_tool_gating,

@@ -115,6 +115,9 @@ pub struct WorkspaceLlamaConfig {
     /// tools they shouldn't touch; the heuristics are brittle and can withhold a
     /// valid tool (e.g. block a web search the model would have run). None → off.
     pub tool_gating: Option<bool>,
+    /// Global hotkey that opens the quick-capture window (e.g. "Ctrl+Space").
+    /// None → the default ("Ctrl+Space").
+    pub quick_capture_shortcut: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -1591,6 +1594,28 @@ pub fn embed_model_path(app_data_dir: &Path) -> Option<String> {
         .and_then(|c| c.embed_model_path)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Configured quick-capture global shortcut, defaulting to "Ctrl+Space".
+pub fn quick_capture_shortcut(app_data_dir: &Path) -> String {
+    load_config(app_data_dir)
+        .ok()
+        .and_then(|c| c.quick_capture_shortcut)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Ctrl+Space".to_string())
+}
+
+/// Set the quick-capture global shortcut string.
+pub fn set_quick_capture_shortcut(app_data_dir: &Path, shortcut: String) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.quick_capture_shortcut = Some(shortcut.trim().to_string()).filter(|s| !s.is_empty());
+    let cfg_path = config_path(app_data_dir);
+    if let Some(parent) = cfg_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&cfg_path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
 }
 
 /// Set (or clear, when empty) the embedding model GGUF path.

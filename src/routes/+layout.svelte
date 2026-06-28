@@ -133,6 +133,9 @@
 	/>
 </svelte:head>
 
+{#if $page.url.pathname === '/quick'}
+	{@render children()}
+{:else}
 <div class="app-container">
 	<!-- Custom Window Resize Handles -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -202,6 +205,7 @@
 		{@render children()}
 	</main>
 </div>
+{/if}
 
 <style>
 	:global(:root) {

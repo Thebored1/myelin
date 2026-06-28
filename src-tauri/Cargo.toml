@@ -39,6 +39,7 @@ serde_yaml = "0.9"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
+tauri-plugin-global-shortcut = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2.5"
 rig-core = "0.38.2"

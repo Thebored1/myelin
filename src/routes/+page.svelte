@@ -513,6 +513,7 @@
 	onMount(() => {
 		let unlistenChanged = () => {};
 		let unlistenStatus = () => {};
+		let unlistenTasks = () => {};
 
 		// Paint instantly from the last-known snapshot so coming back from a note
 		// doesn't blank the UI while the backend responds.
@@ -562,8 +563,17 @@
 				if (event.payload === 'started') { message = 'Indexing…'; indexing = true; }
 				else if (event.payload === 'completed') { message = ''; indexing = false; void refreshApp(); }
 			});
+			// The quick-capture window adds tasks straight to localStorage; reload them.
+			unlistenTasks = await listen('tasks://added', () => {
+				const ws = currentWorkspaceForTasks ?? app?.workspacePath;
+				if (!ws) return;
+				try {
+					const stored = localStorage.getItem(`tasks_${ws}`);
+					dashTasks = stored ? JSON.parse(stored) : [];
+				} catch { /* ignore */ }
+			});
 		})();
-		return () => { unlistenChanged(); unlistenStatus(); };
+		return () => { unlistenChanged(); unlistenStatus(); unlistenTasks(); };
 	});
 
 	let globalSearchDialog: HTMLDialogElement | undefined = $state();
