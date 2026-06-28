@@ -2445,7 +2445,7 @@
 		bind:this={mainLayoutEl}
 	>
 		{#if activeSourceBytes}
-			<section class="pdf-pane" style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
+			<section class="pdf-pane" class:tex-pane={workingDocType === 'tex'} style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
 				{#if workingDocType === 'tex'}
 					<div class="tex-pane-badge">Left: compiled PDF (preview, read-only) · Right: your LaTeX editor — edit there, then Compile</div>
 				{/if}
@@ -2483,7 +2483,7 @@
 
 		<!-- Main Content Area -->
 		{#if shouldRenderEditor}
-			<section class="main-pane" style={activeSourceBytes ? `width: ${100 - splitRatio}%` : ''}>
+			<section class="main-pane" class:tex-pane={workingDocType === 'tex'} style={activeSourceBytes ? `width: ${100 - splitRatio}%` : ''}>
 				<div class="content-area" style="position: relative;">
 					{#if workingDocType === 'md'}
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -3498,6 +3498,15 @@
 
 	.pdf-pane {
 		min-width: 26rem;
+	}
+
+	/* In the .tex split (PDF preview + editor), let both panes shrink with the
+	   window. Otherwise main-pane's 800px min overflows the overflow:hidden layout
+	   on small windows, pushing the editor's horizontal scrollbar off-screen and
+	   clipping long lines. With min-width:0 the inner editor scroller handles them. */
+	.main-layout .pdf-pane.tex-pane,
+	.main-layout .main-pane.tex-pane {
+		min-width: 0;
 	}
 
 	/* Floating label over the compiled-PDF pane (tex split) explaining the layout. */
