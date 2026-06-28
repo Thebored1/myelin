@@ -18,8 +18,23 @@
 		value: string;
 		onInput: (val: string) => void;
 		diagnostics?: TexDiagnostic[];
+		// Compile controls, rendered into the same toolbar as the format buttons.
+		onCompile?: () => void;
+		autoCompile?: boolean;
+		onToggleAuto?: () => void;
+		busy?: boolean;
+		statusMsg?: string | null;
 	}
-	let { value, onInput, diagnostics = [] }: Props = $props();
+	let {
+		value,
+		onInput,
+		diagnostics = [],
+		onCompile,
+		autoCompile = false,
+		onToggleAuto,
+		busy = false,
+		statusMsg = null
+	}: Props = $props();
 
 	let host: HTMLDivElement;
 	let view: EditorView | undefined;
@@ -123,20 +138,70 @@
 </script>
 
 <div style="width: 100%; height: 100%; display: flex; flex-direction: column;">
-	<div style="padding: 8px; background: var(--bg-panel); border-bottom: 1px solid var(--border-default); display: flex; justify-content: space-between; align-items: center;">
-		<div style="display: flex; gap: 4px; align-items: center;">
-			<span style="font-size: 0.8rem; color: var(--text-secondary); font-family: var(--font-mono); margin-right: 12px;">LaTeX Editor</span>
-			<button class="btn-ghost" style="padding: 4px 8px; font-size: 0.8rem; font-weight: bold;" onclick={() => insertText('\\textbf{', '}')} title="Bold">B</button>
-			<button class="btn-ghost" style="padding: 4px 8px; font-size: 0.8rem; font-style: italic;" onclick={() => insertText('\\textit{', '}')} title="Italic">I</button>
-			<button class="btn-ghost" style="padding: 4px 8px; font-size: 0.8rem;" onclick={() => insertText('\\section{', '}')} title="Section">§</button>
-			<button class="btn-ghost" style="padding: 4px 8px; font-size: 0.8rem; font-family: serif;" onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')} title="Equation">∑</button>
-			<button class="btn-ghost" style="padding: 4px 8px; font-size: 0.8rem;" onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')} title="Itemize">•=</button>
+	<div class="tex-toolbar">
+		<div class="tex-tools">
+			<span class="tex-label">LaTeX</span>
+			<button class="btn-ghost tex-btn" style="font-weight: bold;" onclick={() => insertText('\\textbf{', '}')} title="Bold">B</button>
+			<button class="btn-ghost tex-btn" style="font-style: italic;" onclick={() => insertText('\\textit{', '}')} title="Italic">I</button>
+			<button class="btn-ghost tex-btn" onclick={() => insertText('\\section{', '}')} title="Section">§</button>
+			<button class="btn-ghost tex-btn" style="font-family: serif;" onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')} title="Equation">∑</button>
+			<button class="btn-ghost tex-btn" onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')} title="Itemize">•=</button>
 		</div>
+		{#if onCompile}
+			<div class="tex-compile">
+				{#if statusMsg}<span class="tex-status">{statusMsg}</span>{/if}
+				<button
+					class="btn-ghost tex-auto"
+					class:on={autoCompile}
+					title="Recompile automatically a couple of seconds after you stop typing"
+					onclick={onToggleAuto}
+				>Auto: {autoCompile ? 'on' : 'off'}</button>
+				<button class="primary" disabled={busy} onclick={onCompile}>Compile to PDF</button>
+			</div>
+		{/if}
 	</div>
 	<div bind:this={host} class="cm-host"></div>
 </div>
 
 <style>
+	.tex-toolbar {
+		padding: 6px 8px;
+		background: var(--bg-panel);
+		border-bottom: 1px solid var(--border-default);
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.tex-tools {
+		display: flex;
+		gap: 4px;
+		align-items: center;
+	}
+	.tex-label {
+		font-size: 0.8rem;
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		margin-right: 8px;
+	}
+	.tex-btn {
+		padding: 4px 8px;
+		font-size: 0.8rem;
+	}
+	.tex-compile {
+		display: flex;
+		gap: 6px;
+		align-items: center;
+	}
+	.tex-status {
+		font-size: 0.78rem;
+		color: var(--text-secondary);
+	}
+	.tex-auto.on {
+		color: var(--accent-200);
+		border-color: var(--accent-200);
+	}
 	.cm-host {
 		flex: 1;
 		min-height: 0;

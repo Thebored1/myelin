@@ -2449,11 +2449,13 @@
 	<div
 		class="main-layout"
 		class:split-layout={activeSourceBytes !== null && showAttachedNote}
-		class:reverse-split={workingDocType === 'tex'}
 		bind:this={mainLayoutEl}
 	>
 		{#if activeSourceBytes}
-			<section class="pdf-pane" style="width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
+			<section class="pdf-pane" style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
+				{#if workingDocType === 'tex'}
+					<div class="tex-pane-badge">Left: compiled PDF (preview, read-only) · Right: your LaTeX editor — edit there, then Compile</div>
+				{/if}
 				{#if sourceMaterialType === 'pdf'}
 					<PdfViewer
 						pdfBytes={activeSourceBytes}
@@ -2512,32 +2514,17 @@
 							Press <span>{fullscreenShortcut}</span> to toggle
 						</div>
 					{:else if workingDocType === 'tex'}
-						<div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-							<div style="padding: 4px; background: var(--bg-body); border-bottom: 1px solid var(--border-default); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
-								<span style="font-size: 0.8rem; color: var(--text-secondary); padding-left: 4px;">
-									{#if latexDownloadMsg}{latexDownloadMsg}{:else if texCompiling}Compiling…{/if}
-								</span>
-								<div style="display: flex; gap: 6px; align-items: center;">
-									<button
-										class="btn-ghost"
-										style="font-size: 0.78rem; padding: 4px 8px; {texAutoCompile ? 'color: var(--accent-200); border-color: var(--accent-200);' : ''}"
-										title="Recompile automatically a couple of seconds after you stop typing"
-										onclick={() => (texAutoCompile = !texAutoCompile)}
-									>Auto: {texAutoCompile ? 'on' : 'off'}</button>
-									<button class="primary" disabled={isBusy} onclick={() => compileTex({ manual: true })}>
-										{latexDownloadMsg ? 'Downloading…' : 'Compile to PDF'}
-									</button>
-								</div>
-							</div>
-							<div style="flex: 1; min-height: 0;">
-								<TexEditor
-									value={draftBody}
-									onInput={(val) => { draftBody = val; triggerAutoSave(); }}
-									diagnostics={texDiagnostics}
-								/>
-							</div>
-						</div>
-					{:else if workingDocType === 'ipynb'}
+							<TexEditor
+								value={draftBody}
+								onInput={(val) => { draftBody = val; triggerAutoSave(); }}
+								diagnostics={texDiagnostics}
+								onCompile={() => compileTex({ manual: true })}
+								autoCompile={texAutoCompile}
+								onToggleAuto={() => (texAutoCompile = !texAutoCompile)}
+								busy={isBusy}
+								statusMsg={latexDownloadMsg ?? (texCompiling ? 'Compiling…' : null)}
+							/>
+						{:else if workingDocType === 'ipynb'}
 						<IpynbEditor
 							value={draftBody}
 							onInput={(val) => { draftBody = val; triggerAutoSave(); }}
@@ -3515,21 +3502,28 @@
 		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
 
-	.main-layout.reverse-split .pdf-pane {
-		order: 2;
-	}
-	.main-layout.reverse-split .resizer {
-		order: 1;
-	}
-	.main-layout.reverse-split .main-pane {
-		order: 0;
-	}
-	.main-layout.reverse-split .sidebar {
-		order: 3;
-	}
 
 	.pdf-pane {
 		min-width: 26rem;
+	}
+
+	/* Floating label over the compiled-PDF pane (tex split) explaining the layout. */
+	.tex-pane-badge {
+		position: absolute;
+		top: 8px;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 6;
+		pointer-events: none;
+		max-width: 92%;
+		text-align: center;
+		background: var(--bg-panel);
+		color: var(--text-secondary);
+		border: 1px solid var(--border-default);
+		border-radius: 6px;
+		padding: 3px 10px;
+		font-size: 0.72rem;
+		box-shadow: 0 2px 8px var(--shadow-color, rgba(0, 0, 0, 0.15));
 	}
 
 	.resizer {
