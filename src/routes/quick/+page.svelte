@@ -124,7 +124,9 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		padding: 16px;
+		/* Generous padding (in the transparent area) so the card's soft drop shadow
+		   renders fully instead of being clipped at the window edges. */
+		padding: 40px 44px 52px;
 		box-sizing: border-box;
 		background: transparent;
 	}
