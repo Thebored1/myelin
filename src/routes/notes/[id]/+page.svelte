@@ -3504,9 +3504,13 @@
 	   window. Otherwise main-pane's 800px min overflows the overflow:hidden layout
 	   on small windows, pushing the editor's horizontal scrollbar off-screen and
 	   clipping long lines. With min-width:0 the inner editor scroller handles them. */
-	.main-layout .pdf-pane.tex-pane,
 	.main-layout .main-pane.tex-pane {
 		min-width: 0;
+	}
+	/* Keep enough width for the PDF toolbar so its buttons don't crowd/overlap,
+	   but small enough that the editor still gets room to shrink + scroll. */
+	.main-layout .pdf-pane.tex-pane {
+		min-width: 15rem;
 	}
 
 	/* Floating label over the compiled-PDF pane (tex split) explaining the layout. */

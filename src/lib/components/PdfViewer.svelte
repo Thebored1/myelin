@@ -496,8 +496,8 @@
 
 		{#if onClosePdf}
 			<div class="divider" style="width: 1px; height: 16px; background: var(--border-default); margin: 0 4px;"></div>
-			<button class="more-btn" onclick={onClosePdf} title="Close PDF">
-				<svg viewBox="0 0 24 24" width="16" height="16" stroke="var(--danger, #ef4444)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+			<button class="close-pdf-btn" onclick={onClosePdf} title="Close PDF" aria-label="Close PDF">
+				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
 			</button>
 		{/if}
 	</div>
@@ -573,8 +573,8 @@
 	.pdf-controls {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
-		padding: 0 var(--space-6) 0 var(--space-8);
+		gap: 0.4rem;
+		padding: 0 var(--space-4);
 		height: 48px;
 		box-sizing: border-box;
 		background: var(--bg-panel);
@@ -582,6 +582,11 @@
 		font-family: var(--font-mono);
 		font-size: 0.85rem;
 		z-index: 100;
+		overflow-x: auto;
+		scrollbar-width: none; /* keep the 48px bar clean; padding reduction usually avoids the need */
+	}
+	.pdf-controls::-webkit-scrollbar {
+		display: none;
 	}
 
 	.pdf-controls button {
@@ -594,6 +599,16 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		flex-shrink: 0;
+	}
+
+	/* Close button: neutral toolbar styling (not a red standout), turns red on hover. */
+	.close-pdf-btn {
+		color: var(--text-secondary);
+	}
+	.close-pdf-btn:hover {
+		color: var(--danger, #ef4444);
+		border-color: var(--danger, #ef4444) !important;
 	}
 
 	.display-menu-container {
