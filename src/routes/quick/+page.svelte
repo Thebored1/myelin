@@ -394,9 +394,15 @@
 </div>
 
 <style>
-	/* The quick window keeps the app's themed gradient background (so it reads as a
-	   slice of Myelin, not a black/transparent overlay). We don't override the
-	   body background here — it inherits the global gradient from +layout. */
+	/* Fully transparent window: only the floating cards are visible. BOTH html and
+	   body must be cleared — html keeps an opaque --bg-page otherwise, which is what
+	   was painting the window solid dark. (Requires the window's transparent:true,
+	   which only applies after a tauri dev restart.) */
+	:global(html.quick-window),
+	:global(html.quick-window body) {
+		background: transparent !important;
+		background-image: none !important;
+	}
 	:global(html.quick-window :focus-visible) {
 		outline: 2px solid var(--text-primary) !important;
 		outline-offset: 2px !important;
