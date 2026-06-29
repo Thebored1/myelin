@@ -21,6 +21,17 @@
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') isOpen = false;
 	}
+
+	// When the dropdown opens (via focus/click), move the selector to the first
+	// option so keyboard users start there.
+	$effect(() => {
+		if (isOpen && rootEl) {
+			const root = rootEl;
+			requestAnimationFrame(() => {
+				root.querySelector<HTMLButtonElement>('.select-option')?.focus();
+			});
+		}
+	});
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_mouse_events_have_key_events -->
