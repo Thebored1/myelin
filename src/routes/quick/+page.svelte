@@ -140,6 +140,27 @@
 		}
 	}
 
+	// Today's date as yyyy-mm-dd (local), used to prefill the deadline so the user
+	// only adjusts the day instead of getting a malformed year.
+	function todayISO() {
+		const d = new Date();
+		const m = String(d.getMonth() + 1).padStart(2, '0');
+		const day = String(d.getDate()).padStart(2, '0');
+		return `${d.getFullYear()}-${m}-${day}`;
+	}
+
+	// Enter on any of the draft detail fields saves the whole task with whatever is
+	// filled in (Shift+Enter makes a newline in the details box). Esc closes.
+	function onDraftKey(e: KeyboardEvent) {
+		if (e.key === 'Enter' && !e.shiftKey) {
+			e.preventDefault();
+			addTask();
+		} else if (e.key === 'Escape') {
+			e.preventDefault();
+			void win.hide();
+		}
+	}
+
 	let shownAt = 0;
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -267,30 +288,32 @@
 
 					<div class="field-row">
 						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-						<textarea rows="1" use:autoResize placeholder="Add details" bind:value={draftDetails} class="field-input textarea-new"></textarea>
+						<textarea rows="1" use:autoResize onkeydown={onDraftKey} placeholder="Add details (Shift+Enter for new line)" bind:value={draftDetails} class="field-input textarea-new"></textarea>
 					</div>
 
 					<div class="field-row">
 						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-						<input 
-							type="text" 
-							placeholder="Add deadline" 
-							bind:value={draftDueDate} 
-							class="field-input date-time-new" 
-							onfocus={(e) => e.currentTarget.type = 'date'} 
-							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+						<input
+							type="text"
+							placeholder="Add deadline"
+							bind:value={draftDueDate}
+							class="field-input date-time-new"
+							onkeydown={onDraftKey}
+							onfocus={(e) => { e.currentTarget.type = 'date'; if (!draftDueDate) draftDueDate = todayISO(); }}
+							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }}
 						/>
 					</div>
 
 					<div class="field-row">
 						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-						<input 
-							type="text" 
-							placeholder="Add date/time" 
-							bind:value={draftDueTime} 
-							class="field-input date-time-new" 
-							onfocus={(e) => e.currentTarget.type = 'time'} 
-							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+						<input
+							type="text"
+							placeholder="Add date/time"
+							bind:value={draftDueTime}
+							class="field-input date-time-new"
+							onkeydown={onDraftKey}
+							onfocus={(e) => e.currentTarget.type = 'time'}
+							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }}
 						/>
 					</div>
 
@@ -351,7 +374,7 @@
 											placeholder="Add deadline" 
 											bind:value={task.dueDate} 
 											class="field-input date-time-new" 
-											onfocus={(e) => e.currentTarget.type = 'date'} 
+											onfocus={(e) => { e.currentTarget.type = 'date'; if (!task.dueDate) task.dueDate = todayISO(); }}
 											onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
 										/>
 									</div>
