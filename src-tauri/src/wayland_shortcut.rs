@@ -12,19 +12,42 @@ use tauri::AppHandle;
 /// Spawn the portal listener. Best-effort: if the desktop has no GlobalShortcuts
 /// portal (older GNOME/KDE) it logs and gives up — Wayland users then bind a
 /// custom shortcut to the app themselves.
-pub fn spawn(app: AppHandle, configured: String) {
+pub fn spawn(app: AppHandle, configured: String, app_id: String) {
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = run(app, configured).await {
+        if let Err(err) = run(app, configured, app_id).await {
             log::warn!("Wayland global-shortcut portal unavailable: {err}");
         }
     });
 }
 
-async fn run(app: AppHandle, configured: String) -> ashpd::Result<()> {
+/// GNOME's portal refuses GlobalShortcuts from host (non-sandboxed) apps unless
+/// they first declare an app id on the same D-Bus connection via the host
+/// Registry interface. Without this the bind fails with "An app id is required".
+async fn register_app_id(conn: &ashpd::zbus::Connection, app_id: &str) -> ashpd::zbus::Result<()> {
+    use std::collections::HashMap;
+    let registry = ashpd::zbus::Proxy::new(
+        conn,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.host.portal.Registry",
+    )
+    .await?;
+    let options: HashMap<&str, ashpd::zbus::zvariant::OwnedValue> = HashMap::new();
+    let _: () = registry.call("Register", &(app_id, options)).await?;
+    Ok(())
+}
+
+async fn run(app: AppHandle, configured: String, app_id: String) -> ashpd::Result<()> {
     use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
     use futures_util::StreamExt;
 
     let shortcuts = GlobalShortcuts::new().await?;
+
+    // Declare our app id on the portal connection before binding (see above).
+    if let Err(err) = register_app_id(shortcuts.connection(), &app_id).await {
+        log::warn!("host portal Register failed (continuing anyway): {err}");
+    }
+
     let session = shortcuts.create_session().await?;
 
     let trigger = to_portal_trigger(&configured);
@@ -35,6 +58,10 @@ async fn run(app: AppHandle, configured: String) -> ashpd::Result<()> {
     shortcuts
         .bind_shortcuts(&session, &[new_shortcut], &ashpd::WindowIdentifier::default())
         .await?;
+    log::info!(
+        "Wayland global shortcut bound via portal (suggested trigger {:?}); waiting for activation",
+        trigger
+    );
 
     // Toggle the quick-capture window whenever the shortcut fires.
     let mut activated = shortcuts.receive_activated().await?;

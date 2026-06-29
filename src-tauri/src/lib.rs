@@ -561,6 +561,8 @@ pub fn run() {
                         .level_for("lance_table", log::LevelFilter::Warn)
                         .level_for("lance_core", log::LevelFilter::Warn)
                         .level_for("lance_io", log::LevelFilter::Warn)
+                        // zbus logs every D-Bus frame at INFO and floods the log.
+                        .level_for("zbus", log::LevelFilter::Warn)
                         .build(),
                 )?;
             }
@@ -582,7 +584,11 @@ pub fn run() {
                 // plugin can't fire there — go through the xdg-desktop-portal
                 // GlobalShortcuts interface instead. Everywhere else, the plugin works.
                 #[cfg(target_os = "linux")]
-                wayland_shortcut::spawn(app.handle().clone(), sc);
+                wayland_shortcut::spawn(
+                    app.handle().clone(),
+                    sc,
+                    app.config().identifier.clone(),
+                );
                 #[cfg(not(target_os = "linux"))]
                 {
                     use tauri_plugin_global_shortcut::GlobalShortcutExt;
