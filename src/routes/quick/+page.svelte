@@ -205,9 +205,11 @@
 		const ro = new ResizeObserver((entries) => {
 			for (const entry of entries) {
 				const rect = entry.target.getBoundingClientRect();
-				// Use LogicalSize to resize the Tauri OS window to precisely match the new content height.
-				// This ensures the window "expands as much as it wants" without clipping or internal scrolling.
-				win.setSize(new LogicalSize(rect.width, rect.height)).catch(console.error);
+				// Grow the window to fit the content, but cap it at ~92% of the screen
+				// height. Past that the body scrolls (see CSS) instead of running the
+				// window off the bottom of the display.
+				const maxH = Math.round(window.screen.availHeight * 0.92);
+				win.setSize(new LogicalSize(rect.width, Math.min(rect.height, maxH))).catch(console.error);
 			}
 		});
 
@@ -410,6 +412,21 @@
 	:global(html.quick-window body) {
 		background: transparent !important;
 		background-image: none !important;
+	}
+	/* When content exceeds the screen-capped window height, scroll the body
+	   instead of letting the window grow off-screen. */
+	:global(html.quick-window body) {
+		height: 100vh;
+		overflow-y: auto;
+		overflow-x: hidden;
+	}
+	/* Thin, unobtrusive scrollbar for the capture window. */
+	:global(html.quick-window body)::-webkit-scrollbar {
+		width: 8px;
+	}
+	:global(html.quick-window body)::-webkit-scrollbar-thumb {
+		background: var(--neutral-700);
+		border-radius: 4px;
 	}
 	:global(html.quick-window ::selection) {
 		background: rgba(255, 255, 255, 0.2) !important;
