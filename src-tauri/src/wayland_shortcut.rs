@@ -33,16 +33,17 @@ async fn run(app: AppHandle, configured: String) -> ashpd::Result<()> {
 
     // Ask the desktop to bind it (may prompt the user the first time).
     shortcuts
-        .bind_shortcuts(&session, &[new_shortcut], None)
+        .bind_shortcuts(&session, &[new_shortcut], &ashpd::WindowIdentifier::default())
         .await?;
 
     // Toggle the quick-capture window whenever the shortcut fires.
     let mut activated = shortcuts.receive_activated().await?;
     while let Some(event) = activated.next().await {
         if event.shortcut_id() == "toggle-quick-capture" {
-            let app = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                crate::toggle_quick_window(&app);
+            let handle = app.clone();
+            let inner = app.clone();
+            let _ = handle.run_on_main_thread(move || {
+                crate::toggle_quick_window(&inner);
             });
         }
     }
