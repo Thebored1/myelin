@@ -37,7 +37,25 @@
 	let notebookDialog: HTMLDialogElement | undefined = $state();
 	let newNotebookName = $state('');
 
-	let dashTasks = $state<{id: number, text: string, done: boolean}[]>([]);
+	interface TaskSubtask {
+		id: number;
+		text: string;
+		done: boolean;
+	}
+
+	interface TaskItem {
+		id: number;
+		text: string;
+		done: boolean;
+		details?: string;
+		dueDate?: string;
+		dueTime?: string;
+		notebook?: string;
+		subtasks?: TaskSubtask[];
+	}
+
+	let dashTasks = $state<TaskItem[]>([]);
+	let expandedTaskId = $state<number | null>(null);
 	let currentWorkspaceForTasks = $state<string | null>(null);
 	let pinnedNoteIds = $state<string[]>([]);
 	let showTimeline = $state(true);
@@ -1082,11 +1100,61 @@
 								</div>
 								<div class="task-list">
 									{#each filteredTasks as task (task.id)}
-										<label class="task-item" class:done={task.done}>
-											<input class="task-check" type="checkbox" bind:checked={task.done} />
-											<span class="task-text">{task.text}</span>
-											<button class="task-remove" onclick={(e) => { e.preventDefault(); removeTask(task.id); }} aria-label="Remove task">&times;</button>
-										</label>
+										<div class="task-card" class:expanded={expandedTaskId === task.id}>
+											<div class="task-item" class:done={task.done}>
+												<input class="task-check" type="checkbox" bind:checked={task.done} />
+												<input class="task-text-input" type="text" bind:value={task.text} onfocus={() => expandedTaskId = task.id} />
+												<button class="task-remove" tabindex="-1" onclick={(e) => { e.preventDefault(); removeTask(task.id); }} aria-label="Remove task">&times;</button>
+											</div>
+											{#if expandedTaskId === task.id}
+												<div class="task-expanded-details">
+													<textarea placeholder="Add details" bind:value={task.details} class="task-details-input"></textarea>
+													
+													<div class="task-meta-row">
+														<input type="date" bind:value={task.dueDate} class="task-date-input" />
+														<input type="time" bind:value={task.dueTime} class="task-time-input" />
+														<select bind:value={task.notebook} class="task-notebook-select" onfocus={(e) => { try { e.currentTarget.showPicker(); } catch (err) {} }} onkeydown={(e) => {
+															if (e.key === 'Tab') {
+																e.preventDefault();
+																const container = e.currentTarget.closest('.task-expanded-details');
+																if (e.shiftKey) {
+																	(container?.querySelector('.task-time-input') as HTMLElement)?.focus();
+																} else {
+																	(container?.querySelector('.task-subtasks input') as HTMLElement)?.focus();
+																}
+															}
+														}}>
+															<option value="">No Notebook</option>
+															{#each notebooks as nb}
+																<option value={nb}>{nb}</option>
+															{/each}
+														</select>
+													</div>
+
+													<div class="task-subtasks">
+														{#if task.subtasks}
+															{#each task.subtasks as subtask, i}
+																<div class="subtask-item" class:done={subtask.done}>
+																	<input type="checkbox" bind:checked={subtask.done} />
+																	<input type="text" bind:value={subtask.text} class="subtask-text-input" />
+																	<button class="subtask-remove" tabindex="-1" onclick={() => task.subtasks!.splice(i, 1)}>&times;</button>
+																</div>
+															{/each}
+														{/if}
+														<div class="add-subtask-row">
+															<input type="text" placeholder="Add subtask..." class="add-subtask-input" onkeydown={(e) => {
+																if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+																	e.preventDefault();
+																	task.subtasks = task.subtasks || [];
+																	task.subtasks.push({ id: Date.now(), text: e.currentTarget.value.trim(), done: false });
+																	e.currentTarget.value = '';
+																}
+															}} />
+														</div>
+													</div>
+												</div>
+											{/if}
+										</div>
 									{/each}
 									{#if filteredTasks.length === 0}
 										<div class="nb-empty">No {activeTaskFilter === 'all' ? '' : activeTaskFilter + ' '}tasks.</div>
@@ -2320,20 +2388,28 @@
 		overflow-y: auto;
 		margin-bottom: var(--space-3);
 	}
+	.task-card {
+		display: flex;
+		flex-direction: column;
+		border-bottom: 1px solid var(--border-subtle);
+		background: transparent;
+		transition: background 0.1s;
+	}
+	.task-card.expanded {
+		background: var(--hover-overlay);
+	}
+	.task-card:last-child {
+		border-bottom: none;
+	}
 	.task-item {
 		display: flex;
 		align-items: flex-start;
 		gap: 10px;
 		padding: 10px 4px;
-		border-bottom: 1px solid var(--border-subtle);
 		cursor: pointer;
 		position: relative;
-		transition: background 0.1s;
 	}
-	.task-item:last-child {
-		border-bottom: none;
-	}
-	.task-item:hover {
+	.task-card:not(.expanded):hover {
 		background: var(--hover-overlay);
 	}
 	.task-check {
@@ -2344,16 +2420,19 @@
 		accent-color: var(--accent-300);
 		cursor: pointer;
 	}
-	.task-text {
+	.task-text-input {
 		flex: 1;
 		min-width: 0;
 		font-size: 0.85rem;
 		color: var(--text-primary);
+		background: transparent;
+		border: none;
+		outline: none;
 		line-height: 1.5;
-		word-break: break-word;
 		padding-right: 14px;
+		font-family: inherit;
 	}
-	.task-item.done .task-text {
+	.task-item.done .task-text-input {
 		text-decoration: line-through;
 		color: var(--neutral-600);
 	}
@@ -2370,11 +2449,102 @@
 		opacity: 0;
 		transition: opacity 0.1s;
 	}
-	.task-item:hover .task-remove {
+	.task-card:hover .task-remove {
 		opacity: 1;
 	}
 	.task-remove:hover {
 		color: var(--danger);
+	}
+	
+	.task-expanded-details {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 0 10px 14px 29px;
+	}
+	.task-details-input {
+		width: 100%;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: var(--text-secondary);
+		font-size: 0.8rem;
+		font-family: inherit;
+		resize: vertical;
+		min-height: 40px;
+		padding: 0;
+	}
+	.task-meta-row {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		align-items: flex-start;
+	}
+	.task-date-input,
+	.task-time-input,
+	.task-notebook-select {
+		background: var(--bg-surface);
+		border: 1px solid var(--border-default);
+		color: var(--text-primary);
+		border-radius: var(--radius-xs);
+		padding: 4px 8px;
+		font-size: 0.75rem;
+		font-family: var(--font-mono);
+		outline: none;
+	}
+	.task-date-input::-webkit-calendar-picker-indicator,
+	.task-time-input::-webkit-calendar-picker-indicator {
+		display: none;
+		-webkit-appearance: none;
+	}
+	.task-subtasks {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.subtask-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		position: relative;
+	}
+	.subtask-text-input {
+		flex: 1;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: var(--text-primary);
+		font-size: 0.8rem;
+	}
+	.subtask-item.done .subtask-text-input {
+		text-decoration: line-through;
+		color: var(--neutral-600);
+	}
+	.subtask-remove {
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		cursor: pointer;
+		opacity: 0;
+	}
+	.subtask-item:hover .subtask-remove {
+		opacity: 1;
+	}
+	.add-subtask-row {
+		margin-top: 4px;
+		display: flex;
+	}
+	.add-subtask-input {
+		flex: 1;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: var(--text-secondary);
+		font-size: 0.8rem;
+		margin-left: 21px; /* align with text */
+	}
+	.add-subtask-input::placeholder {
+		color: var(--text-secondary);
 	}
 
 	.dash-section {
