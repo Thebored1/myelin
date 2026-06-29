@@ -4,6 +4,7 @@
 	import { emit, listen } from '@tauri-apps/api/event';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 	import { LogicalSize } from '@tauri-apps/api/dpi';
+	import NotebookSelect from '$lib/components/NotebookSelect.svelte';
 
 	let text = $state('');
 	let workspacePath = $state<string | null>(null);
@@ -18,7 +19,24 @@
 	let draftNotebook = $state('');
 	let draftSubtasks = $state<TaskSubtask[]>([]);
 
-	let notebooks = $state<string[]>([]);
+	function autoResize(node: HTMLTextAreaElement) {
+		const resize = () => {
+			node.style.height = 'auto';
+			node.style.height = node.scrollHeight + 'px';
+		};
+		node.addEventListener('input', resize);
+		setTimeout(resize, 0);
+		return {
+			destroy() {
+				node.removeEventListener('input', resize);
+			}
+		};
+	}
+
+	let app = $state<any>(null);
+	let notebooks = $derived(
+		app ? Array.from(new Set(app.workspaces.flatMap((w: any) => w.documents.map((d: any) => d.notebook)))).filter(Boolean) as string[] : []
+	);
 	let expandedTaskId = $state<number | null>(null);
 
 	interface TaskSubtask {
@@ -242,17 +260,12 @@
 			<div class="quick-tasks-container draft-card">
 				<div class="task-expanded-details redesigned">
 					<div class="field-row notebook-row">
-						<select bind:value={draftNotebook} class="field-input select-new" onfocus={(e) => { try { e.currentTarget.showPicker(); } catch (err) {} }}>
-							<option value="">Today</option>
-							{#each notebooks as nb}
-								<option value={nb}>{nb}</option>
-							{/each}
-						</select>
+						<NotebookSelect bind:value={draftNotebook} notebooks={notebooks} />
 					</div>
 
 					<div class="field-row">
 						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-						<textarea placeholder="Add details" bind:value={draftDetails} class="field-input textarea-new"></textarea>
+						<textarea rows="1" use:autoResize placeholder="Add details" bind:value={draftDetails} class="field-input textarea-new"></textarea>
 					</div>
 
 					<div class="field-row">
@@ -321,17 +334,12 @@
 							{#if expandedTaskId === task.id}
 								<div class="task-expanded-details redesigned">
 									<div class="field-row notebook-row">
-										<select bind:value={task.notebook} class="field-input select-new" onfocus={(e) => { try { e.currentTarget.showPicker(); } catch (err) {} }}>
-											<option value="">Today</option>
-											{#each notebooks as nb}
-												<option value={nb}>{nb}</option>
-											{/each}
-										</select>
-									</div>
+														<NotebookSelect bind:value={task.notebook} notebooks={notebooks} />
+													</div>
 
 									<div class="field-row">
 										<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-										<textarea placeholder="Add details" bind:value={task.details} class="field-input textarea-new"></textarea>
+										<textarea rows="1" use:autoResize placeholder="Add details" bind:value={task.details} class="field-input textarea-new"></textarea>
 									</div>
 
 									<div class="field-row">
@@ -402,11 +410,6 @@
 	:global(html.quick-window body) {
 		background: transparent !important;
 		background-image: none !important;
-	}
-	:global(html.quick-window :focus-visible) {
-		outline: 1px solid var(--text-primary) !important;
-		outline-offset: 2px !important;
-		border-radius: 2px;
 	}
 	:global(html.quick-window ::selection) {
 		background: rgba(255, 255, 255, 0.2) !important;
@@ -540,7 +543,7 @@
 	}
 	.field-row {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 16px;
 	}
 	.field-row.notebook-row {
@@ -551,6 +554,7 @@
 		height: 20px;
 		flex-shrink: 0;
 		color: var(--text-secondary);
+		margin-top: 2px;
 	}
 	.field-input {
 		flex: 1;

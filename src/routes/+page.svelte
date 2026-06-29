@@ -16,6 +16,7 @@
 	} from '$lib/types';
 	import { onMount } from 'svelte';
 	import { getVersion } from '@tauri-apps/api/app';
+	import NotebookSelect from '$lib/components/NotebookSelect.svelte';
 
 	let appVersion = $state('');
 	let app = $state<AppSnapshot | null>(null);
@@ -636,6 +637,20 @@
 		setTimeout(() => node.focus(), 10);
 		return { destroy() {} };
 	}
+
+	function autoResize(node: HTMLTextAreaElement) {
+		const resize = () => {
+			node.style.height = 'auto';
+			node.style.height = node.scrollHeight + 'px';
+		};
+		node.addEventListener('input', resize);
+		setTimeout(resize, 0);
+		return {
+			destroy() {
+				node.removeEventListener('input', resize);
+			}
+		};
+	}
 </script>
 
 <svelte:head><title>myelin</title></svelte:head>
@@ -1102,47 +1117,60 @@
 									{#each filteredTasks as task (task.id)}
 										<div class="task-card" class:expanded={expandedTaskId === task.id}>
 											<div class="task-item" class:done={task.done}>
-												<input class="task-check" type="checkbox" bind:checked={task.done} />
+												<button class="subtask-circle main-task-circle" class:done={task.done} onclick={() => task.done = !task.done} tabindex="-1"></button>
 												<input class="task-text-input" type="text" bind:value={task.text} onfocus={() => expandedTaskId = task.id} />
 												<button class="task-remove" tabindex="-1" onclick={(e) => { e.preventDefault(); removeTask(task.id); }} aria-label="Remove task">&times;</button>
 											</div>
 											{#if expandedTaskId === task.id}
-												<div class="task-expanded-details">
-													<textarea placeholder="Add details" bind:value={task.details} class="task-details-input"></textarea>
-													
-													<div class="task-meta-row">
-														<input type="date" bind:value={task.dueDate} class="task-date-input" />
-														<input type="time" bind:value={task.dueTime} class="task-time-input" />
-														<select bind:value={task.notebook} class="task-notebook-select" onfocus={(e) => { try { e.currentTarget.showPicker(); } catch (err) {} }} onkeydown={(e) => {
-															if (e.key === 'Tab') {
-																e.preventDefault();
-																const container = e.currentTarget.closest('.task-expanded-details');
-																if (e.shiftKey) {
-																	(container?.querySelector('.task-time-input') as HTMLElement)?.focus();
-																} else {
-																	(container?.querySelector('.task-subtasks input') as HTMLElement)?.focus();
-																}
-															}
-														}}>
-															<option value="">No Notebook</option>
-															{#each notebooks as nb}
-																<option value={nb}>{nb}</option>
-															{/each}
-														</select>
+												<div class="task-expanded-details redesigned">
+													<div class="field-row notebook-row">
+														<NotebookSelect bind:value={task.notebook} notebooks={notebooks} />
 													</div>
 
-													<div class="task-subtasks">
+													<div class="field-row">
+														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+														<textarea rows="1" use:autoResize placeholder="Add details" bind:value={task.details} class="field-input textarea-new"></textarea>
+													</div>
+
+													<div class="field-row">
+														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+														<input 
+															type="text" 
+															placeholder="Add deadline" 
+															bind:value={task.dueDate} 
+															class="field-input date-time-new" 
+															onfocus={(e) => e.currentTarget.type = 'date'} 
+															onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+														/>
+													</div>
+
+													<div class="field-row">
+														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+														<input 
+															type="text" 
+															placeholder="Add date/time" 
+															bind:value={task.dueTime} 
+															class="field-input date-time-new" 
+															onfocus={(e) => e.currentTarget.type = 'time'} 
+															onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+														/>
+													</div>
+
+													<div class="subtasks-container">
 														{#if task.subtasks}
 															{#each task.subtasks as subtask, i}
-																<div class="subtask-item" class:done={subtask.done}>
-																	<input type="checkbox" bind:checked={subtask.done} />
-																	<input type="text" bind:value={subtask.text} class="subtask-text-input" />
+																<div class="subtask-row">
+																	<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+																	<button class="subtask-circle" class:done={subtask.done} onclick={() => subtask.done = !subtask.done} tabindex="-1"></button>
+																	<input type="text" bind:value={subtask.text} class="field-input subtask-input-new" class:done={subtask.done} />
 																	<button class="subtask-remove" tabindex="-1" onclick={() => task.subtasks!.splice(i, 1)}>&times;</button>
 																</div>
 															{/each}
 														{/if}
-														<div class="add-subtask-row">
-															<input type="text" placeholder="Add subtask..." class="add-subtask-input" onkeydown={(e) => {
+														<div class="subtask-row">
+															<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+															<div class="subtask-circle empty"></div>
+															<input type="text" placeholder="Enter title" class="field-input subtask-input-new" onkeydown={(e) => {
 																if (e.key === 'Enter' && e.currentTarget.value.trim()) {
 																	e.preventDefault();
 																	task.subtasks = task.subtasks || [];
@@ -1151,6 +1179,7 @@
 																}
 															}} />
 														</div>
+														<div class="subtask-add-hint">Add subtasks</div>
 													</div>
 												</div>
 											{/if}
@@ -2281,25 +2310,22 @@
 	}
 	.panel-tabs {
 		display: flex;
-		gap: 2px;
+		gap: 20px;
 	}
 	.panel-tabs button {
 		background: transparent;
 		border: none;
 		color: var(--text-secondary);
-		font-family: var(--font-mono);
-		font-size: 0.72rem;
-		padding: 2px 8px;
-		border-radius: 999px;
+		font-family: var(--font-sans);
+		font-size: 0.95rem;
+		padding: 4px 0;
+		font-weight: 500;
 		cursor: pointer;
-		transition: color 0.15s, background 0.15s;
+		transition: color 0.1s;
 	}
-	.panel-tabs button:hover {
-		color: var(--text-primary);
-	}
+	.panel-tabs button:hover,
 	.panel-tabs button.active {
-		color: var(--accent-100);
-		background: var(--accent-tint);
+		color: var(--text-primary);
 	}
 
 	/* "+" add control at the end of the tabs row */
@@ -2391,34 +2417,41 @@
 	.task-card {
 		display: flex;
 		flex-direction: column;
-		border-bottom: 1px solid var(--border-subtle);
 		background: transparent;
 		transition: background 0.1s;
+		border-radius: var(--radius-sm);
 	}
 	.task-card.expanded {
 		background: var(--hover-overlay);
 	}
-	.task-card:last-child {
-		border-bottom: none;
-	}
 	.task-item {
 		display: flex;
 		align-items: flex-start;
-		gap: 10px;
-		padding: 10px 4px;
+		gap: 16px;
+		padding: 10px 8px;
 		cursor: pointer;
 		position: relative;
 	}
 	.task-card:not(.expanded):hover {
 		background: var(--hover-overlay);
 	}
-	.task-check {
+	.main-task-circle {
+		width: 18px;
+		height: 18px;
 		margin-top: 1px;
-		width: 15px;
-		height: 15px;
+	}
+	.subtask-circle {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		border: 1.5px solid var(--text-secondary);
+		background: transparent;
 		flex-shrink: 0;
-		accent-color: var(--accent-300);
 		cursor: pointer;
+		padding: 0;
+	}
+	.subtask-circle.done {
+		background: var(--text-secondary);
 	}
 	.task-text-input {
 		flex: 1;
@@ -2456,67 +2489,98 @@
 		color: var(--danger);
 	}
 	
-	.task-expanded-details {
+	.task-expanded-details.redesigned {
 		display: flex;
 		flex-direction: column;
-		gap: 12px;
-		padding: 0 10px 14px 29px;
+		gap: 16px;
+		padding: 16px 16px 24px 44px;
 	}
-	.task-details-input {
-		width: 100%;
-		background: transparent;
-		border: none;
-		outline: none;
-		color: var(--text-secondary);
-		font-size: 0.8rem;
-		font-family: inherit;
-		resize: vertical;
-		min-height: 40px;
-		padding: 0;
-	}
-	.task-meta-row {
+	.field-row {
 		display: flex;
-		flex-direction: column;
-		gap: 8px;
 		align-items: flex-start;
+		gap: 16px;
 	}
-	.task-date-input,
-	.task-time-input,
-	.task-notebook-select {
-		background: var(--bg-surface);
-		border: 1px solid var(--border-default);
-		color: var(--text-primary);
-		border-radius: var(--radius-xs);
-		padding: 4px 8px;
-		font-size: 0.75rem;
-		font-family: var(--font-mono);
-		outline: none;
+	.field-row.notebook-row {
+		margin-bottom: -4px;
 	}
-	.task-date-input::-webkit-calendar-picker-indicator,
-	.task-time-input::-webkit-calendar-picker-indicator {
-		display: none;
-		-webkit-appearance: none;
+	.field-icon {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
+		color: var(--text-secondary);
+		margin-top: 2px;
 	}
-	.task-subtasks {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-	.subtask-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		position: relative;
-	}
-	.subtask-text-input {
+	.field-input {
 		flex: 1;
 		background: transparent;
 		border: none;
 		outline: none;
 		color: var(--text-primary);
-		font-size: 0.8rem;
+		font-size: 1rem;
+		font-family: inherit;
+		min-width: 0;
 	}
-	.subtask-item.done .subtask-text-input {
+	.field-input::placeholder {
+		color: var(--text-secondary);
+	}
+	.select-new {
+		appearance: none;
+		-webkit-appearance: none;
+		cursor: pointer;
+		font-weight: 500;
+		font-size: 0.95rem;
+		color: var(--text-secondary);
+		padding: 0;
+		background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>');
+		background-repeat: no-repeat;
+		background-position: right center;
+		background-size: 16px;
+		padding-right: 24px;
+		width: auto;
+		flex: none;
+	}
+	.textarea-new {
+		resize: none;
+		min-height: 24px;
+		line-height: 1.5;
+		padding: 0;
+		overflow: hidden;
+	}
+	.date-time-new {
+		cursor: pointer;
+		font-size: 0.95rem;
+	}
+	.date-time-new::-webkit-calendar-picker-indicator {
+		display: none;
+		-webkit-appearance: none;
+	}
+	.subtasks-container {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		margin-top: 4px;
+	}
+	.subtask-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		position: relative;
+	}
+	.subtask-arrow {
+		width: 16px;
+		height: 16px;
+		color: var(--text-secondary);
+		margin-left: 2px;
+		flex-shrink: 0;
+	}
+	.subtask-circle.empty {
+		border-style: dashed;
+		cursor: default;
+	}
+	.subtask-input-new {
+		font-size: 0.95rem;
+	}
+	.subtask-input-new.done {
 		text-decoration: line-through;
 		color: var(--neutral-600);
 	}
@@ -2526,24 +2590,17 @@
 		color: var(--text-secondary);
 		cursor: pointer;
 		opacity: 0;
+		font-size: 1.2rem;
 	}
-	.subtask-item:hover .subtask-remove {
+	.subtask-row:hover .subtask-remove {
 		opacity: 1;
 	}
-	.add-subtask-row {
-		margin-top: 4px;
-		display: flex;
+	.subtask-remove:hover {
+		color: var(--danger, #ff4444);
 	}
-	.add-subtask-input {
-		flex: 1;
-		background: transparent;
-		border: none;
-		outline: none;
-		color: var(--text-secondary);
-		font-size: 0.8rem;
-		margin-left: 21px; /* align with text */
-	}
-	.add-subtask-input::placeholder {
+	.subtask-add-hint {
+		margin-left: 56px;
+		font-size: 0.85rem;
 		color: var(--text-secondary);
 	}
 
