@@ -2092,6 +2092,21 @@ impl AppState {
         Ok(())
     }
 
+    /// Synchronously kill the spawned llama + embed server child processes. Safe to
+    /// call from a window-close handler — uses try_lock so it never awaits/blocks.
+    pub fn shutdown_servers_sync(&self) {
+        if let Ok(mut guard) = self.inner.llama_server.try_lock() {
+            if let Some(server) = guard.as_mut() {
+                let _ = server.child.kill();
+            }
+        }
+        if let Ok(mut guard) = self.inner.embed_server.try_lock() {
+            if let Some(server) = guard.as_mut() {
+                let _ = server.child.kill();
+            }
+        }
+    }
+
     fn require_workspace(&self) -> Result<PathBuf> {
         self.inner
             .runtime

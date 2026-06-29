@@ -21,21 +21,6 @@
 				"resizable": true,
 				"fullscreen": false,
 				"decorations": false
-			},
-			{
-				"label": "quick",
-				"title": "Quick Capture",
-				"url": "/quick",
-				"width": 660,
-				"height": 600,
-				"resizable": false,
-				"decorations": false,
-				"transparent": true,
-				"shadow": false,
-				"alwaysOnTop": true,
-				"center": true,
-				"skipTaskbar": true,
-				"visible": false
 			}
 		],
 		"security": {

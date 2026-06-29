@@ -469,7 +469,9 @@ async fn prewarm_tectonic(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// Show (and focus) the always-on-top quick-capture window, or hide it if it's
-/// already visible — toggled by the global shortcut.
+/// already visible — toggled by the global shortcut. The window is created
+/// lazily on first use so it doesn't load a second webview at startup (faster
+/// cold start).
 fn toggle_quick_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("quick") {
         if win.is_visible().unwrap_or(false) {
@@ -480,7 +482,25 @@ fn toggle_quick_window(app: &tauri::AppHandle) {
             let _ = win.set_focus();
             let _ = win.emit("quick://focus", ());
         }
+        return;
     }
+    // First press: build the window (on the main thread, required by GTK/Linux).
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        let _ = WebviewWindowBuilder::new(&app2, "quick", WebviewUrl::App("quick".into()))
+            .title("Quick Capture")
+            .inner_size(660.0, 600.0)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .center()
+            .focused(true)
+            .build();
+    });
 }
 
 #[tauri::command]
@@ -621,6 +641,19 @@ pub fn run() {
             set_tool_gating,
             resolve_tool_approval
         ])
+        .on_window_event(|window, event| {
+            // Closing the main window quits the whole app (not just the window —
+            // the hidden quick-capture window would otherwise keep the process
+            // alive) and kills the spawned llama/embed servers so nothing is left
+            // running in the background.
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    let app = window.app_handle();
+                    app.state::<AppState>().shutdown_servers_sync();
+                    app.exit(0);
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

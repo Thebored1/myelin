@@ -235,6 +235,14 @@ pub struct ManagedLlamaServer {
     _stderr_reader: Option<thread::JoinHandle<()>>,
 }
 
+impl Drop for ManagedLlamaServer {
+    fn drop(&mut self) {
+        // Never leave the spawned llama-server running when this handle goes away
+        // (restart, or app teardown). Best-effort; the app-exit path kills it too.
+        let _ = self.child.kill();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LlamaProviderInfo {
     pub resolved: Option<ResolvedLlamaConfig>,
@@ -1479,6 +1487,12 @@ pub struct ManagedEmbedServer {
     pub child: Child,
     pub port: u16,
     pub model_path: PathBuf,
+}
+
+impl Drop for ManagedEmbedServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
 }
 
 /// Spawn the embedding server (nomic-embed etc.) and wait until it's healthy.
