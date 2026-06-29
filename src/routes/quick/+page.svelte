@@ -404,7 +404,7 @@
 		background-image: none !important;
 	}
 	:global(html.quick-window :focus-visible) {
-		outline: 2px solid var(--text-primary) !important;
+		outline: 1px solid var(--text-primary) !important;
 		outline-offset: 2px !important;
 		border-radius: 2px;
 	}
