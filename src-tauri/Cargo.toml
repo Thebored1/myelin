@@ -52,6 +52,11 @@ sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Linux/Wayland global shortcuts go through the xdg-desktop-portal GlobalShortcuts
+# interface (the native global-shortcut plugin can't grab keys under Wayland).
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+
 [target.'cfg(windows)'.dependencies]
 # DXGI adapter enumeration for VRAM/shared-memory sizing of AMD/Intel GPUs
 # (NVIDIA goes through nvidia-smi). Matches the version Tauri already pulls.

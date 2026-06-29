@@ -9,6 +9,7 @@ mod rag;
 pub mod state;
 mod stream_chat;
 mod tool_capability;
+mod wayland_shortcut;
 mod web_search;
 
 use models::{AppSnapshot, NoteDocument, ProviderStatus, SearchResponse};
@@ -576,10 +577,18 @@ pub fn run() {
                     .build(),
             )?;
             {
-                use tauri_plugin_global_shortcut::GlobalShortcutExt;
                 let sc = app.state::<AppState>().quick_shortcut();
-                if let Ok(parsed) = sc.parse::<tauri_plugin_global_shortcut::Shortcut>() {
-                    let _ = app.global_shortcut().register(parsed);
+                // Linux/Wayland blocks apps from grabbing global keys, so the native
+                // plugin can't fire there — go through the xdg-desktop-portal
+                // GlobalShortcuts interface instead. Everywhere else, the plugin works.
+                #[cfg(target_os = "linux")]
+                wayland_shortcut::spawn(app.handle().clone(), sc);
+                #[cfg(not(target_os = "linux"))]
+                {
+                    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                    if let Ok(parsed) = sc.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                        let _ = app.global_shortcut().register(parsed);
+                    }
                 }
             }
 
