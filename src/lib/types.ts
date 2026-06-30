@@ -89,9 +89,13 @@ export type ProviderStatus = {
 		temperature?: number;
 		topP?: number;
 		extraArgs?: string[];
-		backendPreference?: 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
+		backendPreference?: 'auto' | 'gpu' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 		gpuDevice?: string;
+		thinking?: boolean;
+		autoOffload?: boolean;
 		maxTurns?: number;
+		deterministicTools?: boolean;
+		toolGating?: boolean;
 	};
 	resolved?: {
 		executablePath: string;

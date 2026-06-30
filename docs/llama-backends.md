@@ -90,6 +90,146 @@ resource `bin/` as a (lowest-priority) tiering root. So resolution order is:
 user-downloaded (`<app-data>/bin`) → bundled (`<resources>/bin`). The folder is
 gitignored (binaries are large) but its structure is kept.
 
+## Building from source (cross-platform)
+
+`src-tauri/.cargo/config.toml` is kept cross-platform: it only caps build
+parallelism and applies `crt-static` on the Windows target. Everything else is
+per-OS:
+
+- **Linux:** no extra setup. tectonic uses system libraries (`pkg-config`).
+  Needs the usual Tauri deps (`libwebkit2gtk-4.1`, GTK3, `libsoup-3.0`,
+  `librsvg2`) plus a C/C++ toolchain. The harfbuzz symbol clash with the system
+  text stack is handled in `build.rs` (`-Wl,--exclude-libs,ALL`).
+- **Windows:** tectonic's C/C++ deps are built via **vcpkg**, so the build needs
+  these environment variables (set them as **user** env vars, not in the repo, so
+  Linux/macOS stay clean):
+
+  ```
+  TECTONIC_DEP_BACKEND = vcpkg
+  VCPKGRS_TRIPLET      = x64-windows-static-release
+  VCPKG_ROOT           = <repo>\src-tauri\target\vcpkg
+  CXXFLAGS             = /std:c++17
+  ```
+
+  Run `cargo vcpkg build` once to populate `target/vcpkg`. Note: a change to
+  `.cargo/config.toml` forces a full rebuild, and a clean rebuild of host
+  proc-macros with `crt-static` can fail to link; if that happens, build with an
+  explicit `--target x86_64-pc-windows-msvc` so the flag stays off host units.
+- **macOS:** no extra setup; Metal is in the standard toolchain.
+
+## Adaptive GPU offload
+
+Settings → **Advanced AI Configuration → Adaptive GPU offload** (on by default)
+makes the app size the launch to the machine automatically, so the same build
+runs on a 512 MB iGPU and a 24 GB dGPU without manual tuning. The principle is
+**consistent context, variable performance**.
+
+How it works (`llama_server.rs`):
+
+- **Aim for 32k context on *all* systems — CPU included.** Adaptive offload is
+  not GPU-only: with it on (default), the launcher targets a 32k window whether
+  the model runs on a GPU or pure CPU. (Turn it off to set Context Size / GPU
+  Layers manually — the advanced/manual path uses your values verbatim.)
+- **Quantize the KV cache to `q8_0`** (`--cache-type-k/v q8_0`, requires
+  `--flash-attn on`) — near-lossless and ~half the size of f16, so a 32k window
+  fits in RAM on an 8 GB machine. (Skipped for recurrent/hybrid archs, which keep
+  a tiny fixed state; falls back to f16 via the ladder if a backend rejects it.)
+- **Keep the KV cache in RAM** (`--no-kv-offload`) so context size doesn't
+  compete for VRAM — a large (32k) window fits on any GPU. A small `--ubatch-size`
+  keeps the compute buffer bounded.
+- **Take all the VRAM** (`--n-gpu-layers 999`); weights that don't fit spill to
+  GTT/system RAM. On a dGPU this fills real VRAM (big win); on an iGPU it's
+  mostly GTT (modest win) — both work, neither is hard-coded.
+- **Clamp context to fit RAM**, not VRAM: the launcher reads the model's KV
+  geometry from the GGUF header (a tiny built-in parser in `gguf.rs`) and the
+  system's available RAM (`sysinfo`), then caps the 32k target so the (q8) KV
+  cache fits ~75% of free RAM. This is what prevents the "huge prompt →
+  out-of-memory → GPU device-lost" crash.
+- **Retry instead of predict**: if a launch fails (OOM at load), it relaunches
+  the same backend with a smaller context, then fewer GPU layers, before falling
+  through to the next backend (ultimately CPU). A crash mid-reply is detected and
+  the server is relaunched.
+
+A cross-platform free-VRAM probe (AMD sysfs / `nvidia-smi` on Linux; DXGI/Metal
+elsewhere — see `free_device_local_vram`) is logged and can later pick a smarter
+starting `-ngl`, but the design intentionally doesn't depend on predicting exact
+VRAM. Turn the toggle **off** to use the manual Context Size / GPU Layers fields
+verbatim.
+
+## Adaptive offload (auto)
+
+Settings → **Advanced AI Configuration → Adaptive GPU offload** (default **on**)
+sizes everything per machine + model so it uses the GPU for what it can without
+running out of VRAM — *consistent context, variable performance*:
+
+- **KV cache stays in system RAM** (`--no-kv-offload`), so context size doesn't
+  compete for VRAM — a large context fits on any GPU, even a 512 MB iGPU.
+- **Targets a 32k context**, clamped down only if RAM can't hold the KV cache
+  (estimated from GGUF metadata: `layers × kv_heads × head_dim`, read by a small
+  built-in GGUF parser).
+- **Requests full offload** (`-ngl 999`) + **flash attention**; weights fill real
+  VRAM and spill to GTT on shared-memory iGPUs.
+- **Degrades on failure**: if a launch fails (e.g. device-lost / OOM) it retries
+  with a smaller context, then fewer layers, then falls through to the next
+  backend / CPU — instead of predicting exact VRAM up front.
+- **Recovers from a mid-generation GPU crash** by relaunching.
+
+VRAM is detected best-effort (AMD sysfs / `nvidia-smi` on Linux; DXGI/Metal
+later) and used only as a hint — the retry loop is what guarantees a working
+launch. Turn the toggle **off** to set Context Size / GPU Layers manually.
+
+## Compute device: GPU / Vulkan / CPU
+
+The Settings compute selector has three choices:
+
+- **GPU** (performance) — uses the fastest available GPU: CUDA on an NVIDIA
+  discrete card, otherwise Vulkan. `backend_preference = "gpu"`.
+- **Vulkan** (power-saving) — forces the Vulkan backend and, on a machine that
+  also has a discrete GPU, **auto-pins the integrated GPU** (matched by name)
+  via `--device`, so heavy work stays off the power-hungry dGPU.
+  `backend_preference = "vulkan"`.
+- **CPU** (most reliable) — forces CPU-only execution (`-ngl 0`, no GPU
+  fallback). `backend_preference = "cpu"`. Slower, but it is the **most
+  reliable** path: it works with every model regardless of GPU driver/quant
+  bugs. Some GGUFs (e.g. certain Qwen quants on AMD RADV/Vulkan) produce
+  garbage output on the GPU but are correct on the CPU — this is the escape
+  hatch for that.
+
+On a machine with **no discrete GPU**, the **GPU** option is disabled (with a
+note) and the app defaults to **Vulkan** on the integrated GPU; **CPU** stays
+available as the reliable fallback. The "Running on …" badge polls the provider
+status, so it reflects the live backend as the server starts / restarts /
+recovers.
+
+The GPU and Vulkan choices still fall back through Vulkan → CPU automatically if
+the preferred path is unavailable (adaptive offload + retry loop handle it). The
+CPU choice pins CPU only and does not attempt the GPU at all.
+
+## Supported models
+
+Only **GGUF** models (the llama.cpp format) are supported — that is what
+`llama-server` loads. The Settings model picker filters to `.gguf` files. The
+launcher reads each model's GGUF metadata (see `gguf.rs`) to size context and
+decide whether `--jinja` is safe (only when the model embeds a chat template).
+
+## Tool calling
+
+The launcher passes **`--jinja`** so llama-server uses each model's embedded
+chat template to render tool definitions. This is required for correct tool
+calling on models like **LFM2** (which, unlike Qwen, has no built-in C++
+template path) — without it the model mis-selects or appears to "lose" its
+tools. Note context is also passed as labelled reference (separate from the
+user's request) so models don't echo the note's current content as their answer.
+
+## Thinking / reasoning toggle
+
+Settings → **Advanced AI Configuration → Model thinking / reasoning** toggles
+whether the model reasons before answering. It's model-agnostic: the launcher
+passes `--reasoning on|off` to llama-server, which drives each model's chat
+template (Qwen, LFM, …) rather than a model-specific prompt token. Off (default)
+is faster and emits no hidden reasoning tokens; on may improve accuracy at the
+cost of speed. Changing it relaunches the server.
+
 ## Override / power users
 
 - `MYELIN_LLAMA_SERVER_PATH` env var hard-pins a single executable and skips

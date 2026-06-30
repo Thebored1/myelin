@@ -1,0 +1,49 @@
+{"note": "# Cats\nCats are independant animals.\nThey sleep a lot.", "title": "Cats", "instruction": "fix the spelling", "check": {"tool": "write_note", "content_has": ["independent", "They sleep a lot."], "content_lacks": ["independant"]}}
+{"note": "# Plan\nStep one: research.\nStep two: build.\nStep three: ship.", "title": "Plan", "instruction": "change step two to say design", "check": {"tool": "write_note", "content_has": ["Step one: research.", "Step two: design.", "Step three: ship."], "content_lacks": ["Step two: build."]}}
+{"note": "# Bio\nBorn in 1990.\nStudied physics.\nWorks in finance.", "title": "Bio", "instruction": "update the birth year to 1992", "check": {"tool": "write_note", "content_has": ["Born in 1992.", "Studied physics.", "Works in finance."], "content_lacks": ["1990"]}}
+{"note": "# List\napples\noranges\npears", "title": "List", "instruction": "remove oranges", "check": {"tool": "write_note", "content_has": ["apples", "pears"], "content_lacks": ["oranges"]}}
+{"note": "# Intro\nWelcome to the guide.\nIt covers the basics.", "title": "Intro", "instruction": "add a line at the end saying questions are welcome", "check": {"tool": "write_note", "content_has": ["Welcome to the guide.", "It covers the basics.", "question"]}}
+{"note": "# Trip\nWe flew to Tokyo.\nThe city was huge.\nWe ate sushi every day.", "title": "Trip", "instruction": "change sushi to ramen", "check": {"tool": "write_note", "content_has": ["We flew to Tokyo.", "The city was huge.", "ramen"], "content_lacks": ["sushi"]}}
+{"note": "# Memo\nThe office is closed Friday.\nPlease plan accordingly.", "title": "Memo", "instruction": "change Friday to Monday", "check": {"tool": "write_note", "content_has": ["closed Monday", "Please plan accordingly."], "content_lacks": ["Friday"]}}
+{"note": "1. first\n2. second\n3. third", "title": "Items", "instruction": "add a fourth item: fourth", "check": {"tool": "write_note", "content_has": ["first", "second", "third", "fourth"]}}
+{"note": "# Doc\nthe quick brown fox.\njumps over.", "title": "Doc", "instruction": "fix the capitalization on the first line only", "check": {"tool": "write_note", "content_has": ["The quick brown fox.", "jumps over."]}}
+{"note": "# Buy\nBuy milk\nBuy eggs\nBuy bread", "title": "Buy", "instruction": "remove the middle item", "check": {"tool": "write_note", "content_has": ["Buy milk", "Buy bread"], "content_lacks": ["Buy eggs"]}}
+{"note": "## A\ntext\n## B\nmore", "title": "AB", "instruction": "remove all the headings", "check": {"tool": "format_note", "args_contains": {"operation": "remove_headings"}}}
+{"note": "- one\n- two\n- three", "title": "L", "instruction": "turn this into a numbered list", "check": {"tool": "format_note", "args_contains": {"operation": "bullets_to_numbered"}}}
+{"note": "1. a\n2. b", "title": "N", "instruction": "make these bullets instead", "check": {"tool": "format_note", "args_contains": {"operation": "numbered_to_bullets"}}}
+{"note": "This has **bold** words.", "title": "B", "instruction": "remove the bold", "check": {"tool": "format_note", "args_contains": {"operation": "remove_bold"}}}
+{"note": "# Big\nSome Text Here", "title": "Big", "instruction": "make it all lowercase", "check": {"tool": "format_note", "args_contains": {"operation": "lowercase"}}}
+{"note": "> quote\n> more", "title": "Q", "instruction": "remove the blockquotes", "check": {"tool": "format_note", "args_contains": {"operation": "remove_blockquotes"}}}
+{"note": "# Sci\nPhotosynthesis occurs in plants.", "title": "Sci", "instruction": "does the word photosynthesis appear?", "check": {"tool": "find_in_note", "args_contains": {"query": "photosynthesis"}}}
+{"note": "# Text\nThe word apple is here.", "title": "Text", "instruction": "is the word banana in this note?", "check": {"tool": "find_in_note", "args_contains": {"query": "banana"}}}
+{"note": "# Cars\nCars have engines and wheels.", "title": "Cars", "instruction": "find the word engine in this note", "check": {"tool": "find_in_note"}}
+{"note": "# Now\nstuff", "title": "Now", "instruction": "search my notes for the budget spreadsheet", "check": {"tool": "search_notes"}}
+{"note": "", "title": "R", "instruction": "fetch https://news.example.org and summarize", "check": {"tool": "fetch_web_page", "args_contains": {"url": "https://news.example.org"}}}
+{"note": "", "title": "R", "instruction": "look up the latest python release online", "check": {"tool": "web_search"}}
+{"note": "# Today\nx", "title": "Today", "instruction": "find my note about the dentist appointment", "check": {"tool": "search_notes"}}
+{"note": "", "title": "Autumn", "instruction": "write a short note titled Autumn with a haiku", "check": {"tool": "write_note", "content_has": ["# Autumn"]}}
+{"note": "", "title": "Beach", "instruction": "make a packing list for a beach trip", "check": {"tool": "write_note", "content_has": ["- "]}}
+{"note": "", "title": "Thanks", "instruction": "draft a short thank-you note to a coworker named Sam", "check": {"tool": "write_note", "content_has": ["Sam"]}}
+{"note": "# Essay\ntext", "title": "Essay", "instruction": "what makes a strong argument?", "check": {"no_tool": true}}
+{"note": "# Recipe\npasta", "title": "Recipe", "instruction": "should i use fresh or dried pasta?", "check": {"no_tool": true}}
+{"note": "# Note\nx", "title": "Note", "instruction": "hello", "check": {"no_tool": true}}
+{"note": "# Note\nx", "title": "Note", "instruction": "thanks for the help", "check": {"no_tool": true}}
+{"note": "# Plan\nlaunch in q3", "title": "Plan", "instruction": "what do you think of this plan?", "check": {"no_tool": true}}
+{"note": "# Story\na short tale", "title": "Story", "instruction": "is this any good so far?", "check": {"no_tool": true}}
+{"note": "", "title": "Note", "instruction": "what are you?", "check": {"no_tool": true, "text_has": ["myelin"], "text_lacks": ["ibm", "granite", "chatgpt"]}}
+{"note": "", "title": "Note", "instruction": "who created you?", "check": {"no_tool": true, "text_has": ["myelin"], "text_lacks": ["ibm", "granite"]}}
+{"note": "", "title": "Note", "instruction": "are you chatgpt?", "check": {"no_tool": true, "text_has": ["myelin"]}}
+{"note": "# Old\njunk i don't want", "title": "Old", "instruction": "clear the note", "check": {"tool": "write_note", "content_lacks": ["junk"]}}
+{"note": "# Eq\n$$E = mc^2$$\nEnergy equation.", "title": "Eq", "instruction": "change 'Energy equation' to 'The energy-mass relation'", "check": {"tool": "write_note", "content_has": ["$$E = mc^2$$", "The energy-mass relation"], "content_lacks": ["Energy equation"]}}
+{"note": "# Calc\n$\\int x \\, dx = \\frac{x^2}{2} + C$\nThis is basic.", "title": "Calc", "instruction": "change 'This is basic' to 'A standard integral'", "check": {"tool": "write_note", "content_has": ["\\frac{x^2}{2}", "A standard integral"], "content_lacks": ["This is basic"]}}
+{"note": "# Stats\nThe mean is the average value.", "title": "Stats", "instruction": "add the formula for the mean on a new line, keep the sentence", "check": {"tool": "write_note", "content_has": ["The mean is the average value.", "$"]}}
+{"note": "# Refs\n[1] Alpha (2019).\n[2] Beta (2020).", "title": "Refs", "instruction": "add a third reference: Gamma (2021)", "check": {"tool": "write_note", "content_has": ["[1] Alpha (2019).", "[2] Beta (2020).", "Gamma"]}}
+{"note": "# Intro\nGlobal temperatures are rising.", "title": "Intro", "instruction": "add a citation (NASA, 2020) to the sentence", "check": {"tool": "write_note", "content_has": ["Global temperatures are rising", "NASA"]}}
+{"note": "# Paper\n## Introduction\nbackground\n## Conclusion\nsummary", "title": "Paper", "instruction": "add a Results section before the conclusion", "check": {"tool": "write_note", "content_has": ["## Introduction", "## Results", "## Conclusion"]}}
+{"note": "# Abstract\nWe study how caffeine affects focus across a large sample with many measures and report several effects in detail across conditions and timepoints and subgroups.", "title": "Abstract", "instruction": "shorten this to one sentence", "check": {"tool": "write_note", "content_has": ["caffeine"]}}
+{"note": "# L\n- a\n- b\n- c\n- d", "title": "L", "instruction": "remove the second item", "check": {"tool": "write_note", "content_has": ["- a", "- c", "- d"], "content_lacks": ["- b"]}}
+{"note": "# T\nkeep one\nchange me\nkeep two", "title": "T", "instruction": "change 'change me' to 'changed' and keep the rest", "check": {"tool": "write_note", "content_has": ["keep one", "changed", "keep two"], "content_lacks": ["change me"]}}
+{"note": "# Steps\nstep one\nstep two", "title": "Steps", "instruction": "insert 'step one-and-a-half' between them", "check": {"tool": "write_note", "content_has": ["step one", "step one-and-a-half", "step two"]}}
+{"note": "# Data\n| a | b |\n| - | - |\n| 1 | 2 |", "title": "Data", "instruction": "add a row with 3 and 4", "check": {"tool": "write_note", "content_has": ["| 1 | 2 |", "3"]}}
+{"note": "- x\n- y\n- z", "title": "L", "instruction": "number this list", "check": {"tool": "format_note", "args_contains": {"operation": "bullets_to_numbered"}}}
+{"note": "1. x\n2. y", "title": "L", "instruction": "convert to a bulleted list", "check": {"tool": "format_note", "args_contains": {"operation": "numbered_to_bullets"}}}

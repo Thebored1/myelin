@@ -15,10 +15,12 @@
 	} from '$lib/types';
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { showSidebarToggle, noteSidebarOpen } from '$lib/stores';
+	import { theme } from '$lib/theme';
 	import Vditor from 'vditor';
 	import 'vditor/dist/index.css';
 	import 'mathlive';
 	import 'mathlive/fonts.css';
+	import katex from 'katex';
 	import PdfViewer from '$lib/components/PdfViewer.svelte';
 	import EpubViewer from '$lib/components/EpubViewer.svelte';
 	import HtmlViewer from '$lib/components/HtmlViewer.svelte';
@@ -36,6 +38,13 @@
 	let draftTags = $state('');
 	let isBusy = $state(false);
 	let message = $state('');
+	// First LaTeX compile fetches Tectonic's ~50 MB bundle; show real progress.
+	let latexDownloadMsg = $state<string | null>(null);
+	// .tex live-preview state.
+	let texAutoCompile = $state(false);
+	let texCompiling = $state(false);
+	let texDiagnostics = $state<{ line: number; message: string; severity?: 'error' | 'warning' }[]>([]);
+	let texAutoTimer: ReturnType<typeof setTimeout> | undefined;
 
 	let activeSidebarTab = $state<'info' | 'chat' | 'versions'>('info');
 	let noteHistory = $state<GitCommit[]>([]);
@@ -46,6 +55,73 @@
 
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
+	let copiedIdx = $state<number | null>(null);
+
+	async function copyMessage(idx: number, text: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			copiedIdx = idx;
+			setTimeout(() => {
+				if (copiedIdx === idx) copiedIdx = null;
+			}, 1200);
+		} catch {
+			/* clipboard unavailable */
+		}
+	}
+	// The editor selection the user has "armed" for the AI. Persists across sends
+	// (cleared only by the ✕ pill or by deselecting inside the editor). Captured in
+	// source-markdown coordinates with surrounding context so the backend can pin
+	// the exact span even as the note drifts.
+	let armedSelection = $state<{
+		text: string;
+		before: string;
+		after: string;
+		chars: number;
+		words: number;
+	} | null>(null);
+	let selDebounce: ReturnType<typeof setTimeout> | undefined;
+
+	// Prompt-box context-usage ring: estimate fill from the open note + chat
+	// length against the working context window (~32K tokens ≈ 130K chars).
+	const RING_CIRC = 2 * Math.PI * 15.5;
+	let contextPercent = $derived.by(() => {
+		const noteChars = note?.body?.length ?? 0;
+		const histChars = chatMessages.reduce((s, m) => s + (m.content?.length ?? 0), 0);
+		const used = noteChars + histChars + chatInput.length;
+		return Math.min(100, Math.round((used / 130000) * 100));
+	});
+	let ringOffset = $derived(RING_CIRC * (1 - contextPercent / 100));
+	let ringColor = $derived(
+		contextPercent < 60 ? 'var(--accent-200, #6ea8fe)' : contextPercent < 85 ? '#e0a341' : '#e5484d'
+	);
+
+	// A chat turn is in flight while the last assistant bubble is still streaming.
+	// Sending is blocked until it finishes, but the textarea stays editable so you
+	// can compose your next prompt while the model is still answering.
+	let isChatStreaming = $derived(chatMessages.some((m) => m.isStreaming));
+
+	// The notebook (top-level folder) the open note lives in. Anything created or
+	// uploaded while it's open inherits it, so docs stay with their note.
+	function openNoteNotebook(): string | null {
+		if (!note) return null;
+		const segs = note.relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
+		return segs.length > 1 ? segs[0] : null;
+	}
+
+	// Upload button: attach a document (becomes a note via the PDF/EPUB import).
+	async function attachFile() {
+		const picked = await openFileDialog({
+			multiple: false,
+			filters: [{ name: 'Documents', extensions: ['pdf', 'epub'] }]
+		});
+		if (typeof picked === 'string') {
+			try {
+				await invoke('import_pdf_file', { filePath: picked, notebook: openNoteNotebook() });
+			} catch (e) {
+				console.error('attach failed', e);
+			}
+		}
+	}
 	let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
 	let chatMessagesEl: HTMLDivElement | undefined = $state();
 	let currentTime = $state(Date.now());
@@ -57,6 +133,10 @@
 	let vditorInstance: Vditor | null = null;
 	let fullscreenShortcut = $state('Esc');
 	let noteAnimationTimer: ReturnType<typeof setTimeout> | undefined;
+	// Live note streaming (real token-by-token writes from the backend).
+	let noteStreaming = $state(false);
+	let noteStreamBuf = '';
+	let noteStreamBackup = '';
 	let savedEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
 
@@ -72,7 +152,7 @@
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
 
-	const NOTE_MIN_WIDTH = 760;
+	const NOTE_MIN_WIDTH = 800; // must match .main-pane min-width in CSS
 	let sidebarWidth = $state(320);
 	let isSidebarResizing = $state(false);
 
@@ -88,18 +168,21 @@
 	function handleGlobalMouseMove(e: MouseEvent) {
 		if (isResizing && mainLayoutEl) {
 			const rect = mainLayoutEl.getBoundingClientRect();
-			let newRatio = ((e.clientX - rect.left) / rect.width) * 100;
-			if (workingDocType === 'tex') {
-				newRatio = 100 - newRatio;
-			}
+			// splitRatio is the LEFT (PDF) pane's width %, and the panes are in
+			// natural order (PDF left, editor right), so the cursor's fraction from
+			// the left edge is the ratio directly — no per-doc-type inversion.
+			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
 			if (newRatio > 20 && newRatio < 80) {
 				splitRatio = newRatio;
 			}
 		} else if (isSidebarResizing) {
 			const newWidth = window.innerWidth - e.clientX;
 			// Never let the sidebar grow past the point where the note would drop
-			// below its protected minimum width — keeps it on-screen and the editor stable.
-			const maxSidebar = Math.max(320, window.innerWidth - NOTE_MIN_WIDTH);
+			// below its protected minimum width — keeps it on-screen and the editor
+			// stable. Clamp against the layout container (which excludes the left
+			// rail), not the full window, or the panes overflow and get clipped.
+			const containerWidth = mainLayoutEl?.getBoundingClientRect().width ?? window.innerWidth;
+			const maxSidebar = Math.max(320, containerWidth - NOTE_MIN_WIDTH);
 			sidebarWidth = Math.max(320, Math.min(newWidth, maxSidebar));
 		}
 	}
@@ -188,6 +271,193 @@
 		return offset;
 	}
 
+	// Text offset of a (container, offset) point within the editor's rendered text.
+	function textOffsetOf(editorEl: HTMLElement, container: Node, offset: number): number | null {
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		let acc = 0;
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			if (node === container) return acc + offset;
+			acc += node.textContent?.length ?? 0;
+		}
+		return null;
+	}
+
+	// Occurrence of `needle` in `hay` whose start is closest to `hint` (disambiguates repeats).
+	function nearestIndexOf(hay: string, needle: string, hint: number): number {
+		let best = -1;
+		let bestDist = Infinity;
+		let from = 0;
+		let i: number;
+		while ((i = hay.indexOf(needle, from)) >= 0) {
+			const d = Math.abs(i - hint);
+			if (d < bestDist) {
+				bestDist = d;
+				best = i;
+			}
+			from = i + 1;
+		}
+		return best;
+	}
+
+	// Map the current editor selection to a source-markdown span + surrounding
+	// context. In Vditor IR mode the rendered text ≈ the source for prose, so the
+	// tree-walked offsets usually map straight in; we validate and fall back to a
+	// proximity text-search when formatting markers skew them.
+	function computeSourceSelection(): { text: string; before: string; after: string } | null {
+		if (!vditorInstance || !vditorContainer) return null;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return null;
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+		const range = sel.getRangeAt(0);
+		if (!editorEl.contains(range.commonAncestorContainer)) return null;
+		const selText = sel.toString();
+		if (!selText.trim()) return null;
+
+		const source = vditorInstance.getValue();
+		const startOff = textOffsetOf(editorEl, range.startContainer, range.startOffset);
+		const endOff = textOffsetOf(editorEl, range.endContainer, range.endOffset);
+
+		let s = -1;
+		let e = -1;
+		if (startOff != null && endOff != null && source.slice(startOff, endOff) === selText) {
+			s = startOff;
+			e = endOff;
+		} else {
+			s = nearestIndexOf(source, selText, startOff ?? 0);
+			if (s >= 0) e = s + selText.length;
+		}
+		if (s < 0) return null;
+
+		const N = 40;
+		return {
+			text: source.slice(s, e),
+			before: source.slice(Math.max(0, s - N), s),
+			after: source.slice(e, Math.min(source.length, e + N))
+		};
+	}
+
+	// Paint the armed selection with the CSS Custom Highlight API so it stays
+	// visible even when focus leaves the editor (e.g. while typing in the prompt).
+	// It's independent of the browser's native selection, which collapses on blur.
+	const HIGHLIGHT_SUPPORTED =
+		typeof CSS !== 'undefined' && !!(CSS as any).highlights && typeof (window as any).Highlight !== 'undefined';
+
+	function setArmedHighlight(range: Range | null) {
+		if (!HIGHLIGHT_SUPPORTED) return;
+		const reg = (CSS as any).highlights as Map<string, unknown>;
+		if (range) reg.set('ai-armed', new (window as any).Highlight(range));
+		else reg.delete('ai-armed');
+	}
+
+	function clearArmedSelection() {
+		armedSelection = null;
+		setArmedHighlight(null);
+	}
+
+	// Build a DOM Range from rendered-text offsets (inverse of textOffsetOf) so we
+	// can re-highlight a span the user can no longer natively select.
+	function rangeFromRenderedOffsets(
+		editorEl: HTMLElement,
+		startOff: number,
+		endOff: number
+	): Range | null {
+		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+		let acc = 0;
+		let startNode: Node | null = null;
+		let startNodeOff = 0;
+		let endNode: Node | null = null;
+		let endNodeOff = 0;
+		let node: Node | null;
+		while ((node = walker.nextNode())) {
+			const len = node.textContent?.length ?? 0;
+			if (startNode === null && startOff <= acc + len) {
+				startNode = node;
+				startNodeOff = startOff - acc;
+			}
+			if (endOff <= acc + len) {
+				endNode = node;
+				endNodeOff = endOff - acc;
+				break;
+			}
+			acc += len;
+		}
+		if (!startNode || !endNode) return null;
+		try {
+			const range = document.createRange();
+			range.setStart(startNode, Math.max(0, startNodeOff));
+			range.setEnd(endNode, Math.max(0, endNodeOff));
+			return range;
+		} catch {
+			return null;
+		}
+	}
+
+	function captureEditorSelection() {
+		if (!vditorContainer) return;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return;
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+		const range = sel.getRangeAt(0);
+		if (!editorEl.contains(range.commonAncestorContainer)) return;
+		const computed = computeSourceSelection();
+		if (computed) {
+			const words = computed.text.trim().split(/\s+/).filter(Boolean).length;
+			armedSelection = { ...computed, chars: computed.text.length, words };
+			setArmedHighlight(range.cloneRange());
+		}
+	}
+
+	// After the AI edits the armed selection, re-select the MODIFIED text: it now
+	// sits between the unchanged context anchors, so re-locate it, re-arm, and
+	// re-highlight (best-effort for the visual range on formatted content).
+	function reselectAfterEdit() {
+		if (!armedSelection || !vditorInstance || !vditorContainer) return;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return;
+		const source = vditorInstance.getValue();
+		const before = armedSelection.before;
+		const after = armedSelection.after;
+		let s = 0;
+		let e = source.length;
+		if (before) {
+			const bi = source.indexOf(before);
+			if (bi >= 0) s = bi + before.length;
+		}
+		if (after) {
+			const ai = source.indexOf(after, s);
+			if (ai >= 0) e = ai;
+		}
+		if (e <= s) return;
+		const newText = source.slice(s, e);
+		if (!newText.trim()) return;
+		const words = newText.trim().split(/\s+/).filter(Boolean).length;
+		armedSelection = {
+			text: newText,
+			before: source.slice(Math.max(0, s - 40), s),
+			after: source.slice(e, Math.min(source.length, e + 40)),
+			chars: newText.length,
+			words
+		};
+		setArmedHighlight(rangeFromRenderedOffsets(editorEl, s, e));
+	}
+
+	// Clear the armed selection on any click OUTSIDE the prompt box (by choice via
+	// the ✕, or accidentally). Clicks inside the prompt box keep it; a fresh drag
+	// in the editor re-arms via selectionchange.
+	function onDocMouseDown(e: MouseEvent) {
+		const target = e.target as HTMLElement | null;
+		if (target && target.closest('.chat-input-area')) return;
+		if (armedSelection) clearArmedSelection();
+	}
+
+	function onSelectionChange() {
+		clearTimeout(selDebounce);
+		selDebounce = setTimeout(captureEditorSelection, 120);
+	}
+
 	function restoreSelectionTextOffset(editorEl: HTMLElement, targetOffset: number) {
 		const selection = window.getSelection();
 		if (!selection) return;
@@ -250,6 +520,29 @@
 
 	let mathDialog: HTMLDialogElement | undefined = $state();
 	let mathValue = $state('');
+	// Non-empty when the current formula won't render in KaTeX (the engine Vditor
+	// uses for $$…$$). Surfaced in the dialog so a bad formula isn't inserted only
+	// to silently fail — or render as a red error — later in the note.
+	let mathError = $state('');
+
+	function mathToKatex(raw: string): string {
+		// MathLive emits \placeholder tokens KaTeX doesn't know; map them to a box.
+		return raw.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
+	}
+
+	$effect(() => {
+		const v = mathValue;
+		if (!v.trim()) {
+			mathError = '';
+			return;
+		}
+		try {
+			katex.renderToString(mathToKatex(v), { throwOnError: true, displayMode: true });
+			mathError = '';
+		} catch (e: any) {
+			mathError = e?.message ? String(e.message) : 'KaTeX cannot render this formula.';
+		}
+	});
 
 	let linkNoteDialog: HTMLDialogElement | undefined = $state();
 	let linkSearchQuery = $state('');
@@ -300,6 +593,7 @@
 		deleteMainNoteDialog?.showModal();
 	}
 	let pendingNavigationUrl = $state('');
+	let pendingBack = $state(false);
 
 	let attachPdfDialog: HTMLDialogElement | undefined = $state();
 	let pdfSearchQuery = $state('');
@@ -345,12 +639,76 @@
 
 	function insertMath() {
 		if (vditorInstance && mathValue) {
-			// Replace MathLive specific placeholders with standard KaTeX squares
-			const cleanMath = mathValue.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
+			const cleanMath = mathToKatex(mathValue);
+			if (mathError && !confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)) {
+				return; // keep the dialog open so the user can fix it
+			}
 			vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 		}
 		mathDialog?.close();
 	}
+
+	// Compile the open .tex note to PDF and show it in the split preview pane.
+	// Shared by the manual button and the debounced auto-compile.
+	async function compileTex(_opts: { manual?: boolean } = {}) {
+		if (!note || texCompiling) return;
+		texCompiling = true;
+		isBusy = true;
+		try {
+			await saveNote();
+			const pdfBytes = await invoke<ArrayBuffer>('compile_latex', { noteId: note.id });
+			activeSourceBytes = new Uint8Array(pdfBytes);
+			sourceMaterialType = 'pdf';
+			showAttachedNote = true;
+			texDiagnostics = [];
+			message = '';
+		} catch (e) {
+			const info = parseLatexError(e);
+			texDiagnostics = info.diagnostics;
+			message = info.diagnostics.length
+				? `LaTeX: ${info.diagnostics.length} error${info.diagnostics.length > 1 ? 's' : ''} — see editor markers.`
+				: `Compile error: ${info.message}`;
+		} finally {
+			texCompiling = false;
+			isBusy = false;
+			latexDownloadMsg = null;
+		}
+	}
+
+	// The backend serialises compile failures as JSON { message, log, diagnostics }
+	// (line numbers already mapped to editor coordinates). Fall back to plain text.
+	function parseLatexError(e: unknown): {
+		message: string;
+		diagnostics: { line: number; message: string; severity?: 'error' | 'warning' }[];
+	} {
+		const raw = typeof e === 'string' ? e : ((e as any)?.message ?? String(e));
+		try {
+			const parsed = JSON.parse(raw);
+			if (parsed && Array.isArray(parsed.diagnostics)) {
+				return { message: parsed.message ?? 'LaTeX compilation failed', diagnostics: parsed.diagnostics };
+			}
+		} catch {
+			/* not structured — show the raw string */
+		}
+		return { message: raw, diagnostics: [] };
+	}
+
+	function closeTexPreview() {
+		activeSourceBytes = null;
+		showAttachedNote = false;
+	}
+
+	// Debounced auto-compile: a couple of seconds after typing stops, when armed.
+	$effect(() => {
+		void draftBody;
+		const armed = texAutoCompile && workingDocType === 'tex';
+		if (!armed) return;
+		if (texAutoTimer) clearTimeout(texAutoTimer);
+		texAutoTimer = setTimeout(() => void compileTex(), 2000);
+		return () => {
+			if (texAutoTimer) clearTimeout(texAutoTimer);
+		};
+	});
 
 	$effect(() => {
 		const query = linkSearchQuery;
@@ -737,7 +1095,7 @@
 			draftBody = existingScratchpad?.body ?? '';
 			draftTags = loadedNote.tags.join(', ');
 			activeSourceId = loadedNote.id;
-			const bytes = await invoke<number[]>('read_file_binary', { noteId: loadedNote.id });
+			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			scratchpadSavedId = existingScratchpad?.id ?? null;
 			showAttachedNote = draftBody.trim().length > 0;
@@ -750,7 +1108,7 @@
 
 			if (loadedNote.sourcePdf) {
 				activeSourceId = loadedNote.sourcePdf;
-				const bytes = await invoke<number[]>('read_file_binary', { noteId: loadedNote.sourcePdf });
+				const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
 				activeSourceBytes = new Uint8Array(bytes);
 				showAttachedNote = draftBody.trim().length > 0;
 				// If a working document has a sourcePdf, we need to know its type. 
@@ -797,27 +1155,45 @@
 		void fetchRelatedNotes();
 	}
 
-	function startNoteStreamAnimation(newContent: string, mode: 'write' | 'append') {
+	// A live note stream is starting (whole-body replace). Clear the editor so
+	// the new content streams in from scratch, after stashing the old body so we
+	// can restore it if the stream is cancelled.
+	function beginNoteStream() {
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		noteAnimationTimer = undefined;
+		noteStreamBackup = vditorInstance ? vditorInstance.getValue() : draftBody;
+		noteStreamBuf = '';
+		noteStreaming = true;
+		if (vditorInstance) vditorInstance.setValue('');
+	}
+
+	// A token (or several) of the note arrived — append and reflect it live.
+	function appendNoteStream(delta: string) {
+		if (!noteStreaming) beginNoteStream();
+		noteStreamBuf += delta;
+		if (vditorInstance) vditorInstance.setValue(noteStreamBuf);
+	}
+
+	// The stream turned out not to be a whole-body replace (append/edit) — undo
+	// the live preview; the authoritative note_written will apply the real change.
+	function cancelNoteStream() {
+		if (!noteStreaming) return;
+		noteStreaming = false;
+		if (vditorInstance) vditorInstance.setValue(noteStreamBackup);
+	}
+
+	// Authoritative result of a write_note tool call. Sets the final content in
+	// one shot (no fake animation) and reconciles any live-streamed preview.
+	function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
+		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
+		noteAnimationTimer = undefined;
+		noteStreaming = false;
 		const baseContent =
 			mode === 'append' && vditorInstance ? vditorInstance.getValue().trimEnd() + '\n\n' : '';
 		const finalContent = baseContent + newContent;
 		if (note) note = { ...note, body: finalContent };
 		draftBody = finalContent;
-		if (!newContent) return;
-		let i = 0;
-		const chunkSize = 8;
-		function step() {
-			i = Math.min(i + chunkSize, newContent.length);
-			if (vditorInstance) vditorInstance.setValue(baseContent + newContent.slice(0, i));
-			if (i < newContent.length) {
-				noteAnimationTimer = setTimeout(step, 20);
-			} else {
-				noteAnimationTimer = undefined;
-			}
-		}
-		noteAnimationTimer = setTimeout(step, 20);
+		if (vditorInstance) vditorInstance.setValue(finalContent);
 	}
 
 	function initVditor() {
@@ -828,7 +1204,11 @@
 				value: draftBody,
 				placeholder: isSourceMaterial ? 'Scratchpad for notes...' : 'Start typing here...',
 				mode: 'ir',
-				theme: 'dark',
+				// Vditor ships its own skin; 'classic' is its light theme. We mirror the
+				// app theme here and keep it in sync via the $effect below. Pass only the
+				// skin (no content/code theme) so Vditor doesn't fetch theme CSS from a CDN
+				// — the editor's bg/text colors come from our own var overrides anyway.
+				theme: $theme === 'light' ? 'classic' : 'dark',
 				icon: 'material',
 				lang: 'en_US',
 				tab: '\t',
@@ -989,6 +1369,12 @@
 		}
 	});
 
+	// Keep Vditor's skin in sync when the app theme is toggled while a note is open.
+	$effect(() => {
+		const skin = $theme === 'light' ? 'classic' : 'dark';
+		if (vditorInstance) vditorInstance.setTheme(skin);
+	});
+
 	function parseBacklinkContext(context: string): string {
 		if (!context) return '';
 		let html = context;
@@ -1113,7 +1499,8 @@
 				if (!scratchpadSavedId) {
 					const newNote = await invoke<NoteDocument>('create_note', {
 						title: draftTitle,
-						sourcePdf: activeSourceId
+						sourcePdf: activeSourceId,
+						notebook: openNoteNotebook()
 					});
 					scratchpadSavedId = newNote.id;
 				}
@@ -1184,7 +1571,7 @@
 	}
 
 	async function sendChatMessage() {
-		if (!note || !chatInput.trim()) return;
+		if (!note || !chatInput.trim() || isChatStreaming) return;
 		const userText = chatInput.trim();
 		chatInput = '';
 		if (chatTextareaEl) chatTextareaEl.style.height = 'auto';
@@ -1205,7 +1592,18 @@
 		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true, startTime }];
 		setTimeout(() => scrollChatToBottom(true), 50);
 		try {
-			await invoke('ask_ai_stream', { noteId: note.id, question: userText, requestId });
+			await invoke('ask_ai_stream', {
+				noteId: note.id,
+				question: userText,
+				requestId,
+				// Working-doc type so the model edits as LaTeX / notebook, not Markdown.
+				docType: workingDocType,
+				// Armed selection persists across sends (cleared only by the ✕ pill),
+				// so several edits can target the same span.
+				selection: armedSelection
+					? { text: armedSelection.text, before: armedSelection.before, after: armedSelection.after }
+					: null
+			});
 		} catch (e) {
 			console.error('AI Error:', e);
 			failStreamingChatMessage(extractChatErrorMessage(e));
@@ -1290,7 +1688,9 @@
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
 		if (wroteToCurrentNote(tools)) {
-			void refreshCurrentNoteFromBackend(noteAnimationTimer !== undefined);
+			// note_written already set the editor authoritatively — sync metadata
+			// from the backend but don't overwrite the editor content.
+			void refreshCurrentNoteFromBackend(true);
 		}
 	}
 
@@ -1312,6 +1712,9 @@
 		errorMsg: string,
 		tools: { name: string; details: string }[] = []
 	) {
+		// If a live note stream was interrupted, the note was never saved —
+		// restore the pre-stream content rather than leaving a partial draft.
+		cancelNoteStream();
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming) {
 				return { ...m, isStreaming: false, error: true, content: m.content + '\n\n' + errorMsg, tools, endTime: Date.now() };
@@ -1410,6 +1813,32 @@
 		void goto(url);
 	}
 
+	// Back button: go to the page the user actually came from (browser history),
+	// not always home. A deliberate ?returnTo= still wins, and the unsaved-changes
+	// guard is respected (warn first, then go back on confirm).
+	function goBack() {
+		if (page.url.searchParams.has('returnTo')) {
+			safeNavigate(backUrl);
+			return;
+		}
+		if (saveStatus === 'saving' || saveStatus === 'unsaved') {
+			pendingBack = true;
+			navigationWarningDialog?.showModal();
+			return;
+		}
+		navigateBack();
+	}
+
+	function navigateBack() {
+		// Mark programmatic so beforeNavigate doesn't re-prompt on the popstate.
+		isProgrammaticNavigation = true;
+		if (typeof window !== 'undefined' && window.history.length > 1) {
+			history.back();
+		} else {
+			void goto('/');
+		}
+	}
+
 	function requestDeleteAttachedNote() {
 		deleteAttachedNoteDialog?.showModal();
 	}
@@ -1484,7 +1913,7 @@
 			});
 			note = saved;
 			activeSourceId = pdfNote.id;
-			const bytes = await invoke<number[]>('read_file_binary', { noteId: pdfNote.id });
+			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: pdfNote.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			showAttachedNote = true;
 			saveStatus = 'saved';
@@ -1542,7 +1971,7 @@
 		attachPdfDialog?.close();
 		isBusy = true;
 		try {
-			const pdfNote = await invoke<NoteDocument>('import_pdf_file', { filePath });
+			const pdfNote = await invoke<NoteDocument>('import_pdf_file', { filePath, notebook: openNoteNotebook() });
 			await attachPdf(pdfNote);
 		} catch (err) {
 			message = `Failed to import PDF: ${err}`;
@@ -1599,6 +2028,11 @@
 
 	function confirmNavigation() {
 		navigationWarningDialog?.close();
+		if (pendingBack) {
+			pendingBack = false;
+			navigateBack();
+			return;
+		}
 		if (pendingNavigationUrl) {
 			isProgrammaticNavigation = true;
 			void goto(pendingNavigationUrl);
@@ -1609,6 +2043,7 @@
 	function cancelNavigation() {
 		navigationWarningDialog?.close();
 		pendingNavigationUrl = '';
+		pendingBack = false;
 	}
 
 	// AI Actions
@@ -1629,13 +2064,15 @@
 		}
 	}
 
+	let aiModal = $state<{ title: string; body: string } | null>(null);
+
 	async function runSummarise() {
 		if (!note) return;
 		isBusy = true;
 		try {
 			message = 'Summarising note...';
 			const res = await invoke<string>('summarise_note', { noteId: note.id });
-			alert(`AI Summary:\n\n${res}`);
+			aiModal = { title: 'AI summary', body: res };
 			message = 'Summary complete.';
 		} finally {
 			isBusy = false;
@@ -1650,7 +2087,7 @@
 		try {
 			message = 'Asking AI...';
 			const res = await invoke<string>('ask_ai', { noteId: note.id, question: q });
-			alert(`AI Answer:\n\n${res}`);
+			aiModal = { title: 'AI answer', body: res };
 			message = 'AI answered.';
 		} finally {
 			isBusy = false;
@@ -1696,6 +2133,9 @@
 				link.classList.add('force-expand');
 			}
 		});
+
+		// Arm/refresh the editor selection for the AI (debounced).
+		onSelectionChange();
 	}
 
 	onMount(() => {
@@ -1712,24 +2152,25 @@
 		let unlistenChunk: UnlistenFn;
 		let unlistenDone: UnlistenFn;
 		let unlistenError: UnlistenFn;
+		let unlistenAborted: UnlistenFn;
 		let unlistenApproval: UnlistenFn;
 		let unlistenNoteWritten: UnlistenFn;
+		let unlistenNoteStreamStart: UnlistenFn;
+		let unlistenNoteDelta: UnlistenFn;
+		let unlistenNoteStreamCancel: UnlistenFn;
+		let unlistenLatex: UnlistenFn;
 
 		$showSidebarToggle = true;
-		if (window.innerWidth > 1200) {
-			$noteSidebarOpen = true;
-		}
+		// The note sidebar's open/closed state is remembered across sessions via the
+		// persisted noteSidebarOpen store, so we intentionally don't force it here.
 
 		const mql = window.matchMedia('(max-width: 1200px)');
-		const handleMediaChange = (e: MediaQueryListEvent) => {
-			if (e.matches) {
-				$noteSidebarOpen = false;
-			} else {
-				$noteSidebarOpen = true;
-			}
-		};
+		const handleMediaChange = (_e: MediaQueryListEvent) => {};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
+		// Clear the armed selection on clicks outside the prompt box (capture phase
+		// so it runs before the click lands).
+		document.addEventListener('mousedown', onDocMouseDown, true);
 
 		let unlistenTool: () => void;
 
@@ -1739,16 +2180,48 @@
 			(event) => {
 				const { noteId, content, mode } = event.payload;
 				if (!note || note.id !== noteId) return;
-				startNoteStreamAnimation(content, mode);
+				applyNoteWrite(content, mode);
+				// If a selection was armed, re-select the modified span once the
+				// editor has re-rendered, so follow-up edits target the new text.
+				if (armedSelection) setTimeout(reselectAfterEdit, 60);
 			}
 		).then((fn) => (unlistenNoteWritten = fn));
 
-		listen<{ tool: string; details: string }>('ai://chat_tool', (event) => {
+		listen<{ noteId: string }>('ai://note_stream_start', (event) => {
+			if (!note || note.id !== event.payload.noteId) return;
+			beginNoteStream();
+		}).then((fn) => (unlistenNoteStreamStart = fn));
+
+		listen<{ noteId: string; delta: string }>('ai://note_delta', (event) => {
+			if (!note || note.id !== event.payload.noteId) return;
+			appendNoteStream(event.payload.delta);
+		}).then((fn) => (unlistenNoteDelta = fn));
+
+		listen<{ noteId: string }>('ai://note_stream_cancel', (event) => {
+			if (!note || note.id !== event.payload.noteId) return;
+			cancelNoteStream();
+		}).then((fn) => (unlistenNoteStreamCancel = fn));
+
+		listen<{ tool: string; details: string; mutatesNote?: boolean; isUpdate?: boolean }>('ai://chat_tool', (event) => {
+			if (event.payload.isUpdate) {
+				// Update the last tool entry's details with the result content
+				chatMessages = chatMessages.map((m) => {
+					const tools = m.tools?.map((t) =>
+						t.name === event.payload.tool
+							? { name: t.name, details: event.payload.details }
+							: t
+					);
+					return tools ? { ...m, tools } : m;
+				});
+				return;
+			}
 			let lastStartTime = Date.now();
 			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) {
 					lastStartTime = m.startTime || lastStartTime;
-					return { ...m, isStreaming: false };
+					// On a note edit, drop the model's pre-tool prose — it tends to
+					// duplicate the note content that's already shown in the editor.
+					return { ...m, isStreaming: false, content: event.payload.mutatesNote ? '' : m.content };
 				}
 				return m;
 			});
@@ -1830,6 +2303,24 @@
 			}
 		).then((fn) => (unlistenError = fn));
 
+		// Aborted by user: remove the partial streaming message entirely.
+		listen<{ requestId: string }>('ai://chat_aborted', () => {
+			chatMessages = chatMessages.filter((m) => !m.isStreaming);
+		}).then((fn) => (unlistenAborted = fn));
+
+		// LaTeX support bundle download progress (first compile only).
+		listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
+			const p = event.payload;
+			const mb = ((p.bytes ?? 0) / (1024 * 1024)).toFixed(1);
+			if (p.phase === 'start' || p.phase === 'progress') {
+				latexDownloadMsg = `Downloading LaTeX support files (first run)… ${mb} MB`;
+			} else if (p.phase === 'done') {
+				latexDownloadMsg = null;
+			} else if (p.phase === 'error') {
+				latexDownloadMsg = null;
+			}
+		}).then((fn) => (unlistenLatex = fn));
+
 		window.addEventListener('mousemove', handleGlobalMouseMove);
 		window.addEventListener('mouseup', stopResizing);
 		window.addEventListener('beforeunload', handleBeforeUnload);
@@ -1837,6 +2328,7 @@
 		return () => {
 			mql.removeEventListener('change', handleMediaChange);
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
+			document.removeEventListener('mousedown', onDocMouseDown, true);
 			window.removeEventListener('mousemove', handleGlobalMouseMove);
 			window.removeEventListener('mouseup', stopResizing);
 			window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -1847,9 +2339,14 @@
 			if (unlistenChunk) unlistenChunk();
 			if (unlistenDone) unlistenDone();
 			if (unlistenError) unlistenError();
+			if (unlistenAborted) unlistenAborted();
 			if (unlistenTool) unlistenTool();
 			if (unlistenApproval) unlistenApproval();
 			if (unlistenNoteWritten) unlistenNoteWritten();
+			if (unlistenNoteStreamStart) unlistenNoteStreamStart();
+			if (unlistenNoteDelta) unlistenNoteDelta();
+			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
+			if (unlistenLatex) unlistenLatex();
 		};
 	});
 
@@ -1859,6 +2356,7 @@
 		if (vditorInstance) vditorInstance.destroy();
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
+			document.removeEventListener('mousedown', onDocMouseDown, true);
 		}
 	});
 
@@ -1894,7 +2392,7 @@
 		<div class="header-copy">
 			<button
 				class="back-link"
-				onclick={() => safeNavigate(backUrl)}
+				onclick={goBack}
 				aria-label="Go back"
 				title="Go back"
 			>
@@ -1957,11 +2455,13 @@
 	<div
 		class="main-layout"
 		class:split-layout={activeSourceBytes !== null && showAttachedNote}
-		class:reverse-split={workingDocType === 'tex'}
 		bind:this={mainLayoutEl}
 	>
 		{#if activeSourceBytes}
-			<section class="pdf-pane" style="width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
+			<section class="pdf-pane" class:tex-pane={workingDocType === 'tex'} style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
+				{#if workingDocType === 'tex'}
+					<div class="tex-pane-badge">PDF preview</div>
+				{/if}
 				{#if sourceMaterialType === 'pdf'}
 					<PdfViewer
 						pdfBytes={activeSourceBytes}
@@ -1969,7 +2469,7 @@
 						onQuote={handlePdfQuote}
 						onAnnotationsChange={handleAnnotationsChange}
 						onImageExtract={handleImageExtract}
-						onClosePdf={(activeSourceBytes !== null && showAttachedNote) ? requestDetachPdf : undefined}
+						onClosePdf={workingDocType === 'tex' ? closeTexPreview : ((activeSourceBytes !== null && showAttachedNote) ? requestDetachPdf : undefined)}
 						onAttachNote={() => {
 							showAttachedNote = true;
 							setTimeout(() => initVditor(), 100);
@@ -1996,7 +2496,7 @@
 
 		<!-- Main Content Area -->
 		{#if shouldRenderEditor}
-			<section class="main-pane" style={activeSourceBytes ? `width: ${100 - splitRatio}%` : ''}>
+			<section class="main-pane" class:tex-pane={workingDocType === 'tex'} style={activeSourceBytes ? `width: ${100 - splitRatio}%` : ''}>
 				<div class="content-area" style="position: relative;">
 					{#if workingDocType === 'md'}
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -2020,30 +2520,17 @@
 							Press <span>{fullscreenShortcut}</span> to toggle
 						</div>
 					{:else if workingDocType === 'tex'}
-						<div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-							<div style="padding: 4px; background: var(--bg-body); border-bottom: 1px solid var(--border-default); display: flex; justify-content: flex-end;">
-								<button class="primary" onclick={async () => {
-									isBusy = true;
-									await saveNote();
-									try {
-										const pdfBytes = await invoke<number[]>('compile_latex', { noteId: note?.id });
-										activeSourceBytes = new Uint8Array(pdfBytes);
-										sourceMaterialType = 'pdf';
-									} catch(e) {
-										message = `Compile error: ${e}`;
-									} finally {
-										isBusy = false;
-									}
-								}}>Compile to PDF</button>
-							</div>
-							<div style="flex: 1;">
-								<TexEditor
-									value={draftBody}
-									onInput={(val) => { draftBody = val; triggerAutoSave(); }}
-								/>
-							</div>
-						</div>
-					{:else if workingDocType === 'ipynb'}
+							<TexEditor
+								value={draftBody}
+								onInput={(val) => { draftBody = val; triggerAutoSave(); }}
+								diagnostics={texDiagnostics}
+								onCompile={() => compileTex({ manual: true })}
+								autoCompile={texAutoCompile}
+								onToggleAuto={() => (texAutoCompile = !texAutoCompile)}
+								busy={isBusy}
+								statusMsg={latexDownloadMsg ?? (texCompiling ? 'Compiling…' : null)}
+							/>
+						{:else if workingDocType === 'ipynb'}
 						<IpynbEditor
 							value={draftBody}
 							onInput={(val) => { draftBody = val; triggerAutoSave(); }}
@@ -2243,7 +2730,10 @@
 														{msg.content}
 													{/if}
 													{#if msg.isStreaming && msg.startTime}
-														<span class="chat-time-taken live">{((currentTime - msg.startTime) / 1000).toFixed(1)}s</span>
+														{#if !msg.content}
+									<span class="chat-working" aria-label="Working"><span></span><span></span><span></span></span>
+								{/if}
+								<span class="chat-time-taken live">{((currentTime - msg.startTime) / 1000).toFixed(1)}s</span>
 													{:else if msg.endTime && msg.startTime}
 														<span class="chat-time-taken">{((msg.endTime - msg.startTime) / 1000).toFixed(1)}s</span>
 													{/if}
@@ -2260,6 +2750,20 @@
 															onclick={() => retryMessage(msg.snapshot!, msg.content)}
 															title="Retry — rewind and resend this prompt">↻</button
 														>
+													</div>
+												{/if}
+												{#if msg.role === 'assistant' && msg.content && !msg.isStreaming}
+													<div class="chat-msg-actions assistant">
+														<button
+															class="rewind-btn copy-btn"
+															onclick={() => copyMessage(i, msg.content)}
+															title="Copy response"
+															aria-label="Copy response"
+														>
+															{#if copiedIdx === i}✓{:else}
+																<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+															{/if}
+														</button>
 													</div>
 												{/if}
 											</div>
@@ -2283,35 +2787,90 @@
 							{/if}
 							
 							<div class="chat-input-area">
-								<textarea
-									bind:this={chatTextareaEl}
-									bind:value={chatInput}
-									onkeydown={(e) => {
-										if (e.key === 'Enter' && !e.shiftKey) {
-											e.preventDefault();
-											if (chatInput.trim()) sendChatMessage();
-										}
-									}}
-									oninput={(e) => {
-										const target = e.target as HTMLTextAreaElement;
-										target.style.height = 'auto';
-										target.style.height = `${Math.min(target.scrollHeight + 2, 150)}px`;
-									}}
-									placeholder="Ask AI..."
-									rows="1"
-								></textarea>
-								<label class="full-permission-toggle">
-									<div class="toggle-switch">
-										<input type="checkbox" checked={!requireToolApproval} onchange={(e) => {
-											requireToolApproval = !e.currentTarget.checked;
-											invoke('set_require_tool_approval', { require: requireToolApproval });
-										}} />
-										<span class="slider"></span>
+								<div class="prompt-box">
+									<textarea
+										bind:this={chatTextareaEl}
+										bind:value={chatInput}
+										onkeydown={(e) => {
+											if (e.key === 'Enter' && !e.shiftKey) {
+												e.preventDefault();
+												if (chatInput.trim() && !isChatStreaming) sendChatMessage();
+											}
+										}}
+										oninput={(e) => {
+											const target = e.target as HTMLTextAreaElement;
+											target.style.height = 'auto';
+											target.style.height = `${Math.min(target.scrollHeight + 2, 150)}px`;
+										}}
+										placeholder="Ask AI…"
+										rows="1"
+									></textarea>
+									<div class="prompt-toolbar">
+										<button
+											type="button"
+											class="mode-pill"
+											class:auto={!requireToolApproval}
+											onclick={() => {
+												requireToolApproval = !requireToolApproval;
+												invoke('set_require_tool_approval', { require: requireToolApproval });
+											}}
+											title={requireToolApproval
+												? 'Ask: confirms before each tool action — click for Auto'
+												: 'Auto: edits freely without asking — click to require permission'}
+										>
+											{requireToolApproval ? 'Ask' : 'Auto'}
+										</button>
+										<button
+											type="button"
+											class="prompt-icon-btn"
+											onclick={attachFile}
+											title="Attach a file"
+											aria-label="Attach a file"
+										>
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+										</button>
+										{#if armedSelection}
+												<button
+													type="button"
+													class="selection-pill"
+													onclick={() => clearArmedSelection()}
+													title={`The AI will edit only your selection — ${armedSelection.chars} chars, ${armedSelection.words} word${armedSelection.words === 1 ? '' : 's'}. Click to clear.`}
+												>
+													<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/></svg>
+													<span>{armedSelection.chars} sel</span>
+													<span class="sel-x">✕</span>
+												</button>
+											{/if}
+											<div class="prompt-spacer"></div>
+										<div class="context-ring" title={`~${contextPercent}% of the context window used`}>
+											<svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
+												<circle class="ring-track" cx="18" cy="18" r="15.5"></circle>
+												<circle class="ring-value" cx="18" cy="18" r="15.5" style={`stroke-dasharray:${RING_CIRC};stroke-dashoffset:${ringOffset};stroke:${ringColor};`}></circle>
+											</svg>
+										</div>
+										<button
+											type="button"
+											class="send-btn"
+											class:stop={isChatStreaming}
+											onclick={() => {
+												if (isChatStreaming) {
+													invoke('abort_ai_stream').catch(console.error);
+												} else if (chatInput.trim()) {
+													sendChatMessage();
+												}
+											}}
+											disabled={!isChatStreaming && !chatInput.trim()}
+											aria-label={isChatStreaming ? 'Stop' : 'Send'}
+											title={isChatStreaming ? 'Stop generation' : 'Send (Enter)'}
+										>
+											{#if isChatStreaming}
+												<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+											{:else}
+												<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+											{/if}
+										</button>
 									</div>
-									<span style="font-size: 0.7rem; color: var(--text-secondary); opacity: 0.8; margin-left: 4px;">
-										{requireToolApproval ? 'OFF (Asks for permission)' : 'ON (Edits freely)'}
-									</span>
-								</label>
+								</div>
 							</div>
 						</div>
 					{:else if activeSidebarTab === 'versions'}
@@ -2374,7 +2933,7 @@
 	</div>
 </dialog>
 
-<dialog bind:this={mathDialog} class="math-dialog" onclose={() => (mathValue = '')}>
+<dialog bind:this={mathDialog} class="math-dialog" onclose={() => { mathValue = ''; mathError = ''; }}>
 	<div class="dialog-content">
 		<h3>Insert Math</h3>
 		<div class="math-container">
@@ -2385,9 +2944,14 @@
 				>{mathValue}</svelte:element
 			>
 		</div>
+		{#if mathError}
+			<p style="margin: 8px 0 0; font-size: 0.8rem; color: var(--danger, #e5534b);">
+				⚠ Won't render in the note: {mathError}
+			</p>
+		{/if}
 		<div class="dialog-actions">
 			<button class="secondary" onclick={() => mathDialog?.close()}>Cancel</button>
-			<button class="primary" onclick={insertMath} disabled={!mathValue}>Insert</button>
+			<button class="primary" onclick={insertMath} disabled={!mathValue}>{mathError ? 'Insert anyway' : 'Insert'}</button>
 		</div>
 	</div>
 </dialog>
@@ -2760,15 +3324,63 @@
 	</div>
 </dialog>
 
+{#if aiModal}
+	<div class="ai-modal-overlay" role="presentation" onclick={() => (aiModal = null)}>
+		<div class="ai-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+			<h3 class="ai-modal-title">{aiModal.title}</h3>
+			<div class="ai-modal-body">{aiModal.body}</div>
+			<div class="dialog-actions">
+				<button class="secondary" onclick={() => (aiModal = null)}>Close</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
+	.ai-modal-overlay {
+		position: fixed;
+		inset: 0;
+		background: var(--scrim-soft);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		padding: var(--space-4);
+	}
+	.ai-modal {
+		background: var(--bg-elevated, #1a1a1a);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md, 8px);
+		max-width: 640px;
+		width: 100%;
+		max-height: 80vh;
+		display: flex;
+		flex-direction: column;
+		padding: var(--space-4);
+		gap: var(--space-3);
+	}
+	.ai-modal-title {
+		margin: 0;
+		font-size: 0.95rem;
+		color: var(--text-secondary);
+		font-weight: 600;
+	}
+	.ai-modal-body {
+		overflow-y: auto;
+		white-space: pre-wrap;
+		line-height: 1.5;
+		color: var(--text-primary);
+		font-size: 0.9rem;
+	}
+
 	:global(.chat-bubble think) {
 		display: block;
 		padding: 12px 14px;
 		margin: 8px 0;
-		border-left: 3px solid var(--accent, #f37021);
-		color: rgba(255, 255, 255, 0.6);
+		border-left: 3px solid var(--accent-200);
+		color: var(--text-secondary);
 		font-style: italic;
-		background: rgba(0, 0, 0, 0.2);
+		background: var(--bg-code);
 		border-radius: 4px;
 		font-size: 0.9em;
 	}
@@ -2778,7 +3390,7 @@
 		font-weight: 600;
 		font-style: normal;
 		margin-bottom: 6px;
-		color: rgba(255, 255, 255, 0.8);
+		color: var(--text-primary);
 		font-size: 0.85rem;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
@@ -2788,7 +3400,6 @@
 		height: 100%;
 		display: grid;
 		grid-template-rows: auto 1fr;
-		animation: fade-in var(--duration-page) var(--ease-out);
 		background: var(--bg-page);
 	}
 
@@ -2798,7 +3409,7 @@
 		align-items: center;
 		padding: var(--space-4) var(--space-6) var(--space-4) var(--space-8);
 		border-bottom: 1px solid var(--border-default);
-		background: rgba(16, 16, 16, 0.94);
+		background: var(--bg-panel-blur);
 		backdrop-filter: blur(var(--blur-md));
 		position: relative;
 		z-index: 1;
@@ -2907,21 +3518,41 @@
 		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
 
-	.main-layout.reverse-split .pdf-pane {
-		order: 2;
-	}
-	.main-layout.reverse-split .resizer {
-		order: 1;
-	}
-	.main-layout.reverse-split .main-pane {
-		order: 0;
-	}
-	.main-layout.reverse-split .sidebar {
-		order: 3;
-	}
 
 	.pdf-pane {
 		min-width: 26rem;
+	}
+
+	/* In the .tex split (PDF preview + editor), let both panes shrink with the
+	   window. Otherwise main-pane's 800px min overflows the overflow:hidden layout
+	   on small windows, pushing the editor's horizontal scrollbar off-screen and
+	   clipping long lines. With min-width:0 the inner editor scroller handles them. */
+	.main-layout .main-pane.tex-pane {
+		min-width: 0;
+	}
+	/* Keep enough width for the PDF toolbar so its buttons don't crowd/overlap,
+	   but small enough that the editor still gets room to shrink + scroll. */
+	.main-layout .pdf-pane.tex-pane {
+		min-width: 15rem;
+	}
+
+	/* Floating label over the compiled-PDF pane (tex split) explaining the layout. */
+	.tex-pane-badge {
+		position: absolute;
+		top: 8px;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 6;
+		pointer-events: none;
+		max-width: 92%;
+		text-align: center;
+		background: var(--bg-panel);
+		color: var(--text-secondary);
+		border: 1px solid var(--border-default);
+		border-radius: 6px;
+		padding: 3px 10px;
+		font-size: 0.72rem;
+		box-shadow: 0 2px 8px var(--shadow-color, rgba(0, 0, 0, 0.15));
 	}
 
 	.resizer {
@@ -2970,14 +3601,14 @@
 	}
 
 	.danger {
-		border: 1px solid rgba(239, 68, 68, 0.35);
-		background: rgba(239, 68, 68, 0.12);
-		color: #fecaca;
+		border: 1px solid var(--danger-border);
+		background: var(--danger-bg);
+		color: var(--danger-text);
 	}
 
 	.danger:hover:not(:disabled) {
-		background: rgba(239, 68, 68, 0.18);
-		color: #fee2e2;
+		background: var(--danger-bg-strong);
+		color: var(--danger-text);
 	}
 
 	.content-area {
@@ -3029,8 +3660,8 @@
 	}
 
 	.toolbar-close-note-btn:hover:not(:disabled) {
-		background: rgba(239, 68, 68, 0.18);
-		color: #fee2e2;
+		background: var(--danger-bg-strong);
+		color: var(--danger-text);
 	}
 
 	.toolbar-attach-pdf-btn {
@@ -3072,7 +3703,7 @@
 	}
 	.toolbar-overlay-toggle:hover {
 		color: var(--text-primary);
-		background: rgba(255, 255, 255, 0.05);
+		background: var(--hover-overlay);
 	}
 	.toolbar-overlay-toggle.expanded svg {
 		transform: rotate(180deg);
@@ -3099,7 +3730,7 @@
 		top: auto !important;
 		bottom: -5px !important;
 		border-top-color: transparent !important;
-		border-bottom-color: #3b3e43 !important;
+		border-bottom-color: var(--neutral-800) !important;
 	}
 
 	:global(.vditor) {
@@ -3110,7 +3741,7 @@
 		flex-direction: column !important;
 		--panel-background-color: var(--bg-page) !important;
 		--textarea-background-color: var(--bg-page) !important;
-		--toolbar-background-color: rgba(18, 18, 18, 0.96) !important;
+		--toolbar-background-color: var(--bg-panel-blur) !important;
 	}
 
 	:global(.vditor-content) {
@@ -3231,7 +3862,7 @@
 			margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 		border-left: 1px solid var(--border-default);
 		border-radius: 0 !important;
-		box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
+		box-shadow: -4px 0 24px var(--shadow-color);
 		font-family: var(--font-mono);
 	}
 
@@ -3242,7 +3873,7 @@
 	.sidebar-backdrop {
 		position: absolute;
 		inset: 0;
-		background: rgba(0, 0, 0, 0.4);
+		background: var(--scrim-soft);
 		backdrop-filter: blur(var(--blur-sm));
 		z-index: 90;
 		animation: fade-in var(--duration-fast) ease-out;
@@ -3254,8 +3885,9 @@
 			position: relative;
 			transform: none;
 			margin-right: calc(var(--sidebar-width, 20rem) * -1);
-			/* Hard cap: the note keeps at least NOTE_MIN_WIDTH (760px) no matter what. */
-			max-width: calc(100vw - 760px);
+			/* Hard cap relative to the layout container (excludes the left rail), so
+			   the note keeps its 800px min-width and the panes never overflow/clip. */
+			max-width: calc(100% - 800px);
 			box-shadow: none;
 			flex-shrink: 0;
 		}
@@ -3306,7 +3938,7 @@
 		font-size: 0.65rem;
 		color: var(--neutral-400);
 		font-family: var(--font-mono);
-		background: rgba(255, 255, 255, 0.02);
+		background: var(--overlay-faint);
 		flex-shrink: 0;
 		white-space: nowrap;
 	}
@@ -3412,7 +4044,7 @@
 		box-shadow: none;
 	}
 	.math-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(var(--blur-sm));
 	}
 	.dialog-content {
@@ -3461,7 +4093,7 @@
 		box-shadow: none;
 	}
 	.link-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(var(--blur-sm));
 	}
 	.link-search-input {
@@ -3515,7 +4147,7 @@
 	}
 	.link-result-btn:hover,
 	.link-result-btn.selected {
-		background: rgba(238, 96, 24, 0.12);
+		background: var(--accent-tint);
 	}
 
 	.folder-badge {
@@ -3540,10 +4172,10 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md);
 		color: var(--text-primary);
-		box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+		box-shadow: 0 10px 30px var(--shadow-color-strong);
 	}
 	.pdf-attach-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(2px);
 	}
 	.pdf-attach-dialog .dialog-content {
@@ -3581,7 +4213,7 @@
 	}
 
 	.pdf-grid-upload-card {
-		background: rgba(255, 255, 255, 0.02);
+		background: var(--overlay-faint);
 		border: 1px dashed var(--border-default);
 		border-radius: var(--radius-sm);
 		padding: 24px 16px;
@@ -3597,7 +4229,7 @@
 		font-family: inherit;
 	}
 	.pdf-grid-upload-card:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.05);
+		background: var(--hover-overlay);
 		border-color: var(--accent-300);
 	}
 	.pdf-grid-upload-card:disabled {
@@ -3618,7 +4250,7 @@
 	}
 
 	.pdf-grid-card {
-		background: rgba(255, 255, 255, 0.03);
+		background: var(--overlay-faint);
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		padding: 16px;
@@ -3633,12 +4265,12 @@
 		color: inherit;
 	}
 	.pdf-grid-card:hover {
-		background: rgba(255, 255, 255, 0.06);
+		background: var(--hover-overlay-strong);
 		border-color: var(--border-default);
 		transform: translateY(-2px);
 	}
 	.pdf-card-icon {
-		background: rgba(0, 0, 0, 0.2);
+		background: var(--bg-code);
 		padding: 12px;
 		border-radius: 8px;
 		display: flex;
@@ -3677,7 +4309,7 @@
 		outline: none;
 	}
 	.preview-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.4);
+		background: var(--scrim-soft);
 		backdrop-filter: blur(var(--blur-sm));
 	}
 	.preview-layout {
@@ -3694,7 +4326,7 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-		box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+		box-shadow: 0 12px 48px var(--shadow-color-strong);
 	}
 	.preview-header {
 		padding: var(--space-6) var(--space-8);
@@ -3777,7 +4409,7 @@
 	:global(.transclusion-wrapper.force-expand),
 	:global(.transclusion-wrapper.vditor-ir__node--expand) {
 		padding: 0.25rem 0.5rem !important;
-		background: rgba(238, 96, 24, 0.06) !important;
+		background: var(--accent-tint) !important;
 		border-left: 3px solid var(--accent-200) !important;
 		border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
 		display: inline-block !important;
@@ -3796,7 +4428,7 @@
 		display: block;
 		margin-top: 0.5rem;
 		padding: var(--space-3) 1rem;
-		background: rgba(238, 96, 24, 0.05);
+		background: var(--accent-tint);
 		border-left: 3px solid var(--accent-200);
 		border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 		color: var(--text-secondary);
@@ -3839,7 +4471,7 @@
 		position: fixed;
 		bottom: var(--space-8);
 		right: var(--space-8);
-		background: rgba(18, 18, 18, 0.85);
+		background: var(--bg-panel-blur);
 		color: var(--text-secondary);
 		padding: var(--space-2) var(--space-4);
 		border-radius: var(--radius-full);
@@ -3967,7 +4599,7 @@
 	}
 	.chat-message.user .chat-bubble {
 		background: var(--accent-200);
-		color: var(--bg-page);
+		color: var(--on-accent);
 	}
 	.chat-message.assistant .chat-bubble {
 		background: var(--bg-panel);
@@ -3982,13 +4614,13 @@
 		background: color-mix(in srgb, var(--bg-panel) 82%, var(--accent-200));
 	}
 	.chat-bubble.error {
-		border-left: 3px solid var(--error-color, #e53e3e);
-		background-color: var(--error-bg, rgba(229, 62, 62, 0.1));
+		border-left: 3px solid var(--danger);
+		background-color: var(--danger-bg);
 	}
 	
 	.approval-card {
-		background: rgba(0, 0, 0, 0.2);
-		border: 1px solid var(--accent);
+		background: var(--bg-code);
+		border: 1px solid var(--accent-200);
 		border-radius: var(--radius-md);
 		padding: var(--space-3);
 		margin: var(--space-2) 0;
@@ -3999,11 +4631,11 @@
 		box-sizing: border-box;
 	}
 	.approval-card.rejected {
-		border-color: rgba(239, 68, 68, 0.4);
-		background: rgba(239, 68, 68, 0.05);
+		border-color: var(--danger-border);
+		background: var(--danger-bg);
 	}
 	.approval-card.rejected .title {
-		color: #fca5a5;
+		color: var(--danger-text);
 	}
 	
 	.approval-card .title {
@@ -4013,7 +4645,7 @@
 	}
 	
 	.approval-card pre {
-		background: rgba(0, 0, 0, 0.3);
+		background: var(--bg-code);
 		padding: var(--space-2);
 		border-radius: var(--radius-sm);
 		font-size: 0.75rem;
@@ -4047,61 +4679,6 @@
 		flex-wrap: wrap; /* Fix responsiveness for narrow sidebars */
 	}
 	
-	.full-permission-toggle {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: 0.8rem;
-		color: var(--text-secondary);
-		margin-top: 6px;
-		cursor: pointer;
-	}
-
-	.toggle-switch {
-		position: relative;
-		display: inline-block;
-		width: 34px;
-		height: 20px;
-	}
-
-	.toggle-switch input {
-		opacity: 0;
-		width: 0;
-		height: 0;
-	}
-
-	.slider {
-		position: absolute;
-		cursor: pointer;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		background-color: rgba(255, 255, 255, 0.2);
-		transition: .4s;
-		border-radius: 20px;
-	}
-
-	.slider:before {
-		position: absolute;
-		content: "";
-		height: 14px;
-		width: 14px;
-		left: 3px;
-		bottom: 3px;
-		background-color: white;
-		transition: .4s;
-		border-radius: 50%;
-	}
-
-	input:checked + .slider {
-		background-color: var(--primary, #f97316);
-	}
-
-	input:checked + .slider:before {
-		transform: translateX(14px);
-	}
-
 	.pending-approval-bar {
 		display: flex;
 		justify-content: space-between;
@@ -4160,18 +4737,179 @@
 		padding-top: var(--space-3);
 		border-top: 1px solid var(--border-subtle);
 	}
+	.prompt-box {
+		background: var(--neutral-1000);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		padding: var(--space-2);
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		transition: border-color 0.15s ease, box-shadow 0.15s ease;
+	}
+	.prompt-box:focus-within {
+		border-color: color-mix(in srgb, var(--accent-200) 55%, var(--border-default));
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-200) 12%, transparent);
+	}
 	.chat-input-area textarea {
 		width: 100%;
-		background: var(--bg-page);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xs);
-		padding: var(--space-2) var(--space-3);
+		background: transparent;
+		border: none;
+		border-radius: 0;
+		padding: var(--space-1) var(--space-2);
 		color: var(--text-primary);
 		outline: none;
 		resize: none;
 		font-family: inherit;
-		line-height: 1.4;
+		font-size: 0.875rem;
+		line-height: 1.45;
 		overflow-y: auto;
+	}
+	.chat-input-area textarea::placeholder {
+		color: var(--neutral-500);
+	}
+	/* The armed-selection highlight (CSS Custom Highlight API). Global because the
+	   ::highlight() pseudo applies to document-registered ranges, not scoped DOM. */
+	:global(::highlight(ai-armed)) {
+		background-color: color-mix(in srgb, var(--accent-100) 24%, transparent);
+		border-radius: 2px;
+	}
+
+	.prompt-toolbar {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		padding: 2px;
+	}
+	.prompt-spacer {
+		flex: 1;
+	}
+
+	/* Shared control baseline: same height, calm by default, theme-consistent. */
+	.mode-pill,
+	.prompt-icon-btn,
+	.send-btn,
+	.selection-pill {
+		height: 28px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border: none;
+		background: transparent;
+		color: var(--text-secondary);
+		cursor: pointer;
+		border-radius: var(--radius-md);
+		white-space: nowrap;
+		transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease,
+			box-shadow 0.14s ease, opacity 0.14s ease;
+	}
+
+	.mode-pill {
+		gap: 6px;
+		padding: 0 11px 0 9px;
+		font-size: 0.72rem;
+		font-weight: 600;
+		border-radius: var(--radius-md);
+		border: 1px solid var(--border-default);
+	}
+	.mode-pill::before {
+		content: '';
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--neutral-500);
+		transition: background 0.14s ease, box-shadow 0.14s ease;
+	}
+	.mode-pill.auto::before {
+		background: var(--accent-100);
+		box-shadow: 0 0 6px color-mix(in srgb, var(--accent-100) 75%, transparent);
+	}
+	.mode-pill:hover {
+		background: var(--neutral-900);
+		color: var(--text-primary);
+		border-color: var(--border-subtle);
+	}
+
+	.prompt-icon-btn {
+		width: 28px;
+	}
+	.prompt-icon-btn:hover {
+		background: var(--neutral-900);
+		color: var(--text-primary);
+	}
+
+	.selection-pill {
+		gap: 6px;
+		padding: 0 5px 0 9px;
+		border-radius: var(--radius-md);
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--accent-100);
+		background: color-mix(in srgb, var(--accent-100) 9%, transparent);
+	}
+	.selection-pill:hover {
+		background: color-mix(in srgb, var(--accent-100) 15%, transparent);
+	}
+	.selection-pill svg {
+		opacity: 0.75;
+	}
+	.selection-pill .sel-x {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		opacity: 0.5;
+		font-size: 0.66rem;
+	}
+	.selection-pill:hover .sel-x {
+		opacity: 0.95;
+		background: color-mix(in srgb, var(--accent-100) 22%, transparent);
+	}
+
+	.send-btn {
+		width: 28px;
+	}
+	.send-btn:not(:disabled) {
+		background: var(--accent-200);
+		color: var(--on-accent);
+	}
+	.send-btn:hover:not(:disabled) {
+		background: var(--accent-100);
+	}
+	.send-btn.stop:not(:disabled) {
+		background: #e5484d;
+		color: white;
+	}
+	.send-btn.stop:hover:not(:disabled) {
+		background: #d1393e;
+	}
+	.send-btn:disabled {
+		background: transparent;
+		color: var(--neutral-600);
+		cursor: default;
+	}
+
+	.context-ring {
+		display: inline-flex;
+		align-items: center;
+		padding: 0 2px;
+	}
+	.context-ring svg {
+		display: block;
+		transform: rotate(-90deg);
+	}
+	.context-ring .ring-track {
+		fill: none;
+		stroke: var(--border-default);
+		stroke-width: 3;
+	}
+	.context-ring .ring-value {
+		fill: none;
+		stroke-width: 3;
+		stroke-linecap: round;
+		transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;
 	}
 	.chat-input-area textarea::-webkit-scrollbar {
 		width: 6px;
@@ -4185,9 +4923,6 @@
 	}
 	.chat-input-area textarea::-webkit-scrollbar-thumb:hover {
 		background: var(--neutral-500, #666);
-	}
-	.chat-input-area textarea:focus {
-		border-color: var(--accent-200);
 	}
 
 	.loading-dots::after {
@@ -4212,6 +4947,14 @@
 		gap: var(--space-1);
 		margin-top: 3px;
 		justify-content: flex-end;
+	}
+	.chat-msg-actions.assistant {
+		justify-content: flex-start;
+	}
+	.copy-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
 	}
 	.rewind-btn {
 		padding: 1px 6px;
@@ -4292,5 +5035,44 @@
 	.chat-time-taken.live {
 		color: var(--accent);
 		opacity: 0.9;
+	}
+
+	/* Animated "working" dots shown while a turn is running but has produced no
+	   text yet (model thinking, or a tool like web search/fetch executing) — so a
+	   slow turn reads as alive, not frozen. */
+	.chat-working {
+		display: inline-flex;
+		gap: 4px;
+		align-items: center;
+		margin-top: var(--space-2);
+		margin-right: var(--space-2);
+		vertical-align: middle;
+	}
+
+	.chat-working span {
+		width: 5px;
+		height: 5px;
+		border-radius: 50%;
+		background: var(--accent);
+		animation: chat-working-pulse 1.2s ease-in-out infinite;
+	}
+
+	.chat-working span:nth-child(2) {
+		animation-delay: 0.2s;
+	}
+
+	.chat-working span:nth-child(3) {
+		animation-delay: 0.4s;
+	}
+
+	@keyframes chat-working-pulse {
+		0%, 80%, 100% {
+			opacity: 0.25;
+			transform: scale(0.8);
+		}
+		40% {
+			opacity: 1;
+			transform: scale(1);
+		}
 	}
 </style>

@@ -1,7 +1,12 @@
 [build]
 # Cap parallel codegen so heavy linking (arrow/lance/tectonic) doesn't exhaust
-# RAM and swap on 16 GB machines. Raise on boxes with more memory.
+# RAM and swap on lower-memory machines. Raise on boxes with more memory.
 jobs = 6
 
+# Static CRT only on Windows (tectonic links vcpkg static libs there). Scoped to
+# the Windows target so it isn't forced onto Linux/macOS builds. The Windows
+# vcpkg build environment (TECTONIC_DEP_BACKEND, VCPKG_ROOT, VCPKGRS_TRIPLET,
+# CXXFLAGS) is set as user environment variables on Windows rather than here, so
+# this file stays cross-platform — see docs/llama-backends.md.
 [target.'cfg(windows)']
 rustflags = ["-C", "target-feature=+crt-static"]

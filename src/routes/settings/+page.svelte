@@ -1,14 +1,13 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, onDestroy } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
     import { listen } from '@tauri-apps/api/event';
     import { open } from '@tauri-apps/plugin-dialog';
     import { goto } from '$app/navigation';
-    import type { AppSnapshot, IndexState, ProviderStatus, LlamaDevice } from '$lib/types';
+    import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
+    import { theme, toggleTheme } from '$lib/theme';
 
-    type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
-    const GPU_BACKENDS = ['cuda', 'vulkan', 'metal'];
-    const isGpuBackend = (b: string) => GPU_BACKENDS.includes(b);
+    type BackendPref = 'auto' | 'gpu' | 'vulkan' | 'cpu';
 
     let currentModelPath = $state('');
     let contextSize = $state<number | null>(null);
@@ -17,13 +16,15 @@
     let temperature = $state<number | null>(null);
     let topP = $state<number | null>(null);
     let maxTurns = $state<number | null>(null);
+    let thinking = $state(false);
+    let autoOffload = $state(true);
+    let deterministicTools = $state(true);
+    let toolGating = $state(false);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
     let activeProvider = $state('');
     let backendPreference = $state<BackendPref>('auto');
-    let gpuDevice = $state<string>('');
-    let devices = $state<LlamaDevice[]>([]);
     let downloadableBackends = $state<string[]>([]);
     let download = $state<{ backend: string; phase: string; percent: number; message: string } | null>(null);
     let activeBackend = $state<string | null>(null);
@@ -35,134 +36,125 @@
     let providerHealthy = $state(true);
     let providerDetail = $state('');
 
-    // Proactive validation of the chosen compute backend against this machine.
-    const gpuIssue = $derived.by((): { level: 'error' | 'warn'; message: string } | null => {
+    // LaTeX → PDF support bundle (Tectonic) cache state.
+    let latexCache = $state<{ warmed: boolean; sizeBytes: number } | null>(null);
+    let latexDownloading = $state(false);
+    let latexDownloadBytes = $state(0);
+    let latexError = $state('');
+    const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+
+    // Quick-capture global shortcut.
+    let quickShortcut = $state('Ctrl+Space');
+    let quickRecording = $state(false);
+    let quickShortcutError = $state('');
+    const prettyShortcut = (s: string) =>
+        s
+            .replace(/\bKey([A-Z])\b/g, '$1')
+            .replace(/\bDigit(\d)\b/g, '$1')
+            .replace(/\+/g, ' + ');
+
+    async function applyShortcut(combo: string) {
+        try {
+            await invoke('set_quick_shortcut', { shortcut: combo });
+            quickShortcut = combo;
+            quickShortcutError = '';
+        } catch (e) {
+            quickShortcutError = String(e);
+        }
+    }
+    function startRecording() {
+        if (quickRecording) return;
+        quickRecording = true;
+        quickShortcutError = '';
+        const MODS = ['ControlLeft','ControlRight','AltLeft','AltRight','ShiftLeft','ShiftRight','MetaLeft','MetaRight','OSLeft','OSRight'];
+        const cleanup = () => {
+            quickRecording = false;
+            window.removeEventListener('keydown', onKey, true);
+        };
+        const onKey = (e: KeyboardEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (MODS.includes(e.code)) return; // wait for a non-modifier key
+            if (e.code === 'Escape') { cleanup(); return; } // Esc cancels
+            const parts: string[] = [];
+            if (e.ctrlKey) parts.push('Ctrl');
+            if (e.altKey) parts.push('Alt');
+            if (e.shiftKey) parts.push('Shift');
+            if (e.metaKey) parts.push('Super');
+            parts.push(e.code);
+            cleanup();
+            void applyShortcut(parts.join('+'));
+        };
+        window.addEventListener('keydown', onKey, true);
+    }
+
+    const hasGpuBuild = () => installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
+    const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
+
+    // A "GPU" (performance) choice is only distinct from "Vulkan" when there's a
+    // discrete GPU: an NVIDIA card (CUDA), or more than one GPU (a real iGPU +
+    // dGPU split). A single non-NVIDIA GPU is integrated → GPU adds nothing over
+    // Vulkan, so it's disabled. (Robust: no fragile codename matching — lspci
+    // reports APUs under inconsistent names like "Lucienne".)
+    const hasDedicatedGpu = $derived(nvidiaDetected || gpus.length >= 2);
+
+    let statusPoll: ReturnType<typeof setInterval> | undefined;
+    onDestroy(() => { if (statusPoll) clearInterval(statusPoll); });
+
+    // Heads-up when the chosen GPU path isn't available / installed — the app
+    // falls back to CPU automatically, so it's never a hard error.
+    const gpuIssue = $derived.by((): { level: 'warn'; message: string } | null => {
         if (backendPreference === 'cpu') return null;
-        const explicitGpu = isGpuBackend(backendPreference);
-
         if (!gpuAvailable) {
-            if (explicitGpu) {
-                return {
-                    level: 'error',
-                    message:
-                        'No GPU was detected on this system' +
-                        (gpus.length ? ` (${gpus.join(', ')})` : '') +
-                        '. This will fall back to CPU.'
-                };
-            }
-            return null; // Auto on a GPU-less machine correctly uses CPU.
+            return { level: 'warn', message: `No GPU detected${gpus.length ? ` (${gpus.join(', ')})` : ''} — running on CPU.` };
         }
-
-        if (explicitGpu && !installedBackends.includes(backendPreference)) {
+        const need = backendPreference === 'vulkan' ? 'vulkan' : nvidiaDetected ? 'cuda' : 'vulkan';
+        if (!installedBackends.includes(need)) {
             return {
                 level: 'warn',
-                message: `The ${backendPreference.toUpperCase()} build isn't installed. Add it under bin/${backendPreference}/ — see docs/llama-backends.md — or it falls back to CPU.`
-            };
-        }
-        if (backendPreference === 'cuda' && !nvidiaDetected) {
-            return {
-                level: 'warn',
-                message: 'No NVIDIA GPU detected — CUDA may fail and fall back. Use Vulkan for Intel/AMD GPUs.'
-            };
-        }
-        if (backendPreference === 'auto' && !installedBackends.some((b) => isGpuBackend(b))) {
-            return {
-                level: 'warn',
-                message: `A GPU was detected (${gpus.join(', ') || 'unknown'}), but no GPU build is installed. Add ${nvidiaDetected ? 'CUDA' : 'Vulkan'} — see docs/llama-backends.md — otherwise it runs on CPU.`
+                message: `No ${backendLabel(need)} build installed — install it below, otherwise it runs on CPU.`
             };
         }
         return null;
     });
 
-    // Backends offered in the selector: Auto + CPU always, plus any installed GPU build.
-    const backendOptions = $derived.by(() => {
-        const opts: { value: BackendPref; label: string }[] = [{ value: 'auto', label: 'Auto' }];
-        for (const b of ['cuda', 'vulkan', 'metal'] as const) {
-            if (installedBackends.includes(b)) {
-                opts.push({ value: b, label: b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : 'Metal' });
-            }
-        }
-        opts.push({ value: 'cpu', label: 'CPU' });
-        return opts;
-    });
-
-    const selectedDeviceName = $derived(devices.find((d) => d.id === gpuDevice)?.name ?? '');
-
-    // Integrated GPUs share (limited) system memory — flag them so users know
-    // large models / contexts may be slow or fail to load.
-    const isIntegratedSelected = $derived(
-        /uhd|iris|integrated|radeon\(tm\) graphics|radeon graphics|\bhd graphics\b/i.test(selectedDeviceName)
-    );
-
-    const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
-
-    // What the current selection will actually run on, and whether it's live yet.
+    // What the current selection resolves to, and whether it's live yet.
     const computeStatus = $derived.by((): { level: 'gpu' | 'cpu'; title: string; detail: string } => {
         const installed = (b: string) => installedBackends.includes(b);
-
-        // Resolve the selection to a concrete backend.
-        let target: string;
-        if (backendPreference === 'cpu') target = 'cpu';
-        else if (backendPreference === 'auto') {
-            target =
-                nvidiaDetected && installed('cuda') ? 'cuda'
+        const target =
+            backendPreference === 'cpu'
+                ? 'cpu'
+                : backendPreference === 'vulkan'
+                ? (installed('vulkan') ? 'vulkan' : 'cpu')
+                : nvidiaDetected && installed('cuda') ? 'cuda'
                 : installed('vulkan') ? 'vulkan'
                 : installed('metal') ? 'metal'
                 : 'cpu';
-        } else {
-            target = installed(backendPreference) ? backendPreference : 'cpu';
-        }
 
-        // Authoritative: the running server requested a GPU but landed on CPU.
-        if (backendFellBack) {
-            return { level: 'cpu', title: 'Running on CPU', detail: 'The selected GPU could not be used — check the GPU and driver.' };
+        if (backendPreference !== 'cpu' && backendFellBack) {
+            return { level: 'cpu', title: 'Running on CPU', detail: 'The GPU could not be used — check the GPU and driver.' };
         }
-
-        // The running server already matches the GPU target.
-        if (activeBackend && activeBackend !== 'cpu' && activeBackend === target) {
-            return {
-                level: 'gpu',
-                title: `Running on ${activeBackend.toUpperCase()}`,
-                detail: selectedDeviceName ? `Using ${selectedDeviceName}.` : 'GPU acceleration active.'
-            };
+        if (target !== 'cpu' && activeBackend && activeBackend !== 'cpu') {
+            return { level: 'gpu', title: `Running on ${activeBackend.toUpperCase()}`, detail: 'GPU acceleration active.' };
         }
-
-        const pending = activeBackend !== null && activeBackend !== target;
         if (target === 'cpu') {
-            return {
-                level: 'cpu',
-                title: 'Running on CPU',
-                detail: backendPreference === 'cpu' ? 'CPU mode selected.' : 'No GPU build available — see the note above.'
-            };
+            const detail =
+                backendPreference === 'cpu'
+                    ? 'CPU mode — the most reliable option (works with every model).'
+                    : hasGpuBuild() ? 'No GPU available on this machine.' : 'Install a GPU build below to accelerate.';
+            return { level: 'cpu', title: 'Running on CPU', detail };
         }
+        const pending = activeBackend !== null && activeBackend !== target;
         return {
             level: 'gpu',
             title: `Set to use ${target.toUpperCase()}`,
-            detail:
-                (selectedDeviceName ? `${selectedDeviceName}. ` : '') +
-                (pending ? 'Applies on your next message.' : 'GPU acceleration active.')
+            detail: pending ? 'Applies on your next message.' : 'GPU acceleration active.'
         };
     });
-
-    async function loadDevices(backend: string) {
-        if (!isGpuBackend(backend)) {
-            devices = [];
-            return;
-        }
-        try {
-            devices = await invoke<LlamaDevice[]>('list_llama_devices', { backend });
-        } catch (e) {
-            console.error('Failed to list devices:', e);
-            devices = [];
-        }
-    }
 
     function selectBackend(value: BackendPref) {
         if (value === backendPreference) return;
         backendPreference = value;
-        gpuDevice = ''; // a device id is backend-specific; reset on switch
-        if (isGpuBackend(value)) loadDevices(value);
-        else devices = [];
         debounceSave();
     }
     let isSaving = $state(false);
@@ -170,6 +162,27 @@
     let saved = $state(false);
     
     let enableJupyterExecution = $state(false);
+
+    // Web search + embeddings/RAG + model compatibility (Phase 5).
+    let searxngUrl = $state('');
+    let embedModelPath = $state('');
+    type ProfileInfo = { name: string; architecture?: string; namePattern?: string; role?: string; verified: boolean; notes?: string; supportsTools?: boolean };
+    let modelProfiles = $state<ProfileInfo[]>([]);
+
+    async function saveSearxng() {
+        await invoke('set_searxng_url', { url: searxngUrl.trim() || null });
+    }
+    async function pickEmbedModel() {
+        const picked = await open({ multiple: false, filters: [{ name: 'GGUF model', extensions: ['gguf'] }] });
+        if (typeof picked === 'string') {
+            embedModelPath = picked;
+            await invoke('set_embed_model_path', { path: picked });
+        }
+    }
+    async function clearEmbedModel() {
+        embedModelPath = '';
+        await invoke('set_embed_model_path', { path: null });
+    }
 
     async function refreshSnapshot() {
         const snapshot = await invoke<AppSnapshot>('get_snapshot');
@@ -191,14 +204,41 @@
         return status;
     }
 
+    // Back: return to the page the user came from, not always home.
+    function goBack() {
+        if (typeof window !== 'undefined' && window.history.length > 1) {
+            history.back();
+        } else {
+            goto('/');
+        }
+    }
+
     onMount(async () => {
         try {
             await refreshSnapshot();
             const status = await loadProviderStatus();
             downloadableBackends = await invoke<string[]>('downloadable_backends');
-            backendPreference = (status.config?.backendPreference as BackendPref) ?? 'auto';
-            gpuDevice = status.config?.gpuDevice ?? '';
-            if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
+            // Auto = let the app pick; GPU = dedicated/fastest; Vulkan = integrated;
+            // CPU = most reliable. Anything unrecognised (or unset) means Auto.
+            const sp = status.config?.backendPreference;
+            backendPreference =
+                sp === 'cpu' ? 'cpu' : sp === 'vulkan' ? 'vulkan' : sp === 'gpu' ? 'gpu' : 'auto';
+            // No dedicated GPU → the explicit "GPU" choice is meaningless; fall to
+            // Vulkan. (Auto needs no fixup — it adapts on its own.)
+            if (!hasDedicatedGpu && backendPreference === 'gpu') backendPreference = 'vulkan';
+            thinking = status.config?.thinking ?? false;
+            autoOffload = status.config?.autoOffload ?? true;
+            deterministicTools = status.config?.deterministicTools ?? true;
+            // Gating is opt-in and off by default (model-agnostic full toolset).
+            toolGating = status.config?.toolGating ?? false;
+            searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
+            embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
+            quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
+            try {
+                modelProfiles = await invoke<ProfileInfo[]>('list_model_profiles');
+            } catch (e) {
+                modelProfiles = [];
+            }
             if (status.resolved) {
                 currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
                 contextSize = status.config?.contextSize ?? status.resolved.contextSize ?? null;
@@ -221,6 +261,25 @@
             
             enableJupyterExecution = localStorage.getItem('myelin_jupyter_exec') === 'true';
 
+            // LaTeX support bundle: current cache state + live download progress.
+            try { latexCache = await invoke('tectonic_cache_status'); } catch (e) { console.error(e); }
+            await listen<{ phase: string; bytes?: number; message?: string }>(
+                'latex://download',
+                async (event) => {
+                    const p = event.payload;
+                    if (p.phase === 'start') {
+                        latexDownloading = true; latexError = ''; latexDownloadBytes = p.bytes ?? 0;
+                    } else if (p.phase === 'progress') {
+                        latexDownloading = true; latexDownloadBytes = p.bytes ?? latexDownloadBytes;
+                    } else if (p.phase === 'done') {
+                        latexDownloading = false; latexDownloadBytes = p.bytes ?? latexDownloadBytes;
+                        try { latexCache = await invoke('tectonic_cache_status'); } catch (e) { console.error(e); }
+                    } else if (p.phase === 'error') {
+                        latexDownloading = false; latexError = p.message ?? 'Download failed';
+                    }
+                }
+            );
+
             // Live-update the backend badge when a server actually starts.
             await listen<{ backend: string; gpuOffloaded: boolean; fellBackToCpu: boolean }>(
                 'ai://llama_backend',
@@ -237,17 +296,35 @@
                     download = event.payload;
                     if (event.payload.phase === 'done') {
                         await loadProviderStatus();
-                        if (isGpuBackend(backendPreference)) await loadDevices(backendPreference);
                         setTimeout(() => {
                             if (download?.phase === 'done') download = null;
                         }, 4000);
                     }
                 }
             );
+
+            // Keep the "Running on" badge live (server may start/restart/crash
+            // while this page is open).
+            statusPoll = setInterval(() => {
+                loadProviderStatus().catch(() => {});
+            }, 2500);
         } catch (e) {
             console.error('Failed to load provider status:', e);
         }
     });
+
+    async function downloadLatexSupport() {
+        latexError = '';
+        latexDownloading = true;
+        try {
+            await invoke('prewarm_tectonic');
+        } catch (e) {
+            // The backend also emits a `latex://download` error event, but guard
+            // against the invoke itself rejecting (e.g. no network at all).
+            latexError = String(e);
+            latexDownloading = false;
+        }
+    }
 
     async function downloadBackend(backend: string) {
         try {
@@ -326,7 +403,9 @@
                 topP: topP,
                 extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null,
                 backendPreference: backendPreference,
-                gpuDevice: gpuDevice || null,
+                gpuDevice: null,
+                thinking: thinking,
+                autoOffload: autoOffload,
                 maxTurns: maxTurns
             });
             saved = true;
@@ -365,7 +444,7 @@
 
 <div class="settings-container">
     <header class="settings-header">
-        <button class="back-btn" onclick={() => goto('/')}>
+        <button class="back-btn" onclick={goBack}>
             <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="19" y1="12" x2="5" y2="12"></line>
                 <polyline points="12 19 5 12 12 5"></polyline>
@@ -403,7 +482,7 @@
         <section class="settings-section">
             <h2>Local AI Model Configuration</h2>
             <p class="description">
-                Select a <code>.gguf</code> model to use for local AI features. This model will run completely offline on your device and is saved in app settings, not inside the notes workspace.
+                Select a model to use for local AI features. It runs completely offline on your device and is saved in app settings, not inside the notes workspace. <strong>Only <code>.gguf</code> models are supported</strong> (llama.cpp format).
             </p>
 
             <div class="model-picker">
@@ -418,55 +497,43 @@
 
             <div class="compute-device">
                 <span class="compute-label">Compute device</span>
-                <div class="segmented" role="group" aria-label="Compute backend">
-                    {#each backendOptions as opt}
-                        {@const disabled = isGpuBackend(opt.value) && !gpuAvailable}
+                <div class="segmented" role="group" aria-label="Compute device">
+                    {#each [{ value: 'auto', label: 'Auto' }, { value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }, { value: 'cpu', label: 'CPU' }] as opt}
+                        {@const disabled = opt.value === 'gpu' && !hasDedicatedGpu}
                         <button
                             type="button"
                             class="segment"
                             class:active={backendPreference === opt.value}
                             {disabled}
-                            title={disabled ? 'No GPU detected on this system' : ''}
-                            onclick={() => selectBackend(opt.value)}
+                            title={disabled ? 'No dedicated GPU detected on this system' : ''}
+                            onclick={() => selectBackend(opt.value as BackendPref)}
                         >
                             {opt.label}
                         </button>
                     {/each}
                 </div>
                 <p class="compute-hint">
-                    {#if backendPreference === 'auto'}
-                        Pick the best backend automatically. {gpus.length ? `Detected: ${gpus.join(', ')}.` : 'No GPU detected.'}
-                    {:else if backendPreference === 'cpu'}
-                        Force CPU only. Slower, but works everywhere.
+                    {#if backendPreference === 'cpu'}
+                        Most reliable: runs entirely on the CPU. Works with every model (some models give wrong output on the GPU), at the cost of speed.
+                    {:else if backendPreference === 'vulkan'}
+                        Power-saving: runs on the integrated GPU via Vulkan. The app still manages offload and falls back to CPU if needed.
+                    {:else if backendPreference === 'gpu'}
+                        Performance: uses the fastest available GPU (the dedicated GPU where present). Falls back automatically.
                     {:else}
-                        Force the {backendPreference.toUpperCase()} backend. Falls back to CPU if unavailable.
+                        Recommended: detects your hardware and picks the fastest backend — dedicated GPU (CUDA), integrated GPU (Vulkan), or CPU — and falls back on its own.
                     {/if}
                 </p>
 
-                {#if isGpuBackend(backendPreference) && devices.length > 0}
-                    <div class="device-row">
-                        <label for="gpu_device">GPU device</label>
-                        <select id="gpu_device" bind:value={gpuDevice} onchange={debounceSave}>
-                            <option value="">Automatic (let {backendPreference.toUpperCase()} choose)</option>
-                            {#each devices as dev}
-                                <option value={dev.id}>{dev.name} ({dev.id})</option>
-                            {/each}
-                        </select>
+                {#if !hasDedicatedGpu && backendPreference !== 'cpu' && backendPreference !== 'auto'}
+                    <div class="device-issue warn">
+                        <span class="issue-icon">ℹ️</span>
+                        <span>No dedicated GPU detected — GPU mode is unavailable. Using the integrated GPU via Vulkan, or switch to CPU for the most reliable output.</span>
                     </div>
-                    <p class="compute-hint">
-                        Pick a specific GPU — e.g. an integrated GPU to save battery, or the discrete GPU for speed.
-                    </p>
-                    {#if isIntegratedSelected}
-                        <div class="device-issue warn">
-                            <span class="issue-icon">⚠️</span>
-                            <span>Integrated GPUs share system memory and have limited capacity. Large models or high context sizes may run slowly or fail to load — lower the context size, or use the discrete GPU / CPU for heavier work.</span>
-                        </div>
-                    {/if}
                 {/if}
 
                 {#if gpuIssue}
-                    <div class="device-issue" class:error={gpuIssue.level === 'error'} class:warn={gpuIssue.level === 'warn'}>
-                        <span class="issue-icon">{gpuIssue.level === 'error' ? '⛔' : '⚠️'}</span>
+                    <div class="device-issue warn">
+                        <span class="issue-icon">⚠️</span>
                         <span>{gpuIssue.message}</span>
                     </div>
                 {/if}
@@ -522,18 +589,85 @@
             {/if}
 
             <br/>
+            <h2>Web Search</h2>
+            <p class="description">
+                Privacy-first web search for the assistant. Set a SearXNG instance URL, or leave blank to use the no-key DuckDuckGo fallback.
+            </p>
+            <div class="model-picker">
+                <input
+                    type="text"
+                    class="path-display"
+                    bind:value={searxngUrl}
+                    placeholder="https://searx.example.org (optional)"
+                    onchange={saveSearxng}
+                />
+            </div>
+
+            <br/>
+            <h2>Embeddings — Document Search & RAG</h2>
+            <p class="description">
+                A small embedding model (e.g. nomic-embed-text v1.5, Q8_0) powers semantic search over your notes and lets the assistant search ingested documents (PDFs, books). It runs as a second local server.
+            </p>
+            <div class="model-picker">
+                <div class="path-display" class:empty={!embedModelPath}>
+                    {embedModelPath || 'No embedding model selected — semantic search uses a lexical fallback'}
+                </div>
+                <button class="browse-btn" onclick={pickEmbedModel}>Browse...</button>
+                {#if embedModelPath}
+                    <button class="browse-btn" onclick={clearEmbedModel}>Clear</button>
+                {/if}
+            </div>
+
+            {#if modelProfiles.length > 0}
+                <br/>
+                <h2>Compatible Models</h2>
+                <p class="description">
+                    Models with a verified profile work out of the box (tool-calling and chat template tuned). Other models run on auto-detected defaults.
+                </p>
+                <div class="backends-list">
+                    {#each modelProfiles as p}
+                        <div class="backend-item">
+                            <span class="backend-name">
+                                {p.name}{#if p.role === 'embed'} <small>(embedding)</small>{/if}
+                            </span>
+                            {#if p.verified}
+                                <span class="backend-installed">✓ Verified</span>
+                            {:else}
+                                <span class="backend-progress-text">Experimental</span>
+                            {/if}
+                        </div>
+                        {#if p.notes}
+                            <p class="compute-hint">{p.notes}</p>
+                        {/if}
+                    {/each}
+                </div>
+            {/if}
+
+            <br/>
             <h2>Advanced AI Configuration</h2>
             <p class="description">
                 Fine-tune llama-server memory usage and CLI flags. Leave blank to use system defaults.
             </p>
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={autoOffload} onchange={debounceSave} />
+                <span class="toggle-text">
+                    <strong>Adaptive GPU offload (recommended)</strong>
+                    <span class="toggle-hint">
+                        {autoOffload
+                            ? 'On — automatically uses available VRAM, keeps the KV cache in RAM for a large (32k) context, and retries with less if the GPU runs out. Manages Context Size & GPU Layers for you.'
+                            : 'Off — use the manual Context Size & GPU Layers below exactly as set.'}
+                    </span>
+                </span>
+            </label>
+
             <div class="advanced-grid">
                 <div class="input-group">
-                    <label for="ctx">Context Size</label>
-                    <input type="number" id="ctx" bind:value={contextSize} oninput={debounceSave} placeholder="4096" />
+                    <label for="ctx">Context Size {autoOffload ? '(auto)' : ''}</label>
+                    <input type="number" id="ctx" bind:value={contextSize} oninput={debounceSave} placeholder="auto" disabled={autoOffload} />
                 </div>
                 <div class="input-group">
-                    <label for="ngl">GPU Layers</label>
-                    <input type="number" id="ngl" bind:value={gpuLayers} oninput={debounceSave} placeholder="999" />
+                    <label for="ngl">GPU Layers {autoOffload ? '(auto)' : ''}</label>
+                    <input type="number" id="ngl" bind:value={gpuLayers} oninput={debounceSave} placeholder="auto" disabled={autoOffload} />
                 </div>
                 <div class="input-group">
                     <label for="threads">CPU Threads</label>
@@ -552,6 +686,19 @@
                     <input type="number" min="1" max="12" step="1" id="max_turns" bind:value={maxTurns} oninput={debounceSave} placeholder="4" />
                 </div>
             </div>
+
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={thinking} onchange={debounceSave} />
+                <span class="toggle-text">
+                    <strong>Model thinking / reasoning</strong>
+                    <span class="toggle-hint">
+                        {thinking
+                            ? 'On — the model reasons before answering (slower, may be more accurate).'
+                            : 'Off — faster, no hidden reasoning tokens. Works across models.'}
+                    </span>
+                </span>
+            </label>
+
             <div class="input-group full-width" style="margin-top: 1rem;">
                 <label>
                     Extra Arguments
@@ -574,6 +721,70 @@
         </section>
 
         <section class="settings-section">
+            <h2>Assistant Tooling</h2>
+            <p class="description">
+                Two independent assists for how the model uses tools. Hover each <span class="info-dot">i</span> for details and caveats.
+            </p>
+
+            <label class="toggle-row">
+                <input
+                    type="checkbox"
+                    bind:checked={toolGating}
+                    onchange={() => invoke('set_tool_gating', { enabled: toolGating })}
+                />
+                <span class="toggle-text">
+                    <span class="toggle-label">
+                        <strong>Per-message tool gating</strong>
+                        <span class="info" tabindex="0" role="note" aria-label="About per-message tool gating">
+                            <span class="info-dot">i</span>
+                            <span class="info-pop">Offers the model only the tools its message seems to need, chosen by keyword heuristics — brittle and not model-agnostic. It can <strong>withhold a tool the model would have used</strong>: e.g. “search for the latest news” isn’t recognised as a web search, so the model can’t search at all. <strong>Off by default</strong> — only useful for sub-2B models that misfire on tools they shouldn’t touch.</span>
+                        </span>
+                    </span>
+                    <span class="toggle-hint">
+                        {toolGating
+                            ? 'On — only the tools your message seems to need are offered each turn.'
+                            : 'Off — full toolset every turn, the model decides (recommended).'}
+                    </span>
+                </span>
+            </label>
+
+            <label class="toggle-row">
+                <input
+                    type="checkbox"
+                    bind:checked={deterministicTools}
+                    onchange={() => invoke('set_deterministic_tools', { enabled: deterministicTools })}
+                />
+                <span class="toggle-text">
+                    <span class="toggle-label">
+                        <strong>Deterministic format &amp; find</strong>
+                        <span class="info" tabindex="0" role="note" aria-label="About deterministic format and find">
+                            <span class="info-dot">i</span>
+                            <span class="info-pop">In-code correctness assists that don’t withhold tools — they make the result reliable: formatting (strip headings/bold/bullets, change case, convert lists) is applied by exact rules instead of the model rewriting the whole note; exact-word lookups use a reliable search; and a guard prevents accidentally wiping a note during an edit. <strong>On by default.</strong> (Surgical deletes — remove a paragraph/heading/section — always apply, regardless of this toggle.)</span>
+                        </span>
+                    </span>
+                    <span class="toggle-hint">
+                        {deterministicTools
+                            ? 'On — reliable in-code formatting, search & a wipe guard.'
+                            : 'Off — the model handles formatting & edits on its own.'}
+                    </span>
+                </span>
+            </label>
+        </section>
+
+        <section class="settings-section">
+            <h2>Appearance</h2>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">Theme</h3>
+                    <p class="description" style="margin-top: 4px;">Switch between the dark and light interface. Your choice is remembered across sessions.</p>
+                </div>
+                <button class="browse-btn" onclick={toggleTheme}>
+                    {$theme === 'light' ? 'Light' : 'Dark'}
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
             <h2>Features</h2>
             <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
                 <div>
@@ -582,6 +793,66 @@
                 </div>
                 <button class="browse-btn" onclick={toggleJupyterExecution}>
                     {enableJupyterExecution ? 'Enabled' : 'Disabled'}
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>Quick Capture</h2>
+            <p class="description">A global shortcut opens a small window to jot down a task from anywhere — even when Myelin isn't focused.</p>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; gap: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">Global shortcut</h3>
+                    <p class="description" style="margin-top: 4px;">
+                        {#if quickShortcutError}
+                            <span style="color: var(--danger, #e5534b);">{quickShortcutError}</span>
+                        {:else if quickRecording}
+                            Press your shortcut… (Esc to cancel)
+                        {:else}
+                            Current: <strong>{prettyShortcut(quickShortcut)}</strong>
+                        {/if}
+                    </p>
+                </div>
+                <button class="browse-btn" onclick={startRecording} disabled={quickRecording}>
+                    {quickRecording ? 'Recording…' : 'Change'}
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>LaTeX → PDF</h2>
+            <p class="description">
+                Compiling <code>.tex</code> notes to PDF uses Tectonic, which downloads a
+                LaTeX support bundle (~50&nbsp;MB) on first use. Download it now to make the
+                first compile instant and to work fully offline afterwards.
+            </p>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; gap: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">LaTeX support files</h3>
+                    <p class="description" style="margin-top: 4px;">
+                        {#if latexDownloading}
+                            Downloading… {formatMB(latexDownloadBytes)}
+                        {:else if latexError}
+                            <span style="color: var(--danger, #e5534b);">Error: {latexError}</span>
+                        {:else if latexCache?.warmed}
+                            Ready — {formatMB(latexCache.sizeBytes)} cached.
+                        {:else}
+                            Not downloaded yet.
+                        {/if}
+                    </p>
+                </div>
+                <button
+                    class="browse-btn"
+                    onclick={downloadLatexSupport}
+                    disabled={latexDownloading || latexCache?.warmed}
+                >
+                    {#if latexDownloading}
+                        Downloading…
+                    {:else if latexCache?.warmed}
+                        Downloaded
+                    {:else}
+                        Download now
+                    {/if}
                 </button>
             </div>
         </section>
@@ -829,30 +1100,6 @@
         line-height: 1.4;
     }
 
-    .device-row {
-        display: flex;
-        align-items: center;
-        gap: var(--space-3);
-        margin-top: var(--space-3);
-    }
-
-    .device-row label {
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: var(--text-secondary);
-        white-space: nowrap;
-    }
-
-    .device-row select {
-        flex: 1;
-        background: var(--bg-page);
-        border: 1px solid var(--border-default);
-        border-radius: var(--radius-sm);
-        padding: 0.5rem 0.75rem;
-        color: var(--text-primary);
-        font-size: 0.85rem;
-    }
-
     .backend-status {
         display: flex;
         align-items: flex-start;
@@ -979,6 +1226,108 @@
         cursor: not-allowed;
     }
 
+    .toggle-row {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        cursor: pointer;
+    }
+
+    .toggle-row input {
+        margin-top: 0.2rem;
+        flex: 0 0 auto;
+    }
+
+    .toggle-text {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+    }
+
+    .toggle-text strong {
+        color: var(--text-primary);
+        font-size: 0.9rem;
+    }
+
+    .toggle-hint {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        line-height: 1.4;
+    }
+
+    .toggle-label {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    /* Little circled "i" that reveals detail/caveats on hover or focus, so the
+       long explanation isn't pasted under every toggle. */
+    .info {
+        position: relative;
+        display: inline-flex;
+        outline: none;
+    }
+
+    .info-dot {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 1px solid var(--text-secondary);
+        color: var(--text-secondary);
+        font-size: 0.62rem;
+        font-style: italic;
+        font-weight: 700;
+        line-height: 1;
+        cursor: help;
+        user-select: none;
+    }
+
+    .info:hover .info-dot,
+    .info:focus .info-dot {
+        border-color: var(--text-primary);
+        color: var(--text-primary);
+    }
+
+    .info-pop {
+        position: absolute;
+        bottom: calc(100% + 8px);
+        left: 0;
+        z-index: 20;
+        width: 320px;
+        max-width: 60vw;
+        padding: 0.6rem 0.7rem;
+        background: var(--bg-elevated, #1e1e1e);
+        border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        color: var(--text-secondary);
+        font-size: 0.78rem;
+        font-weight: 400;
+        line-height: 1.45;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(4px);
+        transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+        pointer-events: none;
+    }
+
+    .info-pop strong {
+        color: var(--text-primary);
+        font-size: inherit;
+    }
+
+    .info:hover .info-pop,
+    .info:focus .info-pop {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+    }
+
     .advanced-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -1015,6 +1364,15 @@
     .input-group input:focus {
         outline: none;
         border-color: var(--accent-200);
+    }
+
+    /* Adaptive offload manages Context Size + GPU Layers, so they're locked
+       (disabled) when it's on — show that clearly instead of looking editable. */
+    .input-group input:disabled {
+        opacity: 0.45;
+        background: var(--bg-panel);
+        color: var(--text-muted);
+        cursor: not-allowed;
     }
 
     .success-message {

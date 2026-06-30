@@ -1,23 +1,19 @@
 use crate::llama_server::{self, ManagedLlamaServer};
 use crate::models::{
     AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult,
+    ProviderStatus, SearchResponse, SearchResult, Task,
 };
 use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::Utc;
-use futures_util::StreamExt;
 use lancedb::connection::Connection;
 use lancedb::{connect, Table};
 use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
-use rig_core::agent::MultiTurnStreamItem;
 use rig_core::completion::{CompletionError, Prompt, PromptError};
-use rig_core::message::Text;
-use rig_core::streaming::{StreamedAssistantContent, StreamingPrompt};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -29,12 +25,309 @@ use std::sync::Arc;
 use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-const EMBEDDING_DIM: i32 = 64;
+// nomic-embed-text v1.5 width. Notes use real embeddings when an embed model is
+// configured (semantic search), else a same-width lexical hashed fallback.
+const EMBEDDING_DIM: i32 = 768;
 const INDEX_DIR_NAME: &str = "index";
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
-const NOTE_BODY_PROMPT_LIMIT: usize = 400;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
+// Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
+// We pin that package cache to a directory we own under app data so it lands in
+// a known place we can measure, pre-warm from Settings, and report on.
+const TECTONIC_CACHE_DIR_NAME: &str = "tectonic-cache";
+const TECTONIC_WARMED_MARKER: &str = ".myelin_warmed";
+
+// Preamble used to wrap bare .tex notes that lack their own \documentclass. Kept
+// deliberately broad so typical documents (math, figures, tables, links, colour,
+// sensible margins) compile without the user hand-rolling a preamble. The prewarm
+// stub uses the SAME preamble so "Download now" caches exactly these packages.
+const DEFAULT_TEX_PREAMBLE: &str = "\\documentclass[11pt]{article}\n\
+     \\usepackage[margin=1in]{geometry}\n\
+     \\usepackage{amsmath,amssymb,amsfonts,mathtools}\n\
+     \\usepackage{graphicx}\n\
+     \\usepackage{booktabs}\n\
+     \\usepackage{enumitem}\n\
+     \\usepackage{xcolor}\n\
+     \\usepackage{hyperref}\n\
+     \\begin{document}";
+
+/// Wrap bare LaTeX body text (no `\documentclass`) in the default preamble.
+fn wrap_bare_latex(body: &str) -> String {
+    format!("{DEFAULT_TEX_PREAMBLE}\n{body}\n\\end{{document}}")
+}
+
+/// Faithful test entrypoint mirroring [`AppState::compile_latex`]'s transform
+/// (frontmatter strip → preamble wrap / package injection → compile) for a raw
+/// note file. Used by the `texcheck` diagnostic bin. Returns PDF bytes or the
+/// first-line error message.
+pub fn compile_tex_source(raw: &str) -> std::result::Result<Vec<u8>, String> {
+    let body = split_frontmatter(raw).1;
+    if body.trim().is_empty() {
+        return Err("This note is empty — add some LaTeX before compiling.".to_string());
+    }
+    let final_tex = if !body.contains("\\documentclass") {
+        wrap_bare_latex(&body)
+    } else {
+        ensure_packages(&body).0
+    };
+    compile_with_tectonic(&final_tex).map_err(|f| f.message)
+}
+
+// Packages commonly used in notes that we make sure are available even when the
+// note brings its own (often thin) preamble — e.g. AI/template notes that use
+// \mathbb but only load amsmath. geometry/inputenc are intentionally excluded:
+// they change layout, and a note with its own preamble may set them itself.
+const ENSURE_PACKAGES: &[&str] = &[
+    "amsmath", "amssymb", "amsfonts", "mathtools", "graphicx", "booktabs", "enumitem", "xcolor",
+    "hyperref",
+];
+
+/// For a document that has its own `\documentclass`, inject `\usepackage{…}` lines
+/// for any [`ENSURE_PACKAGES`] not already referenced, right after the
+/// `\documentclass` line. Returns the new source and how many lines were inserted
+/// (so TeX error lines can be mapped back to the editor). Skipping already-present
+/// packages avoids LaTeX "option clash" errors.
+fn ensure_packages(src: &str) -> (String, usize) {
+    let missing: Vec<&str> = ENSURE_PACKAGES
+        .iter()
+        .copied()
+        .filter(|pkg| !src.contains(pkg))
+        .collect();
+    if missing.is_empty() {
+        return (src.to_string(), 0);
+    }
+    let Some(dc) = src.find("\\documentclass") else {
+        return (src.to_string(), 0);
+    };
+    // Insert after the end of the \documentclass line.
+    let insert_at = src[dc..]
+        .find('\n')
+        .map(|i| dc + i + 1)
+        .unwrap_or(src.len());
+    let injected: String = missing
+        .iter()
+        .map(|pkg| format!("\\usepackage{{{pkg}}}\n"))
+        .collect();
+    let mut out = String::with_capacity(src.len() + injected.len());
+    out.push_str(&src[..insert_at]);
+    out.push_str(&injected);
+    out.push_str(&src[insert_at..]);
+    (out, missing.len())
+}
+
+/// A failed Tectonic run: the engine's high-level message plus the raw TeX log
+/// (which carries the `l.NN` line markers we parse into editor diagnostics).
+struct TexFailure {
+    message: String,
+    log: String,
+}
+
+/// StatusBackend that captures the TeX error log instead of printing it. The
+/// one-shot `tectonic::latex_to_pdf` uses a Noop backend that throws this away,
+/// so we drive the session ourselves to get line-level diagnostics.
+#[derive(Default, Clone)]
+struct CapturingStatus {
+    log: Arc<Mutex<Vec<u8>>>,
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl tectonic::status::StatusBackend for CapturingStatus {
+    fn report(
+        &mut self,
+        kind: tectonic::status::MessageKind,
+        args: std::fmt::Arguments,
+        _err: Option<&anyhow::Error>,
+    ) {
+        if matches!(
+            kind,
+            tectonic::status::MessageKind::Error | tectonic::status::MessageKind::Warning
+        ) {
+            self.messages.lock().push(format!("{args}"));
+        }
+    }
+
+    fn dump_error_logs(&mut self, output: &[u8]) {
+        self.log.lock().extend_from_slice(output);
+    }
+}
+
+/// Delete the cached LaTeX format(s) so Tectonic rebuilds them. Used to recover
+/// from a corrupt format whose catcode table breaks every compile.
+fn clear_tectonic_format_cache() {
+    if let Ok(dir) = std::env::var("TECTONIC_CACHE_DIR") {
+        let _ = fs::remove_dir_all(Path::new(&dir).join("formats"));
+    }
+}
+
+/// Compile `tex` to PDF bytes. Self-heals a corrupt format cache: if the engine
+/// claims `\begin{document}` is missing even though our input contains it (the
+/// classic symptom of a broken cached format), drop the format cache and retry.
+fn compile_with_tectonic(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
+    match run_tectonic_session(tex) {
+        Ok(pdf) => Ok(pdf),
+        Err(failure)
+            if tex.contains("\\begin{document}")
+                && failure.message.contains("Missing \\begin{document}") =>
+        {
+            clear_tectonic_format_cache();
+            run_tectonic_session(tex)
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
+/// Compile `tex` to PDF bytes, capturing the TeX log on failure. Runs the
+/// Tectonic driver directly (vs. latex_to_pdf) so we can attach a capturing
+/// status backend. Honours TECTONIC_CACHE_DIR set at startup.
+fn run_tectonic_session(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
+    use tectonic::config::PersistentConfig;
+    use tectonic::driver::{OutputFormat, ProcessingSessionBuilder};
+
+    let mut status = CapturingStatus::default();
+    let log_handle = status.log.clone();
+    let messages_handle = status.messages.clone();
+    let read_log = |h: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&h.lock()).into_owned();
+
+    let config = match PersistentConfig::open(false) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("Tectonic config error: {e}"),
+                log: String::new(),
+            })
+        }
+    };
+    let bundle = match config.default_bundle(false) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("Could not load the LaTeX support bundle: {e}"),
+                log: read_log(&log_handle),
+            })
+        }
+    };
+    let format_cache_path = match config.format_cache_path() {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("Tectonic format cache error: {e}"),
+                log: read_log(&log_handle),
+            })
+        }
+    };
+
+    let mut sb = ProcessingSessionBuilder::default();
+    sb.bundle(bundle)
+        .primary_input_buffer(tex.as_bytes())
+        .tex_input_name("texput.tex")
+        .format_name("latex")
+        .format_cache_path(format_cache_path)
+        .keep_logs(false)
+        .keep_intermediates(false)
+        .print_stdout(false)
+        .output_format(OutputFormat::Pdf)
+        .do_not_write_output_files();
+
+    let mut sess = match sb.create(&mut status) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(TexFailure {
+                message: format!("{e}"),
+                log: read_log(&log_handle),
+            })
+        }
+    };
+    if let Err(e) = sess.run(&mut status) {
+        // Prefer the engine's first reported error line over the generic wrapper.
+        let message = messages_handle
+            .lock()
+            .iter()
+            .find(|m| !m.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("{e}"));
+        return Err(TexFailure {
+            message,
+            log: read_log(&log_handle),
+        });
+    }
+
+    let mut files = sess.into_file_data();
+    match files.remove("texput.pdf") {
+        Some(file) => Ok(file.data),
+        None => Err(TexFailure {
+            message: "LaTeX reported success but produced no PDF.".into(),
+            log: read_log(&log_handle),
+        }),
+    }
+}
+
+/// Parse a TeX error log into editor diagnostics. TeX reports the offending line
+/// as `l.NN`; LaTeX package errors as `... on input line NN`. Line numbers are in
+/// the compiled document's coordinates, so subtract `body_line_offset` (the
+/// preamble length we prepended for bare notes) to map back to the editor.
+fn parse_tex_log(log: &str, body_line_offset: usize) -> Vec<serde_json::Value> {
+    let mut diagnostics = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut current_msg: Option<String> = None;
+
+    let map_line = |n: usize| -> usize { n.saturating_sub(body_line_offset).max(1) };
+    let leading_number = |s: &str| -> Option<usize> {
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<usize>().ok()
+    };
+
+    for raw_line in log.lines() {
+        let line = raw_line.trim_end();
+        if let Some(rest) = line.strip_prefix("! ") {
+            current_msg = Some(rest.trim_end_matches('.').trim().to_string());
+        }
+        let mut push = |line_no: usize, msg: String| {
+            let editor_line = map_line(line_no);
+            if seen.insert((editor_line, msg.clone())) {
+                diagnostics.push(serde_json::json!({
+                    "line": editor_line,
+                    "message": msg,
+                    "severity": "error",
+                }));
+            }
+        };
+        if let Some(num) = line.strip_prefix("l.").and_then(leading_number) {
+            let msg = current_msg.take().unwrap_or_else(|| "LaTeX error".to_string());
+            push(num, msg);
+        } else if let Some(idx) = line.find("on input line ") {
+            if let Some(num) = leading_number(&line[idx + "on input line ".len()..]) {
+                let msg = current_msg
+                    .clone()
+                    .unwrap_or_else(|| line.trim().trim_start_matches('!').trim().to_string());
+                push(num, msg);
+            }
+        }
+    }
+    diagnostics
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TectonicCacheStatus {
+    pub warmed: bool,
+    pub size_bytes: u64,
+}
+
+/// Total size of every file under `path` (recursive). Missing dir ⇒ 0.
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            match entry.metadata() {
+                Ok(meta) if meta.is_dir() => total += dir_size(&entry.path()),
+                Ok(meta) => total += meta.len(),
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
 
 fn describe_completion_error(error: &CompletionError) -> String {
     match error {
@@ -86,13 +379,43 @@ struct InnerState {
     runtime: RwLock<RuntimeState>,
     watcher: Mutex<Option<RecommendedWatcher>>,
     index_lock: AsyncMutex<()>,
+    // Serialises Tectonic runs: concurrent compiles share one format-cache dir and
+    // would corrupt it if they built the format at the same time.
+    tectonic_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
+    embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
     llama_client: Client,
     chat_tools: Mutex<Vec<ChatTool>>,
     latest_chat_question: Mutex<Option<String>>,
+    /// The editor text selection the user armed for the current chat turn, if any.
+    /// Read by the write_note tool to scope an edit to just that span.
+    current_selection: Mutex<Option<crate::agent::SelectionArg>>,
+    /// The working-doc type of the open document this turn: "md" | "tex" | "ipynb".
+    /// Steers the prompt (LaTeX/notebook vs Markdown) and notebook-aware tools.
+    current_doc_type: Mutex<Option<String>>,
     current_note_id: Mutex<Option<String>>,
     require_tool_approval: std::sync::atomic::AtomicBool,
+    /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
+    /// tools (e.g. the write guard) can read it without re-resolving the config.
+    deterministic_tools: std::sync::atomic::AtomicBool,
+    /// Runtime mirror of config.tool_gating (per-message tool gating), refreshed
+    /// each chat turn alongside `deterministic_tools`.
+    tool_gating: std::sync::atomic::AtomicBool,
+    /// Set to true to abort the current streaming chat turn. Checked by
+    /// stream_chat::run_chat between chunks; reset after each turn.
+    abort_chat: std::sync::atomic::AtomicBool,
+    /// Set to true by stream_chat when it aborted due to user request. Checked
+    /// by ask_ai_stream after run_chat returns so it can emit chat_aborted
+    /// instead of chat_done, and the frontend can discard the partial message.
+    chat_was_aborted: std::sync::atomic::AtomicBool,
     pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// Per-note live conversation as the REAL message array (system-less): user
+    /// turns, assistant turns with tool_calls, and the tool RESULTS. The frontend's
+    /// chat_history keeps only text replies, so this is what lets the model keep
+    /// coherent context across turns — search/fetch results stay as real `tool`
+    /// messages instead of being flattened to a vague summary and lost. Re-sent each
+    /// turn so llama-server reuses the cached prefix (KV cache). Keyed by note id.
+    conversations: Mutex<HashMap<String, Vec<serde_json::Value>>>,
 }
 
 #[derive(Default)]
@@ -139,6 +462,13 @@ impl AppState {
             )
         })?;
 
+        // Pin Tectonic's package cache under app data (see TECTONIC_CACHE_DIR_NAME).
+        // Honoured by tectonic via the TECTONIC_CACHE_DIR env var (>= v0.9). Set
+        // here at startup, before any compile, so the bundle lands where we expect.
+        let tectonic_cache = app_data_dir.join(TECTONIC_CACHE_DIR_NAME);
+        let _ = fs::create_dir_all(&tectonic_cache);
+        std::env::set_var("TECTONIC_CACHE_DIR", &tectonic_cache);
+
         // Register the bundled-binary directory (shipped CPU/Vulkan builds) so
         // the backend resolver finds them automatically in a packaged app.
         let resource_bin = handle
@@ -168,16 +498,25 @@ impl AppState {
                 }),
                 watcher: Mutex::new(None),
                 index_lock: AsyncMutex::new(()),
+                tectonic_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
+                embed_server: AsyncMutex::new(None),
                 llama_client: Client::builder()
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
                     .context("failed to create llama HTTP client")?,
                 chat_tools: Mutex::new(Vec::new()),
                 latest_chat_question: Mutex::new(None),
+                current_selection: Mutex::new(None),
+                current_doc_type: Mutex::new(None),
                 current_note_id: Mutex::new(None),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
+                deterministic_tools: std::sync::atomic::AtomicBool::new(true),
+                tool_gating: std::sync::atomic::AtomicBool::new(false),
+                abort_chat: std::sync::atomic::AtomicBool::new(false),
+                chat_was_aborted: std::sync::atomic::AtomicBool::new(false),
                 pending_approvals: Mutex::new(HashMap::new()),
+                conversations: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -205,6 +544,31 @@ impl AppState {
         *self.inner.latest_chat_question.lock() = None;
     }
 
+    /// The user's current chat message (for intent checks during tool calls).
+    pub fn latest_chat_question(&self) -> String {
+        self.inner.latest_chat_question.lock().clone().unwrap_or_default()
+    }
+
+    pub fn set_current_selection(&self, selection: Option<crate::agent::SelectionArg>) {
+        *self.inner.current_selection.lock() = selection;
+    }
+
+    pub fn current_selection(&self) -> Option<crate::agent::SelectionArg> {
+        self.inner.current_selection.lock().clone()
+    }
+
+    pub fn set_current_doc_type(&self, doc_type: Option<String>) {
+        *self.inner.current_doc_type.lock() = doc_type;
+    }
+
+    pub fn current_doc_type(&self) -> String {
+        self.inner
+            .current_doc_type
+            .lock()
+            .clone()
+            .unwrap_or_else(|| "md".to_string())
+    }
+
     pub fn set_current_note_id(&self, note_id: impl Into<String>) {
         *self.inner.current_note_id.lock() = Some(note_id.into());
     }
@@ -217,6 +581,41 @@ impl AppState {
         self.inner.current_note_id.lock().clone()
     }
 
+    /// Signal the currently-running chat turn to abort as soon as possible.
+    pub fn signal_abort_chat(&self) {
+        self.inner.abort_chat.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether an abort was requested (and reset the flag).
+    pub fn check_abort_chat(&self) -> bool {
+        self.inner.abort_chat.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Mark the current chat as having been aborted (instead of completing).
+    pub fn mark_chat_aborted(&self) {
+        self.inner.chat_was_aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether the last chat was aborted (and reset the flag).
+    pub fn check_chat_aborted(&self) -> bool {
+        self.inner.chat_was_aborted.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The live conversation (real message array) for a note — empty if none yet.
+    pub fn conversation(&self, note_id: &str) -> Vec<serde_json::Value> {
+        self.inner.conversations.lock().get(note_id).cloned().unwrap_or_default()
+    }
+
+    /// Replace a note's live conversation after a turn (already trimmed by caller).
+    pub fn save_conversation(&self, note_id: &str, msgs: Vec<serde_json::Value>) {
+        self.inner.conversations.lock().insert(note_id.to_string(), msgs);
+    }
+
+    /// Forget a note's live conversation (e.g. when the user clears chat).
+    pub fn clear_conversation(&self, note_id: &str) {
+        self.inner.conversations.lock().remove(note_id);
+    }
+
     fn note_by_id(&self, id: &str) -> Option<NoteDocument> {
         self.inner
             .runtime
@@ -226,9 +625,16 @@ impl AppState {
             .map(|note| note.document.clone())
     }
 
+    /// Body of the note currently open in the editor (for the find_in_note tool).
+    pub fn open_note_body(&self) -> Option<String> {
+        self.current_note_id()
+            .and_then(|id| self.note_by_id(&id))
+            .map(|doc| doc.body)
+    }
+
     /// Resolve the note a chat tool should act on: always prefer the note that
     /// is currently open in the editor, regardless of the title the model
-    /// passed (a small model often gets the title wrong). Fall back to an exact
+    /// passed (a model can get the title wrong). Fall back to an exact
     /// title match only when no note is open.
     pub fn resolve_chat_target_note(&self, title: &str) -> Option<NoteDocument> {
         if let Some(id) = self.current_note_id() {
@@ -239,17 +645,28 @@ impl AppState {
         self.find_note_by_exact_title(title)
     }
 
-    pub fn latest_chat_allows_note_mutation(&self) -> bool {
-        // We now rely on the LLM's own intelligence to decide when to mutate the note.
-        true
-    }
-
     pub fn is_tool_approval_required(&self) -> bool {
         self.inner.require_tool_approval.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_require_tool_approval(&self, require: bool) {
         self.inner.require_tool_approval.store(require, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn deterministic_tools_enabled(&self) -> bool {
+        self.inner.deterministic_tools.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_deterministic_tools_runtime(&self, enabled: bool) {
+        self.inner.deterministic_tools.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn tool_gating_enabled(&self) -> bool {
+        self.inner.tool_gating.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_tool_gating_runtime(&self, enabled: bool) {
+        self.inner.tool_gating.store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn register_pending_approval(&self, id: String, tx: tokio::sync::oneshot::Sender<bool>) {
@@ -267,7 +684,13 @@ impl AppState {
         if let Some(workspace) = workspace {
             crate::git_history::init_repo(&workspace)?;
             self.start_watcher(&workspace)?;
-            self.reindex_workspace(workspace).await?;
+            // On boot, only rebuild the LanceDB index if it doesn't already exist.
+            // This makes cold-start fast; the file watcher triggers a rebuild
+            // when notes actually change during the session.
+            let index_path = self.index_dir();
+            let table_dir = index_path.join(TABLE_NAME);
+            let needs_rebuild = !table_dir.exists();
+            self.reindex_workspace(workspace, needs_rebuild).await?;
         }
         Ok(self.snapshot())
     }
@@ -292,7 +715,7 @@ impl AppState {
         )?;
 
         self.start_watcher(&workspace)?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -306,6 +729,18 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn set_deterministic_tools(&self, enabled: bool) -> Result<()> {
+        crate::llama_server::set_deterministic_tools(&self.inner.app_data_dir, enabled)?;
+        self.set_deterministic_tools_runtime(enabled);
+        Ok(())
+    }
+
+    pub async fn set_tool_gating(&self, enabled: bool) -> Result<()> {
+        crate::llama_server::set_tool_gating(&self.inner.app_data_dir, enabled)?;
+        self.set_tool_gating_runtime(enabled);
+        Ok(())
+    }
+
     pub async fn set_llama_advanced_config(
         &self,
         context_size: Option<u32>,
@@ -316,6 +751,8 @@ impl AppState {
         extra_args: Option<Vec<String>>,
         backend_preference: Option<String>,
         gpu_device: Option<String>,
+        thinking: Option<bool>,
+        auto_offload: Option<bool>,
         max_turns: Option<u32>,
     ) -> Result<()> {
         crate::llama_server::set_advanced_config(
@@ -328,6 +765,8 @@ impl AppState {
             extra_args,
             backend_preference,
             gpu_device,
+            thinking,
+            auto_offload,
             max_turns,
         )?;
         Ok(())
@@ -369,6 +808,19 @@ impl AppState {
         let _ = fs::remove_dir_all(&staging);
         fs::create_dir_all(&staging)?;
 
+        // Backend archives are hundreds of MB and can take minutes. The shared
+        // `llama_client` has a 120s TOTAL timeout tuned for chat/health requests,
+        // which aborts a large download mid-body — surfacing as the misleading
+        // "error decoding response body". Use a dedicated client with a per-read
+        // idle timeout (catches stalled/dead connections) but NO overall cap, so a
+        // slow-but-progressing download isn't killed.
+        let download_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(120))
+            .user_agent("Myelin")
+            .build()
+            .unwrap_or_else(|_| self.inner.llama_client.clone());
+
         let result: Result<()> = async {
             let total_assets = assets.len() as f64;
             for (i, asset) in assets.iter().enumerate() {
@@ -376,7 +828,7 @@ impl AppState {
                 self.emit_download(&backend, "downloading", (i as f64 / total_assets) * 100.0,
                     &format!("Downloading {} ({}/{})", asset, i + 1, assets.len()));
 
-                let resp = self.inner.llama_client.get(&url).send().await
+                let resp = download_client.get(&url).send().await
                     .with_context(|| format!("failed to download {asset}"))?;
                 if !resp.status().is_success() {
                     anyhow::bail!("download failed for {asset}: HTTP {}", resp.status());
@@ -388,7 +840,9 @@ impl AppState {
                 let mut last_pct: i32 = -1;
                 let mut stream = resp.bytes_stream();
                 while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
+                    let chunk = chunk.with_context(|| {
+                        format!("download stream interrupted for {asset} (network stalled or connection dropped)")
+                    })?;
                     std::io::Write::write_all(&mut file, &chunk)?;
                     downloaded += chunk.len() as u64;
                     if total > 0 {
@@ -462,6 +916,7 @@ impl AppState {
         title: String,
         source_pdf: Option<String>,
         extension: Option<String>,
+        notebook: Option<String>,
     ) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let now = timestamp_now();
@@ -471,7 +926,18 @@ impl AppState {
         let safe_slug = slugify(&unique_title);
         let ext = extension.unwrap_or_else(|| "md".to_string());
         let file_name = format!("{safe_slug}--{}.{ext}", &id[..8]);
-        let path = unique_note_path(&workspace, &file_name);
+        // When a notebook (folder) is given, create the note inside it.
+        let target_dir = match notebook {
+            Some(name) if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") => {
+                let safe = sanitize_relative_folder(&name)?;
+                let dir = workspace.join(folder_to_relative_path(&safe));
+                fs::create_dir_all(&dir)
+                    .with_context(|| format!("failed to open notebook {}", dir.display()))?;
+                dir
+            }
+            _ => workspace.clone(),
+        };
+        let path = unique_note_path(&target_dir, &file_name);
         let relative_path = relative_to_workspace(&workspace, &path);
 
         let document = NoteDocument {
@@ -488,12 +954,17 @@ impl AppState {
             chat_history: Vec::new(),
         };
 
-        let vector = hashed_embedding(&format!(
-            "{}\n{}\n{}",
-            document.title,
-            document.tags.join(" "),
-            document.body
-        ));
+        let vector = self
+            .note_embedding(
+                &format!(
+                    "{}\n{}\n{}",
+                    document.title,
+                    document.tags.join(" "),
+                    document.body
+                ),
+                false,
+            )
+            .await;
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -520,10 +991,52 @@ impl AppState {
         let state = self.clone();
         let workspace_clone = workspace.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = state.reindex_workspace(workspace_clone).await;
+            let _ = state.reindex_workspace(workspace_clone, true).await;
+            
         });
 
         Ok(document)
+    }
+
+    /// Create a notebook — a top-level folder in the workspace that holds notes
+    /// of any kind. Returns the updated list of notebooks.
+    pub fn create_notebook(&self, name: String) -> Result<Vec<String>> {
+        let workspace = self.require_workspace()?;
+        let safe = sanitize_relative_folder(&name)?;
+        if safe == "Root" {
+            return Err(anyhow!("notebook name cannot be empty"));
+        }
+        let dir = workspace.join(folder_to_relative_path(&safe));
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create notebook {}", dir.display()))?;
+        self.list_notebooks()
+    }
+
+    /// List notebooks: the top-level folders in the workspace (filesystem is the
+    /// source of truth), excluding hidden/ignored dirs. Includes empty ones.
+    pub fn list_notebooks(&self) -> Result<Vec<String>> {
+        let workspace = self.require_workspace()?;
+        let mut names = Vec::new();
+        if let Ok(entries) = fs::read_dir(&workspace) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.')
+                    || name == "node_modules"
+                    || name == "target"
+                    || name == "dist"
+                    || name == "build"
+                    || name == "tasks"
+                {
+                    continue;
+                }
+                names.push(name);
+            }
+        }
+        names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        Ok(names)
     }
 
     pub async fn load_note(&self, note_id: String) -> Result<NoteDocument> {
@@ -590,12 +1103,17 @@ impl AppState {
 
         let path = workspace.join(&updated.relative_path);
 
-        let vector = hashed_embedding(&format!(
-            "{}\n{}\n{}",
-            updated.title,
-            updated.tags.join(" "),
-            updated.body
-        ));
+        let vector = self
+            .note_embedding(
+                &format!(
+                    "{}\n{}\n{}",
+                    updated.title,
+                    updated.tags.join(" "),
+                    updated.body
+                ),
+                false,
+            )
+            .await;
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -619,7 +1137,8 @@ impl AppState {
         let state = self.clone();
         let workspace_clone = workspace.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = state.reindex_workspace(workspace_clone).await;
+            let _ = state.reindex_workspace(workspace_clone, true).await;
+            
         });
 
         Ok(updated)
@@ -637,8 +1156,23 @@ impl AppState {
         };
 
         fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
+
+        // Delete the note's sidecars too — the chat session and annotations are
+        // keyed by note id and would otherwise orphan in the workspace data dir
+        // (stale sessions lingering after the note is gone).
+        let data_dir = self.workspace_data_dir(&workspace);
+        let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.json")));
+        let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.tmp")));
+        let _ = fs::remove_file(
+            data_dir
+                .join("annotations")
+                .join(format!("{note_id}.annotations.json")),
+        );
+        // Drop any RAG chunks ingested for this note from the document store.
+        let _ = self.delete_document(&note_id).await;
+
         crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -687,7 +1221,7 @@ impl AppState {
             &workspace,
             &format!("Duplicate note: {}", document.title),
         )?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         self.load_note(duplicate_id).await
     }
 
@@ -724,7 +1258,7 @@ impl AppState {
             &format!("Move note: {}", source.document.title),
         )?;
 
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         self.load_note(note_id).await
     }
 
@@ -757,7 +1291,7 @@ impl AppState {
         }
 
         self.persist_runtime_settings()?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -784,7 +1318,7 @@ impl AppState {
             runtime.notes.values().cloned().collect::<Vec<_>>()
         };
 
-        let query_vector = hashed_embedding(trimmed);
+        let query_vector = self.note_embedding(trimmed, true).await;
         let keyword_terms = tokenize(trimmed);
         let mut results = notes
             .into_iter()
@@ -970,77 +1504,188 @@ impl AppState {
         note_id: String,
         question: String,
         request_id: String,
+        selection: Option<crate::agent::SelectionArg>,
+        doc_type: Option<String>,
     ) -> Result<()> {
         self.reset_chat_tools();
         self.set_latest_chat_question(question.clone());
+        // An armed selection is only meaningful if it carries text; ignore empties.
+        let selection = selection.filter(|s| !s.text.trim().is_empty());
+        self.set_current_selection(selection.clone());
+        let doc_type = doc_type.unwrap_or_else(|| "md".to_string());
+        self.set_current_doc_type(Some(doc_type.clone()));
         self.set_current_note_id(note_id.clone());
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
-            let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
 
-            let note_body_excerpt = if note.body.len() > NOTE_BODY_PROMPT_LIMIT {
-                format!("{}…", &note.body[..NOTE_BODY_PROMPT_LIMIT])
+            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+            self.set_deterministic_tools_runtime(config.deterministic_tools);
+            self.set_tool_gating_runtime(config.tool_gating);
+            self.ensure_llama_server(&config).await?;
+
+            // Budget the note to ~half the context window the server ACTUALLY
+            // launched with (auto-offload may run far above the configured value),
+            // leaving room for the system prompt, tools, chat history, and the
+            // reply. ~4 chars/token → a 32K-token context holds ~65K chars of note,
+            // far past the old flat 24K cap.
+            let ctx_tokens = self
+                .running_ctx_size()
+                .await
+                .unwrap_or(config.context_size) as usize;
+            let note_char_limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
+            // Truncate on a char boundary (never a raw byte slice — that panics on
+            // multi-byte UTF-8).
+            let note_body_excerpt = if note.body.chars().count() > note_char_limit {
+                let head: String = note.body.chars().take(note_char_limit).collect();
+                format!("{head}\n…[note truncated — ask me to work on a specific section]")
             } else {
                 note.body.clone()
             };
-            let prompt = format!(
-                "Open Note: \"{}\"\nNote body (excerpt): {}\n\nChat History (for context only):\n{}\n\n### USER REQUEST ###\n{}\n### END REQUEST ###",
-                note.title,
-                if note_body_excerpt.trim().is_empty() { "(empty)".to_string() } else { note_body_excerpt },
-                history_text,
-                question
-            );
+            // Give the model the note's CURRENT content as editable text. The old
+            // "reference only — do NOT copy" framing (plus a 400-char cap) meant it
+            // could neither see nor feel allowed to modify existing content, so it
+            // could only write fresh, never edit/format/shorten/delete.
+            let mut context = format!("The note currently open is titled \"{}\".", note.title);
+            // For a notebook, present readable CELLS (not the raw JSON body) so the
+            // model edits via edit_notebook instead of trying to rewrite JSON.
+            let notebook_cells = if doc_type == "ipynb" {
+                crate::notebook::present(&note.body)
+            } else {
+                None
+            };
+            if let Some(cells) = &notebook_cells {
+                context.push_str(&format!("\n\n{cells}"));
+            } else if note_body_excerpt.trim().is_empty() {
+                context.push_str(" It is currently empty.");
+            } else {
+                context.push_str(&format!(
+                    "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---",
+                    note_body_excerpt
+                ));
+            }
+            // The open document isn't always Markdown — tell the model so it edits
+            // in the right language instead of defaulting to Markdown headings/lists.
+            if doc_type == "tex" {
+                context.push_str(
+                    "\n\nIMPORTANT: This open document is a LaTeX (.tex) source file, NOT Markdown. \
+                     Write and edit it using LaTeX syntax only — e.g. \\section{...}, \\subsection{...}, \
+                     \\textbf{...}, \\emph{...}, \\begin{itemize}\\item ...\\end{itemize}, $...$ for math, \
+                     \\begin{equation}...\\end{equation}. Do NOT use Markdown (#, **, -). Preserve the \
+                     document's preamble and \\begin{document}/\\end{document} structure.",
+                );
+            }
+            // If the user armed an editor selection, show the model EXACTLY what is
+            // selected and scope the request to it. The deterministic write path
+            // (selection_scoped_plan) enforces "selection only" regardless, but the
+            // model still needs to see the selected text to rewrite it well.
+            if let Some(sel) = &selection {
+                context.push_str(&format!(
+                    "\n\nThe user has SELECTED the following part of the note, and their request applies to the SELECTION ONLY — rewrite/edit just this text and leave the rest of the note unchanged:\n\"\"\"\n{}\n\"\"\"",
+                    sel.text
+                ));
+            }
+            // The note context (current note) goes in THIS turn's user message;
+            // prior turns (incl. tool results) come from the live conversation array
+            // built below — not flattened to a lossy text summary.
+            let user_content = format!("{}\n\nUser request: {}", context, question);
 
-            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
-            self.ensure_llama_server(&config).await?;
+            // Per-message tool gating: hand the model ONLY the tools this message
+            // warrants so it can't misfire on one it was never given. We also pass
+            // an edit-thread signal (did a recent user turn ask to write/edit?) so
+            // a verb-less follow-up correction still keeps write_note available.
+            let recent_user_msgs: Vec<&str> = note
+                .chat_history
+                .iter()
+                .filter(|m| m.role == "user" && m.error != Some(true))
+                .map(|m| m.content.as_str())
+                .collect();
+            let edit_thread = crate::agent::in_edit_thread(&recent_user_msgs);
+            // Capability gate: skip tools entirely for a model whose template
+            // can't do tool calls (profile-known or probed once + cached), so it
+            // works as a chat-only model instead of erroring every turn.
+            let model_id = config.model_path.to_string_lossy().to_string();
+            let mut tools = if crate::tool_capability::supports_tools(
+                &self.inner.llama_client,
+                &config.base_url(),
+                &self.inner.app_data_dir,
+                &config.model_path,
+                &model_id,
+                config.supports_tools,
+            )
+            .await
+            {
+                crate::agent::select_tools_cfg(
+                    &question,
+                    true,
+                    edit_thread,
+                    config.tool_gating,
+                    config.deterministic_tools,
+                )
+            } else {
+                Vec::new()
+            };
 
-            let agent = crate::agent::build_myelin_agent(
-                self.clone(),
-                &format!("{}/v1", config.base_url()),
-                &config.model_name(),
-                crate::agent::MYELIN_PREAMBLE,
-                config.temperature as f64,
-                config.max_turns as usize,
-            );
-
-            let mut response_stream = agent
-                .stream_prompt(&prompt)
-                .multi_turn(config.max_turns as usize)
-                .await;
-            let mut streamed_response = String::new();
-            let mut final_response = String::new();
-
-            while let Some(chunk) = response_stream.next().await {
-                match chunk {
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(Text { text, .. }),
-                    )) => {
-                        streamed_response.push_str(&text);
-                        self.handle.emit(
-                            "ai://chat_chunk",
-                            serde_json::json!({
-                                "requestId": request_id,
-                                "delta": text
-                            }),
-                        )?;
+            // A notebook is edited cell-by-cell via edit_notebook, never with the
+            // text tools (write_note/format_note/find_in_note would mangle the JSON).
+            // Swap them out when an edit was warranted; read tools stay.
+            if doc_type == "ipynb" && !tools.is_empty() {
+                let wanted_edit = tools.iter().any(|t| {
+                    matches!(
+                        t["function"]["name"].as_str(),
+                        Some("write_note") | Some("format_note")
+                    )
+                });
+                tools.retain(|t| {
+                    !matches!(
+                        t["function"]["name"].as_str(),
+                        Some("write_note") | Some("format_note") | Some("find_in_note")
+                    )
+                });
+                if wanted_edit {
+                    if let Some(nb) = crate::agent::tool_specs()
+                        .into_iter()
+                        .find(|t| t["function"]["name"].as_str() == Some("edit_notebook"))
+                    {
+                        tools.push(nb);
                     }
-                    Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                        final_response = response.response().to_string();
-                    }
-                    Ok(_) => {}
-                    Err(error) => return Err(anyhow!(error.to_string())),
                 }
             }
 
-            if streamed_response.is_empty() && !final_response.is_empty() {
-                self.handle.emit(
-                    "ai://chat_chunk",
-                    serde_json::json!({
-                        "requestId": request_id,
-                        "delta": final_response
-                    }),
-                )?;
+            // Stream directly against llama-server (not through rig) so the note
+            // content can be surfaced token-by-token as it is generated. See
+            // `stream_chat`.
+            // Build the send array as REAL messages: system preamble + the note's
+            // live conversation (prior user/assistant turns AND tool results) + this
+            // turn's user message. Re-sent each turn so llama-server reuses the
+            // cached prefix (KV cache); the retained tool messages are what let a
+            // later "write what you found" actually have the search results.
+            let nid = self.current_note_id().unwrap_or_default();
+            let mut convo = self.conversation(&nid);
+            if convo.is_empty() {
+                // First turn this session: seed from the saved text history (no tool
+                // results — those were never persisted) so we don't lose continuity.
+                convo = chat_history_to_messages(&note.chat_history);
             }
+            let mut messages = vec![serde_json::json!({
+                "role": "system",
+                "content": crate::agent::MYELIN_PREAMBLE,
+            })];
+            messages.extend(convo.iter().cloned());
+            messages.push(serde_json::json!({ "role": "user", "content": user_content }));
+            let sent_len = messages.len();
+
+            let final_messages =
+                crate::stream_chat::run_chat(self, &config, messages, tools, &request_id).await?;
+
+            // Persist the conversation for the next turn: prior turns + the RAW user
+            // question (the note context is rebuilt fresh each turn, so it is not
+            // stored) + this turn's new assistant/tool messages (incl. results).
+            convo.push(serde_json::json!({ "role": "user", "content": question }));
+            if final_messages.len() > sent_len {
+                convo.extend(final_messages[sent_len..].iter().cloned());
+            }
+            let convo = trim_conversation(convo, 24_000);
+            self.save_conversation(&nid, convo);
 
             Ok(())
         }
@@ -1052,17 +1697,38 @@ impl AppState {
         match result {
             Ok(()) => {
                 let tools = self.take_chat_tools();
-                self.handle.emit(
-                    "ai://chat_done",
-                    serde_json::json!({
-                        "requestId": request_id,
-                        "tools": tools
-                    }),
-                )?;
-
+                if self.check_chat_aborted() {
+                    let _ = self.handle.emit(
+                        "ai://chat_aborted",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "tools": tools
+                        }),
+                    );
+                } else {
+                    self.handle.emit(
+                        "ai://chat_done",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "tools": tools
+                        }),
+                    )?;
+                }
                 Ok(())
             }
             Err(error) => {
+                // If the error is from an abort (stream closed), treat as abort.
+                if self.check_chat_aborted() {
+                    let tools = self.take_chat_tools();
+                    let _ = self.handle.emit(
+                        "ai://chat_aborted",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "tools": tools
+                        }),
+                    );
+                    return Ok(());
+                }
                 let message = error.to_string();
                 let tools = self.take_chat_tools();
                 log::error!("AI chat failed: {message}");
@@ -1118,7 +1784,7 @@ impl AppState {
 
     pub async fn rebuild_index(&self) -> Result<AppSnapshot> {
         let workspace = self.require_workspace()?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -1148,7 +1814,11 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn import_pdf_file(&self, file_path: String) -> Result<NoteDocument> {
+    pub async fn import_pdf_file(
+        &self,
+        file_path: String,
+        notebook: Option<String>,
+    ) -> Result<NoteDocument> {
         let workspace = self.require_workspace()?;
         let src = PathBuf::from(&file_path);
 
@@ -1162,7 +1832,20 @@ impl AppState {
             let file_name = src
                 .file_name()
                 .ok_or_else(|| anyhow!("invalid file path: no filename"))?;
-            let dest = workspace.join(file_name);
+            // Place the import inside the given notebook (folder), else workspace root.
+            let target_dir = match &notebook {
+                Some(name)
+                    if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") =>
+                {
+                    let safe = sanitize_relative_folder(name)?;
+                    let dir = workspace.join(folder_to_relative_path(&safe));
+                    fs::create_dir_all(&dir)
+                        .map_err(|e| anyhow!("failed to open notebook: {}", e))?;
+                    dir
+                }
+                _ => workspace.clone(),
+            };
+            let dest = target_dir.join(file_name);
             if !dest.exists() {
                 fs::copy(&src, &dest)
                     .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
@@ -1170,7 +1853,7 @@ impl AppState {
             dest
         };
 
-        self.reindex_workspace(workspace.clone()).await?;
+        self.reindex_workspace(workspace.clone(), true).await?;
 
         let rel_path = relative_to_workspace(&workspace, &dest);
         let runtime = self.inner.runtime.read();
@@ -1205,6 +1888,130 @@ impl AppState {
         }
     }
 
+    fn tectonic_cache_dir(&self) -> PathBuf {
+        self.inner.app_data_dir.join(TECTONIC_CACHE_DIR_NAME)
+    }
+
+    fn tectonic_warmed_marker(&self) -> PathBuf {
+        self.tectonic_cache_dir().join(TECTONIC_WARMED_MARKER)
+    }
+
+    fn is_tectonic_warmed(&self) -> bool {
+        self.tectonic_warmed_marker().exists()
+    }
+
+    fn mark_tectonic_warmed(&self) {
+        let _ = fs::write(self.tectonic_warmed_marker(), b"1");
+    }
+
+    /// Cache state for the Settings UI: whether the support bundle has been
+    /// fetched at least once, and how much disk the cache currently occupies.
+    pub fn tectonic_cache_status(&self) -> TectonicCacheStatus {
+        TectonicCacheStatus {
+            warmed: self.is_tectonic_warmed(),
+            size_bytes: dir_size(&self.tectonic_cache_dir()),
+        }
+    }
+
+    /// Compile `tex` to PDF bytes. The heavy Tectonic call runs on a blocking
+    /// thread so it never stalls the async runtime. When the package cache hasn't
+    /// been warmed yet (first run ⇒ ~50 MB bundle fetch) we emit `latex://download`
+    /// events (`start` / `progress` with byte counts / `done` / `error`) so the UI
+    /// can show a real download indicator instead of a generic spinner.
+    async fn run_tectonic(&self, tex: String, body_line_offset: usize) -> Result<Vec<u8>> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // One Tectonic run at a time — concurrent runs corrupt the format cache.
+        let _tectonic_guard = self.inner.tectonic_lock.lock().await;
+
+        let needs_fetch = !self.is_tectonic_warmed();
+        let cache_dir = self.tectonic_cache_dir();
+        let handle = self.handle.clone();
+
+        // While the (blocking) compile downloads the bundle, a side thread polls
+        // the cache directory size and streams real progress to the frontend.
+        let stop = Arc::new(AtomicBool::new(false));
+        let poller = if needs_fetch {
+            let _ = handle.emit(
+                "latex://download",
+                serde_json::json!({ "phase": "start", "bytes": dir_size(&cache_dir) }),
+            );
+            let stop_poll = stop.clone();
+            let poll_handle = handle.clone();
+            let poll_dir = cache_dir.clone();
+            Some(std::thread::spawn(move || {
+                while !stop_poll.load(Ordering::Relaxed) {
+                    let _ = poll_handle.emit(
+                        "latex://download",
+                        serde_json::json!({ "phase": "progress", "bytes": dir_size(&poll_dir) }),
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                }
+            }))
+        } else {
+            None
+        };
+
+        let result =
+            tauri::async_runtime::spawn_blocking(move || compile_with_tectonic(&tex)).await;
+
+        stop.store(true, Ordering::Relaxed);
+        if let Some(p) = poller {
+            let _ = p.join();
+        }
+
+        match result {
+            Ok(Ok(pdf)) => {
+                self.mark_tectonic_warmed();
+                if needs_fetch {
+                    let _ = handle.emit(
+                        "latex://download",
+                        serde_json::json!({ "phase": "done", "bytes": dir_size(&cache_dir) }),
+                    );
+                }
+                Ok(pdf)
+            }
+            Ok(Err(failure)) => {
+                // A non-empty TeX log means the engine actually ran (bundle present),
+                // so a LaTeX *content* error shouldn't keep re-triggering the
+                // first-run download UI. An empty log ⇒ the bundle fetch itself
+                // failed (e.g. offline) — surface that as a download error.
+                let engine_ran = !failure.log.is_empty();
+                if engine_ran {
+                    self.mark_tectonic_warmed();
+                }
+                if needs_fetch {
+                    let phase = if engine_ran { "done" } else { "error" };
+                    let _ = handle.emit(
+                        "latex://download",
+                        serde_json::json!({
+                            "phase": phase,
+                            "bytes": dir_size(&cache_dir),
+                            "message": failure.message,
+                        }),
+                    );
+                }
+                // Serialise as JSON so the frontend can place line markers in the
+                // editor; it falls back to showing the message verbatim otherwise.
+                let payload = serde_json::json!({
+                    "message": failure.message,
+                    "log": failure.log,
+                    "diagnostics": parse_tex_log(&failure.log, body_line_offset),
+                });
+                Err(anyhow!("{payload}"))
+            }
+            Err(e) => {
+                if needs_fetch {
+                    let _ = handle.emit(
+                        "latex://download",
+                        serde_json::json!({ "phase": "error", "message": e.to_string() }),
+                    );
+                }
+                Err(anyhow!("LaTeX compile task failed: {}", e))
+            }
+        }
+    }
+
     pub async fn compile_latex(&self, note_id: String) -> Result<Vec<u8>> {
         let workspace = self.require_workspace()?;
         let path = {
@@ -1212,16 +2019,34 @@ impl AppState {
             let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
-        let mut tex_content = fs::read_to_string(&path)?;
-        
-        if !tex_content.contains("\\documentclass") {
-            tex_content = format!("\\documentclass{{article}}\n\\usepackage{{amsmath}}\n\\begin{{document}}\n{}\n\\end{{document}}", tex_content);
+        let raw = fs::read_to_string(&path)?;
+        // The .tex file on disk carries YAML frontmatter (id/title/tags/…). Strip
+        // it before compiling — otherwise that metadata block is text BEFORE
+        // \documentclass and LaTeX fails with "Missing \begin{document}" at line 1.
+        let tex_content = split_frontmatter(&raw).1;
+        if tex_content.trim().is_empty() {
+            return Err(anyhow!("This note is empty — add some LaTeX before compiling."));
         }
-        
-        let pdf_data = tectonic::latex_to_pdf(tex_content)
-            .map_err(|e| anyhow!("Failed to compile LaTeX using Tectonic: {}", e))?;
-            
-        Ok(pdf_data)
+
+        // Bare notes get the full default preamble prepended; notes with their own
+        // \documentclass get any missing common packages injected. Either way the
+        // returned offset is how many lines we added before the body, so TeX error
+        // lines map back to what the editor shows.
+        let (final_tex, offset) = if !tex_content.contains("\\documentclass") {
+            (wrap_bare_latex(&tex_content), DEFAULT_TEX_PREAMBLE.lines().count())
+        } else {
+            ensure_packages(&tex_content)
+        };
+
+        self.run_tectonic(final_tex, offset).await
+    }
+
+    /// Pre-download Tectonic's support bundle by compiling a tiny stub document,
+    /// so users can warm the cache from Settings instead of paying the first-run
+    /// fetch when they hit "Compile to PDF".
+    pub async fn prewarm_tectonic(&self) -> Result<()> {
+        let stub = wrap_bare_latex("Myelin LaTeX warm-up: $E = mc^2$, \\textbf{ready}.");
+        self.run_tectonic(stub, 0).await.map(|_| ())
     }
 
     pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {
@@ -1240,6 +2065,104 @@ impl AppState {
             notes,
             &normalized_custom_order(&runtime.custom_note_order, &runtime.notes),
         )
+    }
+
+    // ── Tasks ──
+    // Each task is a self-contained JSON file (file-per-item: portable, separately
+    // copyable, Drive-syncable). Default location is `<workspace>/tasks/<id>.json`;
+    // a task assigned to a notebook lives at `<workspace>/<notebook>/tasks/<id>.json`.
+    // The note indexer ignores them (not a note extension).
+
+    pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        let workspace = self.require_workspace()?;
+        let mut tasks = Vec::new();
+        for entry in walkdir::WalkDir::new(&workspace)
+            .into_iter()
+            .filter_entry(|e| !is_hidden_or_ignored(e))
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if !is_task_file(path) {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(mut task) = serde_json::from_str::<Task>(&raw) else {
+                continue;
+            };
+            // The file's location is the source of truth for the notebook (a task
+            // file copied into another notebook folder belongs to that notebook).
+            task.notebook = notebook_from_task_path(&workspace, path);
+            tasks.push(task);
+        }
+        tasks.sort_by(|a, b| match (a.position, b.position) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.created_at.cmp(&b.created_at),
+        });
+        Ok(tasks)
+    }
+
+    /// Create (empty id) or update a task, writing its JSON file. Moving it between
+    /// notebooks (changing `notebook`) relocates the file. Returns the saved task.
+    pub fn save_task(&self, mut task: Task) -> Result<Task> {
+        let workspace = self.require_workspace()?;
+        task.notebook = task
+            .notebook
+            .map(|s| s.trim().replace('\\', "/"))
+            .filter(|s| !s.is_empty());
+        if let Some(nb) = &task.notebook {
+            validate_relative_dir(nb)?;
+        }
+        if task.id.trim().is_empty() {
+            task.id = Uuid::new_v4().to_string();
+        }
+        validate_task_id(&task.id)?;
+        let now = Utc::now().to_rfc3339();
+        if task.created_at.trim().is_empty() {
+            task.created_at = now.clone();
+        }
+        task.updated_at = now;
+        for sub in task.subtasks.iter_mut() {
+            if sub.id.trim().is_empty() {
+                sub.id = Uuid::new_v4().to_string();
+            }
+        }
+        let dir = task_dir_for(&workspace, task.notebook.as_deref());
+        fs::create_dir_all(&dir)?;
+        let target = dir.join(format!("{}.json", task.id));
+        // Drop any existing file for this id elsewhere (handles notebook moves).
+        remove_task_files(&workspace, &task.id, Some(target.as_path()));
+        let tmp = dir.join(format!("{}.tmp", task.id));
+        fs::write(&tmp, serde_json::to_string_pretty(&task)?)?;
+        fs::rename(&tmp, &target)?;
+        let _ = self.handle.emit("tasks://changed", ());
+        Ok(task)
+    }
+
+    pub fn delete_task(&self, id: String) -> Result<()> {
+        let workspace = self.require_workspace()?;
+        validate_task_id(&id)?;
+        remove_task_files(&workspace, &id, None);
+        let _ = self.handle.emit("tasks://changed", ());
+        Ok(())
+    }
+
+    /// Synchronously kill the spawned llama + embed server child processes. Safe to
+    /// call from a window-close handler — uses try_lock so it never awaits/blocks.
+    pub fn shutdown_servers_sync(&self) {
+        if let Ok(mut guard) = self.inner.llama_server.try_lock() {
+            if let Some(server) = guard.as_mut() {
+                let _ = server.child.kill();
+            }
+        }
+        if let Ok(mut guard) = self.inner.embed_server.try_lock() {
+            if let Some(server) = guard.as_mut() {
+                let _ = server.child.kill();
+            }
+        }
     }
 
     fn require_workspace(&self) -> Result<PathBuf> {
@@ -1270,7 +2193,7 @@ impl AppState {
                 let watched_workspace = workspace_path.clone();
                 tauri::async_runtime::spawn(async move {
                     let _ = cloned_state.handle.emit("index://changed", "filesystem");
-                    let _ = cloned_state.reindex_workspace(watched_workspace).await;
+                    let _ = cloned_state.reindex_workspace(watched_workspace, true).await;
                 });
             }
         })?;
@@ -1280,7 +2203,7 @@ impl AppState {
         Ok(())
     }
 
-    async fn reindex_workspace(&self, workspace: PathBuf) -> Result<()> {
+    async fn reindex_workspace(&self, workspace: PathBuf, rebuild_index: bool) -> Result<()> {
         let _guard = self.inner.index_lock.lock().await;
 
         {
@@ -1297,6 +2220,28 @@ impl AppState {
         })
         .await
         .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
+
+        // Upgrade the hashed placeholder vectors to real embeddings (one batch)
+        // when an embed model is configured — semantic note search.
+        self.reembed_notes(&mut notes).await;
+
+        // Self-heal: remove orphaned chat sessions whose note no longer exists
+        // (left behind by older deletes that didn't clean up the sidecar).
+        {
+            let live_ids: std::collections::HashSet<&str> =
+                notes.iter().map(|n| n.document.id.as_str()).collect();
+            let chats_dir = self.workspace_data_dir(&workspace).join("chats");
+            if let Ok(entries) = std::fs::read_dir(&chats_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if let Some(id) = name.strip_suffix(".chat.json") {
+                        if !live_ids.contains(id) {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
 
         let mut backlinks_map: HashMap<String, Vec<Backlink>> = HashMap::new();
         for note in &notes {
@@ -1335,7 +2280,13 @@ impl AppState {
             }
         }
 
-        let table = rebuild_lancedb(&self.index_dir(), &notes).await?;
+        let table = if rebuild_index {
+            rebuild_lancedb(&self.index_dir(), &notes).await?
+        } else {
+            let conn = open_database(&self.index_dir()).await?;
+            conn.open_table(TABLE_NAME).execute().await
+                .context("failed to open existing lancedb table")?
+        };
         let note_count = notes.len();
 
         {
@@ -1388,7 +2339,7 @@ impl AppState {
         let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
         self.ensure_llama_server(&config).await?;
 
-        let full_prompt = format!("/no_think\n{}", system_prompt);
+        let full_prompt = system_prompt.to_string();
         let agent = crate::agent::build_myelin_agent(
             self.clone(),
             &format!("{}/v1", config.base_url()),
@@ -1405,6 +2356,250 @@ impl AppState {
             .map_err(|error| anyhow!(describe_prompt_error(&error)))
     }
 
+    /// Context window (tokens) the running llama-server launched with, if any.
+    async fn running_ctx_size(&self) -> Option<u32> {
+        self.inner.llama_server.lock().await.as_ref().map(|s| s.ctx_size)
+    }
+
+    /// The configured SearXNG base URL for web search (None → DuckDuckGo).
+    pub fn searxng_url(&self) -> Option<String> {
+        crate::llama_server::searxng_url(&self.inner.app_data_dir)
+    }
+
+    /// Set (or clear, when empty) the SearXNG base URL for web search.
+    pub fn set_searxng_url(&self, url: Option<String>) -> Result<()> {
+        crate::llama_server::set_searxng_url(&self.inner.app_data_dir, url)
+    }
+
+    /// The configured embedding model GGUF path (None → embeddings disabled).
+    pub fn quick_shortcut(&self) -> String {
+        crate::llama_server::quick_capture_shortcut(&self.inner.app_data_dir)
+    }
+
+    pub fn set_quick_shortcut(&self, shortcut: String) -> Result<()> {
+        crate::llama_server::set_quick_capture_shortcut(&self.inner.app_data_dir, shortcut)
+    }
+
+    pub fn embed_model_path(&self) -> Option<String> {
+        crate::llama_server::embed_model_path(&self.inner.app_data_dir)
+    }
+
+    /// All known model profiles (bundled + user) for the compatibility list.
+    pub fn list_model_profiles(&self) -> Vec<crate::model_profiles::ModelProfile> {
+        crate::model_profiles::all_profiles(&self.inner.app_data_dir)
+    }
+
+    /// Set (or clear, when empty) the embedding model GGUF path.
+    pub fn set_embed_model_path(&self, path: Option<String>) -> Result<()> {
+        crate::llama_server::set_embed_model_path(&self.inner.app_data_dir, path)
+    }
+
+    /// Start (or keep) the llama-server warm for the note now open in the editor,
+    /// so the first message is instant and subsequent ones reuse the warm slot.
+    /// Called on note open. Best-effort: a failure just means the first chat pays
+    /// the cold start it already handled before.
+    pub async fn warm_llama_server(&self) -> Result<()> {
+        let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+        self.ensure_llama_server(&config).await
+    }
+
+    /// Stop the llama-server (and the embedding server), releasing RAM/VRAM.
+    /// Called when the open note is closed — nothing to infer for. The next note
+    /// open warms it again. Idempotent.
+    pub async fn stop_llama_server(&self) {
+        let mut guard = self.inner.llama_server.lock().await;
+        if let Some(mut server) = guard.take() {
+            llama_server::stop_server(&mut server).await;
+            log::info!("llama-server stopped (note closed)");
+        }
+        drop(guard);
+        let mut embed = self.inner.embed_server.lock().await;
+        if let Some(mut server) = embed.take() {
+            llama_server::stop_embed_server(&mut server).await;
+        }
+    }
+
+    /// Ensure the embedding server is running for the configured embed model and
+    /// return its base URL. The embed server runs alongside the chat server on
+    /// chat_port + 1. Errors if no embedding model is configured.
+    async fn ensure_embed_server(&self) -> Result<String> {
+        let model = llama_server::embed_model_path(&self.inner.app_data_dir)
+            .ok_or_else(|| anyhow::anyhow!("no embedding model configured (set one in Settings)"))?;
+        let model_path = std::path::PathBuf::from(&model);
+        let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+        let host = config.host.clone();
+        let port = config.port.saturating_add(1);
+        let base = format!("http://{host}:{port}");
+
+        let mut guard = self.inner.embed_server.lock().await;
+        if let Some(server) = guard.as_ref() {
+            let healthy = self
+                .inner
+                .llama_client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if server.model_path == model_path && healthy {
+                return Ok(base);
+            }
+            if let Some(mut old) = guard.take() {
+                llama_server::stop_embed_server(&mut old).await;
+            }
+        }
+        let server = llama_server::start_embed_server(
+            &self.inner.llama_client,
+            &config.executable_path,
+            &model_path,
+            &host,
+            port,
+        )
+        .await?;
+        *guard = Some(server);
+        Ok(base)
+    }
+
+    /// Embed a batch of texts via the local embedding server (starting it if
+    /// needed). `is_query` selects the nomic query vs document task prefix.
+    pub async fn embed_texts(&self, texts: &[String], is_query: bool) -> Result<Vec<Vec<f32>>> {
+        let base = self.ensure_embed_server().await?;
+        crate::embeddings::embed(
+            &self.inner.llama_client,
+            &base,
+            "nomic-embed",
+            texts,
+            is_query,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// LanceDB dir for the document RAG store (separate from the notes index so
+    /// re-indexing notes never wipes ingested documents).
+    fn rag_dir(&self) -> PathBuf {
+        self.inner.app_data_dir.join("rag-index")
+    }
+
+    /// Ingest a document into the RAG store: chunk → embed → store. Re-ingesting
+    /// the same doc_id replaces its chunks. `contextual` (for the working doc /
+    /// "deep index") embeds each chunk with a one-sentence LLM context that
+    /// situates it in the document, while STORING the clean chunk text. Plain
+    /// (sources) skips that for speed. Returns the number of chunks stored.
+    pub async fn ingest_document(
+        &self,
+        doc_id: &str,
+        source: &str,
+        text: &str,
+        contextual: bool,
+    ) -> Result<usize> {
+        let chunks = crate::embeddings::chunk_text(text, 320, 50);
+        if chunks.is_empty() {
+            crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await?;
+            return Ok(0);
+        }
+
+        // Contextual: one LLM summary of the doc, prepended to each chunk's
+        // EMBED text (not its stored text) so the vector carries document context.
+        let prefix = if contextual {
+            let excerpt: String = text.chars().take(3000).collect();
+            match self
+                .run_llama_prompt(
+                    "You write a single short sentence situating a document, for search context.",
+                    &format!(
+                        "Document:\n{excerpt}\n\nIn ONE sentence, say what this document is about (for retrieval context). Reply with only the sentence."
+                    ),
+                )
+                .await
+            {
+                Ok(s) => format!("[Context: {}] ", s.trim()),
+                Err(_) => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        let embed_input: Vec<String> = chunks
+            .iter()
+            .map(|c| format!("{prefix}{}", c.text))
+            .collect();
+        let vectors = self.embed_texts(&embed_input, false).await?;
+        let docs: Vec<crate::rag::DocChunk> = chunks
+            .iter()
+            .zip(vectors)
+            .map(|(c, v)| crate::rag::DocChunk {
+                doc_id: doc_id.to_string(),
+                source: source.to_string(),
+                chunk_index: c.index as i32,
+                text: c.text.clone(),
+                vector: v,
+            })
+            .collect();
+        let n = docs.len();
+        crate::rag::upsert_document(&self.rag_dir(), doc_id, docs).await?;
+        Ok(n)
+    }
+
+    /// Remove a document's chunks from the RAG store.
+    pub async fn delete_document(&self, doc_id: &str) -> Result<()> {
+        crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await
+    }
+
+    /// Embedding for a note / query: real nomic vectors when an embed model is
+    /// configured (semantic search), else the lexical hashed fallback. Always
+    /// EMBEDDING_DIM-wide so both paths are interchangeable.
+    async fn note_embedding(&self, text: &str, is_query: bool) -> Vec<f32> {
+        if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
+            let input: String = text.chars().take(4000).collect();
+            if let Ok(mut v) = self.embed_texts(&[input], is_query).await {
+                if let Some(vec) = v.pop() {
+                    if vec.len() == EMBEDDING_DIM as usize {
+                        return vec;
+                    }
+                }
+            }
+        }
+        hashed_embedding(text)
+    }
+
+    /// Re-embed a batch of notes with real nomic vectors when an embed model is
+    /// configured (one batched call); otherwise leaves their hashed vectors.
+    async fn reembed_notes(&self, notes: &mut [IndexedNote]) {
+        if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_none() {
+            return;
+        }
+        let inputs: Vec<String> = notes
+            .iter()
+            .map(|n| {
+                let body: String = n.document.body.chars().take(4000).collect();
+                format!("{}\n{}", n.document.title, body)
+            })
+            .collect();
+        if let Ok(vectors) = self.embed_texts(&inputs, false).await {
+            if vectors.len() == notes.len() {
+                for (n, v) in notes.iter_mut().zip(vectors) {
+                    if v.len() == EMBEDDING_DIM as usize {
+                        n.vector = v;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Retrieve the top-K document chunks most relevant to a query.
+    pub async fn retrieve_chunks(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<crate::rag::RetrievedChunk>> {
+        let qv = self.embed_texts(&[query.to_string()], true).await?;
+        let qvec = qv.into_iter().next().unwrap_or_default();
+        if qvec.is_empty() {
+            return Ok(Vec::new());
+        }
+        crate::rag::search_hybrid(&self.rag_dir(), qvec, query, k).await
+    }
+
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
         let mut guard = self.inner.llama_server.lock().await;
 
@@ -1413,6 +2608,22 @@ impl AppState {
                 && llama_server::health_check(&self.inner.llama_client, &server.config).await
             {
                 return Ok(());
+            }
+
+            // Distinguish an unexpected crash (e.g. a GPU device-lost mid-reply)
+            // from a config change, and surface it. start_server then relaunches
+            // with its adaptive offload + degrade-on-failure plans.
+            if let Ok(Some(status)) = server.child.try_wait() {
+                log::warn!("llama-server exited unexpectedly ({status}); relaunching");
+                let _ = self.handle.emit(
+                    "ai://llama_backend",
+                    serde_json::json!({
+                        "backend": server.active_backend.label(),
+                        "gpuOffloaded": false,
+                        "fellBackToCpu": false,
+                        "crashed": true,
+                    }),
+                );
             }
 
             llama_server::stop_server(server).await;
@@ -1522,6 +2733,70 @@ fn format_chat_history_for_prompt(
     } else {
         messages.join("\n")
     }
+}
+
+/// Seed a live conversation from the frontend's saved chat history on the first
+/// turn of a session. Only text turns survive (tool results were never persisted),
+/// but it keeps continuity after an app restart instead of starting blank.
+fn chat_history_to_messages(
+    chat_history: &[crate::models::ChatMessage],
+) -> Vec<serde_json::Value> {
+    chat_history
+        .iter()
+        .filter(|m| m.error != Some(true) && m.is_streaming != Some(true))
+        .filter(|m| !m.content.trim().is_empty())
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .rev()
+        .take(MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect()
+}
+
+/// Keep the most recent whole turns of a live conversation under a rough char
+/// budget. A "turn" starts at a `user` message and includes the assistant/tool
+/// messages that follow it, so trimming never orphans a tool result from its
+/// assistant tool_call (which llama-server would reject).
+fn trim_conversation(
+    msgs: Vec<serde_json::Value>,
+    max_chars: usize,
+) -> Vec<serde_json::Value> {
+    let mut groups: Vec<Vec<serde_json::Value>> = Vec::new();
+    for m in msgs {
+        if m["role"] == "user" || groups.is_empty() {
+            groups.push(vec![m]);
+        } else {
+            groups.last_mut().unwrap().push(m);
+        }
+    }
+    let cost = |m: &serde_json::Value| -> usize {
+        let c = m["content"].as_str().map(|s| s.len()).unwrap_or(0);
+        let a = m["tool_calls"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|t| {
+                        t["function"]["arguments"].as_str().map(|s| s.len()).unwrap_or(0)
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        c + a
+    };
+    let mut kept: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut total = 0usize;
+    for g in groups.into_iter().rev() {
+        let g_cost: usize = g.iter().map(&cost).sum();
+        if !kept.is_empty() && total + g_cost > max_chars {
+            break;
+        }
+        total += g_cost;
+        kept.push(g);
+    }
+    kept.reverse();
+    kept.into_iter().flatten().collect()
 }
 
 fn is_simple_greeting(question: &str) -> bool {
@@ -1898,6 +3173,88 @@ fn relative_to_workspace(workspace: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// Directory holding a task's file for a given notebook (None = workspace root).
+fn task_dir_for(workspace: &Path, notebook: Option<&str>) -> PathBuf {
+    match notebook.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(nb) => workspace.join(nb).join("tasks"),
+        None => workspace.join("tasks"),
+    }
+}
+
+/// True for a `.../tasks/<name>.json` file (a task file we own).
+fn is_task_file(path: &Path) -> bool {
+    let is_json = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(|e| e.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    let in_tasks_dir = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(OsStr::to_str)
+        .map(|n| n == "tasks")
+        .unwrap_or(false);
+    is_json && in_tasks_dir
+}
+
+/// Notebook a task file belongs to, derived from its path. None = root tasks.
+fn notebook_from_task_path(workspace: &Path, path: &Path) -> Option<String> {
+    let holder = path.parent()?.parent()?; // the folder that contains the `tasks` dir
+    let rel = relative_to_workspace(workspace, holder);
+    if rel.is_empty() || rel == "." {
+        None
+    } else {
+        Some(rel)
+    }
+}
+
+/// Delete every `<id>.json` task file across the workspace except `keep`.
+fn remove_task_files(workspace: &Path, id: &str, keep: Option<&Path>) {
+    let target = format!("{id}.json");
+    for entry in walkdir::WalkDir::new(workspace)
+        .into_iter()
+        .filter_entry(|e| !is_hidden_or_ignored(e))
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if is_task_file(path)
+            && path.file_name().and_then(OsStr::to_str) == Some(target.as_str())
+            && keep != Some(path)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn validate_task_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow!("invalid task id"));
+    }
+    Ok(())
+}
+
+/// Reject notebook paths that could escape the workspace (absolute, `..`, roots).
+fn validate_relative_dir(dir: &str) -> Result<()> {
+    let p = Path::new(dir);
+    let bad = p.is_absolute()
+        || p.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+            )
+        });
+    if bad {
+        return Err(anyhow!("invalid notebook path"));
+    }
+    Ok(())
 }
 
 fn folder_from_relative_path(relative_path: &str) -> String {

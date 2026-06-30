@@ -5,6 +5,8 @@
 	import { resolve } from '$app/paths';
 	import { open } from '@tauri-apps/plugin-dialog';
 	import { sidebarOpen } from '$lib/stores';
+	import { theme, toggleTheme } from '$lib/theme';
+	import { appCache } from '$lib/appCache';
 	import type {
 		AppSnapshot,
 		NoteDocument,
@@ -13,11 +15,15 @@
 		SearchResponse
 	} from '$lib/types';
 	import { onMount } from 'svelte';
+	import { getVersion } from '@tauri-apps/api/app';
+	import NotebookSelect from '$lib/components/NotebookSelect.svelte';
 
+	let appVersion = $state('');
 	let app = $state<AppSnapshot | null>(null);
 	// True once the initial snapshot has loaded — prevents the "no workspace"
 	// welcome screen from flashing before we know if a workspace is connected.
 	let ready = $state(false);
+	let indexing = $state(false);
 	let provider = $state<ProviderStatus | null>(null);
 	let query = $state('');
 	let isBusy = $state(false);
@@ -26,17 +32,42 @@
 	let pendingCreateCount = 0;
 	let createLoopRunning = false;
 	let activeMenuId = $state<string | null>(null);
+	let showAddMenu = $state(false);
 	let deleteDialog: HTMLDialogElement | undefined = $state();
 	let noteToDelete = $state<string | null>(null);
+	let notebookDialog: HTMLDialogElement | undefined = $state();
+	let newNotebookName = $state('');
 
-	let dashTasks = $state<{id: number, text: string, done: boolean}[]>([]);
+	interface TaskSubtask {
+		id: number;
+		text: string;
+		done: boolean;
+	}
+
+	interface TaskItem {
+		id: number;
+		text: string;
+		done: boolean;
+		details?: string;
+		dueDate?: string;
+		dueTime?: string;
+		notebook?: string;
+		subtasks?: TaskSubtask[];
+	}
+
+	let dashTasks = $state<TaskItem[]>([]);
+	let expandedTaskId = $state<number | null>(null);
 	let currentWorkspaceForTasks = $state<string | null>(null);
 	let pinnedNoteIds = $state<string[]>([]);
 	let showTimeline = $state(true);
+	let tasksCollapsed = $state(false);
 
 	$effect(() => {
 		if (app?.workspacePath && app.workspacePath !== currentWorkspaceForTasks) {
 			currentWorkspaceForTasks = app.workspacePath;
+			activeTag = null;
+			selectedNote = null;
+			activeNotebook = null;
 			const stored = localStorage.getItem(`tasks_${app.workspacePath}`);
 			if (stored) {
 				try {
@@ -59,6 +90,7 @@
 			} else {
 				showTimeline = true;
 			}
+			tasksCollapsed = localStorage.getItem(`taskscollapsed_${app.workspacePath}`) === 'true';
 		}
 	});
 
@@ -78,6 +110,7 @@
 			localStorage.setItem(`tasks_${currentWorkspaceForTasks}`, toSave);
 			localStorage.setItem(`pinned_${currentWorkspaceForTasks}`, JSON.stringify(pinnedNoteIds));
 			localStorage.setItem(`timeline_${currentWorkspaceForTasks}`, showTimeline.toString());
+			localStorage.setItem(`taskscollapsed_${currentWorkspaceForTasks}`, tasksCollapsed.toString());
 		}
 	});
 
@@ -130,14 +163,99 @@
 		[...(app?.notes ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 	);
 	let dashNotes = $derived(allNotesSorted);
-	let dashPdfs = $derived(allNotesSorted.filter((n) => n.relativePath.toLowerCase().endsWith('.pdf')));
 
-	let timelineNotes = $derived(dashNotes.filter(n => new Date(n.createdAt).toDateString() === new Date().toDateString()));
-	let pinnedNotes = $derived(
-		dashNotes.filter(n => pinnedNoteIds.includes(n.id))
-	);
+	// ── Notes list (left) — filter ──
+	// Main-pane tabs filter by category ("notes" = editable md/tex/ipynb, "documents"
+	// = source pdf/epub); the sidebar dropdowns set a specific type. Both share this.
+	type NbFilter = 'all' | 'notes' | 'documents' | 'md' | 'tex' | 'ipynb' | 'pdf' | 'epub';
+	let activeTypeFilter = $state<NbFilter>('all');
 
-	let totalLinks = $derived((app?.notes ?? []).reduce((sum, n) => sum + n.backlinks.length, 0));
+	function noteType(n: NoteSummary): 'md' | 'pdf' | 'tex' | 'ipynb' | 'epub' {
+		const rel = n.relativePath.toLowerCase();
+		if (rel.endsWith('.pdf')) return 'pdf';
+		if (rel.endsWith('.epub')) return 'epub';
+		if (rel.endsWith('.tex')) return 'tex';
+		if (rel.endsWith('.ipynb')) return 'ipynb';
+		return 'md';
+	}
+	const NOTE_GROUP = ['md', 'tex', 'ipynb'];
+	const DOC_GROUP = ['pdf', 'epub'];
+
+	// Sidebar "notes" / "documents" groups. "notes" = editable working docs (right
+	// editor pane); "documents" = uploaded source material (left pane).
+	const NOTE_SUBTYPES = [
+		{ type: 'md', label: 'markdown' },
+		{ type: 'tex', label: 'latex' },
+		{ type: 'ipynb', label: 'jupyter' }
+	] as const;
+	const DOC_SUBTYPES = [
+		{ type: 'pdf', label: 'pdf' },
+		{ type: 'epub', label: 'epub' }
+	] as const;
+	let typeCounts = $derived.by(() => {
+		const c: Record<string, number> = { md: 0, tex: 0, ipynb: 0, pdf: 0, epub: 0 };
+		for (const n of dashNotes) c[noteType(n)] += 1;
+		return c;
+	});
+	let notesExpanded = $state(false);
+	let docsExpanded = $state(false);
+	let notebooksExpanded = $state(true);
+	let showNotebookMenu = $state(false);
+	let isClustersListOpen = $state(false);
+	function openClustersDialog() {
+		isClustersListOpen = true;
+	}
+	function closeClustersList() {
+		isClustersListOpen = false;
+	}
+
+	// Sidebar-driven narrowing of the same notes list: a tag.
+	let activeTag = $state<string | null>(null);
+	let selectedNote = $state<NoteSummary | null>(null);
+	let notebooks = $state<string[]>([]);
+	let activeNotebook = $state<string | null>(null);
+
+	// Filter by category/type + tag, float pinned notes to the top, keep recency order.
+	let filteredNotebook = $derived.by(() => {
+		let base = dashNotes;
+		const f = activeTypeFilter;
+		if (f === 'notes') base = base.filter((n) => NOTE_GROUP.includes(noteType(n)));
+		else if (f === 'documents') base = base.filter((n) => DOC_GROUP.includes(noteType(n)));
+		else if (f !== 'all') base = base.filter((n) => noteType(n) === f);
+		if (activeTag !== null) base = base.filter((n) => n.tags.includes(activeTag!));
+		// null notebook = "uncategorized" (notes not in any notebook / workspace root).
+		if (activeNotebook === null) base = base.filter((n) => notebookOf(n) === null);
+		else base = base.filter((n) => n.folder === activeNotebook || n.folder.startsWith(activeNotebook + '/'));
+		return [...base].sort(
+			(a, b) =>
+				(pinnedNoteIds.includes(b.id) ? 1 : 0) - (pinnedNoteIds.includes(a.id) ? 1 : 0)
+		);
+	});
+
+	function setTypeFilter(t: typeof activeTypeFilter) {
+		activeTypeFilter = t;
+	}
+	function toggleTag(tag: string) {
+		activeTag = activeTag === tag ? null : tag;
+	}
+
+	function fullDateTime(value: string) {
+		const d = new Date(value);
+		return (
+			d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) +
+			' ' +
+			d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+		);
+	}
+
+	// ── Tasks (right) — filter tabs ──
+	let activeTaskFilter = $state<'all' | 'active' | 'done'>('all');
+	let filteredTasks = $derived.by(() => {
+		if (activeTaskFilter === 'active') return dashTasks.filter((t) => !t.done);
+		if (activeTaskFilter === 'done') return dashTasks.filter((t) => t.done);
+		return dashTasks;
+	});
+
 	let tagCounts = $derived.by(() => {
 		const counts = new Map<string, number>();
 		app?.notes.forEach((n) =>
@@ -149,23 +267,6 @@
 		return [...counts.entries()].sort((a, b) => b[1] - a[1]);
 	});
 
-	let folderStats = $derived.by(() => {
-		const stats = new Map<string, { notes: number; pdfs: number }>();
-		app?.notes.forEach((n) => {
-			const entry = stats.get(n.folder) ?? { notes: 0, pdfs: 0 };
-			if (n.relativePath.toLowerCase().endsWith('.pdf')) entry.pdfs += 1;
-			else entry.notes += 1;
-			stats.set(n.folder, entry);
-		});
-		return [...stats.entries()].sort(
-			(a, b) => b[1].notes + b[1].pdfs - (a[1].notes + a[1].pdfs)
-		);
-	});
-
-	function searchTag(tag: string) {
-		query = tag;
-		void runSearch();
-	}
 
 	function scrollToSection(id: string) {
 		document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -214,11 +315,30 @@
 		} else {
 			searchResults = null;
 		}
+		appCache.app = app;
+		appCache.provider = provider;
+		void loadNotebooks();
 	}
+
+	// Keep the cross-navigation cache in sync with any path that reassigns the
+	// snapshot (create / delete / rebuild / workspace change), so a later return
+	// to Home paints current data, not a stale copy.
+	$effect(() => {
+		if (app) appCache.app = app;
+		if (provider) appCache.provider = provider;
+	});
 
 	function folderFromRelativePath(relativePath: string) {
 		const segments = relativePath.split('/').filter(Boolean);
 		return segments.length > 1 ? segments.slice(0, -1).join('/') : 'Root';
+	}
+
+	// The note's containing folder. Notes live directly in the workspace, so show
+	// the workspace name; only nested notes (if any) show a subfolder path.
+	function folderLabel(note: NoteSummary): string {
+		const segments = note.relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
+		if (segments.length > 1) return segments.slice(0, -1).join('/');
+		return app?.workspacePath ? workspaceLabel(app.workspacePath) : 'workspace';
 	}
 
 	function excerptFromBody(body: string) {
@@ -255,7 +375,7 @@
 		}
 	}
 
-	async function createNote(extension: string = 'md') {
+	async function createNote(extension: string = 'md', notebook: string | null = createTarget) {
 		pendingCreateCount += 1;
 		if (createLoopRunning) return;
 		createLoopRunning = true;
@@ -267,11 +387,77 @@
 				              extension === 'tex' ? 'New LaTeX Document' :
 				              extension === 'ipynb' ? 'New Jupyter Notebook' :
 				              extension === 'epub' ? 'New EPUB Book' : 'New note';
-				const note = await invoke<NoteDocument>('create_note', { title, extension });
+				const note = await invoke<NoteDocument>('create_note', { title, extension, notebook });
 				upsertNoteIntoLibrary(note);
 			}
 			await refreshApp();
 		} finally { isBusy = false; createLoopRunning = false; }
+	}
+
+	function newNotebook() {
+		newNotebookName = '';
+		notebookDialog?.showModal();
+	}
+
+	async function confirmNewNotebook() {
+		const name = newNotebookName.trim();
+		if (!name) return;
+		isBusy = true;
+		try {
+			notebooks = await invoke<string[]>('create_notebook', { name });
+			activeNotebook = name;
+			notebookDialog?.close();
+		} catch (e) {
+			console.error('create notebook failed', e);
+			message = `Could not create notebook: ${e}`;
+		} finally {
+			isBusy = false;
+		}
+	}
+
+	async function loadNotebooks() {
+		try {
+			notebooks = await invoke<string[]>('list_notebooks');
+		} catch (e) {
+			console.error('list notebooks failed', e);
+		}
+	}
+
+	function toggleNotebook(nb: string) {
+		activeNotebook = activeNotebook === nb ? null : nb;
+	}
+	function notebookCount(nb: string): number {
+		return dashNotes.filter((n) => n.folder === nb || n.folder.startsWith(nb + '/')).length;
+	}
+	// The top-level notebook a note belongs to, or null if it's loose in the workspace.
+	function notebookOf(note: NoteSummary): string | null {
+		if (!note.folder || note.folder === 'Root') return null;
+		return note.folder.split('/')[0];
+	}
+	let uncategorizedCount = $derived(dashNotes.filter((n) => notebookOf(n) === null).length);
+
+	// Where new notes / uploads land — inferred, never asked: the open note's
+	// notebook if one is selected, otherwise the notebook you're viewing. null =
+	// uncategorized (workspace root).
+	let createTarget = $derived(selectedNote ? notebookOf(selectedNote) : activeNotebook);
+
+	// Upload a document (PDF/EPUB) into the workspace from the notebook "+" menu.
+	async function importFile() {
+		showAddMenu = false;
+		const picked = await open({
+			multiple: false,
+			filters: [{ name: 'Documents', extensions: ['pdf', 'epub'] }]
+		});
+		if (typeof picked !== 'string') return;
+		isBusy = true;
+		try {
+			await invoke('import_pdf_file', { filePath: picked, notebook: createTarget });
+			await refreshApp();
+		} catch (e) {
+			console.error('import failed', e);
+		} finally {
+			isBusy = false;
+		}
 	}
 
 	async function runSearch() {
@@ -311,6 +497,17 @@
 		await goto(resolve(`/notes/${encodeURIComponent(noteId)}`));
 	}
 
+	// First click selects a row and shows its details in the right pane (closing
+	// tasks); clicking the already-selected row opens it.
+	function selectOrOpen(note: NoteSummary) {
+		if (selectedNote?.id === note.id) {
+			void openNote(note.id);
+		} else {
+			selectedNote = note;
+			tasksCollapsed = true;
+		}
+	}
+
 	function requestDeleteNote(e: MouseEvent, noteId: string) {
 		e.stopPropagation();
 		activeMenuId = null;
@@ -335,20 +532,67 @@
 	onMount(() => {
 		let unlistenChanged = () => {};
 		let unlistenStatus = () => {};
+		let unlistenTasks = () => {};
+
+		// Paint instantly from the last-known snapshot so coming back from a note
+		// doesn't blank the UI while the backend responds.
+		if (appCache.app) {
+			app = appCache.app;
+			provider = appCache.provider;
+			appVersion = appCache.appVersion;
+			ready = true;
+		}
+
 		void (async () => {
+			if (!appVersion) {
+				getVersion().then((v) => { appVersion = v; appCache.appVersion = v; }).catch(() => {});
+			}
+
+			// Cold start: paint the shell immediately from the cheap in-memory snapshot
+			// (workspace + whatever's already indexed) so the window never sits blank.
+			if (!appCache.app) {
+				try {
+					app = await invoke<AppSnapshot>('get_snapshot');
+					provider = await invoke<ProviderStatus>('get_provider_status');
+					appCache.app = app;
+					appCache.provider = provider;
+				} catch (e) {
+					console.error(e);
+				}
+				ready = true;
+			}
+
+			// Heavy one-time init (git, watcher, full reindex) now runs with the UI
+			// already up; the index events refresh the list when it finishes.
 			try {
-				app = await invoke<AppSnapshot>('bootstrap');
+				if (!appCache.bootstrapped) {
+					indexing = true;
+					app = await invoke<AppSnapshot>('bootstrap');
+					appCache.bootstrapped = true;
+					appCache.app = app;
+					indexing = false;
+				}
 				await refreshApp();
 			} finally {
 				ready = true;
+				indexing = false;
 			}
 			unlistenChanged = await listen('index://changed', () => { message = 'Reindexing…'; });
 			unlistenStatus = await listen<string>('index://status', (event) => {
-				if (event.payload === 'started') message = 'Indexing…';
-				else if (event.payload === 'completed') { message = ''; void refreshApp(); }
+				if (event.payload === 'started') { message = 'Indexing…'; indexing = true; }
+				else if (event.payload === 'completed') { message = ''; indexing = false; void refreshApp(); }
+			});
+			// The quick-capture window adds tasks straight to localStorage; reload them.
+			unlistenTasks = await listen('tasks://added', () => {
+				const ws = currentWorkspaceForTasks ?? app?.workspacePath;
+				if (!ws) return;
+				try {
+					const stored = localStorage.getItem(`tasks_${ws}`);
+					dashTasks = stored ? JSON.parse(stored) : [];
+				} catch { /* ignore */ }
 			});
 		})();
-		return () => { unlistenChanged(); unlistenStatus(); };
+		return () => { unlistenChanged(); unlistenStatus(); unlistenTasks(); };
 	});
 
 	let globalSearchDialog: HTMLDialogElement | undefined = $state();
@@ -393,10 +637,24 @@
 		setTimeout(() => node.focus(), 10);
 		return { destroy() {} };
 	}
+
+	function autoResize(node: HTMLTextAreaElement) {
+		const resize = () => {
+			node.style.height = 'auto';
+			node.style.height = node.scrollHeight + 'px';
+		};
+		node.addEventListener('input', resize);
+		setTimeout(resize, 0);
+		return {
+			destroy() {
+				node.removeEventListener('input', resize);
+			}
+		};
+	}
 </script>
 
 <svelte:head><title>myelin</title></svelte:head>
-<svelte:window onclick={() => { activeMenuId = null; }} />
+<svelte:window onclick={() => { activeMenuId = null; showAddMenu = false; showNotebookMenu = false; }} />
 
 <dialog bind:this={deleteDialog} class="confirm-dialog" onclose={() => { noteToDelete = null; }}>
 	<div class="dialog-content">
@@ -405,6 +663,24 @@
 		<div class="dialog-actions">
 			<button class="btn-ghost" onclick={() => deleteDialog?.close()}>Cancel</button>
 			<button class="btn-danger" onclick={confirmDelete} disabled={isBusy}>Delete</button>
+		</div>
+	</div>
+</dialog>
+
+<dialog bind:this={notebookDialog} class="confirm-dialog" onclose={() => { newNotebookName = ''; }}>
+	<div class="dialog-content">
+		<h3>New notebook</h3>
+		<p>Create a notebook — a folder that holds notes of any kind.</p>
+		<input
+			class="nb-name-input"
+			bind:value={newNotebookName}
+			use:autofocus
+			placeholder="Notebook name"
+			onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); confirmNewNotebook(); } }}
+		/>
+		<div class="dialog-actions">
+			<button class="btn-ghost" onclick={() => notebookDialog?.close()}>Cancel</button>
+			<button class="btn-primary nb-create-btn" onclick={confirmNewNotebook} disabled={isBusy || !newNotebookName.trim()}>Create</button>
 		</div>
 	</div>
 </dialog>
@@ -444,7 +720,33 @@
 	<aside class="rail">
 		<div class="rail-top">
 			<span class="wordmark">myelin</span>
+			<button
+				class="theme-toggle-btn"
+				onclick={toggleTheme}
+				title={$theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+				aria-label="Toggle theme"
+			>
+				{#if $theme === 'light'}
+					<!-- moon: click to go dark -->
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+					</svg>
+				{:else}
+					<!-- sun: click to go light -->
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<circle cx="12" cy="12" r="4"></circle>
+						<path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+					</svg>
+				{/if}
+			</button>
 		</div>
+
+		{#if app?.workspacePath}
+			<button class="rail-search-btn" onclick={() => globalSearchDialog?.showModal()}>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+				Search notes...
+			</button>
+		{/if}
 
 		<div class="rail-list">
 			{#if !ready}
@@ -487,37 +789,96 @@
 					{/each}
 				{/if}
 			{:else}
-				<!-- Details panel — the page handles browsing, the rail shows workspace vitals -->
 				<div class="section-label">
-					<span>Overview</span>
+					<span>New</span>
 				</div>
-				<div class="ov-group">
-					<div class="ov-row"><span class="ov-key">notes</span><span class="ov-val">{dashNotes.length}</span></div>
-					<div class="ov-row"><span class="ov-key">pdfs</span><span class="ov-val">{dashPdfs.length}</span></div>
-					<div class="ov-row"><span class="ov-key">tags</span><span class="ov-val">{tagCounts.length}</span></div>
-					<div class="ov-row"><span class="ov-key">links</span><span class="ov-val">{totalLinks}</span></div>
-					<div class="ov-row"><span class="ov-key">clusters</span><span class="ov-val">{commonplaces.length}</span></div>
+				<div class="ov-group new-actions">
+					<button class="ov-row ov-clickable ov-action" onclick={() => createNote('md')} disabled={isBusy}>
+						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>markdown</span>
+					</button>
+					<button class="ov-row ov-clickable ov-action" onclick={() => createNote('tex')} disabled={isBusy}>
+						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"/></svg>latex</span>
+					</button>
+					<button class="ov-row ov-clickable ov-action" onclick={() => createNote('ipynb')} disabled={isBusy}>
+						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>jupyter</span>
+					</button>
+					<button class="ov-row ov-clickable ov-action" onclick={importFile} disabled={isBusy}>
+						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>upload</span>
+					</button>
+					<button class="new-notebook-btn" onclick={newNotebook} disabled={isBusy}>
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+						new notebook
+					</button>
 				</div>
 
-				<div class="section-label" style="margin-top: var(--space-4);">
-					<span>Folders</span>
-					<span class="section-count">{folderStats.length}</span>
+				<!-- Details panel — the page handles browsing, the rail shows workspace vitals -->
+				<div class="section-label">
+					<span>Library</span>
 				</div>
-				{#if folderStats.length > 0}
-					<div class="ov-group">
-						{#each folderStats as [folder, s] (folder)}
-							<div class="ov-row">
-								<span class="ov-key ov-ellipsis" title={folder}>
-									<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-									{folder.toLowerCase()}
-								</span>
-								<span class="ov-val">{s.notes + s.pdfs}</span>
-							</div>
+				<div class="ov-group">
+					<!-- notebooks group -->
+					<button class="ov-row ov-group-head" onclick={() => (notebooksExpanded = !notebooksExpanded)}>
+						<span class="ov-key">
+							<svg class="ov-chevron" class:collapsed={!notebooksExpanded} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+							notebooks
+						</span>
+						<span class="ov-val">{notebooks.length}</span>
+					</button>
+					{#if notebooksExpanded}
+						<button class="ov-row ov-sub ov-clickable" class:active={activeNotebook === null} onclick={() => (activeNotebook = null)} title="Notes not in a notebook">
+							<span class="ov-key ov-ellipsis">uncategorized</span>
+							<span class="ov-val">{uncategorizedCount}</span>
+						</button>
+						{#each notebooks as nb (nb)}
+							<button class="ov-row ov-sub ov-clickable" class:active={activeNotebook === nb} onclick={() => toggleNotebook(nb)} title={nb}>
+								<span class="ov-key ov-ellipsis">{nb}</span>
+								<span class="ov-val">{notebookCount(nb)}</span>
+							</button>
 						{/each}
-					</div>
-				{:else}
-					<p class="rail-empty">Nothing here yet.</p>
-				{/if}
+					{/if}
+
+					<!-- notes group: editable working docs -->
+					<button class="ov-row ov-group-head" onclick={() => (notesExpanded = !notesExpanded)}>
+						<span class="ov-key">
+							<svg class="ov-chevron" class:collapsed={!notesExpanded} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+							notes
+						</span>
+						<span class="ov-val">{typeCounts.md + typeCounts.tex + typeCounts.ipynb}</span>
+					</button>
+					{#if notesExpanded}
+						{#each NOTE_SUBTYPES as st}
+							{#if typeCounts[st.type] > 0}
+								<button class="ov-row ov-sub ov-clickable" class:active={activeTypeFilter === st.type} onclick={() => setTypeFilter(activeTypeFilter === st.type ? 'all' : st.type)}>
+									<span class="ov-key ov-ellipsis">{st.label}</span>
+									<span class="ov-val">{typeCounts[st.type]}</span>
+								</button>
+							{/if}
+						{/each}
+					{/if}
+
+					<!-- documents group: uploaded source material -->
+					<button class="ov-row ov-group-head" onclick={() => (docsExpanded = !docsExpanded)}>
+						<span class="ov-key">
+							<svg class="ov-chevron" class:collapsed={!docsExpanded} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+							documents
+						</span>
+						<span class="ov-val">{typeCounts.pdf + typeCounts.epub}</span>
+					</button>
+					{#if docsExpanded}
+						{#each DOC_SUBTYPES as st}
+							{#if typeCounts[st.type] > 0}
+								<button class="ov-row ov-sub ov-clickable" class:active={activeTypeFilter === st.type} onclick={() => setTypeFilter(activeTypeFilter === st.type ? 'all' : st.type)}>
+									<span class="ov-key ov-ellipsis">{st.label}</span>
+									<span class="ov-val">{typeCounts[st.type]}</span>
+								</button>
+							{/if}
+						{/each}
+					{/if}
+
+					<div class="ov-row"><span class="ov-key">tags</span><span class="ov-val">{tagCounts.length}</span></div>
+					<button class="ov-row ov-clickable" onclick={openClustersDialog} title="View clusters"><span class="ov-key">clusters</span><span class="ov-val">{commonplaces.length}</span></button>
+				</div>
+
 
 				<div class="section-label" style="margin-top: var(--space-4);">
 					<span>Tags</span>
@@ -526,7 +887,7 @@
 				{#if tagCounts.length > 0}
 					<div class="ov-group">
 						{#each tagCounts.slice(0, 12) as [tag, count] (tag)}
-							<button class="ov-row ov-clickable" onclick={() => searchTag(tag)} title="Search “{tag}”">
+							<button class="ov-row ov-clickable" class:active={activeTag === tag} onclick={() => toggleTag(tag)} title="Filter by #{tag}">
 								<span class="ov-key ov-ellipsis">#{tag}</span>
 								<span class="ov-val">{count}</span>
 							</button>
@@ -552,6 +913,10 @@
 				</div>
 			{/if}
 		</div>
+
+		{#if appVersion}
+			<div class="rail-version">v{appVersion}</div>
+		{/if}
 
 		<div class="rail-footer">
 			<button class="footer-change-btn" onclick={pickWorkspace} disabled={isBusy} title={app?.workspacePath ?? 'Choose workspace'}>
@@ -585,209 +950,289 @@
 			<div class="dashboard-container">
 				<!-- Header -->
 				<header class="dashboard-header">
-					<h2>{app?.workspacePath ? workspaceLabel(app.workspacePath) : 'workspace'}</h2>
-					<div style="display: flex; gap: var(--space-2); align-items: center;">
-						<button class="header-icon-btn" onclick={() => showTimeline = !showTimeline} title="Toggle Timeline" class:active={showTimeline}>
-							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+					<div class="nb-switcher">
+						<button class="nb-switch-btn" onclick={(e) => { e.stopPropagation(); showNotebookMenu = !showNotebookMenu; }}>
+							<h2>{activeNotebook ?? 'Uncategorized'}</h2>
+							<svg class="nb-switch-caret" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
 						</button>
-						<button class="header-search-btn" onclick={() => globalSearchDialog?.showModal()}>
-							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-							Search notes...
+						{#if showNotebookMenu}
+							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+							<div class="nb-switch-menu" onclick={(e) => e.stopPropagation()}>
+								<button class="nb-switch-item" class:active={activeNotebook === null} onclick={() => { activeNotebook = null; showNotebookMenu = false; }}>
+									<span>Uncategorized</span>
+									<span class="nb-switch-count">{uncategorizedCount}</span>
+								</button>
+								{#each notebooks as nb (nb)}
+									<button class="nb-switch-item" class:active={activeNotebook === nb} onclick={() => { activeNotebook = nb; showNotebookMenu = false; }}>
+										<span class="ov-ellipsis">{nb}</span>
+										<span class="nb-switch-count">{notebookCount(nb)}</span>
+									</button>
+								{/each}
+								<div class="nb-add-divider"></div>
+								<button class="nb-switch-item nb-switch-new" onclick={() => { showNotebookMenu = false; newNotebook(); }}>
+									<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+									New notebook
+								</button>
+							</div>
+						{/if}
+					</div>
+						{#if indexing}
+							<span class="indexing-pill" title="Indexing your workspace">
+								<svg class="nb-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+								indexing
+							</span>
+						{/if}
+					<div style="display: flex; gap: var(--space-2); align-items: center;">
+						<button
+							class="header-toggle-btn"
+							class:active={!tasksCollapsed && !selectedNote}
+							onclick={() => { selectedNote = null; tasksCollapsed = !tasksCollapsed; }}
+							title={tasksCollapsed ? 'Show tasks' : 'Hide tasks'}
+						>
+							<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+							Tasks
+							{#if dashTasks.filter((t) => !t.done).length > 0}
+								<span class="header-toggle-count">{dashTasks.filter((t) => !t.done).length}</span>
+							{/if}
 						</button>
 					</div>
 				</header>
 
-				{#if app?.workspacePath}
-					<section class="dash-section clusters-section">
-						<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>clusters</h3>
-						
-						{#if commonplaces.length > 0}
-							<div class="work-areas-grid">
-								{#each commonplaces as cluster}
+				<div class="dashboard-grid">
+					<!-- Left: notebook -->
+					<div class="dash-left">
+						<section class="dash-section nb-section">
+							<h3 class="nb-header-tabs-container">
+								<button class="h3-tab" class:active={activeTypeFilter !== 'documents'} onclick={() => setTypeFilter('notes')}>
+									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+									notes
+								</button>
+								<button class="h3-tab" class:active={activeTypeFilter === 'documents'} onclick={() => setTypeFilter('documents')}>
+									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+									documents
+								</button>
+								{#if activeNotebook}
+									<button class="filter-chip" onclick={() => (activeNotebook = null)} title="Clear notebook filter">
+										{activeNotebook}<span class="chip-x">×</span>
+									</button>
+								{/if}
+								{#if activeTag}
+									<button class="filter-chip" onclick={() => (activeTag = null)} title="Clear tag filter">
+										#{activeTag}<span class="chip-x">×</span>
+									</button>
+								{/if}
+							</h3>
+							<div class="nb-list">
+								{#each filteredNotebook as note (note.id)}
 									<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-									<div class="wa-card" onclick={() => openCluster(cluster)}>
-										<div class="wa-title">
-											Cluster {commonplaces.indexOf(cluster) + 1}
+									<div class="nb-row" class:selected={selectedNote?.id === note.id} onclick={() => selectOrOpen(note)} oncontextmenu={(e) => { e.preventDefault(); activeMenuId = activeMenuId === note.id ? null : note.id; }}>
+										{#if pinnedNoteIds.includes(note.id)}
+											<svg class="nb-pin" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+										{/if}
+										<span class="nb-row-title">{note.title}</span>
+										{#if notebookOf(note)}
+											<span class="nb-row-book" title="Notebook: {notebookOf(note)}">
+												<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+												{notebookOf(note)}
+											</span>
+										{/if}
+										<span class="nb-row-date">{fullDateTime(note.createdAt)}</span>
+										<span class="row-badge nb-row-badge">{getNoteBadge(note)}</span>
+										<div class="row-menu-wrap">
+											<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
+												<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+											</button>
+											{#if activeMenuId === note.id}
+												<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+												<div class="row-dropdown" onclick={(e) => e.stopPropagation()}>
+													<button class="row-delete" onclick={(e) => { e.preventDefault(); togglePin(note.id); }} style="color: var(--text-primary);">
+														{pinnedNoteIds.includes(note.id) ? 'Unpin' : 'Pin'}
+													</button>
+													<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
+												</div>
+											{/if}
 										</div>
-										<div class="wa-balance">{cluster.length} notes connected</div>
 									</div>
 								{/each}
+								{#if filteredNotebook.length === 0}
+									{#if indexing}
+										<div class="nb-empty nb-indexing">
+											<svg class="nb-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+											Indexing your workspace…
+										</div>
+									{:else}
+										<div class="nb-empty">No {activeTypeFilter === 'all' ? '' : activeTypeFilter + ' '}notes yet.</div>
+									{/if}
+								{/if}
 							</div>
-						{:else}
-							<div style="font-size: 0.85rem; color: var(--neutral-600); padding: 1rem 0;">
-								No clusters found. Link notes together to form connections!
-							</div>
-						{/if}
-					</section>
-				{/if}
+						</section>
+					</div>
 
-				<div class="dashboard-grid">
-					<!-- Left Column -->
-					<div class="dash-left">
-
-
-						<div class="dash-split">
-							<!-- Tasks -->
-							<section class="dash-section">
-								<div class="section-header-split">
-									<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>tasks</h3>
+					<!-- Right: note details (selected row) or tasks -->
+					{#if selectedNote}
+						<div class="dash-right">
+							<section class="dash-panel">
+								<div class="panel-head">
+									<h3>details</h3>
+									<button class="panel-close" onclick={() => (selectedNote = null)} aria-label="Close details" title="Close">
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+									</button>
 								</div>
-								<div class="dash-task-list">
-									{#each dashTasks as task (task.id)}
-										<label class="dash-task">
-											<input type="checkbox" bind:checked={task.done} /> 
-											<span class:done={task.done}>{task.text}</span>
-											<button class="remove-task-btn" onclick={(e) => { e.preventDefault(); removeTask(task.id); }} aria-label="Remove task">&times;</button>
-										</label>
-									{/each}
+								<div class="detail-body">
+									<div class="detail-head">
+										<div class="detail-title">{selectedNote.title}</div>
+										<span class="row-badge">{getNoteBadge(selectedNote)}</span>
+									</div>
+									{#if selectedNote.tags.length > 0}
+										<div class="detail-tags">
+											{#each selectedNote.tags as tag}<span class="kc-tag">#{tag}</span>{/each}
+										</div>
+									{/if}
+									<div class="detail-rows">
+										<div class="detail-row"><span class="dr-key">created</span><span class="dr-val">{fullDateTime(selectedNote.createdAt)}</span></div>
+										<div class="detail-row"><span class="dr-key">modified</span><span class="dr-val">{fullDateTime(selectedNote.updatedAt)}</span></div>
+										<div class="detail-row"><span class="dr-key">folder</span><span class="dr-val">{folderLabel(selectedNote)}</span></div>
+										<div class="detail-row"><span class="dr-key">path</span><span class="dr-val" title={selectedNote.relativePath}>{selectedNote.relativePath}</span></div>
+										<div class="detail-row"><span class="dr-key">links</span><span class="dr-val">{selectedNote.backlinks.length}</span></div>
+									</div>
+									{#if selectedNote.excerpt}
+										<p class="detail-excerpt">{selectedNote.excerpt}</p>
+									{/if}
+									<button class="btn-primary detail-open" onclick={() => selectedNote && openNote(selectedNote.id)}>Open</button>
 								</div>
-								<form class="add-task-form" onsubmit={(e) => { e.preventDefault(); addTask(); }}>
-									<input type="text" placeholder="Add a new task..." bind:value={newTaskText} />
-									<button type="submit" class="btn-primary" style="padding: 4px 12px; border-radius: var(--radius-xs); font-size: 0.8rem; font-weight: 500; min-height: unset; line-height: 1;">Add</button>
-								</form>
 							</section>
-
-							<!-- Notes -->
-							<section class="dash-section" id="sec-contents">
-								<div class="section-header-split">
-									<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>notes</h3>
-									<div class="row-menu-wrap" style="position: relative;">
-										<button class="btn-ghost" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === 'new-note-menu' ? null : 'new-note-menu'; }} disabled={isBusy}>
-											New note ▾
-										</button>
-										{#if activeMenuId === 'new-note-menu'}
-											<div class="row-dropdown" style="top: 100%; right: 0; margin-top: 4px; z-index: 10;">
-												<button class="row-delete" onclick={(e) => { e.preventDefault(); createNote('md'); activeMenuId = null; }} style="color: var(--text-primary); text-align: left;">Markdown Note</button>
-												<button class="row-delete" onclick={(e) => { e.preventDefault(); createNote('tex'); activeMenuId = null; }} style="color: var(--text-primary); text-align: left;">LaTeX Document</button>
-												<button class="row-delete" onclick={(e) => { e.preventDefault(); createNote('ipynb'); activeMenuId = null; }} style="color: var(--text-primary); text-align: left;">Jupyter Notebook</button>
-											</div>
-										{/if}
+						</div>
+					{:else if !tasksCollapsed}
+						<div class="dash-right">
+							<section class="dash-panel">
+								<div class="panel-head">
+									<h3>tasks</h3>
+									<div class="panel-tabs">
+										<button class:active={activeTaskFilter === 'all'} onclick={() => (activeTaskFilter = 'all')}>all</button>
+										<button class:active={activeTaskFilter === 'active'} onclick={() => (activeTaskFilter = 'active')}>active</button>
+										<button class:active={activeTaskFilter === 'done'} onclick={() => (activeTaskFilter = 'done')}>done</button>
 									</div>
 								</div>
-								<div class="contents-single-list">
-									{#each dashNotes as note}
-										<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-										<div class="kanban-card" onclick={() => openNote(note.id)}>
-											<div class="kc-header-row">
-												<div style="display: flex; align-items: flex-start; gap: 8px;">
-													<div class="kc-title">{note.title}</div>
-													<div class="row-badge">
-														{getNoteBadge(note)}
+								<div class="task-list">
+									{#each filteredTasks as task (task.id)}
+										<div class="task-card" class:expanded={expandedTaskId === task.id}>
+											<div class="task-item" class:done={task.done}>
+												<button class="subtask-circle main-task-circle" class:done={task.done} onclick={() => task.done = !task.done} tabindex="-1"></button>
+												<input class="task-text-input" type="text" bind:value={task.text} onfocus={() => expandedTaskId = task.id} />
+												<button class="task-remove" tabindex="-1" onclick={(e) => { e.preventDefault(); removeTask(task.id); }} aria-label="Remove task">&times;</button>
+											</div>
+											{#if expandedTaskId === task.id}
+												<div class="task-expanded-details redesigned">
+													<div class="field-row notebook-row">
+														<NotebookSelect bind:value={task.notebook} notebooks={notebooks} />
+													</div>
+
+													<div class="field-row">
+														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+														<textarea rows="1" use:autoResize placeholder="Add details" bind:value={task.details} class="field-input textarea-new"></textarea>
+													</div>
+
+													<div class="field-row">
+														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+														<input 
+															type="text" 
+															placeholder="Add deadline" 
+															bind:value={task.dueDate} 
+															class="field-input date-time-new" 
+															onfocus={(e) => e.currentTarget.type = 'date'} 
+															onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+														/>
+													</div>
+
+													<div class="field-row">
+														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+														<input 
+															type="text" 
+															placeholder="Add date/time" 
+															bind:value={task.dueTime} 
+															class="field-input date-time-new" 
+															onfocus={(e) => e.currentTarget.type = 'time'} 
+															onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+														/>
+													</div>
+
+													<div class="subtasks-container">
+														{#if task.subtasks}
+															{#each task.subtasks as subtask, i}
+																<div class="subtask-row">
+																	<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+																	<button class="subtask-circle" class:done={subtask.done} onclick={() => subtask.done = !subtask.done} tabindex="-1"></button>
+																	<input type="text" bind:value={subtask.text} class="field-input subtask-input-new" class:done={subtask.done} />
+																	<button class="subtask-remove" tabindex="-1" onclick={() => task.subtasks!.splice(i, 1)}>&times;</button>
+																</div>
+															{/each}
+														{/if}
+														<div class="subtask-row">
+															<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+															<div class="subtask-circle empty"></div>
+															<input type="text" placeholder="Enter title" class="field-input subtask-input-new" onkeydown={(e) => {
+																if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+																	e.preventDefault();
+																	task.subtasks = task.subtasks || [];
+																	task.subtasks.push({ id: Date.now(), text: e.currentTarget.value.trim(), done: false });
+																	e.currentTarget.value = '';
+																}
+															}} />
+														</div>
+														<div class="subtask-add-hint">Add subtasks</div>
 													</div>
 												</div>
-												<div class="row-menu-wrap">
-													<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
-														<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
-													</button>
-													{#if activeMenuId === note.id}
-														<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-														<div class="row-dropdown" onclick={(e) => e.stopPropagation()}>
-															<button class="row-delete" onclick={(e) => { e.preventDefault(); togglePin(note.id); }} style="color: var(--text-primary);">
-																{pinnedNoteIds.includes(note.id) ? 'Unpin' : 'Pin'}
-															</button>
-															<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
-														</div>
-													{/if}
-												</div>
-											</div>
-											<div class="kc-snippet">{note.excerpt}</div>
-											<div class="kc-tags">
-												{#each note.tags.slice(0, 3) as tag}
-													<span class="kc-tag">#{tag}</span>
-												{/each}
-											</div>
-											<div class="kc-footer">
-												<div class="kc-platform">{note.relativePath}</div>
-												<div class="kc-dates">
-													<span>Created: {new Date(note.createdAt).toLocaleDateString()}</span>
-													<span>Modified: {new Date(note.updatedAt).toLocaleDateString()}</span>
-												</div>
-											</div>
+											{/if}
 										</div>
 									{/each}
+									{#if filteredTasks.length === 0}
+										<div class="nb-empty">No {activeTaskFilter === 'all' ? '' : activeTaskFilter + ' '}tasks.</div>
+									{/if}
 								</div>
+								<form class="add-task-form" onsubmit={(e) => { e.preventDefault(); addTask(); }}>
+									<input type="text" placeholder="Add a task..." bind:value={newTaskText} />
+									<button type="submit" class="btn-primary" style="padding: 6px 14px; border-radius: var(--radius-xs); font-size: 0.8rem; font-weight: 500; min-height: unset; line-height: 1;">Add</button>
+								</form>
 							</section>
 						</div>
-
-						<!-- Pinned Notes -->
-						<section class="dash-section pinned-section" style="width: 100%;">
-							<div class="section-header-split">
-								<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>pinned notes</h3>
-							</div>
-							<div class="pinned-list">
-								{#each pinnedNotes as note}
-									<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-									<div class="pinned-item" onclick={() => openNote(note.id)}>
-										<div class="pi-title">{note.title}</div>
-										<div class="pi-date">
-											{new Date(note.createdAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} 
-											{new Date(note.createdAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
-										</div>
-										<div class="pi-badge">
-											{getNoteBadge(note)}
-										</div>
-									</div>
-								{/each}
-								{#if pinnedNotes.length === 0}
-									<div style="font-size: 0.8rem; color: var(--neutral-600); margin-top: 1rem;">No pinned notes.</div>
-								{/if}
-							</div>
-						</section>
-					</div>
-
-					<!-- Right Column (Timeline) -->
-					{#if showTimeline}
-					<div class="dash-right">
-						<section class="dash-section timeline-widget">
-							<div class="section-header-split" style="border-bottom: none;">
-								<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>timeline</h3>
-								<div class="tl-subtitle" style="margin-top: 0; font-family: var(--font-mono); font-size: 0.75rem;">{new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}</div>
-							</div>
-							<div class="tl-track">
-								{#if timelineNotes.length === 0}
-									<div class="tl-empty" style="color: var(--neutral-600); font-size: 0.8rem; margin-top: 1rem;">No activity today.</div>
-								{:else}
-									{#each timelineNotes as note, i}
-										<div class="tl-item {i === 0 ? 'is-active' : ''}">
-											<div class="tl-time-side">
-												{new Date(note.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', hour12: false})}
-											</div>
-											<div class="tl-node">
-												<div class="tl-circle">
-													{#if i === 0}
-														<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" width="10" height="10"><polyline points="20 6 9 17 4 12"></polyline></svg>
-													{/if}
-												</div>
-												{#if i < timelineNotes.length - 1}
-													<div class="tl-line"></div>
-												{/if}
-											</div>
-											<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-											<div class="tl-content-side" onclick={() => openNote(note.id)} style="cursor:pointer">
-												<div class="tl-title" class:active-title={i === 0}>{note.title}</div>
-												<div class="tl-subtext">{note.relativePath}</div>
-											</div>
-										</div>
-									{/each}
-								{/if}
-							</div>
-						</section>
-					</div>
 					{/if}
 				</div>
-				<section class="dash-section notebook-section" style="margin-top: auto; padding-top: 2rem;">
-					<h3><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>workspace</h3>
-					<div class="notebook-list">
-						<div class="nb-item">
-							<div class="nb-title">{app?.workspacePath ? workspaceLabel(app.workspacePath) : 'No workspace'}</div>
-							<div class="nb-date"><span class="kc-tag">active</span> {app?.workspacePath || ''}</div>
-						</div>
-					</div>
-				</section>
 			</div>
 		{/if}
 	</main>
 </div>
+
+{#if isClustersListOpen}
+	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<div class="modal-overlay" onclick={closeClustersList}>
+		<div class="modal-content" onclick={(e) => e.stopPropagation()}>
+			<header class="modal-header">
+				<h2>Clusters ({commonplaces.length})</h2>
+				<p class="modal-subtitle">Groups of notes connected by links. Select one to view its notes.</p>
+			</header>
+			<div class="modal-body">
+				{#if commonplaces.length === 0}
+					<p class="cluster-empty">No clusters yet. Link notes together to form connections.</p>
+				{:else}
+					<div class="cluster-list">
+						{#each commonplaces as cluster, i}
+							<button class="cluster-row" onclick={() => { closeClustersList(); openCluster(cluster); }}>
+								<span class="cluster-name">
+									<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M9.5 10.5 6.7 7.3M14.5 10.5l2.8-3.2M10.2 14.2 7.4 17.4"/></svg>
+									Cluster {i + 1}
+								</span>
+								<span class="cluster-meta">{cluster.length} notes</span>
+							</button>
+						{/each}
+					</div>
+				{/if}
+			</div>
+			<footer class="modal-footer">
+				<button class="btn-cancel" onclick={closeClustersList}>Close</button>
+			</footer>
+		</div>
+	</div>
+{/if}
 
 {#if isClusterDialogOpen}
 	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -830,7 +1275,6 @@
 		grid-template-columns: 300px 1fr;
 		height: calc(100vh - 32px);
 		overflow: hidden;
-		animation: fade-in 0.2s ease-out;
 		transition: grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 		position: relative;
 	}
@@ -862,7 +1306,7 @@
 			max-width: 85vw;
 			z-index: 100;
 			transform: translateX(0);
-			box-shadow: 4px 0 24px rgba(0,0,0,0.8);
+			box-shadow: 4px 0 24px var(--shadow-color-strong);
 		}
 		.shell.rail-collapsed .rail {
 			transform: translateX(-100%);
@@ -877,6 +1321,26 @@
 		padding: var(--space-5) var(--space-5) var(--space-4);
 		gap: var(--space-3);
 		flex-shrink: 0;
+	}
+
+	.theme-toggle-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 30px;
+		height: 30px;
+		flex-shrink: 0;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: color 0.15s, background 0.15s, border-color 0.15s;
+	}
+	.theme-toggle-btn:hover {
+		color: var(--accent-100);
+		background: var(--hover-overlay);
+		border-color: var(--border-default);
 	}
 
 	.wordmark {
@@ -914,6 +1378,27 @@
 	.search-input::placeholder { color: var(--neutral-600); }
 	.search-input:focus { border-color: var(--neutral-600); }
 
+	.rail-search-btn {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0 var(--space-4) var(--space-3);
+		padding: 8px 12px;
+		background: var(--bg-input);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.85rem;
+		cursor: pointer;
+		flex-shrink: 0;
+		transition: border-color 0.15s, color 0.15s;
+	}
+	.rail-search-btn:hover {
+		border-color: var(--neutral-600);
+		color: var(--text-primary);
+	}
+
 	.rail-list {
 		flex: 1;
 		overflow-y: auto;
@@ -923,9 +1408,9 @@
 	.rail-list::-webkit-scrollbar { display: none; }
 
 	.rail-empty {
-		font-size: 1rem;
+		font-size: 0.8rem;
 		color: var(--text-secondary);
-		padding: var(--space-4) var(--space-3);
+		padding: var(--space-3);
 		margin: 0;
 	}
 
@@ -938,13 +1423,35 @@
 		font-weight: 700;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: #ffffff;
+		color: var(--text-hero);
 		user-select: none;
 	}
 	.section-count {
 		font-size: 0.82rem;
-		color: #ffffff;
+		color: var(--text-hero);
 		font-weight: 400;
+	}
+	.section-add {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 18px;
+		height: 18px;
+		padding: 0;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-xs);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: color 0.15s, background 0.15s;
+	}
+	.section-add:hover:not(:disabled) {
+		color: var(--accent-100);
+		background: var(--hover-overlay);
+	}
+	.section-add:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
 	}
 
 	.note-row {
@@ -959,7 +1466,7 @@
 		transition: background 0.1s, border-color 0.1s;
 	}
 	.note-row:hover {
-		background: rgba(255,255,255,0.04);
+		background: var(--hover-overlay);
 		border-color: var(--border-default);
 	}
 	.note-row:hover .row-menu-btn { opacity: 1; }
@@ -987,7 +1494,7 @@
 		font-size: 0.65rem;
 		color: var(--neutral-400);
 		font-family: var(--font-mono);
-		background: rgba(255, 255, 255, 0.02);
+		background: var(--overlay-faint);
 		flex-shrink: 0;
 		white-space: nowrap;
 	}
@@ -1015,7 +1522,7 @@
 		opacity: 0;
 		transition: opacity 0.1s, background 0.1s;
 	}
-	.row-menu-btn:hover { background: rgba(255,255,255,0.08); color: var(--text-primary); }
+	.row-menu-btn:hover { background: var(--hover-overlay-strong); color: var(--text-primary); }
 
 	.row-dropdown {
 		position: absolute;
@@ -1027,7 +1534,7 @@
 		border-radius: var(--radius-sm);
 		padding: var(--space-1);
 		min-width: 100px;
-		box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+		box-shadow: 0 4px 12px var(--shadow-color);
 	}
 	.row-delete {
 		width: 100%;
@@ -1036,12 +1543,12 @@
 		font-size: 0.9rem;
 		font-family: var(--font-mono);
 		background: transparent;
-		color: #e05555;
+		color: var(--danger);
 		border: none;
 		border-radius: var(--radius-xs);
 		cursor: pointer;
 	}
-	.row-delete:hover { background: rgba(224,85,85,0.1); }
+	.row-delete:hover { background: var(--danger-tint); }
 
 	/* ── Rail details panel ── */
 	.ov-group {
@@ -1056,8 +1563,8 @@
 		gap: var(--space-3);
 		width: 100%;
 		box-sizing: border-box;
-		padding: 8px 0;
-		font-size: 1rem;
+		padding: 6px 0;
+		font-size: 0.8rem;
 		font-family: var(--font-mono);
 		background: transparent;
 		border: none;
@@ -1081,12 +1588,100 @@
 	.ov-val {
 		flex-shrink: 0;
 		color: var(--text-primary);
-		font-size: 0.95rem;
+		font-size: 0.78rem;
 	}
-	.ov-val.ov-ok { color: #4caf50; }
+	.ov-val.ov-ok { color: var(--success); }
 	.ov-clickable { cursor: pointer; }
 	.ov-clickable:hover .ov-key { color: var(--text-primary); }
+	/* Create / upload action rows in the "New" section */
+	.ov-action {
+		border-bottom: none;
+		border-radius: var(--radius-xs);
+		padding: 6px var(--space-2);
+	}
+	/* "New" actions laid out as a 2×2 grid */
+	.new-actions {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 2px;
+	}
+	.new-actions .ov-action {
+		width: auto;
+		justify-content: flex-start;
+		border: 1px solid var(--border-subtle);
+	}
+	.new-notebook-btn {
+		grid-column: 1 / -1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		margin-top: 2px;
+		padding: 7px;
+		background: transparent;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-xs);
+		color: var(--text-primary);
+		font-family: var(--font-mono);
+		font-size: 0.8rem;
+		cursor: pointer;
+		transition: border-color 0.15s, background 0.15s, color 0.15s;
+	}
+	.new-notebook-btn svg {
+		color: var(--accent-200);
+	}
+	.new-notebook-btn:hover:not(:disabled) {
+		border-color: var(--accent-300);
+		background: var(--hover-overlay);
+		color: var(--accent-100);
+	}
+	.new-notebook-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.ov-action .ov-key svg { color: var(--accent-200); }
+	.ov-action:hover:not(:disabled) { background: var(--hover-overlay); }
+	.ov-action:disabled { opacity: 0.5; cursor: not-allowed; }
+	.ov-row.active .ov-key,
+	.ov-row.active .ov-val {
+		color: var(--accent-100);
+	}
+	.ov-row.active .ov-key svg {
+		color: var(--accent-100);
+	}
+	/* Collapsible group heads (notes / documents) + their indented sub-rows. */
+	.ov-group-head {
+		cursor: pointer;
+	}
+	.ov-group-head .ov-key {
+		color: var(--text-primary);
+		font-weight: 500;
+	}
+	.ov-group-head:hover .ov-key {
+		color: var(--accent-100);
+	}
+	.ov-chevron {
+		transition: transform 0.15s ease;
+	}
+	.ov-chevron.collapsed {
+		transform: rotate(-90deg);
+	}
+	.ov-row.ov-sub {
+		padding-left: 20px;
+		font-size: 0.78rem;
+	}
+	.ov-row.ov-sub .ov-key {
+		color: var(--text-secondary);
+	}
 
+	.rail-version {
+		flex-shrink: 0;
+		padding: 0 var(--space-4) var(--space-2);
+		font-size: 0.7rem;
+		color: var(--text-secondary);
+		opacity: 0.6;
+		font-family: var(--font-mono);
+	}
 	.rail-footer {
 		flex-shrink: 0;
 		padding: var(--space-3) var(--space-4);
@@ -1117,7 +1712,7 @@
 	.footer-change-btn:hover:not(:disabled) {
 		color: var(--text-primary);
 		border-color: var(--border-default);
-		background: rgba(255,255,255,0.04);
+		background: var(--hover-overlay);
 	}
 	.footer-change-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 	.footer-dot {
@@ -1127,7 +1722,7 @@
 		background: var(--neutral-700);
 		flex-shrink: 0;
 	}
-	.footer-dot.dot-ok { background: #4caf50; }
+	.footer-dot.dot-ok { background: var(--success); }
 
 	/* ── Workspace panel ── */
 	.workspace {
@@ -1173,7 +1768,7 @@
 		font-family: var(--font-mono);
 		font-size: 0.925rem;
 		background: var(--accent-200);
-		color: #fff;
+		color: var(--on-accent);
 		border: none;
 		border-radius: var(--radius-sm);
 		cursor: pointer;
@@ -1211,10 +1806,10 @@
 		color: var(--text-primary) !important;
 		max-width: 20rem !important;
 		width: 100% !important;
-		box-shadow: 0 8px 32px rgba(0,0,0,0.4) !important;
+		box-shadow: 0 8px 32px var(--shadow-color) !important;
 	}
 	.confirm-dialog::backdrop {
-		background: rgba(0,0,0,0.5) !important;
+		background: var(--scrim-soft) !important;
 		backdrop-filter: blur(4px) !important;
 	}
 	.dialog-content {
@@ -1227,6 +1822,27 @@
 	.dialog-content h3 { margin: 0; font-size: 0.95rem; color: var(--text-hero); }
 	.dialog-content p { margin: 0; font-size: 0.75rem; color: var(--text-secondary); }
 	.dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+	.nb-name-input {
+		width: 100%;
+		box-sizing: border-box;
+		background: var(--bg-page);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		color: var(--text-primary);
+		font-family: var(--font-mono);
+		font-size: 0.9rem;
+		padding: 9px 11px;
+		outline: none;
+		transition: border-color 0.15s;
+	}
+	.nb-name-input:focus { border-color: var(--accent-200); }
+	.nb-create-btn {
+		padding: 6px 14px;
+		font-size: 0.75rem;
+		min-height: unset;
+		line-height: 1;
+		border-radius: var(--radius-sm);
+	}
 	.btn-ghost {
 		padding: 6px 14px;
 		font-size: 0.75rem;
@@ -1243,12 +1859,12 @@
 		font-size: 0.75rem;
 		font-family: var(--font-mono);
 		background: transparent;
-		border: 1px solid #e05555;
+		border: 1px solid var(--danger);
 		border-radius: var(--radius-sm);
-		color: #e05555;
+		color: var(--danger);
 		cursor: pointer;
 	}
-	.btn-danger:hover:not(:disabled) { background: rgba(224,85,85,0.1); }
+	.btn-danger:hover:not(:disabled) { background: var(--danger-tint); }
 	.btn-danger:disabled { opacity: 0.4; }
 
 	@keyframes fade-in {
@@ -1266,11 +1882,12 @@
 		padding: 1.5rem 2rem;
 		box-sizing: border-box;
 		font-family: var(--font-mono);
-		overflow-y: auto;
+		overflow: hidden;
 		color: var(--text-primary);
 	}
 
 	.dashboard-header {
+		flex-shrink: 0;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -1283,6 +1900,95 @@
 		font-weight: 800;
 		letter-spacing: -0.04em;
 		color: var(--text-hero);
+	}
+
+	/* Notebook switcher (replaces the static workspace title) */
+	.nb-switcher {
+		position: relative;
+	}
+	.nb-switch-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		background: transparent;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		max-width: 100%;
+	}
+	.nb-switch-btn h2 {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.nb-switch-caret {
+		flex-shrink: 0;
+		color: var(--text-secondary);
+		margin-top: 6px;
+		transition: color 0.15s;
+	}
+	.nb-switch-btn:hover .nb-switch-caret {
+		color: var(--text-primary);
+	}
+	.nb-switch-menu {
+		position: absolute;
+		top: 100%;
+		left: 0;
+		margin-top: 6px;
+		z-index: 50;
+		min-width: 230px;
+		max-width: 320px;
+		background: var(--bg-panel);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		padding: var(--space-1);
+		box-shadow: 0 8px 24px var(--shadow-color);
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+	.nb-switch-item {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		width: 100%;
+		text-align: left;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-xs);
+		color: var(--text-primary);
+		font-family: var(--font-mono);
+		font-size: 0.85rem;
+		padding: 7px 10px;
+		cursor: pointer;
+		transition: background 0.1s;
+	}
+	.nb-switch-item:hover {
+		background: var(--hover-overlay);
+	}
+	.nb-switch-item.active {
+		color: var(--accent-100);
+	}
+	.nb-switch-count {
+		flex-shrink: 0;
+		color: var(--text-secondary);
+		font-size: 0.75rem;
+	}
+	.nb-switch-check {
+		flex-shrink: 0;
+		color: var(--accent-100);
+	}
+	.nb-switch-new {
+		justify-content: flex-start;
+		gap: 8px;
+		color: var(--text-secondary);
+	}
+	.nb-switch-new svg {
+		color: var(--accent-200);
+	}
+	.nb-switch-new:hover {
+		color: var(--text-primary);
 	}
 	.dash-tabs {
 		display: flex;
@@ -1306,31 +2012,595 @@
 	.dash-tab:hover { color: var(--text-primary); }
 	.dash-tab.active {
 		color: var(--text-primary);
-		background: rgba(255,255,255,0.06);
+		background: var(--hover-overlay-strong);
 		border-color: var(--border-default);
 	}
 
 	.dashboard-grid {
 		display: flex;
-		gap: 3rem;
+		gap: 2.5rem;
 		align-items: stretch;
 		flex: 1;
 		min-height: 0;
 	}
 	.dash-left {
 		flex: 1;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 1.5rem;
 		min-height: 0;
 	}
 	.dash-right {
-		width: 320px;
+		width: 400px;
 		flex-shrink: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 2rem;
+		/* Hug content at the top instead of stretching to the notes column height,
+		   so the tasks panel's height is independent of the notes list. */
+		align-self: flex-start;
+	}
+
+	/* The notes list and the tasks list each scroll on their own. */
+	.nb-section {
+		flex: 1;
 		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.nb-section > h3 {
+		flex-shrink: 0;
+	}
+
+	/* ── Notebook (left) ── */
+	.dash-section h3.nb-header-tabs-container {
+		padding-bottom: 0;
+		text-transform: none;
+		letter-spacing: normal;
+	}
+	.h3-tab {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		cursor: pointer;
+		font-size: 0.85rem;
+		font-family: var(--font-mono);
+		padding: 0 4px 8px 4px;
+		margin-bottom: -1px;
+		border-bottom: 2px solid transparent;
+		transition: color 0.15s, border-color 0.15s;
+	}
+	.h3-tab:hover {
+		color: var(--text-primary);
+	}
+	.h3-tab.active {
+		color: var(--text-primary);
+		border-bottom-color: var(--text-primary);
+	}
+	.h3-tab svg {
+		color: var(--neutral-600);
+	}
+
+	.nb-list {
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+	}
+	.nb-list::-webkit-scrollbar,
+	.task-list::-webkit-scrollbar {
+		width: 6px;
+	}
+	.nb-list::-webkit-scrollbar-thumb,
+	.task-list::-webkit-scrollbar-thumb {
+		background: var(--border-default);
+		border-radius: 4px;
+	}
+	.nb-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		padding: 9px var(--space-2);
+		border-bottom: 1px solid var(--border-subtle);
+		cursor: pointer;
+		position: relative;
+		transition: background 0.1s;
+	}
+	.nb-row:hover {
+		background: var(--hover-overlay);
+	}
+	.nb-row.selected {
+		background: var(--accent-tint);
+		box-shadow: inset 2px 0 0 var(--accent-200);
+	}
+	.nb-row:last-child {
+		border-bottom: none;
+	}
+	.nb-row:hover .row-menu-btn {
+		opacity: 1;
+	}
+	.nb-pin {
+		color: var(--accent-200);
+		flex-shrink: 0;
+	}
+	.nb-row-title {
+		flex: 1;
+		min-width: 0;
+		font-size: 0.95rem;
+		color: var(--text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.nb-row-date {
+		flex-shrink: 0;
+		font-size: 0.78rem;
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+	}
+	.nb-row-book {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+		max-width: 9rem;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		font-size: 0.72rem;
+		font-family: var(--font-mono);
+		color: var(--text-secondary);
+		background: var(--overlay-faint);
+		border: 1px solid var(--border-subtle);
+		border-radius: 999px;
+		padding: 1px 8px;
+	}
+	.nb-row-book svg {
+		flex-shrink: 0;
+		color: var(--accent-200);
+	}
+	.nb-row-badge {
+		flex-shrink: 0;
+	}
+	.nb-empty {
+		font-size: 0.85rem;
+		color: var(--neutral-600);
+		padding: var(--space-4) var(--space-2);
+	}
+	.nb-indexing {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--text-secondary);
+	}
+	.nb-spin {
+		animation: nb-spin 0.8s linear infinite;
+	}
+	@keyframes nb-spin {
+		to { transform: rotate(360deg); }
+	}
+	.indexing-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		color: var(--accent-100);
+		background: var(--accent-tint);
+		border: 1px solid var(--accent-300);
+		border-radius: 999px;
+		padding: 2px 10px;
+		white-space: nowrap;
+	}
+	/* ── Right panel (tasks) ── */
+	.dash-panel {
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-lg);
+		background: var(--bg-panel);
+		padding: var(--space-4);
+		display: flex;
+		flex-direction: column;
+	}
+	.panel-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: var(--space-3);
+		flex-shrink: 0;
+	}
+	.panel-head h3 {
+		margin: 0;
+		font-size: 0.8rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-hero);
+	}
+	.panel-close {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		cursor: pointer;
+		padding: 2px;
+		border-radius: var(--radius-xs);
+	}
+	.panel-close:hover {
+		color: var(--text-primary);
+		background: var(--hover-overlay);
+	}
+
+	/* ── Note details pane ── */
+	.detail-body {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3);
+		overflow-y: auto;
+	}
+	.detail-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: var(--space-2);
+	}
+	.detail-title {
+		font-size: 1.05rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		line-height: 1.3;
+		word-break: break-word;
+	}
+	.detail-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+	.detail-rows {
+		display: flex;
+		flex-direction: column;
+	}
+	.detail-row {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--space-3);
+		padding: 6px 0;
+		border-bottom: 1px solid var(--border-subtle);
+		font-family: var(--font-mono);
+		font-size: 0.78rem;
+	}
+	.detail-row:last-child {
+		border-bottom: none;
+	}
+	.dr-key {
+		color: var(--text-secondary);
+		flex-shrink: 0;
+	}
+	.dr-val {
+		color: var(--text-primary);
+		text-align: right;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.detail-excerpt {
+		margin: 0;
+		font-size: 0.82rem;
+		line-height: 1.5;
+		color: var(--text-secondary);
+		display: -webkit-box;
+		-webkit-line-clamp: 5;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+	.detail-open {
+		margin-top: var(--space-1);
+		padding: 8px 14px;
+		border-radius: var(--radius-sm);
+		font-size: 0.85rem;
+		font-weight: 500;
+		text-align: center;
+	}
+	.panel-tabs {
+		display: flex;
+		gap: 20px;
+	}
+	.panel-tabs button {
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		font-family: var(--font-sans);
+		font-size: 0.95rem;
+		padding: 4px 0;
+		font-weight: 500;
+		cursor: pointer;
+		transition: color 0.1s;
+	}
+	.panel-tabs button:hover,
+	.panel-tabs button.active {
+		color: var(--text-primary);
+	}
+
+	/* "+" add control at the end of the tabs row */
+	.nb-add-wrap {
+		margin-left: auto;
+		position: relative;
+	}
+	.nb-add-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		background: transparent;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		cursor: pointer;
+		transition: color 0.15s, background 0.15s, border-color 0.15s;
+	}
+	.nb-add-btn:hover:not(:disabled) {
+		color: var(--accent-100);
+		border-color: var(--accent-300);
+		background: var(--hover-overlay);
+	}
+	.nb-add-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.nb-add-menu {
+		position: absolute;
+		top: calc(100% + 6px);
+		right: 0;
+		z-index: 30;
+		min-width: 170px;
+		background: var(--bg-panel);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		padding: var(--space-1);
+		box-shadow: 0 8px 24px var(--shadow-color);
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+	.nb-add-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		text-align: left;
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-xs);
+		color: var(--text-primary);
+		font-family: var(--font-mono);
+		font-size: 0.85rem;
+		padding: 7px 10px;
+		cursor: pointer;
+		transition: background 0.1s;
+	}
+	.nb-add-item:hover {
+		background: var(--hover-overlay);
+	}
+	.nb-add-item .plus {
+		color: var(--accent-100);
+		font-weight: 700;
+		font-size: 1rem;
+		line-height: 1;
+		width: 13px;
+		text-align: center;
+	}
+	.nb-add-item svg {
+		color: var(--text-secondary);
+		flex-shrink: 0;
+	}
+	.nb-add-divider {
+		height: 1px;
+		background: var(--border-subtle);
+		margin: var(--space-1) 4px;
+	}
+
+	.task-list {
+		display: flex;
+		flex-direction: column;
+		max-height: 60vh;
+		overflow-y: auto;
+		margin-bottom: var(--space-3);
+	}
+	.task-card {
+		display: flex;
+		flex-direction: column;
+		background: transparent;
+		transition: background 0.1s;
+		border-radius: var(--radius-sm);
+	}
+	.task-card.expanded {
+		background: var(--hover-overlay);
+	}
+	.task-item {
+		display: flex;
+		align-items: flex-start;
+		gap: 16px;
+		padding: 10px 8px;
+		cursor: pointer;
+		position: relative;
+	}
+	.task-card:not(.expanded):hover {
+		background: var(--hover-overlay);
+	}
+	.main-task-circle {
+		width: 18px;
+		height: 18px;
+		margin-top: 1px;
+	}
+	.subtask-circle {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		border: 1.5px solid var(--text-secondary);
+		background: transparent;
+		flex-shrink: 0;
+		cursor: pointer;
+		padding: 0;
+	}
+	.subtask-circle.done {
+		background: var(--text-secondary);
+	}
+	.task-text-input {
+		flex: 1;
+		min-width: 0;
+		font-size: 0.85rem;
+		color: var(--text-primary);
+		background: transparent;
+		border: none;
+		outline: none;
+		line-height: 1.5;
+		padding-right: 14px;
+		font-family: inherit;
+	}
+	.task-item.done .task-text-input {
+		text-decoration: line-through;
+		color: var(--neutral-600);
+	}
+	.task-remove {
+		position: absolute;
+		right: 2px;
+		top: 9px;
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		cursor: pointer;
+		font-size: 1.2rem;
+		line-height: 1;
+		opacity: 0;
+		transition: opacity 0.1s;
+	}
+	.task-card:hover .task-remove {
+		opacity: 1;
+	}
+	.task-remove:hover {
+		color: var(--danger);
+	}
+	
+	.task-expanded-details.redesigned {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		padding: 16px 16px 24px 44px;
+	}
+	.field-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 16px;
+	}
+	.field-row.notebook-row {
+		margin-bottom: -4px;
+	}
+	.field-icon {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
+		color: var(--text-secondary);
+		margin-top: 2px;
+	}
+	.field-input {
+		flex: 1;
+		background: transparent;
+		border: none;
+		outline: none;
+		color: var(--text-primary);
+		font-size: 1rem;
+		font-family: inherit;
+		min-width: 0;
+	}
+	.field-input::placeholder {
+		color: var(--text-secondary);
+	}
+	.select-new {
+		appearance: none;
+		-webkit-appearance: none;
+		cursor: pointer;
+		font-weight: 500;
+		font-size: 0.95rem;
+		color: var(--text-secondary);
+		padding: 0;
+		background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>');
+		background-repeat: no-repeat;
+		background-position: right center;
+		background-size: 16px;
+		padding-right: 24px;
+		width: auto;
+		flex: none;
+	}
+	.textarea-new {
+		resize: none;
+		min-height: 24px;
+		line-height: 1.5;
+		padding: 0;
+		overflow: hidden;
+	}
+	.date-time-new {
+		cursor: pointer;
+		font-size: 0.95rem;
+	}
+	.date-time-new::-webkit-calendar-picker-indicator {
+		display: none;
+		-webkit-appearance: none;
+	}
+	.subtasks-container {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		margin-top: 4px;
+	}
+	.subtask-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		position: relative;
+	}
+	.subtask-arrow {
+		width: 16px;
+		height: 16px;
+		color: var(--text-secondary);
+		margin-left: 2px;
+		flex-shrink: 0;
+	}
+	.subtask-circle.empty {
+		border-style: dashed;
+		cursor: default;
+	}
+	.subtask-input-new {
+		font-size: 0.95rem;
+	}
+	.subtask-input-new.done {
+		text-decoration: line-through;
+		color: var(--neutral-600);
+	}
+	.subtask-remove {
+		background: transparent;
+		border: none;
+		color: var(--text-secondary);
+		cursor: pointer;
+		opacity: 0;
+		font-size: 1.2rem;
+	}
+	.subtask-row:hover .subtask-remove {
+		opacity: 1;
+	}
+	.subtask-remove:hover {
+		color: var(--danger, #ff4444);
+	}
+	.subtask-add-hint {
+		margin-left: 56px;
+		font-size: 0.85rem;
+		color: var(--text-secondary);
 	}
 
 	.dash-section {
@@ -1344,141 +2614,42 @@
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: #ffffff;
+		color: var(--text-hero);
 		margin: 0 0 0.5rem 0;
 		border-bottom: 1px solid var(--border-default);
 		padding-bottom: 6px;
 	}
 	.dash-section h3 svg { color: var(--neutral-600); }
 
-	.work-areas-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-		gap: var(--space-3);
-		margin-top: 1rem;
-	}
-	.wa-card {
-		background: var(--bg-panel);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-sm);
-		padding: var(--space-3);
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-		transition: border-color 0.15s, background 0.15s;
-	}
-	.wa-card:hover { border-color: var(--neutral-600); background: rgba(255,255,255,0.03); }
-	.wa-title {
-		display: flex;
+	/* Active sidebar filter shown in the notes header; click to clear. */
+	.filter-chip {
+		display: inline-flex;
 		align-items: center;
-		gap: 8px;
-		font-size: 0.95rem;
-		font-weight: 600;
-	}
-	.wa-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 18px;
-		height: 18px;
-		border-radius: 4px;
-		font-size: 0.65rem;
-		font-weight: 800;
-		color: #fff;
-	}
-	.wa-balance {
-		font-size: 0.75rem;
-		color: var(--text-secondary);
-	}
-
-	.dash-split {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 2.5fr);
-		gap: 1.5rem;
-		height: 480px;
-		min-height: 0;
-		max-height: 480px;
-	}
-	.dash-split > .dash-section {
-		display: flex;
-		flex-direction: column;
-		min-height: 0;
-	}
-	.section-header-split {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		margin-bottom: 1rem;
-		border-bottom: 1px solid var(--border-default);
-		padding-bottom: 6px;
-		height: 32px;
-		box-sizing: border-box;
-		margin-top: 0;
-	}
-	.section-header-split h3 {
-		margin: 0;
-		border-bottom: none;
-		padding-bottom: 0;
-		line-height: 1;
-	}
-
-	.dash-task-list {
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		flex: 1;
-		min-height: 0;
-		overflow-y: auto;
-		padding-right: 8px;
-	}
-	.dash-task-list::-webkit-scrollbar { width: 4px; }
-	.dash-task-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 4px; }
-	.dash-task {
-		display: flex;
-		align-items: flex-start;
-		gap: 10px;
-		padding: 6px 8px;
-		border-radius: var(--radius-xs);
+		gap: 5px;
+		text-transform: none;
+		letter-spacing: 0;
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		font-weight: 500;
+		color: var(--accent-100);
+		background: var(--accent-tint);
+		border: 1px solid var(--accent-300);
+		border-radius: 999px;
+		padding: 2px 8px;
 		cursor: pointer;
-		font-size: 0.85rem;
-		color: var(--text-secondary);
-		line-height: 1.4;
-		transition: background 0.1s, color 0.1s;
-		position: relative;
 	}
-	.dash-task:hover {
-		background: rgba(255,255,255,0.04);
-		color: var(--text-primary);
-	}
-	.dash-task input {
-		margin-top: 3px;
-		accent-color: var(--accent-300);
-	}
-	.dash-task span.done {
-		text-decoration: line-through;
-		color: var(--neutral-600);
-	}
-	.remove-task-btn {
-		position: absolute;
-		right: 8px;
-		top: 50%;
-		transform: translateY(-50%);
-		background: transparent;
-		border: none;
-		color: var(--text-secondary);
-		cursor: pointer;
-		opacity: 0;
-		font-size: 1.2rem;
+	.filter-chip .chip-x {
+		font-size: 0.9rem;
 		line-height: 1;
-		transition: opacity 0.1s;
+		opacity: 0.8;
 	}
-	.dash-task:hover .remove-task-btn { opacity: 1; }
-	.remove-task-btn:hover { color: #e05555; }
+	.filter-chip:hover .chip-x { opacity: 1; }
 
 	.add-task-form {
-		margin-top: var(--space-3);
+		margin-top: 0;
 		display: flex;
 		gap: 8px;
+		flex-shrink: 0;
 	}
 	.add-task-form input {
 		flex: 1;
@@ -1497,285 +2668,12 @@
 	}
 	.add-task-form input:focus { border-color: var(--neutral-600); }
 
-	.contents-single-list {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-		flex: 1;
-		min-height: 0;
-		overflow-y: auto;
-		padding-right: 8px;
-	}
-	.contents-single-list::-webkit-scrollbar { width: 4px; }
-	.contents-single-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 4px; }
-
-	.kanban-board {
-		display: flex;
-		gap: var(--space-4);
-	}
-	.kanban-col {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-	.kanban-col h4 {
-		margin: 0;
-		font-size: 0.85rem;
-		font-weight: 600;
-		color: var(--text-secondary);
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-	.kanban-count {
-		font-size: 0.7rem;
-		color: var(--neutral-600);
-		background: rgba(255,255,255,0.05);
-		padding: 2px 6px;
-		border-radius: 10px;
-	}
-	.kanban-card {
-		position: relative;
-		cursor: pointer;
-		background: #262626;
-		border: 1px solid transparent;
-		border-radius: var(--radius-sm);
-		padding: var(--space-2) var(--space-3);
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		transition: background 0.15s;
-	}
-	.kanban-card:hover { background: #333; }
-	.kanban-card:hover .row-menu-btn { opacity: 1; }
-	.kanban-card-progress { border-color: rgba(100,181,246,0.3); background: rgba(100,181,246,0.03); }
-	.kanban-card-complete { border-color: rgba(129,199,132,0.3); background: rgba(129,199,132,0.03); }
-	
-	.kc-header-row {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 8px;
-	}
-	.kc-title {
-		font-size: 0.85rem;
-		line-height: 1.3;
-		color: var(--text-primary);
-	}
-	.kc-snippet {
-		font-size: 0.8rem;
-		color: var(--text-secondary);
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-		line-height: 1.4;
-		word-break: break-word;
-		white-space: normal;
-	}
-	.kc-dates {
-		display: flex;
-		gap: var(--space-3);
-		font-size: 0.7rem;
-		color: var(--neutral-500);
-	}
-	.kc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
-	.kc-tag {
-		font-size: 0.65rem;
-		padding: 2px 6px;
-		background: rgba(255,255,255,0.08);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-xs);
-		color: var(--text-secondary);
-	}
-	.kc-platform {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 0.75rem;
-		color: var(--text-secondary);
-	}
-	.kc-footer {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-top: 2px;
-	}
-
-	.notebook-list {
-		display: flex;
-		flex-direction: column;
-	}
-	.nb-item {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: var(--space-2) 0;
-		border-bottom: 1px solid var(--neutral-1000);
-	}
-	.nb-item:last-child { border-bottom: none; }
-	.nb-title { font-size: 0.9rem; color: var(--text-secondary); }
-	.nb-date { font-size: 0.75rem; color: var(--neutral-600); display: flex; align-items: center; gap: 8px; }
-
-	/* Calendar Widget */
-	.calendar-widget {
-		background: transparent;
-		border: none;
-		border-radius: var(--radius-md);
-		padding: var(--space-4);
-	}
-	.cal-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		margin-bottom: var(--space-4);
-	}
-	.cal-month {
-		font-size: 1rem;
-		font-weight: 700;
-		background: rgba(255,255,255,0.05);
-		padding: 4px 12px;
-		border-radius: 12px;
-	}
-	.cal-nav {
-		background: transparent;
-		border: none;
-		color: var(--text-secondary);
-		cursor: pointer;
-		padding: 4px;
-	}
-	.cal-nav:hover { color: var(--text-primary); }
-	.cal-grid {
-		display: grid;
-		grid-template-columns: repeat(7, 1fr);
-		gap: 8px 4px;
-		text-align: center;
-	}
-	.cal-day-name {
-		font-size: 0.7rem;
-		color: var(--neutral-600);
-		font-weight: 600;
-		margin-bottom: 4px;
-	}
-	.cal-day {
-		font-size: 0.85rem;
-		color: var(--text-secondary);
-		padding: 6px 0;
-		border-radius: 50%;
-		cursor: pointer;
-	}
-	.cal-day:hover { background: rgba(255,255,255,0.05); color: var(--text-primary); }
-	.cal-day.active {
-		background: var(--accent-300);
-		color: #000;
-		font-weight: 700;
-	}
-	.w-full { width: 100%; }
-	.mt-4 { margin-top: 1rem; }
-
-	/* Timeline Widget */
-	.timeline-widget {
-		background: transparent;
-		border: none;
-		border-radius: var(--radius-md);
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		height: 100%;
-		min-height: 0;
-	}
-	.tl-subtitle { color: var(--text-secondary); margin: 0; line-height: 1; }
-	.tl-track {
-		display: flex;
-		flex-direction: column;
-		flex: 1;
-		min-height: 0;
-		overflow-y: auto;
-		padding-right: 8px;
-	}
-	.tl-track::-webkit-scrollbar { width: 4px; }
-	.tl-track::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 4px; }
-	.tl-item {
-		display: flex;
-		align-items: stretch;
-		min-height: 60px;
-		flex-shrink: 0;
-	}
-	.tl-time-side {
-		width: 65px;
-		flex-shrink: 0;
-		font-size: 0.7rem;
-		color: var(--text-secondary);
-		padding-top: 1px;
-		text-align: left;
-		padding-right: 8px;
-	}
-	.is-active .tl-time-side {
-		color: var(--text-primary);
-	}
-	.tl-node {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		width: 20px;
-		flex-shrink: 0;
-		margin-right: 16px;
-	}
-	.tl-circle {
-		width: 18px;
-		height: 18px;
-		border-radius: 50%;
-		border: 2px solid var(--border-default);
-		background: transparent;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		color: transparent;
-		z-index: 2;
-	}
-	.is-active .tl-circle {
-		background: var(--accent-300);
-		border-color: var(--accent-300);
-		color: #000;
-	}
-	.tl-line {
-		flex: 1;
-		width: 2px;
-		background: var(--border-default);
-		margin: 4px 0;
-		border-radius: 1px;
-	}
-	.is-active .tl-line {
-		background: transparent;
-		border-left: 2px dashed var(--accent-300);
-		width: 0;
-	}
-	.tl-content-side {
-		flex: 1;
-		padding-bottom: 24px;
-	}
-	.tl-title { 
-		font-size: 0.9rem; 
-		font-weight: 500; 
-		color: var(--text-secondary); 
-		margin-bottom: 4px;
-		line-height: 1.2;
-	}
-	.active-title {
-		color: var(--text-primary);
-	}
-	.tl-subtext { 
-		font-size: 0.75rem; 
-		color: var(--neutral-600); 
-	}
 
 	/* ── Clusters Modal ── */
-	.clusters-section { margin-bottom: 2rem; }
 	.modal-overlay {
 		position: fixed;
 		top: 0; left: 0; right: 0; bottom: 0;
-		background: rgba(0,0,0,0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(2px);
 		display: flex;
 		align-items: center;
@@ -1784,7 +2682,7 @@
 		animation: fade-in 0.2s ease-out;
 	}
 	.modal-content {
-		background: #151515;
+		background: var(--bg-modal);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-sm);
 		width: 90%;
@@ -1792,7 +2690,7 @@
 		max-height: 80vh;
 		display: flex;
 		flex-direction: column;
-		box-shadow: 0 15px 40px rgba(0,0,0,0.8);
+		box-shadow: 0 15px 40px var(--shadow-color-strong);
 	}
 	.modal-header {
 		display: flex;
@@ -1806,6 +2704,49 @@
 	.modal-body {
 		padding: 0;
 		overflow-y: auto;
+	}
+
+	/* Clusters list dialog */
+	.cluster-list {
+		display: flex;
+		flex-direction: column;
+		padding: var(--space-2) 0;
+	}
+	.cluster-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-3);
+		width: 100%;
+		background: transparent;
+		border: none;
+		border-bottom: 1px solid var(--border-subtle);
+		padding: 0.85rem 1.5rem;
+		cursor: pointer;
+		text-align: left;
+		font-family: var(--font-mono);
+		transition: background 0.1s;
+	}
+	.cluster-row:last-child { border-bottom: none; }
+	.cluster-row:hover { background: var(--hover-overlay); }
+	.cluster-name {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 0.9rem;
+		color: var(--text-primary);
+	}
+	.cluster-name svg { color: var(--accent-200); flex-shrink: 0; }
+	.cluster-meta {
+		flex-shrink: 0;
+		font-size: 0.8rem;
+		color: var(--text-secondary);
+	}
+	.cluster-empty {
+		padding: 1.5rem;
+		margin: 0;
+		font-size: 0.9rem;
+		color: var(--text-secondary);
 	}
 
 	.modal-footer {
@@ -1826,7 +2767,7 @@
 		transition: background 0.15s, border-color 0.15s;
 	}
 	.btn-cancel:hover {
-		background: rgba(255,255,255,0.05);
+		background: var(--hover-overlay);
 		border-color: var(--neutral-600);
 	}
 
@@ -1859,7 +2800,7 @@
 		transition: background 0.15s;
 	}
 	.btn-ghost:hover {
-		background: rgba(255, 255, 255, 0.05);
+		background: var(--hover-overlay);
 	}
 
 	/* Pinned Section */
@@ -1915,7 +2856,7 @@
 		font-size: 0.65rem;
 		color: var(--neutral-400);
 		font-family: var(--font-mono);
-		background: rgba(255, 255, 255, 0.02);
+		background: var(--overlay-faint);
 		flex-shrink: 0;
 		width: 80px;
 		text-align: center;
@@ -1926,7 +2867,7 @@
 		border-bottom: none;
 	}
 	.table-row:hover {
-		background: rgba(255,255,255,0.02);
+		background: var(--overlay-faint);
 	}
 	.table-row:last-child {
 		border-bottom: none;
@@ -1949,32 +2890,11 @@
 		text-overflow: ellipsis;
 	}
 
-	.header-icon-btn {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: transparent;
-		border: 1px solid transparent;
-		border-radius: var(--radius-sm);
-		padding: 6px;
-		color: var(--text-secondary);
-		cursor: pointer;
-		transition: background 0.15s, color 0.15s;
-	}
-	.header-icon-btn:hover {
-		background: rgba(255,255,255,0.05);
-		color: var(--text-primary);
-	}
-	.header-icon-btn.active {
-		color: var(--accent-100);
-		background: rgba(255,255,255,0.02);
-	}
-
 	.header-search-btn {
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		background: #1e1e1e;
+		background: var(--bg-input);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-sm);
 		padding: 8px 12px;
@@ -1982,12 +2902,47 @@
 		font-family: var(--font-mono);
 		font-size: 0.85rem;
 		cursor: pointer;
-		width: 250px;
+		width: 400px;
+		box-sizing: border-box;
 		transition: border-color 0.15s, color 0.15s;
 	}
 	.header-search-btn:hover {
 		border-color: var(--neutral-600);
 		color: var(--text-primary);
+	}
+
+	/* Tasks show/hide toggle, sits to the right of the search bar. */
+	.header-toggle-btn {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		background: var(--bg-input);
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		padding: 8px 12px;
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.85rem;
+		cursor: pointer;
+		transition: border-color 0.15s, color 0.15s, background 0.15s;
+	}
+	.header-toggle-btn:hover {
+		border-color: var(--neutral-600);
+		color: var(--text-primary);
+	}
+	.header-toggle-btn.active {
+		color: var(--accent-100);
+		border-color: var(--accent-300);
+	}
+	.header-toggle-count {
+		font-size: 0.72rem;
+		min-width: 16px;
+		text-align: center;
+		color: var(--on-accent);
+		background: var(--accent-200);
+		border-radius: 999px;
+		padding: 0 5px;
+		line-height: 16px;
 	}
 
 	.link-dialog {
@@ -2003,7 +2958,7 @@
 		box-shadow: none;
 	}
 	.link-dialog::backdrop {
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--scrim);
 		backdrop-filter: blur(var(--blur-sm));
 	}
 	.link-search-input {
@@ -2055,7 +3010,7 @@
 	}
 	.link-result-btn:hover,
 	.link-result-btn.selected {
-		background: rgba(238, 96, 24, 0.12);
+		background: var(--accent-tint);
 	}
 	
 	.folder-badge {

@@ -1,5 +1,41 @@
 use serde::{Deserialize, Serialize};
 
+/// A single bullet-point subtask. Persisted inside its parent [`Task`] file.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Subtask {
+    pub id: String,
+    pub text: String,
+    pub done: bool,
+}
+
+/// A task. Each task is stored as its own self-contained JSON file under
+/// `<workspace>/tasks/<id>.json` (file-per-item: portable, separately copyable).
+/// `#[serde(default)]` lets the frontend send partial objects (e.g. just a title).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    /// Free-form details / sub-paragraph (markdown allowed). Empty = none.
+    pub details: String,
+    /// Notebook (workspace folder) this task belongs to, e.g. "Work" or
+    /// "Work/ProjectA". None = the default top-level task list (not in a notebook).
+    /// Determines the on-disk location: `<workspace>/<notebook>/tasks/<id>.json`
+    /// (or `<workspace>/tasks/<id>.json` when None).
+    pub notebook: Option<String>,
+    /// Deadline as an ISO-8601 string — date only ("2026-07-01") or date+time
+    /// ("2026-07-01T14:30"). None = no deadline.
+    pub due: Option<String>,
+    pub done: bool,
+    /// Ordered bullet-point subtasks.
+    pub subtasks: Vec<Subtask>,
+    /// Manual sort position (ascending). Frontend sets it for drag-reorder.
+    pub position: Option<f64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatTool {

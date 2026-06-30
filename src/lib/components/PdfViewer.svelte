@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import * as pdfjsLib from 'pdfjs-dist';
 	import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 	import 'pdfjs-dist/web/pdf_viewer.css';
@@ -74,6 +74,11 @@
 			
 			pdfDoc = doc;
 			numPages = doc.numPages;
+
+			// Fit to the pane width as soon as the PDF renders, so it isn't cropped
+			// on narrow/split windows. Wait for the viewer div to mount + lay out.
+			await tick();
+			requestAnimationFrame(() => fitToScreen());
 		} catch (error: any) {
 			console.error('Error loading PDF:', error);
 			errorMessage = error?.message || String(error);
@@ -82,11 +87,15 @@
 
 	function fitToScreen() {
 		if (!defaultViewport || !pdfViewerDiv) return;
+		// Reserve space for the 2rem container padding AND a vertical scrollbar that
+		// appears once tall content renders — otherwise the page is a hair too wide
+		// and leaves a stray horizontal scrollbar.
+		const SCROLLBAR = 18;
 		if (spreadMode !== 'none') {
-			const targetWidth = pdfViewerDiv.clientWidth - 96;
+			const targetWidth = pdfViewerDiv.clientWidth - 96 - SCROLLBAR;
 			if (targetWidth > 0) scale = targetWidth / (defaultViewport.width * 2);
 		} else {
-			const targetWidth = pdfViewerDiv.clientWidth - 64;
+			const targetWidth = pdfViewerDiv.clientWidth - 64 - SCROLLBAR;
 			if (targetWidth > 0) scale = targetWidth / defaultViewport.width;
 		}
 	}
@@ -487,8 +496,8 @@
 
 		{#if onClosePdf}
 			<div class="divider" style="width: 1px; height: 16px; background: var(--border-default); margin: 0 4px;"></div>
-			<button class="more-btn" onclick={onClosePdf} title="Close PDF">
-				<svg viewBox="0 0 24 24" width="16" height="16" stroke="var(--danger, #ef4444)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+			<button class="close-pdf-btn" onclick={onClosePdf} title="Close PDF" aria-label="Close PDF">
+				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
 			</button>
 		{/if}
 	</div>
@@ -564,8 +573,8 @@
 	.pdf-controls {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
-		padding: 0 var(--space-6) 0 var(--space-8);
+		gap: 0.4rem;
+		padding: 0 var(--space-4);
 		height: 48px;
 		box-sizing: border-box;
 		background: var(--bg-panel);
@@ -573,18 +582,36 @@
 		font-family: var(--font-mono);
 		font-size: 0.85rem;
 		z-index: 100;
+		overflow-x: auto;
+		scrollbar-width: none; /* keep the 48px bar clean; padding reduction usually avoids the need */
+	}
+	.pdf-controls::-webkit-scrollbar {
+		display: none;
 	}
 
 	.pdf-controls button {
 		background: var(--bg-surface);
 		border: 1px solid var(--border-default);
 		color: var(--text-primary);
-		padding: 0.25rem 0.5rem;
+		padding: 0 0.35rem;
 		border-radius: var(--radius-sm);
 		cursor: pointer;
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		flex-shrink: 0;
+		height: 28px;
+		min-width: 28px;
+		box-sizing: border-box;
+	}
+
+	/* Close button: neutral toolbar styling (not a red standout), turns red on hover. */
+	.close-pdf-btn {
+		color: var(--text-secondary);
+	}
+	.close-pdf-btn:hover {
+		color: var(--danger, #ef4444);
+		border-color: var(--danger, #ef4444) !important;
 	}
 
 	.display-menu-container {

@@ -32,12 +32,36 @@ async fn check_tool_approval(state: &AppState, tool_name: &str, title: &str, con
     }
 }
 
-const WEB_FETCH_LIMIT: usize = 12_000;
+const WEB_FETCH_LIMIT: usize = 6_000;
 
 /// System preamble for the note assistant. Kept as a single source of truth so
 /// the startup cache warm-up replays the exact same prefix the live agent uses.
-/// The leading `/no_think` disables Qwen3 reasoning.
-pub const MYELIN_PREAMBLE: &str = "/no_think\nYou are Myelin's built-in note assistant. You are also a capable general assistant with broad knowledge of history, art, science, culture, and everyday topics.\n\nCORE BEHAVIOR (most important):\n- Be decisive and DO THE TASK. NEVER ask the user clarifying or permission questions about formatting, length, structure, or what to include. Make reasonable choices and act immediately.\n- Treat replies like \"yes\", \"sure\", \"ok\", \"anything\", \"anything you like\", \"you decide\", \"go ahead\" as approval to proceed RIGHT NOW with your best version.\n- You have extensive general knowledge. Answer factual or general questions (e.g. \"describe the Mona Lisa\") directly and fully from your own knowledge. NEVER say you cannot browse the internet, cannot access your training data, or need to search — just give the answer.\n- After a tool reports success, STOP calling tools. Do NOT re-read, search, or verify the note. Reply with one short sentence confirming what you did.\n- If a tool reports an error or a refusal, tell the user exactly what went wrong. NEVER claim success when a tool did not succeed.\n- Do not repeat the same question or the same tool call. Make progress on every turn.\n\nWRITING NOTES:\n- When the user asks you to write, create, draft, add, generate, or 'write a note' about something, IMMEDIATELY call rewrite_note (or append_note to extend existing content) with the COMPLETE, finished text. Do not ask what to include — just write it well, in Markdown.\n- rewrite_note, append_note and replace_text ALWAYS act on the note currently open in the editor. You do NOT need to read or search for it first. Pass the title shown in 'Open Note:' and the full content; one call is enough.\n- The content field must be the actual final text — never a description of what you did, and never a placeholder.\n- Use replace_text to change a specific snippet; use rewrite_note with an empty string to clear the note.\n\nTOOLS (only when actually needed):\n- search_notes: ONLY to find OTHER notes by keyword when the user explicitly refers to them. Never to interpret a message or read the currently open note (its contents are already provided below).\n- fetch_web_page: only when the user gives a URL.\n- Greetings and small talk (\"hi\", \"gg\", \"thanks\"): reply briefly in chat with no tools.";
+/// Deliberately small: a role line plus the minimum tool guidance needed to keep
+/// the model from flooding the (memory-bounded) context with stray web/search
+/// calls or describing edits in chat instead of writing them. Tool schemas are
+/// still passed separately via `tool_specs` on every request.
+pub const MYELIN_PREAMBLE: &str = concat!(
+    "You are the assistant inside Myelin, a local notes app, powered by an open model running locally on the user's own machine. If asked what or who you are, identify yourself as Myelin's built-in AI assistant — do not claim to be proprietary or commercial software. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n",
+    "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call the write_note tool with the full result in `content`. The ONLY way to change the note is that tool call: never describe the edit, print the new note text, or type \"write_note\" or \"content:\" in your chat reply.\n",
+    "- Write real Markdown: a heading line starts with \"# \" (a hash then a space), \"## \" for a sub-heading; bullets start with \"- \". \"**bold**\" is NOT a heading.\n",
+    "- When editing, reproduce every line that should stay and change only what was asked. Never return an empty or much-shorter note unless the user explicitly asked to clear or shorten it.\n",
+    "- When the user asks you to write what you found, researched, learned, or understood, put the ACTUAL information into the note as a finished, self-contained note — the real facts, perspectives, and details (use what you found in the conversation plus what you reliably know about the topic). NEVER write a question, an offer to do more (e.g. \"Would you like me to fetch the full text?\"), or a promise to act later (e.g. \"I will now fetch...\") as the note's content — the note holds finished information, not conversation. If you lack some detail, still write the best complete note you can from what you know rather than asking or deferring.\n",
+    "- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.\n",
+    "- NEVER write to or edit the note unless the user's message is a direct instruction to write, edit, or modify. Questions about what a word means (\"what does append mean\"), what you can do, or general inquiries are NOT requests to write — just answer in chat. Likewise, never simulate a tool call with handwritten XML or JSON in your text reply — the only way to call a tool is through the real tool call mechanism.\n\n",
+    "Worked examples show only the editing style — the resulting note text you must pass as write_note's `content` (always via the tool call, never printed in chat):\n\n",
+    "Example 1\n",
+    "NOTE:\n**Cars**\nThey have engines.\n",
+    "USER: make the title a heading\n",
+    "(resulting note)\n# Cars\nThey have engines.\n\n",
+    "Example 2\n",
+    "NOTE:\n## Intro\nPersonal computers changed everything.\n## History\nIt began in the 1970s.\n",
+    "USER: remove all headings\n",
+    "(resulting note)\nIntro\nPersonal computers changed everything.\nHistory\nIt began in the 1970s.\n\n",
+    "Example 3\n",
+    "NOTE: (empty)\n",
+    "USER: write a short note titled Sea\n",
+    "(resulting note)\n# Sea\nThe sea is vast and restless."
+);
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
 /// order they are registered in [`build_myelin_agent`]. Used only by the startup
@@ -53,49 +77,33 @@ pub fn tool_specs() -> Vec<Value> {
     vec![
         spec(
             "read_note",
-            "Read the full markdown content of a note by its ID.",
+            "Read the full Markdown of ANOTHER note by its id (ids come from search_notes). Do NOT use this for the note currently open in the editor — that note's content is already provided in the prompt below.",
             serde_json::json!({
                 "type": "object",
-                "properties": { "note_id": { "type": "string", "description": "The ID of the note to read. Found via search." } },
+                "properties": { "note_id": { "type": "string", "description": "The id of a DIFFERENT note to read (from search_notes results), not the open note." } },
                 "required": ["note_id"]
             }),
         ),
         spec(
-            "rewrite_note",
-            "Fully replace the existing note content. Use this to rewrite the note, or to clear the note (by passing an empty string). Do not use this to add a paragraph; use append_note for that. The content must be the full final note body.",
+            "write_note",
+            "Edit the note currently OPEN in the editor — this tool only ever changes that one open note and NEVER creates a separate new note. It handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the open note. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "The complete final note body to save. Never use placeholders like [insert poem here]." },
-                    "tags": { "type": "array", "items": { "type": "string" } }
+                    "content": { "type": "string", "description": "The text payload. For replace/append it is the note body or the new text; for edit it is the replacement (empty string deletes the matched text). Never a placeholder like [insert poem here]." },
+                    "mode": { "type": "string", "enum": ["replace", "append", "edit"], "description": "How to apply content: replace (default, whole body) | append (add to end) | edit (swap the `find` snippet)." },
+                    "find": { "type": "string", "description": "Required only when mode is \"edit\": the exact existing text in the note to replace or delete." }
                 },
-                "required": ["title", "content"]
+                "required": ["content"]
             }),
         ),
         spec(
-            "replace_text",
-            "Find exact text in the note and replace it with new text. Use an empty string for replacement_text to delete the target_text. Use this when the user asks to modify, replace, or remove a specific small portion of the note without rewriting everything.",
+            "format_note",
+            "Apply a structural Markdown transform to the OPEN note, performed exactly in code (not by you): remove headings/bold/italic/bullets/numbering/links/images/code/quotes/strikethrough/dividers/blank lines, strip ALL formatting to plain text, convert headings<->bold, promote/demote headings, convert between bulleted and numbered lists, or change case. ALWAYS prefer this over write_note when the user asks to remove, strip, or convert any of these — it is reliable where a full rewrite is not.",
             serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "target_text": { "type": "string", "description": "The exact string of text to find and remove/replace. Must be an exact match of what is in the note." },
-                    "replacement_text": { "type": "string", "description": "The new text to insert instead. Use an empty string to delete the target_text." }
-                },
-                "required": ["title", "target_text", "replacement_text"]
-            }),
-        ),
-        spec(
-            "append_note",
-            "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use rewrite_note for that.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "Only the new content to append to the existing note. Do not repeat the whole note body and do not use placeholders." }
-                },
-                "required": ["title", "content"]
+                "properties": { "operation": { "type": "string", "enum": FORMAT_OPS, "description": "Which structural transform to apply to the open note." } },
+                "required": ["operation"]
             }),
         ),
         spec(
@@ -108,6 +116,39 @@ pub fn tool_specs() -> Vec<Value> {
             }),
         ),
         spec(
+            "web_search",
+            "Search the web for current information when the user asks you to look something up, search online, or find recent info and you have NO URL. Returns a ranked list of {title, url, snippet}. After searching, call fetch_web_page on the most relevant result to read it in full. Do NOT use this when the user already gave a URL — fetch that directly.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The search query." },
+                    "count": { "type": "integer", "description": "How many results to return (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        ),
+        spec(
+            "search_documents",
+            "Search the user's ingested source documents (PDFs, books, web pages, etc.) for passages relevant to a query, and get the most relevant excerpts with their source. Use this when the user asks about their documents, sources, a PDF, a book, or a paper — NOT for the note open in the editor (that text is already in the prompt).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for in the documents." },
+                    "count": { "type": "integer", "description": "How many passages to return (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        ),
+        spec(
+            "find_in_note",
+            "Check whether an exact word or phrase appears in the note currently open in the editor, and how many times. Use this whenever the user asks if the note contains a word, or to find/locate a specific word in the note — it searches the exact text reliably instead of you scanning by eye.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string", "description": "The exact word or phrase to look for in the open note." } },
+                "required": ["query"]
+            }),
+        ),
+        spec(
             "search_notes",
             "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.",
             serde_json::json!({
@@ -115,6 +156,11 @@ pub fn tool_specs() -> Vec<Value> {
                 "properties": { "query": { "type": "string", "description": "The search keywords." } },
                 "required": ["query"]
             }),
+        ),
+        spec(
+            "edit_notebook",
+            "Edit the OPEN Jupyter notebook (.ipynb) one cell at a time. operation \"edit\" replaces cell `index`'s source with `content`; \"insert\" adds a new `cell_type` cell BEFORE `index`; \"delete\" removes cell `index`. Cells are 0-indexed as shown in the notebook listing. Use this for notebooks INSTEAD of write_note.",
+            edit_notebook_params(),
         ),
     ]
 }
@@ -136,49 +182,881 @@ impl std::fmt::Display for ToolError {
 }
 impl std::error::Error for ToolError {}
 
-fn looks_like_placeholder(content: &str) -> bool {
-    let normalized = content.trim().to_lowercase();
-    normalized.contains("[insert")
-        || normalized.contains("placeholder")
-        || normalized.contains("write the poem here")
-        || normalized.contains("add the poem here")
+/// Locate a snippet to edit, tolerating the small mismatches a model makes when
+/// it reproduces existing text: try an exact match, then a trimmed match, then a
+/// whitespace-normalized match (the snippet's words separated by any run of
+/// whitespace). Returns the byte span in `body` to replace.
+fn find_tolerant(body: &str, find: &str) -> Option<(usize, usize)> {
+    if let Some(i) = body.find(find) {
+        return Some((i, i + find.len()));
+    }
+    let trimmed = find.trim();
+    if !trimmed.is_empty() && trimmed.len() != find.len() {
+        if let Some(i) = body.find(trimmed) {
+            return Some((i, i + trimmed.len()));
+        }
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let pattern = tokens
+        .iter()
+        .map(|t| regex::escape(t))
+        .collect::<Vec<_>>()
+        .join(r"\s+");
+    let re = regex::Regex::new(&pattern).ok()?;
+    re.find(body).map(|m| (m.start(), m.end()))
 }
 
-fn looks_like_meta_status(content: &str) -> bool {
-    let normalized = content.trim().to_lowercase();
-    if normalized.starts_with("chat history:") {
-        return true;
-    }
-    // Reject single-line sentences that describe the action rather than being the content.
-    let action_prefix = normalized.starts_with("i have appended ")
-        || normalized.starts_with("i have written ")
-        || normalized.starts_with("i have added ")
-        || normalized.starts_with("i've appended ")
-        || normalized.starts_with("i've written ")
-        || normalized.starts_with("i've added ")
-        || normalized.starts_with("i just appended ")
-        || normalized.starts_with("i just wrote ")
-        || normalized.starts_with("i appended ")
-        || normalized.starts_with("i wrote ")
-        || normalized.starts_with("here is the ")
-        || normalized.starts_with("here's the ")
-        || normalized.starts_with("i've written ")
-        || normalized.starts_with("the note has been ")
-        || normalized.starts_with("the note was ");
-    if action_prefix {
-        return true;
-    }
-    let mentions_note = normalized.contains("note \"")
-        || normalized.contains("in the note")
-        || normalized.contains("to your note")
-        || normalized.contains("to the note")
-        || normalized.contains("successfully");
-    let starts_like_status = normalized.starts_with("here is ")
-        || normalized.starts_with("i've written ")
-        || normalized.starts_with("the note ")
-        || normalized.starts_with("the new ");
+/// An editor text selection the user armed, sent alongside the chat request.
+/// `text` is the selected source markdown; `before`/`after` are short surrounding
+/// context snippets used to pin the exact occurrence so repeats — and a body that
+/// drifts between turns — don't move the target. Sent as text+context rather than
+/// raw offsets to avoid the JS-UTF16 vs Rust-UTF8 index mismatch.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionArg {
+    pub text: String,
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub after: String,
+}
 
-    !content.contains('\n') && mentions_note && starts_like_status
+/// Locate the byte range in `body` an armed selection refers to. Picks the
+/// occurrence of `text` whose surrounding context best matches `before`/`after`,
+/// so it survives repeats and edits elsewhere. None if the text no longer occurs
+/// (the user changed that span — caller falls back to normal planning).
+pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)> {
+    // The selection captured from the rendered editor often has leading/trailing
+    // whitespace that isn't in the source (e.g. it ran past a paragraph), so trim
+    // before matching — we only ever want to replace the text itself.
+    let text = sel.text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // Compare anchors whitespace-tolerantly: the captured selection's boundaries
+    // rarely line up byte-for-byte with the source (markers, stray newlines).
+    let before = sel.before.trim();
+    let after = sel.after.trim();
+    let mut best: Option<(u8, usize, usize)> = None; // (context score, start, end)
+    let mut from = 0;
+    while let Some(rel) = body[from..].find(text) {
+        let start = from + rel;
+        let end = start + text.len();
+        let before_ok = before.is_empty() || body[..start].trim_end().ends_with(before);
+        let after_ok = after.is_empty() || body[end..].trim_start().starts_with(after);
+        let score = before_ok as u8 + after_ok as u8;
+        if best.map(|(s, _, _)| score > s).unwrap_or(true) {
+            best = Some((score, start, end));
+            if score == 2 {
+                break; // both anchors match — definitely the right occurrence
+            }
+        }
+        from = start + 1;
+    }
+    // Fallback for a selection that doesn't match the source verbatim — most often
+    // a FORMATTED span where the rendered selection dropped the markdown markers
+    // (**bold**, `code`, a heading's `# `). find_tolerant matches the inner words
+    // (whitespace-tolerant), so we splice inside the markers and keep them.
+    best.map(|(_, s, e)| (s, e)).or_else(|| find_tolerant(body, text))
+}
+
+/// If the user armed a selection, build a plan that replaces ONLY that span with
+/// the model's `content`, keeping the rest of the note byte-identical. Returns
+/// None (caller falls through to normal planning) when there's no usable span,
+/// the content is empty (deletion is handled separately), or the model
+/// regenerated the surrounding note (its content already contains the text just
+/// before/after the selection → it did a full rewrite, which we honor instead).
+pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> Option<WritePlan> {
+    let content = strip_prompt_markers(content);
+    if content.trim().is_empty() {
+        return None;
+    }
+    let (start, end) = locate_selection(body, sel)?;
+    let regenerated_whole = (!sel.after.trim().is_empty() && content.contains(sel.after.trim()))
+        || (!sel.before.trim().is_empty() && content.contains(sel.before.trim()));
+    if regenerated_whole {
+        return None;
+    }
+    let mut new_body = String::with_capacity(body.len() + content.len());
+    new_body.push_str(&body[..start]);
+    new_body.push_str(&content);
+    new_body.push_str(&body[end..]);
+    Some(WritePlan {
+        new_body,
+        op: WriteOp::EditSnippet,
+    })
+}
+
+/// How the editor should apply a write (drives the streaming UI and chip label).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WriteOp {
+    Replace,
+    Append,
+    EditSnippet,
+}
+
+#[derive(Debug)]
+pub struct WritePlan {
+    pub new_body: String,
+    pub op: WriteOp,
+}
+
+/// Pure decision for `write_note`: given the note's current body and the tool
+/// args, produce the new full body — or an `Err` message to relay back to the
+/// model. Decided from intent, tolerant of the mislabelling models can do:
+///   - explicit `mode == "append"` -> append `content`
+///   - explicit `mode == "replace"` -> whole-body replace, IGNORING any stray
+///     `find` (models often send mode:"replace" with the full note in `content`
+///     AND a leftover `find` — honouring find there garbles the note)
+///   - otherwise a non-empty `find` -> targeted snippet edit/delete
+///   - otherwise (e.g. mode:"edit" with no find, or unspecified) -> replace
+/// `mode` is passed raw ("" when unspecified) so an explicit "replace" can be
+/// told apart from the default. Kept free of `AppState`/Tauri for unit tests.
+pub fn plan_write(
+    current_body: &str,
+    content: &str,
+    mode: &str,
+    find: &str,
+) -> Result<WritePlan, String> {
+    // Some models echo the prompt's note-framing markers into the tool content.
+    // Strip them so they never land in the saved note. This runs before the
+    // intent logic so the absorb-check can still clean an edit.
+    let content = strip_prompt_markers(content);
+    let content = content.as_str();
+    let m = mode.trim().to_lowercase();
+    let has_find = !find.trim().is_empty();
+    let is_append = m == "append";
+    let explicit_replace = m == "replace";
+    // A targeted edit only when a `find` is given and the model did NOT
+    // explicitly ask for a whole-body replace/append.
+    let snippet = has_find && !explicit_replace && !is_append;
+
+    if snippet {
+        match find_tolerant(current_body, find) {
+            Some((start, end)) => {
+                let prefix = &current_body[..start];
+                let suffix = &current_body[end..];
+                // If `content` already contains the surrounding text (so splicing
+                // would duplicate it), the model actually sent the whole updated
+                // body, not a snippet replacement — treat it as a replace. Catches
+                // e.g. find:"blue", content:"The sky is green today." on a note of
+                // "The sky is blue today." (which would otherwise garble).
+                let absorbs = (!prefix.trim().is_empty() && content.starts_with(prefix))
+                    || (!suffix.trim().is_empty() && content.ends_with(suffix));
+                if absorbs {
+                    return Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace });
+                }
+                let mut body = String::with_capacity(current_body.len() + content.len());
+                body.push_str(prefix);
+                body.push_str(content);
+                body.push_str(suffix);
+                Ok(WritePlan { new_body: body, op: WriteOp::EditSnippet })
+            }
+            None => Err("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string()),
+        }
+    } else if is_append {
+        let body = if current_body.trim().is_empty() {
+            content.trim().to_string()
+        } else {
+            format!("{}\n\n{}", current_body.trim_end(), content.trim_start())
+        };
+        Ok(WritePlan { new_body: body, op: WriteOp::Append })
+    } else {
+        // Whole-body replace: explicit replace (find ignored), mode:"edit" with
+        // no find, or unspecified mode.
+        Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace })
+    }
+}
+
+/// Word-boundary check: true if any of `words` (lowercase literals/phrases)
+/// appears as a whole word in the already-lowercased `haystack`. Avoids
+/// substring false hits like "fix" inside "prefix" or "add" inside "address".
+fn starts_with_any(s: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| s.starts_with(p))
+}
+
+fn contains_any_word(haystack: &str, words: &[&str]) -> bool {
+    let alternation = words
+        .iter()
+        .map(|w| regex::escape(w))
+        .collect::<Vec<_>>()
+        .join("|");
+    regex::Regex::new(&format!(r"\b(?:{alternation})\b"))
+        .map(|re| re.is_match(haystack))
+        .unwrap_or(false)
+}
+
+/// Heuristic: does this user message ask to CREATE or MODIFY the open note (as
+/// opposed to just chatting / asking a question)? Used by `select_tools` to
+/// decide whether to offer `write_note` this turn. In Myelin the chat is a
+/// note-assistant sidebar, so virtually every edit verb refers to the open note.
+/// Pure and unit-tested.
+pub fn note_write_intent(message: &str) -> bool {
+    let m = message.trim().to_lowercase();
+    if m.is_empty() {
+        return false;
+    }
+
+    // Short affirmations greenlight a write the user just asked for. The preamble
+    // also treats these as "proceed now", so honour them here too.
+    let affirmation = m.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    const AFFIRMATIONS: &[&str] = &[
+        "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "k", "go ahead",
+        "do it", "please do", "go for it", "sounds good", "anything", "you decide",
+        "proceed", "go",
+    ];
+    if AFFIRMATIONS.contains(&affirmation) {
+        return true;
+    }
+    // Leading affirmation word ("yes please", "sure, go for it"). Limited to
+    // strong single-word affirmations so a question like "ok what is X" is not
+    // mistaken for a write.
+    const LEADING_AFFIRMATIONS: &[&str] =
+        &["yes", "yeah", "yep", "yup", "sure", "absolutely", "definitely"];
+    let first_word = affirmation.split_whitespace().next().unwrap_or("");
+    if LEADING_AFFIRMATIONS.contains(&first_word) {
+        return true;
+    }
+
+    // Questions about what something IS / MEANS are not write requests, even if
+    // the subject happens to be a write verb ("what does append mean" triggers
+    // WRITE_VERBS but is a question, not a directive).
+    if starts_with_any(&m, &["what is ", "what are ", "what does ", "what do ", "what's "])
+        || starts_with_any(&m, &["what can you ", "what cannot you ", "what can't you "])
+        || starts_with_any(&m, &["define ", "definition of ", "meaning of "])
+    {
+        return false;
+    }
+
+    // Strong create/edit verbs. In this app these always target the open note.
+    const WRITE_VERBS: &[&str] = &[
+        "write", "rewrite", "re-write", "create", "draft", "compose", "add",
+        "append", "insert", "generate", "produce", "jot", "fill", "format",
+        "reformat", "restructure", "reorganize", "reorganise", "organize",
+        "organise", "clean up", "cleanup", "tidy", "fix", "correct", "proofread",
+        "improve", "polish", "edit", "revise", "update", "change", "modify",
+        "shorten", "condense", "trim", "expand", "lengthen", "elaborate",
+        "reorder", "rearrange", "remove", "delete", "erase", "replace", "swap",
+        "clear", "empty", "wipe", "blank", "scrap",
+        "bold", "italic", "italicize", "capitalize", "capitalise", "continue",
+        "extend", "finish", "translate", "rephrase", "reword",
+        // Transform phrasings that don't use a bare edit verb.
+        "make it", "make this", "make the", "turn it", "turn this", "convert it",
+        "convert this", "shorter", "longer", "concise",
+    ];
+    if contains_any_word(&m, WRITE_VERBS) {
+        return true;
+    }
+
+    // Soft content verbs (explain/describe/...) only count as a note write when
+    // the message explicitly points at the note ("explain X in the note").
+    const NOTE_TARGETS: &[&str] = &[
+        "the note", "this note", "in the note", "to the note", "into the note",
+        "my note", "the document", "the doc", "the page",
+    ];
+    const SOFT_VERBS: &[&str] = &[
+        "explain", "describe", "list", "summarize", "summarise", "answer",
+        "outline", "detail", "note down", "record",
+    ];
+    let targets_note = NOTE_TARGETS.iter().any(|t| m.contains(t));
+    if targets_note && contains_any_word(&m, SOFT_VERBS) {
+        return true;
+    }
+
+    false
+}
+
+/// Pure greeting / acknowledgement vocabulary. If the whole message (<=4 words)
+/// is made of these, it's small talk → offer NO tools so the model can't
+/// reflexively call one. (Pattern borrowed from the ggufplay experiment.)
+const SMALL_TALK: &[&str] = &[
+    "hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "gg", "wsg", "thanks",
+    "thank", "you", "thankyou", "thx", "ty", "cheers", "ok", "okay", "k", "kk",
+    "cool", "nice", "great", "awesome", "perfect", "got", "it", "gotcha",
+    "sounds", "good", "sure", "yep", "yeah", "yup", "yes", "no", "nope", "lol",
+    "haha", "hah", "np", "problem", "welcome", "morning", "afternoon", "evening",
+    "night", "so", "much", "please", "mate", "man", "bro", "how", "are", "whats",
+    "up", "doing", "going",
+];
+
+pub fn is_small_talk(message: &str) -> bool {
+    let words: Vec<String> = message
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    if words.is_empty() {
+        return true;
+    }
+    if words.len() > 4 {
+        return false;
+    }
+    words.iter().all(|w| SMALL_TALK.contains(&w.as_str()))
+}
+
+/// Does the message refer to OTHER notes in the workspace (search/read), as
+/// opposed to the open note whose content is already in the prompt? Precise on
+/// purpose: "write a note about X" (creating content in the OPEN note) must NOT
+/// match, or it would needlessly offer search/read.
+pub fn wants_other_notes(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("other note")
+        || m.contains("my notes")
+        || m.contains("another note")
+        || m.contains("which note")
+        || m.contains("note with id")
+        || m.contains("note id")
+        || m.contains("note titled")
+        || m.contains("note called")
+        || m.contains("read the note with")
+        || m.contains("look up")
+        || m.contains("search my note")
+        || m.contains("search note")
+        || m.contains("search for a note")
+        || m.contains("find a note")
+        || m.contains("find the note")
+        || m.contains("find my note")
+        || (contains_any_word(&m, &["search", "find"]) && m.contains("notes"))
+}
+
+/// TLD allowlist used to spot a BARE domain (example.com, speediq.ai) in a
+/// message while keeping real file names out (notes.txt, model.gguf, poem.md are
+/// NOT web targets). Ported from the ggufplay gating experiment.
+fn has_web_domain(m: &str) -> bool {
+    const WEB_TLD: &str =
+        "com|org|net|io|ai|dev|co|app|gov|edu|me|xyz|info|biz|us|uk|ca|de|fr|in|cloud|tech|news|gg|so";
+    regex::Regex::new(&format!(r"(?i)\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:{WEB_TLD})\b"))
+        .map(|re| re.is_match(m))
+        .unwrap_or(false)
+}
+
+/// Real intent to SEARCH the open web (no URL in hand) — kept precise (explicit
+/// search phrasing or an online/web/internet qualifier) so it doesn't fire on
+/// incidental words or clobber note-search. web_search finds pages; the model
+/// then opens one with fetch_web_page.
+pub fn wants_search(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("search the web")
+        || m.contains("search online")
+        || m.contains("web search")
+        || m.contains("search the internet")
+        || m.contains("on the internet")
+        || m.contains("browse the web")
+        || m.contains("look online")
+        || m.contains("look it up online")
+        || m.contains("google ")
+        || (contains_any_word(&m, &["search", "find", "look", "lookup"])
+            && contains_any_word(&m, &["online", "web", "internet"]))
+}
+
+/// True only when the user explicitly asked to empty/clear/delete the WHOLE
+/// note. Deliberately narrow: "remove all headings", "delete the intro", etc.
+/// are partial edits and must NOT match — they keep the rest of the note.
+pub fn wants_clear(message: &str) -> bool {
+    let m = message.to_lowercase();
+    const PHRASES: &[&str] = &[
+        "clear the note",
+        "clear note",
+        "clear it",
+        "empty the note",
+        "empty it",
+        "make it blank",
+        "make it empty",
+        "delete the note",
+        "delete everything",
+        "delete all the text",
+        "delete all text",
+        "remove everything",
+        "remove all the text",
+        "remove all text",
+        "erase everything",
+        "erase the note",
+        "wipe the note",
+        "start over",
+        "start fresh",
+        "blank note",
+    ];
+    PHRASES.iter().any(|p| m.contains(p))
+}
+
+/// True for a request to remove PART of the open note (a paragraph, heading,
+/// section, line, sentence, etc.) and nothing else — as opposed to a whole-note
+/// clear ([`wants_clear`]) or a removal mixed with new content. Used by
+/// `write_note` to do a surgical deletion from the real body instead of trusting
+/// the model's `content` (which models tend to fill with the whole regenerated
+/// note — slow, and a truncation risk on long notes).
+pub fn wants_partial_removal(message: &str) -> bool {
+    if wants_clear(message) {
+        return false;
+    }
+    let m = message.to_lowercase();
+    let has_remove = contains_any_word(&m, &["remove", "delete", "erase", "cut", "drop", "omit"])
+        || m.contains("get rid of")
+        || m.contains("take out")
+        || m.contains("strip out");
+    // A removal mixed with new/changed content ("delete X and add Y", "replace the
+    // intro") is a real edit, not a pure deletion — leave it to the model's content.
+    let has_add = contains_any_word(
+        &m,
+        &[
+            "add", "insert", "append", "include", "put", "write", "replace", "change",
+            "rewrite", "rename", "make", "turn",
+        ],
+    );
+    has_remove && !has_add
+}
+
+/// Every operation `apply_format_op` understands. Kept in sync with the
+/// format_note tool's `operation` enum and used to validate the model's choice.
+pub const FORMAT_OPS: &[&str] = &[
+    "remove_headings",
+    "remove_bold",
+    "remove_italic",
+    "remove_emphasis",
+    "remove_bullets",
+    "remove_numbering",
+    "remove_links",
+    "remove_images",
+    "remove_code",
+    "remove_blockquotes",
+    "remove_strikethrough",
+    "remove_horizontal_rules",
+    "remove_blank_lines",
+    "strip_markdown",
+    "headings_to_bold",
+    "bold_to_headings",
+    "promote_headings",
+    "demote_headings",
+    "bullets_to_numbered",
+    "numbered_to_bullets",
+    "tasks_to_bullets",
+    "uppercase",
+    "lowercase",
+    "title_case",
+];
+
+pub fn is_format_op(op: &str) -> bool {
+    FORMAT_OPS.contains(&op)
+}
+
+/// Strip bold/italic emphasis. Bold uses doubled markers (** or __), italic
+/// single (* or _). Bold is processed first; when only italic is being removed,
+/// the doubled markers are protected so the single-marker pass can't chew them
+/// (Rust regex has no lookaround).
+fn strip_emphasis(body: &str, bold: bool, italic: bool) -> String {
+    let re = |p: &str| regex::Regex::new(p).unwrap();
+    let mut s = body.to_string();
+    if bold {
+        s = re(r"\*\*(.+?)\*\*").replace_all(&s, "$1").into_owned();
+        s = re(r"__(.+?)__").replace_all(&s, "$1").into_owned();
+    }
+    if italic {
+        let protect = !bold;
+        if protect {
+            s = s.replace("**", "\u{1}B").replace("__", "\u{1}U");
+        }
+        s = re(r"\*(.+?)\*").replace_all(&s, "$1").into_owned();
+        s = re(r"(?:^|\b)_(.+?)_(?:\b|$)").replace_all(&s, "$1").into_owned();
+        if protect {
+            s = s.replace("\u{1}B", "**").replace("\u{1}U", "__");
+        }
+    }
+    s
+}
+
+/// Renumber/convert list-item markers. `to` = "number" (1. 2. … reset per block)
+/// or "bullet" (- ). Operates on a contiguous run of list lines.
+fn convert_lists(body: &str, to: &str) -> String {
+    let bullet = regex::Regex::new(r"^(\s*)[-*+][ \t]+").unwrap();
+    let numbered = regex::Regex::new(r"^(\s*)\d+[.)][ \t]+").unwrap();
+    let mut out: Vec<String> = Vec::new();
+    let mut counter = 0u32;
+    for line in body.split('\n') {
+        let b = bullet.captures(line);
+        let n = numbered.captures(line);
+        let caps = b.as_ref().or(n.as_ref());
+        match caps {
+            Some(c) => {
+                counter += 1;
+                let whole = c.get(0).unwrap();
+                let indent = c.get(1).map(|m| m.as_str()).unwrap_or("");
+                let rest = &line[whole.end()..];
+                if to == "number" {
+                    out.push(format!("{indent}{counter}. {rest}"));
+                } else {
+                    out.push(format!("{indent}- {rest}"));
+                }
+            }
+            None => {
+                counter = 0;
+                out.push(line.to_string());
+            }
+        }
+    }
+    out.join("\n")
+}
+
+fn to_title_case(body: &str) -> String {
+    body.split('\n')
+        .map(|line| {
+            line.split(' ')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(c) => c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Recognize a deterministic Markdown transform the model is bad at but a regex
+/// nails (strip/convert headings, emphasis, lists, links, code, …). Returns the
+/// `apply_format_op` operation, or None. Never fires on a request to CREATE fresh
+/// content ("write a numbered list…") so it can't hijack a real write.
+pub fn detect_format_op(message: &str) -> Option<&'static str> {
+    let m = message.to_lowercase();
+    let creating = contains_any_word(
+        &m,
+        &["write", "create", "draft", "compose", "generate", "give", "jot"],
+    );
+
+    // ---- removals (need a removal verb; very low false-positive) ----
+    let removal = contains_any_word(&m, &["remove", "delete", "strip", "drop", "clear", "kill"])
+        || m.contains("get rid of")
+        || m.contains("take out")
+        || m.contains("without the")
+        || m.contains("without any")
+        || m.contains("no more");
+    if removal {
+        if m.contains("all formatting") || m.contains("all markdown") || m.contains("markdown formatting") || m.contains("plain text") {
+            return Some("strip_markdown");
+        }
+        if m.contains("heading") || m.contains("header") {
+            return Some("remove_headings");
+        }
+        if (m.contains("bold") && m.contains("italic")) || m.contains("emphasis") {
+            return Some("remove_emphasis");
+        }
+        if m.contains("bold") {
+            return Some("remove_bold");
+        }
+        if m.contains("italic") {
+            return Some("remove_italic");
+        }
+        if m.contains("image") || m.contains("picture") {
+            return Some("remove_images");
+        }
+        if m.contains("link") {
+            return Some("remove_links");
+        }
+        if m.contains("code") {
+            return Some("remove_code");
+        }
+        if m.contains("quote") {
+            return Some("remove_blockquotes");
+        }
+        if m.contains("strikethrough") || m.contains("strike-through") || m.contains("strike through") {
+            return Some("remove_strikethrough");
+        }
+        if m.contains("divider") || m.contains("horizontal rule") || m.contains("horizontal line") || m.contains("separator") {
+            return Some("remove_horizontal_rules");
+        }
+        if m.contains("blank line") || m.contains("empty line") || m.contains("extra line") {
+            return Some("remove_blank_lines");
+        }
+        if m.contains("checkbox") || m.contains("check box") || m.contains("task list") {
+            return Some("tasks_to_bullets");
+        }
+        if m.contains("number") {
+            return Some("remove_numbering");
+        }
+        if m.contains("bullet") {
+            return Some("remove_bullets");
+        }
+    }
+
+    // Past here we are transforming EXISTING content; never hijack a fresh write
+    // ("write this in uppercase", "create a numbered list …").
+    if creating {
+        return None;
+    }
+
+    // ---- case transforms ----
+    if m.contains("uppercase") || m.contains("upper case") || m.contains("all caps") || m.contains("capital letters") {
+        return Some("uppercase");
+    }
+    if m.contains("lowercase") || m.contains("lower case") {
+        return Some("lowercase");
+    }
+    if m.contains("title case") || m.contains("titlecase") {
+        return Some("title_case");
+    }
+
+    // ---- conversions ----
+    if (m.contains("heading") || m.contains("header")) && m.contains("bold") {
+        let hi = m.find("head").unwrap_or(usize::MAX);
+        let bi = m.find("bold").unwrap_or(usize::MAX);
+        return Some(if hi < bi { "headings_to_bold" } else { "bold_to_headings" });
+    }
+    if m.contains("heading") || m.contains("header") {
+        if m.contains("promote") || m.contains("up a level") || m.contains("larger") {
+            return Some("promote_headings");
+        }
+        if m.contains("demote") || m.contains("down a level") || m.contains("smaller") {
+            return Some("demote_headings");
+        }
+    }
+    let convert = contains_any_word(&m, &["convert", "change", "turn", "make", "switch"])
+        || m.contains(" to ")
+        || m.contains(" into ");
+    if convert && (m.contains("bullet") || m.contains("number") || m.contains("ordered")) {
+        // The TARGET style is the one mentioned LAST ("turn the numbered list
+        // into bullets" → target = bullets → numbered_to_bullets).
+        let bullet_pos = m.rfind("bullet");
+        let number_pos = m.rfind("number").or_else(|| m.rfind("ordered"));
+        match (bullet_pos, number_pos) {
+            (Some(b), Some(n)) => {
+                return Some(if b > n { "numbered_to_bullets" } else { "bullets_to_numbered" })
+            }
+            (Some(_), None) => return Some("numbered_to_bullets"),
+            (None, Some(_)) => return Some("bullets_to_numbered"),
+            (None, None) => {}
+        }
+    }
+    None
+}
+
+/// Apply a deterministic Markdown transform. Done in code precisely so the
+/// model never has to (and never gets to wipe or echo the note).
+pub fn apply_format_op(body: &str, op: &str) -> String {
+    let re = |p: &str| regex::Regex::new(p).unwrap();
+    match op {
+        // ---- removals ----
+        "remove_headings" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+").replace_all(body, "").into_owned(),
+        "remove_bold" => strip_emphasis(body, true, false),
+        "remove_italic" => strip_emphasis(body, false, true),
+        "remove_emphasis" => strip_emphasis(body, true, true),
+        "remove_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+").replace_all(body, "$1").into_owned(),
+        "remove_numbering" => re(r"(?m)^([ \t]*)\d+[.)][ \t]+").replace_all(body, "$1").into_owned(),
+        // Keep link/alt text; drop the (url). Protect images during the link pass.
+        "remove_links" => {
+            let protected = body.replace("![", "\u{1}I");
+            let unlinked = re(r"\[([^\]]*)\]\([^)]*\)").replace_all(&protected, "$1").into_owned();
+            unlinked.replace("\u{1}I", "![")
+        }
+        "remove_images" => re(r"!\[[^\]]*\]\([^)]*\)").replace_all(body, "").into_owned(),
+        // Fenced blocks first (keep inner code), then inline spans.
+        "remove_code" => {
+            let no_fence = re(r"(?s)```[^\n]*\n(.*?)```").replace_all(body, "$1").into_owned();
+            re(r"`([^`\n]+)`").replace_all(&no_fence, "$1").into_owned()
+        }
+        "remove_blockquotes" => re(r"(?m)^[ \t]{0,3}>[ \t]?").replace_all(body, "").into_owned(),
+        "remove_strikethrough" => re(r"~~(.+?)~~").replace_all(body, "$1").into_owned(),
+        "remove_horizontal_rules" => re(r"(?m)^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*\n?")
+            .replace_all(body, "")
+            .into_owned(),
+        "remove_blank_lines" => re(r"\n{3,}").replace_all(body, "\n\n").into_owned(),
+        // Everything → plain text, in a safe order.
+        "strip_markdown" => {
+            let mut s = apply_format_op(body, "remove_code");
+            s = apply_format_op(&s, "remove_images");
+            s = apply_format_op(&s, "remove_links");
+            s = apply_format_op(&s, "remove_headings");
+            s = apply_format_op(&s, "remove_blockquotes");
+            s = apply_format_op(&s, "remove_horizontal_rules");
+            s = apply_format_op(&s, "remove_bullets");
+            s = apply_format_op(&s, "remove_numbering");
+            s = apply_format_op(&s, "remove_strikethrough");
+            strip_emphasis(&s, true, true)
+        }
+        // ---- conversions ----
+        "headings_to_bold" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$").replace_all(body, "**$1**").into_owned(),
+        "bold_to_headings" => re(r"(?m)^[ \t]*\*\*(.+?)\*\*[ \t]*$").replace_all(body, "# $1").into_owned(),
+        // ##→# (one level up); h1 has no second # so is left alone.
+        "promote_headings" => re(r"(?m)^#(#+[ \t])").replace_all(body, "$1").into_owned(),
+        // #→## (one level down); h6 won't match so is capped.
+        "demote_headings" => re(r"(?m)^(#{1,5})([ \t])").replace_all(body, "#$1$2").into_owned(),
+        "bullets_to_numbered" => convert_lists(body, "number"),
+        "numbered_to_bullets" => convert_lists(body, "bullet"),
+        "tasks_to_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+").replace_all(body, "$1- ").into_owned(),
+        "uppercase" => body.to_uppercase(),
+        "lowercase" => body.to_lowercase(),
+        "title_case" => to_title_case(body),
+        _ => body.to_string(),
+    }
+}
+
+/// Does the message ask whether a specific word/phrase is in the OPEN note (or
+/// to find/locate one there)? Routed to the deterministic find_in_note tool so
+/// the model doesn't have to eyeball-scan the text and get it wrong.
+pub fn wants_find(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("the word")
+        || m.contains("the phrase")
+        || m.contains("the term")
+        || m.contains("search the note")
+        || (contains_any_word(&m, &["find", "locate", "see", "contains", "contain", "appear", "appears", "mention", "mentioned"])
+            && contains_any_word(&m, &["note", "here", "text", "above"]))
+}
+
+/// Does the message ask about the user's ingested SOURCE documents (PDF/book/
+/// paper/source) — as opposed to the note open in the editor? Precise so it
+/// doesn't fire on "this note".
+pub fn wants_documents(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("the pdf")
+        || m.contains("this pdf")
+        || m.contains("the document")
+        || m.contains("this document")
+        || m.contains("my document")
+        || m.contains("the source")
+        || m.contains("the book")
+        || m.contains("this book")
+        || m.contains("the paper")
+        || m.contains("the article")
+        || m.contains("according to the")
+        || m.contains("in the text")
+}
+
+/// Does the message ask to fetch a specific web page — a full URL, a bare
+/// domain, or an explicit "fetch/open/visit the page"?
+pub fn wants_fetch(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("http://")
+        || m.contains("https://")
+        || m.contains("www.")
+        || has_web_domain(&m)
+        || (contains_any_word(&m, &["fetch", "download", "open", "visit", "go to", "load", "scrape"])
+            && contains_any_word(&m, &["page", "url", "site", "website", "link"]))
+}
+
+/// True when recent conversation shows an ACTIVE note-editing thread, so a
+/// follow-up correction that carries no fresh verb ("no, that's wrong", "you
+/// didn't do it", a typo'd "formate it") should still get write_note. Without
+/// this, per-message gating strips the tool on those turns and the model can
+/// only claim success in chat — the "New note 18" bug. Looks back over the last
+/// few user turns for any write intent. Pass recent USER messages (any order).
+pub fn in_edit_thread(recent_user_messages: &[&str]) -> bool {
+    recent_user_messages
+        .iter()
+        .rev()
+        .take(4)
+        .any(|m| note_write_intent(m))
+}
+
+/// Per-message tool gating: hand the model ONLY the tools its message warrants,
+/// so the model can't misfire on a tool it was never given. write_note is
+/// the primary action (the open note is the workspace); search_notes/read_note
+/// and fetch_web_page are opt-in by intent; small talk gets nothing. When
+/// `edit_thread` is set, write_note stays available even without a fresh verb so
+/// follow-up corrections keep editing the note.
+pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Vec<Value> {
+    select_tools_cfg(message, has_open_note, edit_thread, true, true)
+}
+
+/// Filter the full tool spec list down to a set of tool names.
+fn specs_for(names: &[&str]) -> Vec<Value> {
+    tool_specs()
+        .into_iter()
+        .filter(|t| {
+            t["function"]["name"]
+                .as_str()
+                .map(|n| names.contains(&n))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Like [`select_tools`], but with the two assist layers toggled independently:
+///
+/// - `gating` — per-message tool gating: hand the model only the tools its
+///   message warrants. Off → the full general tool set is offered every turn and
+///   the model chooses for itself (suited to larger, more capable models).
+/// - `deterministic` — the deterministic correctness tools: route structural
+///   cleanups to the regex `format_note` tool (instead of an LLM rewrite) and
+///   word lookups to `find_in_note`. These are *correctness* assists, not a
+///   gating crutch, so they apply whether or not gating is on.
+pub fn select_tools_cfg(
+    message: &str,
+    has_open_note: bool,
+    edit_thread: bool,
+    gating: bool,
+    deterministic: bool,
+) -> Vec<Value> {
+    // Deterministic format override (independent of gating): a clean whole-doc
+    // structural cleanup (remove all headings/bold/bullets) goes to the regex
+    // format_note tool, exclusively, so the model can't fumble the rewrite —
+    // echo the note back unchanged, or empty it. Regex beats an LLM rewrite at
+    // this for any model size, which is why it sits above gating.
+    if deterministic && has_open_note && detect_format_op(message).is_some() {
+        return specs_for(&["format_note"]);
+    }
+
+    // Gating off: offer the full general tool set every turn and let the model
+    // decide. Read/search tools are harmless on a misfire, so they're always on
+    // (this is what keeps web search working — gating's brittle keyword routing
+    // was the thing that broke it). The DESTRUCTIVE write tool is the exception:
+    // it still needs edit intent, so a small model can't misfire it on a question
+    // or greeting and clobber the note (the "what can you do" → wrote the title
+    // bug). find_in_note rides along when the deterministic layer is on.
+    if !gating {
+        let mut names = vec![
+            "search_notes",
+            "read_note",
+            "search_documents",
+            "fetch_web_page",
+            "web_search",
+        ];
+        if has_open_note && (note_write_intent(message) || edit_thread) {
+            names.push("write_note");
+        }
+        if deterministic && has_open_note && wants_find(message) {
+            names.push("find_in_note");
+        }
+        return specs_for(&names);
+    }
+
+    // Gating on: hand the model ONLY the tools its message warrants.
+    if is_small_talk(message) {
+        return Vec::new();
+    }
+    let mut names: Vec<&str> = Vec::new();
+    // detect_format_op is included so a format request still gets write_note when
+    // the deterministic format path is OFF (when it's on, we returned above).
+    if has_open_note
+        && (note_write_intent(message) || edit_thread || detect_format_op(message).is_some())
+    {
+        names.push("write_note");
+    }
+    if wants_other_notes(message) {
+        names.push("search_notes");
+        names.push("read_note");
+    }
+    if wants_search(message) {
+        names.push("web_search");
+        names.push("fetch_web_page"); // so it can open a result it found
+    }
+    if wants_documents(message) {
+        names.push("search_documents");
+    }
+    if deterministic && has_open_note && wants_find(message) {
+        names.push("find_in_note");
+    }
+    if wants_fetch(message) {
+        names.push("fetch_web_page");
+    }
+    specs_for(&names)
 }
 
 #[derive(Clone)]
@@ -196,13 +1074,13 @@ impl Tool for ReadNoteTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "read_note".to_string(),
-            description: "Read the full markdown content of a note by its ID.".to_string(),
+            description: "Read the full Markdown of ANOTHER note by its id (ids come from search_notes). Do NOT use this for the note currently open in the editor — that note's content is already provided in the prompt below.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "note_id": {
                         "type": "string",
-                        "description": "The ID of the note to read. Found via search."
+                        "description": "The id of a DIFFERENT note to read (from search_notes results), not the open note."
                     }
                 },
                 "required": ["note_id"]
@@ -233,193 +1111,162 @@ impl Tool for ReadNoteTool {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct RewriteNoteArgs {
-    title: String,
+pub struct WriteNoteArgs {
+    /// The text payload. For replace/append it is the note body or new text; for
+    /// edit it is the replacement (empty string deletes the matched text).
     content: String,
-    tags: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct AppendNoteArgs {
-    title: String,
-    content: String,
+    /// "replace" (default, whole body) | "append" (add to end) | "edit" (swap `find`).
+    #[serde(default)]
+    mode: Option<String>,
+    /// Required only when `mode` is "edit": the exact existing text to replace.
+    #[serde(default)]
+    find: Option<String>,
 }
 
 #[derive(Clone)]
-pub struct RewriteNoteTool {
+pub struct WriteNoteTool {
     pub state: AppState,
 }
 
-impl Tool for RewriteNoteTool {
-    const NAME: &'static str = "rewrite_note";
+impl Tool for WriteNoteTool {
+    const NAME: &'static str = "write_note";
 
     type Error = ToolError;
-    type Args = RewriteNoteArgs;
+    type Args = WriteNoteArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
-            name: "rewrite_note".to_string(),
+            name: "write_note".to_string(),
             description:
-                "Fully replace the existing note content. Use this to rewrite the note, or to clear the note (by passing an empty string). Do not use this to add a paragraph; use append_note for that. The content must be the full final note body."
+                "Edit the note currently OPEN in the editor — this tool only ever changes that one open note and NEVER creates a separate new note. It handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the open note. Only call this tool when the user EXPLICITLY asked to write or edit the note — never on its own. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "The complete final note body to save. Never use placeholders like [insert poem here]." },
-                    "tags": { "type": "array", "items": { "type": "string" } }
+                    "content": { "type": "string", "description": "The text payload. For replace/append it is the note body or the new text; for edit it is the replacement (empty string deletes the matched text). Never a placeholder like [insert poem here]." },
+                    "mode": { "type": "string", "enum": ["replace", "append", "edit"], "description": "How to apply content: replace (default, whole body) | append (add to end) | edit (swap the `find` snippet)." },
+                    "find": { "type": "string", "description": "Required only when mode is \"edit\": the exact existing text in the note to replace or delete." }
                 },
-                "required": ["title", "content"]
+                "required": ["content"]
             }),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if !self.state.latest_chat_allows_note_mutation() {
-            return Ok(
-                "Refused to write because the latest user message did not explicitly ask to modify a note."
-                    .to_string(),
-            );
-        }
+        // Pass mode raw ("" when unspecified) so the planner can tell an explicit
+        // "replace" from the default.
+        let mode = args.mode.as_deref().unwrap_or("").to_string();
+        let content = args.content;
+        let find = args.find.clone().unwrap_or_default();
 
-        if let Err(msg) = check_tool_approval(&self.state, "Rewrite Note", &args.title, &args.content).await {
-            return Ok(msg);
-        }
-        let display_name = if args.content.trim().is_empty() {
-            "Clear Note"
-        } else {
-            "Rewrite Note"
+        // Resolve the open note up front — needed for the tool chip, approval
+        // dialog title, and the actual save. Writes always target the open note.
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => {
+                return Ok("No note is currently open to write to. Creating new notes from the sidebar chat is not allowed.".to_string());
+            }
         };
-        self.state
-            .record_chat_tool(display_name, args.title.clone());
-        let _ = self.state.handle.emit(
-            "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", args.title, args.content) }),
-        );
-        if looks_like_placeholder(&args.content) {
-            return Ok(
-                "Refused to save because rewrite_note received placeholder text instead of the full final content. Call rewrite_note again with the actual poem body."
-                    .to_string(),
-            );
-        }
-        if looks_like_meta_status(&args.content) {
-            return Ok(
-                "Refused to save because rewrite_note received a status/update sentence instead of the actual note body. Call rewrite_note again with only the final poem/content that should appear in the note."
-                    .to_string(),
-            );
-        }
-        if let Some(existing) = self.state.resolve_chat_target_note(&args.title) {
-            let tags = args.tags.unwrap_or(existing.tags.clone());
-            self.state
-                .save_note(
-                    existing.id.clone(),
-                    existing.title,
-                    tags,
-                    args.content.clone(),
-                    existing.source_pdf,
-                    Some(existing.annotations),
-                )
-                .await
-                .map_err(|e| ToolError {
-                    message: e.to_string(),
-                })?;
-            let _ = self.state.handle.emit(
-                "ai://note_written",
-                serde_json::json!({ "noteId": existing.id, "content": args.content, "mode": "write" }),
-            );
-            Ok(format!(
-                "Note successfully updated with ID: {}",
-                existing.id
-            ))
-        } else {
-            Ok("Creating new notes from the sidebar chat is not allowed. I can only write to or append content on the currently open note.".to_string())
-        }
-    }
-}
 
-#[derive(Clone)]
-pub struct AppendNoteTool {
-    pub state: AppState,
-}
-
-impl Tool for AppendNoteTool {
-    const NAME: &'static str = "append_note";
-
-    type Error = ToolError;
-    type Args = AppendNoteArgs;
-    type Output = String;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "append_note".to_string(),
-            description:
-                "Append additional content to the end of an existing note. Use this when the user asks to add another paragraph, continue, extend, or append. Do NOT use this to clear or replace the note; use rewrite_note for that."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "content": { "type": "string", "description": "Only the new content to append to the existing note. Do not repeat the whole note body and do not use placeholders." }
-                },
-                "required": ["title", "content"]
-            }),
-        }
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if !self.state.latest_chat_allows_note_mutation() {
-            return Ok(
-                "Refused to append because the latest user message did not explicitly ask to modify a note."
-                    .to_string(),
-            );
-        }
-
-        if let Err(msg) = check_tool_approval(&self.state, "Append Note", &args.title, &args.content).await {
-            return Ok(msg);
-        }
-        self.state
-            .record_chat_tool("Append Note", args.title.clone());
-        let _ = self.state.handle.emit(
-            "ai://chat_tool",
-            serde_json::json!({ "tool": "Append Note", "details": format!("Title: {}\n\n{}", args.title, args.content) }),
-        );
-        if looks_like_placeholder(&args.content) {
-            return Ok(
-                "Refused to append because append_note received placeholder text instead of the final paragraph."
-                    .to_string(),
-            );
-        }
-        if looks_like_meta_status(&args.content) {
-            return Ok(
-                "Refused to append because append_note received a status/update sentence instead of the actual paragraph to append."
-                    .to_string(),
-            );
-        }
-
-        let existing = self
+        // Selection-scoped edit takes precedence: if the user armed an editor
+        // selection, the model's `content` rewrites JUST that span. Splice it into
+        // the located range and keep the rest of the note byte-identical (unless
+        // the model regenerated the surrounding note — then it's a full rewrite,
+        // handled by normal planning below).
+        let scoped = self
             .state
-            .resolve_chat_target_note(&args.title)
-            .ok_or_else(|| ToolError {
-                message: "No note is currently open to append to.".to_string(),
-            })?;
+            .current_selection()
+            .and_then(|sel| selection_scoped_plan(&existing.body, &content, &sel));
 
-        let appended_body = if existing.body.trim().is_empty() {
-            args.content.trim().to_string()
+        let (plan, content_empty) = if let Some(p) = scoped {
+            // A selection rewrite always supplies replacement content.
+            (p, false)
         } else {
-            format!(
-                "{}\n\n{}",
-                existing.body.trim_end(),
-                args.content.trim_start()
-            )
+            // Surgical deletion (always on — a model-agnostic correctness win, not
+            // a crutch: a full-rewrite-to-delete risks drift/truncation at ANY
+            // model size). Models reliably identify WHAT to remove (the `find`
+            // text) but unreliably fill `content` with the whole regenerated note —
+            // which plan_write then turns into a full-body replace (the "it rewrote
+            // my entire note" complaint). On a pure-removal request where the
+            // model's `find` matches the note, trust `find` and delete it from the
+            // REAL body: an empty `content` makes plan_write do a faithful, surgical
+            // snippet delete — nothing else changes.
+            let surgical = !find.trim().is_empty()
+                && find_tolerant(&existing.body, &find).is_some()
+                && wants_partial_removal(&self.state.latest_chat_question());
+            let eff_mode = if surgical { "edit" } else { mode.as_str() };
+            let eff_content = if surgical { "" } else { content.as_str() };
+
+            // Decide the new body (and how the UI should apply it) using the pure,
+            // unit-tested planner. A refusal comes back as Err and is relayed to the
+            // model verbatim so it can correct itself.
+            let content_empty = eff_content.trim().is_empty();
+            match plan_write(&existing.body, eff_content, eff_mode, &find) {
+                Ok(p) => (p, content_empty),
+                Err(msg) => return Ok(msg),
+            }
         };
+
+        // Destructive-write guard. A model asked to "remove all headings"
+        // once replaced the whole essay with an EMPTY body, wiping the note. If a
+        // replace would empty a non-empty note and the user did not actually ask
+        // to clear it, refuse and tell the model to preserve the content — never
+        // silently erase the user's work.
+        if self.state.deterministic_tools_enabled()
+            && plan.op == WriteOp::Replace
+            && plan.new_body.trim().is_empty()
+            && !existing.body.trim().is_empty()
+            && !wants_clear(&self.state.latest_chat_question())
+        {
+            return Ok(
+                "Refused: that would erase the entire note, which the request did not ask for. \
+                 Keep ALL existing content and call write_note again with only the requested change \
+                 applied. For example, to remove headings, delete just the heading lines (or their \
+                 leading # markers) and keep every other line of the note unchanged."
+                    .to_string(),
+            );
+        }
+
+        let (emit_content, emit_mode, display_name) = match plan.op {
+            WriteOp::Append => (content.clone(), "append", "Append Note"),
+            WriteOp::EditSnippet => (
+                plan.new_body.clone(),
+                "write",
+                if content_empty { "Delete Text" } else { "Replace Text" },
+            ),
+            WriteOp::Replace => (
+                plan.new_body.clone(),
+                "write",
+                if content_empty { "Clear Note" } else { "Write Note" },
+            ),
+        };
+        let new_body = plan.new_body;
+
+        let preview = if plan.op == WriteOp::EditSnippet {
+            format!("Find:\n{}\n\nReplace with:\n{}", find, content)
+        } else {
+            content.clone()
+        };
+
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, preview), "mutatesNote": true }),
+        );
 
         self.state
             .save_note(
                 existing.id.clone(),
                 existing.title,
                 existing.tags,
-                appended_body,
+                new_body,
                 existing.source_pdf,
                 Some(existing.annotations),
             )
@@ -429,91 +1276,79 @@ impl Tool for AppendNoteTool {
             })?;
         let _ = self.state.handle.emit(
             "ai://note_written",
-            serde_json::json!({ "noteId": existing.id, "content": args.content, "mode": "append" }),
+            serde_json::json!({ "noteId": existing.id, "content": emit_content, "mode": emit_mode }),
         );
-
-        Ok(format!(
-            "Content successfully appended to note with ID: {}",
-            existing.id
-        ))
+        Ok(format!("Note successfully updated with ID: {}", existing.id))
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct ReplaceTextArgs {
-    title: String,
-    target_text: String,
-    replacement_text: String,
+pub struct FormatNoteArgs {
+    /// Which structural cleanup to apply: remove_headings | remove_bold | remove_bullets.
+    operation: String,
 }
 
 #[derive(Clone)]
-pub struct ReplaceTextTool {
+pub struct FormatNoteTool {
     pub state: AppState,
 }
 
-impl Tool for ReplaceTextTool {
-    const NAME: &'static str = "replace_text";
+impl Tool for FormatNoteTool {
+    const NAME: &'static str = "format_note";
 
     type Error = ToolError;
-    type Args = ReplaceTextArgs;
+    type Args = FormatNoteArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
-            name: "replace_text".to_string(),
+            name: "format_note".to_string(),
             description:
-                "Find exact text in the note and replace it with new text. Use an empty string for replacement_text to delete the target_text. Use this when the user asks to modify, replace, or remove a specific small portion of the note without rewriting everything."
+                "Apply a structural Markdown transform to the open note, performed exactly in code: remove headings/bold/italic/bullets/numbering/links/images/code/quotes/strikethrough/dividers/blank lines, strip all formatting, convert headings<->bold, promote/demote headings, convert bulleted<->numbered lists, or change case."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "target_text": { "type": "string", "description": "The exact string of text to find and remove/replace. Must be an exact match of what is in the note." },
-                    "replacement_text": { "type": "string", "description": "The new text to insert instead. Use an empty string to delete the target_text." }
-                },
-                "required": ["title", "target_text", "replacement_text"]
+                "properties": { "operation": { "type": "string", "enum": FORMAT_OPS, "description": "Which structural transform to apply." } },
+                "required": ["operation"]
             }),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if !self.state.latest_chat_allows_note_mutation() {
-            return Ok(
-                "Refused to replace because the latest user message did not explicitly ask to modify a note."
-                    .to_string(),
-            );
-        }
-
-        if let Err(msg) = check_tool_approval(&self.state, "Replace Text", &args.title, &args.replacement_text).await {
-            return Ok(msg);
-        }
-
-        let display_name = if args.replacement_text.trim().is_empty() {
-            "Delete Text"
+        // Trust the model's operation only if it's a known op; otherwise fall back
+        // to what the user's message clearly asked for. The transform itself is
+        // deterministic either way.
+        let requested = args.operation.trim();
+        let op = if is_format_op(requested) {
+            requested.to_string()
         } else {
-            "Replace Text"
+            detect_format_op(&self.state.latest_chat_question())
+                .unwrap_or("strip_markdown")
+                .to_string()
         };
 
-        self.state
-            .record_chat_tool(display_name, args.title.clone());
-        let _ = self.state.handle.emit(
-            "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\nTarget:\n{}\n\nReplacement:\n{}", args.title, args.target_text, args.replacement_text) }),
-        );
-
-        let existing = self
-            .state
-            .resolve_chat_target_note(&args.title)
-            .ok_or_else(|| ToolError {
-                message: "No note is currently open to edit.".to_string(),
-            })?;
-
-        if !existing.body.contains(&args.target_text) {
-            return Ok("Could not find the target_text in the note. Make sure to quote the exact text you want to replace or delete.".to_string());
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => return Ok("No note is currently open to format.".to_string()),
+        };
+        let new_body = apply_format_op(&existing.body, &op);
+        let pretty = op.replace('_', " ");
+        if new_body == existing.body {
+            return Ok(format!("Nothing to change — no matching content to {pretty} in the note."));
         }
 
-        let new_body = existing.body.replacen(&args.target_text, &args.replacement_text, 1);
-
+        let display_name = "Format Note";
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &new_body).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, pretty), "mutatesNote": true }),
+        );
         self.state
             .save_note(
                 existing.id.clone(),
@@ -527,15 +1362,111 @@ impl Tool for ReplaceTextTool {
             .map_err(|e| ToolError {
                 message: e.to_string(),
             })?;
-
         let _ = self.state.handle.emit(
             "ai://note_written",
             serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );
+        Ok(format!("Note successfully updated with ID: {}", existing.id))
+    }
+}
 
+fn edit_notebook_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": { "type": "string", "enum": ["edit", "insert", "delete"], "description": "edit: replace cell `index`'s source with `content`. insert: add a new cell BEFORE `index`. delete: remove cell `index`." },
+            "index": { "type": "integer", "description": "0-based cell index, as shown in the notebook listing." },
+            "cell_type": { "type": "string", "enum": ["code", "markdown"], "description": "For insert only: the kind of cell to add (code = Python, markdown = Markdown)." },
+            "content": { "type": "string", "description": "The cell's source text (for edit/insert). Markdown cells use Markdown; code cells use Python." }
+        },
+        "required": ["operation", "index"]
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EditNotebookArgs {
+    pub operation: String,
+    #[serde(default)]
+    pub index: usize,
+    #[serde(default)]
+    pub cell_type: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct EditNotebookTool {
+    pub state: AppState,
+}
+
+impl Tool for EditNotebookTool {
+    const NAME: &'static str = "edit_notebook";
+
+    type Error = ToolError;
+    type Args = EditNotebookArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "edit_notebook".to_string(),
+            description:
+                "Edit the open Jupyter notebook (.ipynb) by cell: edit a cell's source, insert a new cell, or delete a cell. Use this for notebooks instead of write_note."
+                    .to_string(),
+            parameters: edit_notebook_params(),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => return Ok("No notebook is currently open to edit.".to_string()),
+        };
+        let op = crate::notebook::NotebookOp {
+            operation: args.operation.trim(),
+            index: args.index,
+            cell_type: args.cell_type.as_deref().unwrap_or("code"),
+            content: args.content.as_deref().unwrap_or(""),
+        };
+        let new_body = match crate::notebook::apply(&existing.body, &op) {
+            Ok(b) => b,
+            Err(msg) => return Ok(msg),
+        };
+        let display_name = match op.operation {
+            "insert" => "Add Cell",
+            "delete" => "Delete Cell",
+            _ => "Edit Cell",
+        };
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &new_body).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Cell {} · {}", args.index, existing.title), "mutatesNote": true }),
+        );
+        self.state
+            .save_note(
+                existing.id.clone(),
+                existing.title,
+                existing.tags,
+                new_body.clone(),
+                existing.source_pdf,
+                Some(existing.annotations),
+            )
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+        let _ = self.state.handle.emit(
+            "ai://note_written",
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
+        );
         Ok(format!(
-            "Text successfully replaced in note with ID: {}",
-            existing.id
+            "Notebook updated (cell {} {}).",
+            args.index, op.operation
         ))
     }
 }
@@ -583,10 +1514,10 @@ impl Tool for FetchWebPageTool {
         self.state.record_chat_tool("Fetch Web Page", url.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": "Fetch Web Page", "details": url }),
+            serde_json::json!({ "tool": "Fetch Web Page", "details": url.clone() }),
         );
 
-        let response = reqwest::Client::new()
+        let response = crate::web_search::web_client()
             .get(&url)
             .header(
                 reqwest::header::USER_AGENT,
@@ -610,9 +1541,191 @@ impl Tool for FetchWebPageTool {
         })?;
         let text = html_to_text(&body);
         if text.trim().is_empty() {
-            Ok(format!("Fetched {url}, but no readable text was found."))
+            let result = format!("Fetched {url}, but no readable text was found.");
+            let _ = self.state.handle.emit(
+                "ai://chat_tool",
+                serde_json::json!({ "tool": "Fetch Web Page", "details": &result, "isUpdate": true }),
+            );
+            Ok(result)
         } else {
-            Ok(text.chars().take(WEB_FETCH_LIMIT).collect())
+            let full = text.chars().take(WEB_FETCH_LIMIT).collect::<String>();
+            let snippet = full.trim();
+            let ui = if snippet.len() > 1500 {
+                format!("{}…\n\n[truncated; full text is {} chars]", &snippet[..1500], snippet.len())
+            } else {
+                snippet.to_string()
+            };
+            let _ = self.state.handle.emit(
+                "ai://chat_tool",
+                serde_json::json!({ "tool": "Fetch Web Page", "details": ui, "isUpdate": true }),
+            );
+            Ok(snippet.to_string())
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchDocumentsArgs {
+    query: String,
+    #[serde(default)]
+    count: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct SearchDocumentsTool {
+    pub state: AppState,
+}
+
+impl Tool for SearchDocumentsTool {
+    const NAME: &'static str = "search_documents";
+
+    type Error = ToolError;
+    type Args = SearchDocumentsArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "search_documents".to_string(),
+            description:
+                "Search the user's ingested source documents (PDFs, books, web pages) for passages relevant to a query. Returns the most relevant excerpts with their source."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for in the documents." },
+                    "count": { "type": "integer", "description": "How many passages (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let k = args.count.unwrap_or(5).clamp(1, 10) as usize;
+        self.state.record_chat_tool("Search Documents", args.query.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
+        );
+        match self.state.retrieve_chunks(&args.query, k).await {
+            Ok(chunks) if !chunks.is_empty() => {
+                let mut out = format!("Passages from your documents for \"{}\":\n\n", args.query);
+                for (i, c) in chunks.iter().enumerate() {
+                    out.push_str(&format!("{}. [{}]\n{}\n\n", i + 1, c.source, c.text.trim()));
+                }
+                Ok(out)
+            }
+            Ok(_) => Ok("No relevant passages found in your documents.".to_string()),
+            Err(e) => Ok(format!("Document search failed: {e}")),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FindInNoteArgs {
+    query: String,
+}
+
+#[derive(Clone)]
+pub struct FindInNoteTool {
+    pub state: AppState,
+}
+
+impl Tool for FindInNoteTool {
+    const NAME: &'static str = "find_in_note";
+
+    type Error = ToolError;
+    type Args = FindInNoteArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "find_in_note".to_string(),
+            description:
+                "Check whether an exact word or phrase appears in the note open in the editor, and how many times."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string", "description": "The exact word or phrase to look for." } },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let q = args.query.trim().to_string();
+        self.state.record_chat_tool("Find in Note", q.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Find in Note", "details": q.clone() }),
+        );
+        if q.is_empty() {
+            return Ok("No search term was given.".to_string());
+        }
+        let body = self.state.open_note_body().unwrap_or_default();
+        let count = body.to_lowercase().matches(&q.to_lowercase()).count();
+        if count == 0 {
+            Ok(format!("The text \"{q}\" does NOT appear in the open note."))
+        } else {
+            Ok(format!("Yes — \"{q}\" appears {count} time(s) in the open note."))
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WebSearchArgs {
+    query: String,
+    #[serde(default)]
+    count: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct WebSearchTool {
+    pub state: AppState,
+}
+
+impl Tool for WebSearchTool {
+    const NAME: &'static str = "web_search";
+
+    type Error = ToolError;
+    type Args = WebSearchArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "web_search".to_string(),
+            description:
+                "Search the web for current information when the user asks you to look something up or find recent info and you have no URL. Returns ranked {title, url, snippet}; then call fetch_web_page on the best result."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The search query." },
+                    "count": { "type": "integer", "description": "How many results to return (default 5, max 10)." }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let count = args.count.unwrap_or(5).clamp(1, 10) as usize;
+        self.state.record_chat_tool("Web Search", args.query.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Web Search", "details": args.query.clone() }),
+        );
+        let searxng = self.state.searxng_url();
+        match crate::web_search::web_search(&args.query, count, searxng.as_deref()).await {
+            Ok(results) => {
+                let formatted = crate::web_search::format_results(&args.query, &results);
+                let _ = self.state.handle.emit(
+                    "ai://chat_tool",
+                    serde_json::json!({ "tool": "Web Search", "details": formatted, "isUpdate": true }),
+                );
+                Ok(formatted)
+            }
+            Err(e) => Ok(format!("Web search failed: {e}")),
         }
     }
 }
@@ -689,20 +1802,14 @@ pub fn build_myelin_agent(
     let model = client.completion_model(model_name);
     rig_core::agent::AgentBuilder::new(model)
         .preamble(preamble)
-        // Low temperature keeps a small model decisive and on-task instead of
+        // Low temperature keeps the model decisive and on-task instead of
         // rambling or asking the same clarifying question repeatedly.
         .temperature(temperature)
         .default_max_turns(max_turns)
         .tool(ReadNoteTool {
             state: state.clone(),
         })
-        .tool(RewriteNoteTool {
-            state: state.clone(),
-        })
-        .tool(ReplaceTextTool {
-            state: state.clone(),
-        })
-        .tool(AppendNoteTool {
+        .tool(WriteNoteTool {
             state: state.clone(),
         })
         .tool(FetchWebPageTool {
@@ -712,7 +1819,24 @@ pub fn build_myelin_agent(
         .build()
 }
 
-fn normalize_web_url(raw: &str) -> Result<String, String> {
+/// Remove the prompt's note-framing markers that some models echo into content.
+/// Tolerant of the dash-count / spacing variants models produce (e.g. some
+/// models emit "--- END CURRENT NOTE --" with two trailing dashes).
+pub fn strip_prompt_markers(s: &str) -> String {
+    let mut cleaned = regex::Regex::new(r"(?i)-{2,}\s*(?:end\s+)?current note\s*-*")
+        .map(|re| re.replace_all(s, "").into_owned())
+        .unwrap_or_else(|_| s.to_string());
+    // The model sometimes bleeds the "--- CURRENT NOTE ---" delimiter style into
+    // its output as a leading "--- Title" — dashes + text on one line, which is
+    // not a real Markdown rule (an HR is dashes alone). Drop the leading dash run
+    // but keep the text. (Rust's regex has no lookahead, so capture and re-emit.)
+    if let Ok(re) = regex::Regex::new(r"^\s*-{2,}[ \t]+(\S[^\n]*)") {
+        cleaned = re.replace(&cleaned, "$1").into_owned();
+    }
+    cleaned.trim().to_string()
+}
+
+pub fn normalize_web_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("URL is required.".to_string());
@@ -733,7 +1857,7 @@ fn normalize_web_url(raw: &str) -> Result<String, String> {
     Ok(url)
 }
 
-fn html_to_text(raw: &str) -> String {
+pub fn html_to_text(raw: &str) -> String {
     let mut without_scripts = raw.to_string();
     for pattern in [
         "(?is)<script[^>]*>.*?</script>",
@@ -757,4 +1881,471 @@ fn html_to_text(raw: &str) -> String {
     regex::Regex::new(r"\s+")
         .map(|re| re.replace_all(&decoded, " ").trim().to_string())
         .unwrap_or_else(|_| decoded.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOTE: &str = "Cars are fast. They have engines. People drive them daily.";
+
+    // The exact bug from the live probe: the model labels a whole-note rewrite as
+    // mode "edit" and sends NO `find`. That must be treated as a replace.
+    #[test]
+    fn edit_mode_without_find_is_a_replace() {
+        let plan = plan_write(NOTE, "## Cars\nThey are fast.", "edit", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "## Cars\nThey are fast.");
+    }
+
+    #[test]
+    fn default_mode_replaces_whole_body() {
+        let plan = plan_write(NOTE, "brand new body", "replace", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "brand new body");
+    }
+
+    // The "deleted the entire note" bug: "remove all headings" must NOT read as a
+    // request to clear the note (the destructive-write guard relies on this), but
+    // an explicit wipe must.
+    // The exact case the 1B model failed: "remove all headings" must keep every
+    // line and drop only the leading # markers — done in code, not by the model.
+    #[test]
+    fn format_op_strips_headings_keeps_text() {
+        let body = "## Intro\nPersonal computers changed everything.\n### History\nIt began in the 1970s.";
+        assert_eq!(detect_format_op("remove all headings"), Some("remove_headings"));
+        assert_eq!(
+            apply_format_op(body, "remove_headings"),
+            "Intro\nPersonal computers changed everything.\nHistory\nIt began in the 1970s."
+        );
+        assert_eq!(detect_format_op("make the title a heading"), None);
+    }
+
+    #[test]
+    fn format_op_removals() {
+        assert_eq!(apply_format_op("a **bold** word", "remove_bold"), "a bold word");
+        assert_eq!(apply_format_op("a *italic* word", "remove_italic"), "a italic word");
+        // Italic-only must leave bold markers intact.
+        assert_eq!(apply_format_op("**b** and *i*", "remove_italic"), "**b** and i");
+        assert_eq!(apply_format_op("**b** and *i*", "remove_emphasis"), "b and i");
+        assert_eq!(apply_format_op("- one\n- two", "remove_bullets"), "one\ntwo");
+        assert_eq!(apply_format_op("1. one\n2. two", "remove_numbering"), "one\ntwo");
+        assert_eq!(apply_format_op("see [Rust](https://r.org) here", "remove_links"), "see Rust here");
+        // remove_links keeps images.
+        assert_eq!(apply_format_op("![p](a.png) and [x](y)", "remove_links"), "![p](a.png) and x");
+        assert_eq!(apply_format_op("![p](a.png) text", "remove_images"), " text");
+        assert_eq!(apply_format_op("use `code` now", "remove_code"), "use code now");
+        assert_eq!(apply_format_op("> quoted\n> more", "remove_blockquotes"), "quoted\nmore");
+        assert_eq!(apply_format_op("a ~~no~~ b", "remove_strikethrough"), "a no b");
+        assert_eq!(apply_format_op("x\n\n---\n\ny", "remove_horizontal_rules"), "x\n\n\ny");
+        assert_eq!(apply_format_op("a\n\n\n\nb", "remove_blank_lines"), "a\n\nb");
+        assert_eq!(apply_format_op("# H\n- **b** [l](u)", "strip_markdown"), "H\nb l");
+    }
+
+    #[test]
+    fn format_op_conversions() {
+        assert_eq!(apply_format_op("# Title\nbody", "headings_to_bold"), "**Title**\nbody");
+        assert_eq!(apply_format_op("**Title**\nbody", "bold_to_headings"), "# Title\nbody");
+        assert_eq!(apply_format_op("## A\n# B", "promote_headings"), "# A\n# B");
+        assert_eq!(apply_format_op("# A\n## B", "demote_headings"), "## A\n### B");
+        assert_eq!(apply_format_op("- a\n- b\n- c", "bullets_to_numbered"), "1. a\n2. b\n3. c");
+        assert_eq!(apply_format_op("1. a\n2. b", "numbered_to_bullets"), "- a\n- b");
+        assert_eq!(apply_format_op("- [ ] todo\n- [x] done", "tasks_to_bullets"), "- todo\n- done");
+        assert_eq!(apply_format_op("Hi There", "uppercase"), "HI THERE");
+        assert_eq!(apply_format_op("Hi There", "lowercase"), "hi there");
+        assert_eq!(apply_format_op("hello world", "title_case"), "Hello World");
+    }
+
+    #[test]
+    fn detect_format_op_routes_and_guards() {
+        assert_eq!(detect_format_op("strip the bold"), Some("remove_bold"));
+        assert_eq!(detect_format_op("get rid of the bullet points"), Some("remove_bullets"));
+        assert_eq!(detect_format_op("remove the links"), Some("remove_links"));
+        assert_eq!(detect_format_op("remove all the images"), Some("remove_images"));
+        assert_eq!(detect_format_op("strip all formatting"), Some("strip_markdown"));
+        assert_eq!(detect_format_op("make it all uppercase"), Some("uppercase"));
+        assert_eq!(detect_format_op("convert the bullets to a numbered list"), Some("bullets_to_numbered"));
+        assert_eq!(detect_format_op("turn the numbered list into bullets"), Some("numbered_to_bullets"));
+        assert_eq!(detect_format_op("change the headings to bold"), Some("headings_to_bold"));
+        // Never hijack a request to CREATE fresh content.
+        assert_eq!(detect_format_op("write a numbered list of fruits"), None);
+        assert_eq!(detect_format_op("write this note in uppercase"), None);
+        assert_eq!(detect_format_op("make the title a heading"), None);
+        // Every op the detector returns must be applicable.
+        for op in FORMAT_OPS {
+            assert_eq!(apply_format_op("unchanged", "bogus_op"), "unchanged");
+            assert!(is_format_op(op));
+        }
+    }
+
+    #[test]
+    fn wants_clear_is_narrow() {
+        assert!(!wants_clear("remove all headings"));
+        assert!(!wants_clear("remove the bullet points"));
+        assert!(!wants_clear("delete the introduction"));
+        assert!(wants_clear("clear the note"));
+        assert!(wants_clear("delete everything"));
+        assert!(wants_clear("erase the note and start over"));
+        assert!(wants_clear("make it blank"));
+    }
+
+    #[test]
+    fn wants_partial_removal_pure_deletes_only() {
+        // Pure removals of a part → true.
+        assert!(wants_partial_removal("remove the My Take section"));
+        assert!(wants_partial_removal("delete the second paragraph"));
+        assert!(wants_partial_removal("get rid of the bulleted list"));
+        assert!(wants_partial_removal("take out the heading"));
+        // Whole-note clears are handled elsewhere → false.
+        assert!(!wants_partial_removal("delete everything"));
+        assert!(!wants_partial_removal("clear the note"));
+        // Removal mixed with new/changed content is a real edit → false.
+        assert!(!wants_partial_removal("delete the intro and add a conclusion"));
+        assert!(!wants_partial_removal("replace the first paragraph"));
+        assert!(!wants_partial_removal("rewrite the summary without the last line"));
+        // Non-removal requests → false.
+        assert!(!wants_partial_removal("make the title a heading"));
+        assert!(!wants_partial_removal("what does this note say"));
+    }
+
+    #[test]
+    fn surgical_delete_removes_only_find_from_real_body() {
+        // The path the override produces: mode "edit", empty content, find = the
+        // block to remove. plan_write must delete exactly that, byte-faithfully.
+        let body = "# Title\n\nKeep this paragraph.\n\n**My Take:**\nRemove me.";
+        let plan = plan_write(body, "", "edit", "**My Take:**\nRemove me.").unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
+        assert_eq!(plan.new_body, "# Title\n\nKeep this paragraph.\n\n");
+    }
+
+    #[test]
+    fn gating_off_protects_write_note_but_keeps_search() {
+        let has = |v: &[Value], name: &str| {
+            v.iter().any(|t| t["function"]["name"].as_str() == Some(name))
+        };
+        // gating OFF (default), deterministic ON.
+        // A capability question must NOT get write_note (the "what can you do →
+        // wrote the title" misfire), but read/search stay available.
+        let q = select_tools_cfg("what can you do", true, false, false, true);
+        assert!(!has(&q, "write_note"), "a question must not offer write_note");
+        assert!(has(&q, "web_search"), "read/search stay on with gating off");
+        // An explicit edit request still gets write_note.
+        let e = select_tools_cfg("rewrite the introduction", true, false, false, true);
+        assert!(has(&e, "write_note"));
+        // A verb-less follow-up in an edit thread keeps write_note.
+        let f = select_tools_cfg("no, shorter", true, true, false, true);
+        assert!(has(&f, "write_note"));
+        // Web search is never withheld (the thing brittle gating used to break).
+        let s = select_tools_cfg("search the web for the latest rust release", true, false, false, true);
+        assert!(has(&s, "web_search"));
+        assert!(!has(&s, "write_note"));
+    }
+
+    #[test]
+    fn locate_selection_disambiguates_repeats_via_context() {
+        let body = "Cats are nice.\n\nDogs are loyal.\n\nCats are nice.";
+        // The phrase occurs twice; the `before` anchor pins the SECOND one.
+        let sel = SelectionArg {
+            text: "Cats are nice.".into(),
+            before: "loyal.\n\n".into(),
+            after: "".into(),
+        };
+        let (s, e) = locate_selection(body, &sel).unwrap();
+        assert_eq!(s, body.rfind("Cats are nice.").unwrap());
+        assert_eq!(&body[s..e], "Cats are nice.");
+    }
+
+    #[test]
+    fn locate_selection_tolerates_markers_and_trailing_whitespace() {
+        // Real failure from "New note 8": the user selected a BOLD paragraph, so
+        // the captured text dropped the ** markers and ran past with newlines.
+        let body = "# Food\n\n## Intro\n\n**Food is essential and good.**\n\n## More\n\n- a";
+        let sel = SelectionArg {
+            text: "Food is essential and good.\n\n".into(),
+            before: "Intro\n\n**".into(),
+            after: "**\n\n## More".into(),
+        };
+        let (s, e) = locate_selection(body, &sel).unwrap();
+        assert_eq!(&body[s..e], "Food is essential and good.");
+        // Splicing keeps the surrounding ** and the rest of the note.
+        let plan = selection_scoped_plan(body, "Food is vital, nutritious, and cultural.", &sel).unwrap();
+        assert_eq!(
+            plan.new_body,
+            "# Food\n\n## Intro\n\n**Food is vital, nutritious, and cultural.**\n\n## More\n\n- a"
+        );
+    }
+
+    #[test]
+    fn selection_scoped_plan_replaces_only_the_selected_span() {
+        let body = "Intro line.\n\nOld paragraph here.\n\nClosing line.";
+        let sel = SelectionArg {
+            text: "Old paragraph here.".into(),
+            before: "Intro line.\n\n".into(),
+            after: "\n\nClosing line.".into(),
+        };
+        let plan = selection_scoped_plan(body, "New paragraph.", &sel).unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
+        assert_eq!(plan.new_body, "Intro line.\n\nNew paragraph.\n\nClosing line.");
+    }
+
+    #[test]
+    fn selection_scoped_plan_defers_when_model_regenerated_whole_note() {
+        let body = "Intro line.\n\nOld paragraph here.\n\nClosing line.";
+        let sel = SelectionArg {
+            text: "Old paragraph here.".into(),
+            before: "Intro line.\n\n".into(),
+            after: "\n\nClosing line.".into(),
+        };
+        // Model returned the WHOLE note (contains the after-anchor text) → fall
+        // through to normal planning (None) instead of splicing the whole note in.
+        let whole = "Intro line.\n\nNew paragraph.\n\nClosing line.";
+        assert!(selection_scoped_plan(body, whole, &sel).is_none());
+    }
+
+    // Some models echo the prompt's note-framing markers into a direct tool call;
+    // they must never reach the saved note.
+    #[test]
+    fn strips_echoed_prompt_markers_from_content() {
+        let plan = plan_write(
+            "The sky is blue today.",
+            "--- CURRENT NOTE ---\nThe sky is green today.\n--- END CURRENT NOTE ---",
+            "edit",
+            "blue",
+        )
+        .unwrap();
+        assert_eq!(plan.new_body, "The sky is green today.");
+        assert!(!plan.new_body.contains("CURRENT NOTE"));
+    }
+
+    #[test]
+    fn strips_malformed_marker_variants() {
+        // Models emit dash/spacing variants — all must be stripped.
+        assert_eq!(strip_prompt_markers("hi\n--- END CURRENT NOTE --"), "hi");
+        assert_eq!(strip_prompt_markers("---CURRENT NOTE---\nbody"), "body");
+        assert_eq!(strip_prompt_markers("body\n-- end current note ---"), "body");
+        assert_eq!(strip_prompt_markers("clean note"), "clean note");
+        // Bled "--- Title" delimiter (dashes + text on one line) is stripped...
+        assert_eq!(strip_prompt_markers("--- Example Domain"), "Example Domain");
+        // ...but a real horizontal rule (dashes alone on a line) is preserved.
+        assert_eq!(strip_prompt_markers("# Title\n\n---\nmore"), "# Title\n\n---\nmore");
+    }
+
+    #[test]
+    fn append_adds_to_end() {
+        let plan = plan_write(NOTE, "A new line.", "append", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Append);
+        assert!(plan.new_body.starts_with(NOTE));
+        assert!(plan.new_body.ends_with("A new line."));
+    }
+
+    #[test]
+    fn find_replaces_only_the_snippet() {
+        let plan = plan_write(NOTE, "slow", "edit", "fast").unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
+        assert_eq!(plan.new_body, "Cars are slow. They have engines. People drive them daily.");
+    }
+
+    // Regression: the live harness caught the model sending mode:"replace" with
+    // the full new sentence in `content` AND a stray find:"blue". An explicit
+    // replace must use the full content and IGNORE find (not splice it in).
+    #[test]
+    fn explicit_replace_ignores_stray_find() {
+        let plan = plan_write("The sky is blue today.", "The sky is green today.", "replace", "blue")
+            .unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "The sky is green today.");
+    }
+
+    // A `find` with no explicit mode is a snippet edit (the model means to swap
+    // just that text), so content is the replacement, not the whole body.
+    #[test]
+    fn find_without_mode_is_snippet_edit() {
+        let plan = plan_write("The sky is blue.", "green", "", "blue").unwrap();
+        assert_eq!(plan.op, WriteOp::EditSnippet);
+        assert_eq!(plan.new_body, "The sky is green.");
+    }
+
+    // Regression: LFM sends find:"blue" but the WHOLE updated sentence as content.
+    // Splicing would garble ("The sky is The sky is green today. today.") — detect
+    // the absorbed surrounding text and treat it as a replace.
+    #[test]
+    fn find_with_full_sentence_content_replaces() {
+        let plan =
+            plan_write("The sky is blue today.", "The sky is green today.", "edit", "blue").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "The sky is green today.");
+    }
+
+    #[test]
+    fn tool_gating_selects_by_intent() {
+        // small talk → no tools
+        assert!(select_tools("gg", true, false).is_empty());
+        assert!(select_tools("thanks!", true, false).is_empty());
+        // write intent → write_note only
+        let w = select_tools("expand this to 500 words", true, false);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0]["function"]["name"], "write_note");
+        // pure question → no tools (model answers in chat)
+        assert!(select_tools("what is the capital of france?", true, false).is_empty());
+        // other-notes intent → search + read
+        let s = select_tools("search my other notes for cats", true, false);
+        let names: Vec<&str> = s.iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"search_notes"));
+        assert!(names.contains(&"read_note"));
+        // url → fetch
+        let f = select_tools("fetch https://example.com", true, false);
+        assert!(f.iter().any(|t| t["function"]["name"] == "fetch_web_page"));
+    }
+
+    #[test]
+    fn edit_thread_keeps_write_on_verbless_corrections() {
+        // A verb-less correction gets NO write_note cold...
+        let cold = select_tools("no thats wrong", true, false);
+        assert!(!cold.iter().any(|t| t["function"]["name"] == "write_note"));
+        // ...but DOES inside an active edit thread.
+        let warm = select_tools("no thats wrong", true, true);
+        assert!(warm.iter().any(|t| t["function"]["name"] == "write_note"));
+        // Small talk stays tool-free even in an edit thread.
+        assert!(select_tools("thanks!", true, true).is_empty());
+        // in_edit_thread fires when a recent user turn asked to write/edit.
+        assert!(in_edit_thread(&["write a note about cats", "no thats wrong"]));
+        assert!(!in_edit_thread(&["what is rust?", "who are you?"]));
+    }
+
+    #[test]
+    fn small_talk_detection() {
+        assert!(is_small_talk("hi"));
+        assert!(is_small_talk("thanks so much"));
+        assert!(!is_small_talk("write a note about cats"));
+        assert!(!is_small_talk("what is the capital of france and why")); // > 4 words
+    }
+
+    #[test]
+    fn fetch_gating_bare_domains_not_filenames() {
+        // bare domain (no scheme) → fetch
+        assert!(wants_fetch("summarize example.com"));
+        assert!(wants_fetch("what's on speediq.ai"));
+        assert!(wants_fetch("fetch https://x.org/page"));
+        // file names are NOT web targets
+        assert!(!wants_fetch("fix the typo in notes.md"));
+        assert!(!wants_fetch("rename model.gguf"));
+        assert!(!wants_fetch("just chatting about cats"));
+        // and via select_tools: "summarize example.com" → fetch (not a write/clear)
+        let t = select_tools("summarize example.com", true, false);
+        assert!(t.iter().any(|x| x["function"]["name"] == "fetch_web_page"));
+    }
+
+    #[test]
+    fn find_with_empty_content_deletes_snippet() {
+        let plan = plan_write(NOTE, "", "edit", "They have engines. ").unwrap();
+        assert_eq!(plan.new_body, "Cars are fast. People drive them daily.");
+    }
+
+    #[test]
+    fn find_tolerates_whitespace_mismatch() {
+        // Model reproduces the snippet with different internal whitespace.
+        let plan = plan_write(NOTE, "X", "edit", "have   engines").unwrap();
+        assert!(plan.new_body.contains("They X."));
+    }
+
+    #[test]
+    fn find_not_present_is_refused_not_destructive() {
+        let err = plan_write(NOTE, "x", "edit", "no such text here").unwrap_err();
+        assert!(err.to_lowercase().contains("could not find"));
+    }
+
+    #[test]
+    fn empty_replace_clears_the_note() {
+        let plan = plan_write(NOTE, "", "replace", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Replace);
+        assert_eq!(plan.new_body, "");
+    }
+
+    #[test]
+    fn find_tolerant_exact_and_normalized() {
+        assert_eq!(find_tolerant("hello world", "world"), Some((6, 11)));
+        assert!(find_tolerant("a  b   c", "a b c").is_some());
+        assert!(find_tolerant("abc", "xyz").is_none());
+    }
+
+    #[test]
+    fn normalize_url_adds_scheme_and_rejects_junk() {
+        assert_eq!(normalize_web_url("example.com").unwrap(), "https://example.com");
+        assert_eq!(normalize_web_url("http://x.io").unwrap(), "http://x.io");
+        assert!(normalize_web_url("   ").is_err());
+        assert!(normalize_web_url("has space.com").is_err());
+    }
+
+    #[test]
+    fn html_to_text_strips_tags_and_scripts() {
+        let html = "<html><head><style>x{}</style></head><body><h1>Hi</h1><script>bad()</script><p>world &amp; more</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Hi"));
+        assert!(text.contains("world & more"));
+        assert!(!text.contains("bad()"));
+        assert!(!text.contains("<"));
+    }
+
+    #[test]
+    fn write_intent_detects_edit_verbs() {
+        for msg in [
+            "write a poem about cars",
+            "format this",
+            "clean up the formatting",
+            "remove the second paragraph",
+            "make the intro shorter",
+            "rewrite it more formally",
+            "add a conclusion",
+            "fix the spelling",
+        ] {
+            assert!(note_write_intent(msg), "expected write intent: {msg}");
+        }
+    }
+
+    #[test]
+    fn write_intent_soft_verb_needs_note_target() {
+        // "explain X" alone is a chat answer; "explain X in the note" is a write.
+        assert!(!note_write_intent("explain what you are"));
+        assert!(note_write_intent("explain what you are in the note with an h1"));
+        assert!(note_write_intent("summarise this into the note"));
+    }
+
+    #[test]
+    fn write_intent_affirmations_greenlight() {
+        for msg in ["yes", "sure", "ok", "go ahead", "do it", "Yes please!"] {
+            assert!(note_write_intent(msg), "expected affirmation: {msg}");
+        }
+    }
+
+    #[test]
+    fn write_intent_rejects_plain_questions() {
+        for msg in [
+            "what is the capital of France?",
+            "who painted the mona lisa",
+            "hi there",
+            "thanks!",
+            "describe the ocean",
+        ] {
+            assert!(!note_write_intent(msg), "expected no write intent: {msg}");
+        }
+    }
+
+    #[test]
+    fn write_intent_rejects_definition_questions() {
+        // "what does append mean" must NOT trigger write intent even though
+        // "append" is a WRITE_VERB — it's a question, not a directive.
+        assert!(!note_write_intent("what does append mean"));
+        assert!(!note_write_intent("what is append"));
+        assert!(!note_write_intent("what are appendices"));
+        assert!(!note_write_intent("what does edit do"));
+        assert!(!note_write_intent("what can you do"));
+        assert!(!note_write_intent("define append"));
+    }
+
+    #[test]
+    fn write_intent_ignores_substring_false_positives() {
+        // "address" contains "add", "prefix" contains "fix" — must not trigger.
+        assert!(!note_write_intent("what is my ip address"));
+        assert!(!note_write_intent("what does the prefix mean"));
+    }
 }

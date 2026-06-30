@@ -128,7 +128,7 @@ pub fn get_file_at_commit(workspace: &Path, commit_hash: &str, file_path: &str) 
 
 fn repo_relative_path(repo: &Repository, workspace: &Path, file_path: &str) -> Result<PathBuf> {
     let path = PathBuf::from(file_path);
-    let mut rel_path = if path.is_absolute() {
+    let rel_path = if path.is_absolute() {
         let repo_root = repo
             .workdir()
             .or_else(|| repo.path().parent())

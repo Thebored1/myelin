@@ -1,12 +1,15 @@
 [package]
 name = "myelin"
-version = "0.1.0"
+version = "0.2.0"
 description = "Cross-platform local-first AI notes"
 authors = ["Paper"]
 license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
+# The crate ships an extra dev binary (tool_e2e), so `cargo run` / `tauri dev`
+# would otherwise fail to pick a binary. Default to the app.
+default-run = "myelin"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -36,6 +39,7 @@ serde_yaml = "0.9"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
+tauri-plugin-global-shortcut = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2.5"
 rig-core = "0.38.2"
@@ -43,10 +47,28 @@ schemars = { version = "1.2.1", features = ["derive"] }
 tempfile = "3.27.0"
 tectonic = "0.16.9"
 tokio = { version = "1.52.3", features = ["sync"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Linux/Wayland global shortcuts go through the xdg-desktop-portal GlobalShortcuts
+# interface (the native global-shortcut plugin can't grab keys under Wayland).
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+# DXGI adapter enumeration for VRAM/shared-memory sizing of AMD/Intel GPUs
+# (NVIDIA goes through nvidia-smi). Matches the version Tauri already pulls.
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Foundation",
+] }
 
 [package.metadata.vcpkg]
 git = "https://github.com/microsoft/vcpkg"
-rev = "master"
+branch = "master"
 
 [package.metadata.vcpkg.dependencies]
 fontconfig = ""
