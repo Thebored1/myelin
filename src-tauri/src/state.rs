@@ -1421,6 +1421,28 @@ impl AppState {
         crate::git_history::get_file_at_commit(&workspace, &commit_hash, path.to_str().unwrap())
     }
     pub async fn provider_status(&self) -> Result<ProviderStatus> {
+        let kind = crate::llama_server::provider_kind(&self.inner.app_data_dir);
+
+        if kind == "openai" {
+            let config = crate::llama_server::load_config(&self.inner.app_data_dir).unwrap_or_default();
+            let (base, _, model) = crate::llama_server::openai_config(&self.inner.app_data_dir)
+                .unwrap_or_default();
+            let detail = format!("OpenAI-compatible: {} ({})", model, base);
+            return Ok(ProviderStatus {
+                active_provider: "openai".into(),
+                available_providers: vec!["local".into(), "openai".into()],
+                healthy: true,
+                detail,
+                config: Some(config),
+                resolved: None,
+                active_backend: None,
+                nvidia_detected: false,
+                gpu_available: false,
+                gpus: Vec::new(),
+                installed_backends: Vec::new(),
+            });
+        }
+
         let info = llama_server::inspect_provider(&self.inner.app_data_dir)?;
         // Prefer the backend of the running server; fall back to the backend we
         // would select on this machine.
@@ -1442,8 +1464,8 @@ impl AppState {
         };
 
         Ok(ProviderStatus {
-            active_provider: "llama.cpp".into(),
-            available_providers: vec!["llama.cpp".into()],
+            active_provider: "local".into(),
+            available_providers: vec!["local".into(), "openai".into()],
             healthy,
             detail: info.detail,
             config: Some(info.config),
@@ -1518,20 +1540,21 @@ impl AppState {
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
 
-            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+            let is_openai = crate::llama_server::provider_kind(&self.inner.app_data_dir) == "openai";
+            let config = llama_server::resolve_provider_config(&self.inner.app_data_dir)?;
             self.set_deterministic_tools_runtime(config.deterministic_tools);
             self.set_tool_gating_runtime(config.tool_gating);
-            self.ensure_llama_server(&config).await?;
+            if !is_openai {
+                self.ensure_llama_server(&config).await?;
+            }
 
-            // Budget the note to ~half the context window the server ACTUALLY
-            // launched with (auto-offload may run far above the configured value),
-            // leaving room for the system prompt, tools, chat history, and the
-            // reply. ~4 chars/token → a 32K-token context holds ~65K chars of note,
-            // far past the old flat 24K cap.
-            let ctx_tokens = self
-                .running_ctx_size()
-                .await
-                .unwrap_or(config.context_size) as usize;
+            // Budget the note to ~half the context window. For the local provider
+            // we ask the running server; for OpenAI we trust the configured value.
+            let ctx_tokens = if is_openai {
+                config.context_size
+            } else {
+                self.running_ctx_size().await.unwrap_or(config.context_size)
+            } as usize;
             let note_char_limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
             // Truncate on a char boundary (never a raw byte slice — that panics on
             // multi-byte UTF-8).
@@ -1674,8 +1697,10 @@ impl AppState {
             messages.push(serde_json::json!({ "role": "user", "content": user_content }));
             let sent_len = messages.len();
 
+            let openai_key = crate::llama_server::openai_config(&self.inner.app_data_dir)
+                .map(|(_, k, _)| k);
             let final_messages =
-                crate::stream_chat::run_chat(self, &config, messages, tools, &request_id).await?;
+                crate::stream_chat::run_chat(self, &config, messages, tools, &request_id, openai_key.as_deref()).await?;
 
             // Persist the conversation for the next turn: prior turns + the RAW user
             // question (the note context is rebuilt fresh each turn, so it is not
@@ -2336,17 +2361,27 @@ impl AppState {
     }
 
     async fn run_llama_prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
-        self.ensure_llama_server(&config).await?;
+        let is_openai = crate::llama_server::provider_kind(&self.inner.app_data_dir) == "openai";
+        let config = llama_server::resolve_provider_config(&self.inner.app_data_dir)?;
+        if !is_openai {
+            self.ensure_llama_server(&config).await?;
+        }
 
         let full_prompt = system_prompt.to_string();
+        let base_url = format!("{}/v1", config.base_url());
+        let api_key = if is_openai {
+            crate::llama_server::openai_config(&self.inner.app_data_dir).map(|(_, k, _)| k)
+        } else {
+            None
+        };
         let agent = crate::agent::build_myelin_agent(
             self.clone(),
-            &format!("{}/v1", config.base_url()),
+            &base_url,
             &config.model_name(),
             &full_prompt,
             config.temperature as f64,
             config.max_turns as usize,
+            api_key.as_deref(),
         );
 
         agent
@@ -2369,6 +2404,25 @@ impl AppState {
     /// Set (or clear, when empty) the SearXNG base URL for web search.
     pub fn set_searxng_url(&self, url: Option<String>) -> Result<()> {
         crate::llama_server::set_searxng_url(&self.inner.app_data_dir, url)
+    }
+
+    /// Switch between "local" (llama-server) and "openai" (BYOK) providers.
+    pub async fn set_provider(&self, kind: String) -> Result<()> {
+        crate::llama_server::set_provider(&self.inner.app_data_dir, &kind)?;
+        if kind == "openai" {
+            self.inner.llama_server.lock().await.take();
+        }
+        Ok(())
+    }
+
+    /// Configure the OpenAI-compatible BYOK provider (base URL, API key, model).
+    pub async fn set_openai_config(
+        &self,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        model: Option<String>,
+    ) -> Result<()> {
+        crate::llama_server::set_openai_config(&self.inner.app_data_dir, base_url, api_key, model)
     }
 
     /// The configured embedding model GGUF path (None → embeddings disabled).

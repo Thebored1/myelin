@@ -96,6 +96,10 @@ export type ProviderStatus = {
 		maxTurns?: number;
 		deterministicTools?: boolean;
 		toolGating?: boolean;
+		providerKind?: string;
+		openaiBaseUrl?: string;
+		openaiKey?: string;
+		openaiModel?: string;
 	};
 	resolved?: {
 		executablePath: string;

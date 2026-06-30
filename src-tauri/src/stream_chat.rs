@@ -40,6 +40,7 @@ pub async fn run_chat(
     mut messages: Vec<Value>,
     mut tools: Vec<Value>,
     request_id: &str,
+    api_key: Option<&str>,
 ) -> Result<Vec<Value>> {
     let url = format!("{}/v1/chat/completions", config.base_url());
     let model = config.model_name();
@@ -91,9 +92,11 @@ pub async fn run_chat(
             serde_json::to_vec_pretty(&body).unwrap_or_default(),
         );
 
-        let resp = client
-            .post(&url)
-            .json(&body)
+        let mut req = client.post(&url).json(&body);
+        if let Some(key) = api_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| anyhow!("chat request failed: {e}"))?;

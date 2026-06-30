@@ -35,6 +35,11 @@
     let backendFellBack = $state(false);
     let providerHealthy = $state(true);
     let providerDetail = $state('');
+    // BYOK (Bring Your Own Key) provider fields.
+    let providerKind = $state('local');
+    let openaiBaseUrl = $state('');
+    let openaiKey = $state('');
+    let openaiModel = $state('');
 
     // LaTeX → PDF support bundle (Tectonic) cache state.
     let latexCache = $state<{ warmed: boolean; sizeBytes: number } | null>(null);
@@ -172,6 +177,19 @@
     async function saveSearxng() {
         await invoke('set_searxng_url', { url: searxngUrl.trim() || null });
     }
+    async function saveOpenaiConfig() {
+        try {
+            await invoke('set_openai_config', {
+                baseUrl: openaiBaseUrl || null,
+                apiKey: openaiKey || null,
+                model: openaiModel || null,
+            });
+            saved = true;
+            setTimeout(() => { saved = false; }, 3000);
+        } catch (error) {
+            console.error('Failed to save OpenAI config:', error);
+        }
+    }
     async function pickEmbedModel() {
         const picked = await open({ multiple: false, filters: [{ name: 'GGUF model', extensions: ['gguf'] }] });
         if (typeof picked === 'string') {
@@ -199,9 +217,10 @@
         gpuAvailable = status.gpuAvailable ?? true;
         gpus = status.gpus ?? [];
         installedBackends = status.installedBackends ?? [];
-        providerHealthy = status.healthy ?? true;
-        providerDetail = status.detail ?? '';
-        return status;
+            providerHealthy = status.healthy ?? true;
+            providerDetail = status.detail ?? '';
+            providerKind = status.activeProvider || 'local';
+            return status;
     }
 
     // Back: return to the page the user came from, not always home.
@@ -233,6 +252,9 @@
             toolGating = status.config?.toolGating ?? false;
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
+            openaiBaseUrl = status.config?.openaiBaseUrl ?? '';
+            openaiKey = status.config?.openaiKey ?? '';
+            openaiModel = status.config?.openaiModel ?? '';
             quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
             try {
                 modelProfiles = await invoke<ProfileInfo[]>('list_model_profiles');
@@ -480,19 +502,58 @@
         </section>
 
         <section class="settings-section">
-            <h2>Local AI Model Configuration</h2>
-            <p class="description">
-                Select a model to use for local AI features. It runs completely offline on your device and is saved in app settings, not inside the notes workspace. <strong>Only <code>.gguf</code> models are supported</strong> (llama.cpp format).
-            </p>
+            <h2>AI Provider</h2>
 
-            <div class="model-picker">
-                <div class="path-display" class:empty={!currentModelPath}>
-                    {currentModelPath || 'No model selected'}
+            <div class="compute-device">
+                <span class="compute-label">Provider</span>
+                <div class="segmented" role="group" aria-label="AI provider">
+                    {#each [{ value: 'local', label: 'Local' }, { value: 'openai', label: 'OpenAI-compatible' }] as opt}
+                        <button
+                            type="button"
+                            class="segment"
+                            class:active={providerKind === opt.value}
+                            onclick={async () => {
+                                providerKind = opt.value;
+                                await invoke('set_provider', { kind: opt.value });
+                                await loadProviderStatus();
+                            }}
+                        >
+                            {opt.label}
+                        </button>
+                    {/each}
                 </div>
-                <button class="browse-btn" onclick={selectModel} disabled={isSaving}>
-                    Browse...
-                </button>
             </div>
+
+            {#if providerKind === 'openai'}
+                <br/>
+                <div class="advanced-grid">
+                    <div class="input-group">
+                        <label for="openai-base-url">Base URL</label>
+                        <input type="text" id="openai-base-url" bind:value={openaiBaseUrl} onchange={saveOpenaiConfig} placeholder="https://api.openai.com/v1" />
+                    </div>
+                    <div class="input-group">
+                        <label for="openai-key">API Key</label>
+                        <input type="password" id="openai-key" bind:value={openaiKey} onchange={saveOpenaiConfig} placeholder="sk-..." />
+                    </div>
+                    <div class="input-group">
+                        <label for="openai-model">Model</label>
+                        <input type="text" id="openai-model" bind:value={openaiModel} onchange={saveOpenaiConfig} placeholder="gpt-4o-mini" />
+                    </div>
+                </div>
+            {:else}
+                <h2>Local AI Model Configuration</h2>
+                <p class="description">
+                    Select a model to use for local AI features. It runs completely offline on your device and is saved in app settings, not inside the notes workspace. <strong>Only <code>.gguf</code> models are supported</strong> (llama.cpp format).
+                </p>
+
+                <div class="model-picker">
+                    <div class="path-display" class:empty={!currentModelPath}>
+                        {currentModelPath || 'No model selected'}
+                    </div>
+                    <button class="browse-btn" onclick={selectModel} disabled={isSaving}>
+                        Browse...
+                    </button>
+                </div>
             
 
             <div class="compute-device">
@@ -718,7 +779,7 @@
                     + Add Argument
                 </button>
             </div>
-        </section>
+        {/if}
 
         <section class="settings-section">
             <h2>Assistant Tooling</h2>

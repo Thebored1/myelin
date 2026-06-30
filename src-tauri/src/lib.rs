@@ -306,6 +306,27 @@ async fn set_searxng_url(state: State<'_, AppState>, url: Option<String>) -> Res
     state.set_searxng_url(url).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn set_provider(state: State<'_, AppState>, kind: String) -> Result<(), String> {
+    state
+        .set_provider(kind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_openai_config(
+    state: State<'_, AppState>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+) -> Result<(), String> {
+    state
+        .set_openai_config(base_url, api_key, model)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Current embedding model GGUF path (empty = embeddings/RAG disabled).
 #[tauri::command]
 async fn get_embed_model_path(state: State<'_, AppState>) -> Result<Option<String>, String> {
@@ -633,6 +654,8 @@ pub fn run() {
             stop_llama_server,
             get_searxng_url,
             set_searxng_url,
+            set_provider,
+            set_openai_config,
             get_embed_model_path,
             set_embed_model_path,
             ingest_document,

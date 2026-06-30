@@ -108,6 +108,9 @@ pub struct WorkspaceLlamaConfig {
     /// search, and the destructive-write guard. Default ON — they make tool use
     /// more reliable. None → on.
     pub deterministic_tools: Option<bool>,
+    /// Whether the model supports tool calling. None → probe at first use.
+    #[serde(default)]
+    pub supports_tools: Option<bool>,
     /// Per-message tool gating: offer the model only the tools its message
     /// warrants, via keyword intent heuristics. **Default OFF** — the model gets
     /// the full toolset every turn and decides for itself (model-agnostic, the
@@ -118,6 +121,22 @@ pub struct WorkspaceLlamaConfig {
     /// Global hotkey that opens the quick-capture window (e.g. "Ctrl+Space").
     /// None → the default ("Ctrl+Space").
     pub quick_capture_shortcut: Option<String>,
+    /// Provider kind: "local" (default, runs llama-server) or "openai"
+    /// (bring-your-own-key, uses a remote OpenAI-compatible API).
+    #[serde(default)]
+    pub provider_kind: Option<String>,
+    /// Base URL for the OpenAI-compatible API (e.g. "https://api.openai.com/v1").
+    /// Only used when provider_kind is "openai".
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
+    /// API key for the OpenAI-compatible API.
+    /// Only used when provider_kind is "openai".
+    #[serde(default)]
+    pub openai_key: Option<String>,
+    /// Model name for the OpenAI-compatible API (e.g. "gpt-4o-mini").
+    /// Only used when provider_kind is "openai".
+    #[serde(default)]
+    pub openai_model: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -184,12 +203,59 @@ pub struct ResolvedLlamaConfig {
     pub candidates: Vec<BackendCandidate>,
 }
 
+/// Build a synthetic `ResolvedLlamaConfig` for the OpenAI-compatible BYOK provider.
+/// Used instead of `resolve_config` when `provider_kind` is "openai".
+pub fn build_openai_resolved(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
+    let (base, _key, model) = openai_config(app_data_dir)
+        .ok_or_else(|| anyhow!("OpenAI provider not fully configured"))?;
+    let app_config = load_config(app_data_dir).unwrap_or_default();
+    // Strip trailing /v1 so base_url() → /v1/chat/completions works correctly.
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base).to_string();
+    // The base URL goes in `host` and the model name in `model_path` as a
+    // workaround so base_url() and model_name() return the right values.
+    Ok(ResolvedLlamaConfig {
+        executable_path: PathBuf::new(),
+        model_path: PathBuf::from(&model),
+        host: base,
+        port: 0,
+        context_size: app_config.context_size.unwrap_or(4096),
+        gpu_layers: None,
+        threads: None,
+        temperature: app_config.temperature.unwrap_or(0.7),
+        top_p: app_config.top_p.unwrap_or(0.95),
+        chat_format: None,
+        extra_args: Vec::new(),
+        backend: None,
+        backend_preference: "auto".into(),
+        gpu_device: None,
+        thinking: false,
+        auto_offload: false,
+        max_turns: app_config.max_turns.filter(|&n| n > 0).unwrap_or(4),
+        chat_template_override: None,
+        model_role: "chat".into(),
+        supports_tools: Some(true),
+        deterministic_tools: app_config.deterministic_tools.unwrap_or(true),
+        tool_gating: app_config.tool_gating.unwrap_or(false),
+        candidates: Vec::new(),
+    })
+}
+
 impl ResolvedLlamaConfig {
     pub fn base_url(&self) -> String {
+        if self.port == 0 && !self.host.is_empty() {
+            // Synthetic BYOK config: return the stored base URL directly.
+            // For openai configs, `model_path` holds the model name as a workaround.
+            return self.host.clone();
+        }
         format!("http://{}:{}", self.host, self.port)
     }
 
     pub fn model_name(&self) -> String {
+        if self.port == 0 && !self.host.is_empty() {
+            // Synthetic BYOK config: model name is stored as filename in model_path.
+            return self.model_path.to_string_lossy().to_string();
+        }
         self.model_path
             .file_name()
             .and_then(|value| value.to_str())
@@ -1555,7 +1621,7 @@ fn config_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(CONFIG_FILE_NAME)
 }
 
-fn load_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
+pub fn load_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
     let path = config_path(app_data_dir);
     if !path.exists() {
         return Ok(WorkspaceLlamaConfig::default());
@@ -1578,6 +1644,27 @@ pub fn set_model_path(app_data_dir: &Path, model_path: String) -> Result<()> {
     let raw = serde_json::to_string_pretty(&config)?;
     fs::write(&path, raw)?;
     Ok(())
+}
+
+/// Provider kind from config: "local" (default) or "openai".
+pub fn provider_kind(app_data_dir: &Path) -> String {
+    load_config(app_data_dir)
+        .ok()
+        .and_then(|c| c.provider_kind)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".to_string())
+}
+
+/// OpenAI-compatible API config (base URL, key, model) when using BYOK.
+pub fn openai_config(app_data_dir: &Path) -> Option<(String, String, String)> {
+    let cfg = load_config(app_data_dir).ok()?;
+    let base = cfg.openai_base_url.as_ref()?;
+    let key = cfg.openai_key.as_ref()?;
+    let model = cfg.openai_model.as_ref()?;
+    if base.is_empty() || key.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((base.clone(), key.clone(), model.clone()))
 }
 
 /// The configured SearXNG base URL for web search, if set and non-empty.
@@ -1670,6 +1757,35 @@ pub fn set_tool_gating(app_data_dir: &Path, enabled: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn set_provider(app_data_dir: &Path, kind: &str) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.provider_kind = Some(kind.to_string());
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+pub fn set_openai_config(
+    app_data_dir: &Path,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.openai_base_url = base_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    config.openai_key = api_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    config.openai_model = model.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
 pub fn set_executable_path(app_data_dir: &Path, executable_path: String) -> Result<()> {
     let mut config = load_config(app_data_dir).unwrap_or_default();
     config.executable_path = Some(executable_path);
@@ -1742,6 +1858,16 @@ pub fn set_advanced_config(
     let raw = serde_json::to_string_pretty(&config)?;
     fs::write(&path, raw)?;
     Ok(())
+}
+
+/// Resolve the provider config: for the local provider this resolves the binary
+/// and model path; for the OpenAI (BYOK) provider it builds a synthetic config
+/// from the stored base URL, key, and model name.
+pub fn resolve_provider_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
+    if provider_kind(app_data_dir) == "openai" {
+        return build_openai_resolved(app_data_dir);
+    }
+    resolve_config(app_data_dir)
 }
 
 /// Build the ordered list of llama-server binaries to try, best backend first.

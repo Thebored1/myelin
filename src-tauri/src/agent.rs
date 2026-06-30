@@ -1792,10 +1792,12 @@ pub fn build_myelin_agent(
     preamble: &str,
     temperature: f64,
     max_turns: usize,
+    api_key: Option<&str>,
 ) -> rig_core::agent::Agent<impl rig_core::completion::CompletionModel> {
+    let api_key = api_key.unwrap_or("sk-fake");
     let client = rig_core::providers::openai::Client::builder()
-        .api_key("sk-fake")
         .base_url(base_url)
+        .api_key(api_key)
         .build()
         .expect("Failed to initialize rig client")
         .completions_api();
