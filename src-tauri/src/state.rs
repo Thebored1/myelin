@@ -401,6 +401,13 @@ struct InnerState {
     /// Runtime mirror of config.tool_gating (per-message tool gating), refreshed
     /// each chat turn alongside `deterministic_tools`.
     tool_gating: std::sync::atomic::AtomicBool,
+    /// Set to true to abort the current streaming chat turn. Checked by
+    /// stream_chat::run_chat between chunks; reset after each turn.
+    abort_chat: std::sync::atomic::AtomicBool,
+    /// Set to true by stream_chat when it aborted due to user request. Checked
+    /// by ask_ai_stream after run_chat returns so it can emit chat_aborted
+    /// instead of chat_done, and the frontend can discard the partial message.
+    chat_was_aborted: std::sync::atomic::AtomicBool,
     pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     /// Per-note live conversation as the REAL message array (system-less): user
     /// turns, assistant turns with tool_calls, and the tool RESULTS. The frontend's
@@ -506,6 +513,8 @@ impl AppState {
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
                 tool_gating: std::sync::atomic::AtomicBool::new(false),
+                abort_chat: std::sync::atomic::AtomicBool::new(false),
+                chat_was_aborted: std::sync::atomic::AtomicBool::new(false),
                 pending_approvals: Mutex::new(HashMap::new()),
                 conversations: Mutex::new(HashMap::new()),
             }),
@@ -570,6 +579,26 @@ impl AppState {
 
     pub fn current_note_id(&self) -> Option<String> {
         self.inner.current_note_id.lock().clone()
+    }
+
+    /// Signal the currently-running chat turn to abort as soon as possible.
+    pub fn signal_abort_chat(&self) {
+        self.inner.abort_chat.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether an abort was requested (and reset the flag).
+    pub fn check_abort_chat(&self) -> bool {
+        self.inner.abort_chat.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Mark the current chat as having been aborted (instead of completing).
+    pub fn mark_chat_aborted(&self) {
+        self.inner.chat_was_aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether the last chat was aborted (and reset the flag).
+    pub fn check_chat_aborted(&self) -> bool {
+        self.inner.chat_was_aborted.swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The live conversation (real message array) for a note — empty if none yet.
@@ -655,7 +684,13 @@ impl AppState {
         if let Some(workspace) = workspace {
             crate::git_history::init_repo(&workspace)?;
             self.start_watcher(&workspace)?;
-            self.reindex_workspace(workspace).await?;
+            // On boot, only rebuild the LanceDB index if it doesn't already exist.
+            // This makes cold-start fast; the file watcher triggers a rebuild
+            // when notes actually change during the session.
+            let index_path = self.index_dir();
+            let table_dir = index_path.join(TABLE_NAME);
+            let needs_rebuild = !table_dir.exists();
+            self.reindex_workspace(workspace, needs_rebuild).await?;
         }
         Ok(self.snapshot())
     }
@@ -680,7 +715,7 @@ impl AppState {
         )?;
 
         self.start_watcher(&workspace)?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -956,7 +991,8 @@ impl AppState {
         let state = self.clone();
         let workspace_clone = workspace.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = state.reindex_workspace(workspace_clone).await;
+            let _ = state.reindex_workspace(workspace_clone, true).await;
+            
         });
 
         Ok(document)
@@ -1101,7 +1137,8 @@ impl AppState {
         let state = self.clone();
         let workspace_clone = workspace.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = state.reindex_workspace(workspace_clone).await;
+            let _ = state.reindex_workspace(workspace_clone, true).await;
+            
         });
 
         Ok(updated)
@@ -1135,7 +1172,7 @@ impl AppState {
         let _ = self.delete_document(&note_id).await;
 
         crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -1184,7 +1221,7 @@ impl AppState {
             &workspace,
             &format!("Duplicate note: {}", document.title),
         )?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         self.load_note(duplicate_id).await
     }
 
@@ -1221,7 +1258,7 @@ impl AppState {
             &format!("Move note: {}", source.document.title),
         )?;
 
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         self.load_note(note_id).await
     }
 
@@ -1254,7 +1291,7 @@ impl AppState {
         }
 
         self.persist_runtime_settings()?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -1660,17 +1697,38 @@ impl AppState {
         match result {
             Ok(()) => {
                 let tools = self.take_chat_tools();
-                self.handle.emit(
-                    "ai://chat_done",
-                    serde_json::json!({
-                        "requestId": request_id,
-                        "tools": tools
-                    }),
-                )?;
-
+                if self.check_chat_aborted() {
+                    let _ = self.handle.emit(
+                        "ai://chat_aborted",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "tools": tools
+                        }),
+                    );
+                } else {
+                    self.handle.emit(
+                        "ai://chat_done",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "tools": tools
+                        }),
+                    )?;
+                }
                 Ok(())
             }
             Err(error) => {
+                // If the error is from an abort (stream closed), treat as abort.
+                if self.check_chat_aborted() {
+                    let tools = self.take_chat_tools();
+                    let _ = self.handle.emit(
+                        "ai://chat_aborted",
+                        serde_json::json!({
+                            "requestId": request_id,
+                            "tools": tools
+                        }),
+                    );
+                    return Ok(());
+                }
                 let message = error.to_string();
                 let tools = self.take_chat_tools();
                 log::error!("AI chat failed: {message}");
@@ -1726,7 +1784,7 @@ impl AppState {
 
     pub async fn rebuild_index(&self) -> Result<AppSnapshot> {
         let workspace = self.require_workspace()?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace(workspace, true).await?;
         Ok(self.snapshot())
     }
 
@@ -1795,7 +1853,7 @@ impl AppState {
             dest
         };
 
-        self.reindex_workspace(workspace.clone()).await?;
+        self.reindex_workspace(workspace.clone(), true).await?;
 
         let rel_path = relative_to_workspace(&workspace, &dest);
         let runtime = self.inner.runtime.read();
@@ -2135,7 +2193,7 @@ impl AppState {
                 let watched_workspace = workspace_path.clone();
                 tauri::async_runtime::spawn(async move {
                     let _ = cloned_state.handle.emit("index://changed", "filesystem");
-                    let _ = cloned_state.reindex_workspace(watched_workspace).await;
+                    let _ = cloned_state.reindex_workspace(watched_workspace, true).await;
                 });
             }
         })?;
@@ -2145,7 +2203,7 @@ impl AppState {
         Ok(())
     }
 
-    async fn reindex_workspace(&self, workspace: PathBuf) -> Result<()> {
+    async fn reindex_workspace(&self, workspace: PathBuf, rebuild_index: bool) -> Result<()> {
         let _guard = self.inner.index_lock.lock().await;
 
         {
@@ -2222,7 +2280,13 @@ impl AppState {
             }
         }
 
-        let table = rebuild_lancedb(&self.index_dir(), &notes).await?;
+        let table = if rebuild_index {
+            rebuild_lancedb(&self.index_dir(), &notes).await?
+        } else {
+            let conn = open_database(&self.index_dir()).await?;
+            conn.open_table(TABLE_NAME).execute().await
+                .context("failed to open existing lancedb table")?
+        };
         let note_count = notes.len();
 
         {

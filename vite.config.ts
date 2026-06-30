@@ -7,7 +7,21 @@ export default defineConfig({
 	// Vite FAIL LOUDLY if the port is taken instead of silently moving to 5174 —
 	// which once let `tauri dev` load whatever app held 5173 (e.g. ggufplay) inside
 	// myelin's window.
-	server: { port: 1420, strictPort: true },
+	server: {
+		port: 1420,
+		strictPort: true,
+		// Never watch the Rust build output — src-tauri/target holds tens of
+		// thousands of generated files and exhausts the inotify watch budget
+		// (ENOSPC on Linux). The frontend HMR only needs src/.
+		watch: {
+			ignored: [
+				'**/src-tauri/target/**',
+				'**/src-tauri/gen/**',
+				'**/build/**',
+				'**/.svelte-kit/**'
+			]
+		}
+	},
 	test: {
 		expect: { requireAssertions: true },
 		projects: [

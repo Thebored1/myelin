@@ -14,7 +14,6 @@
 		ChatMessage
 	} from '$lib/types';
 	import { onMount, onDestroy, tick } from 'svelte';
-	import { noteOpened, noteClosed } from '$lib/llamaWarm';
 	import { showSidebarToggle, noteSidebarOpen } from '$lib/stores';
 	import { theme } from '$lib/theme';
 	import Vditor from 'vditor';
@@ -2140,9 +2139,6 @@
 	}
 
 	onMount(() => {
-		// Warm llama-server for as long as a note is open (stopped in onDestroy).
-		noteOpened();
-
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
@@ -2156,6 +2152,7 @@
 		let unlistenChunk: UnlistenFn;
 		let unlistenDone: UnlistenFn;
 		let unlistenError: UnlistenFn;
+		let unlistenAborted: UnlistenFn;
 		let unlistenApproval: UnlistenFn;
 		let unlistenNoteWritten: UnlistenFn;
 		let unlistenNoteStreamStart: UnlistenFn;
@@ -2205,7 +2202,19 @@
 			cancelNoteStream();
 		}).then((fn) => (unlistenNoteStreamCancel = fn));
 
-		listen<{ tool: string; details: string; mutatesNote?: boolean }>('ai://chat_tool', (event) => {
+		listen<{ tool: string; details: string; mutatesNote?: boolean; isUpdate?: boolean }>('ai://chat_tool', (event) => {
+			if (event.payload.isUpdate) {
+				// Update the last tool entry's details with the result content
+				chatMessages = chatMessages.map((m) => {
+					const tools = m.tools?.map((t) =>
+						t.name === event.payload.tool
+							? { name: t.name, details: event.payload.details }
+							: t
+					);
+					return tools ? { ...m, tools } : m;
+				});
+				return;
+			}
 			let lastStartTime = Date.now();
 			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) {
@@ -2294,6 +2303,11 @@
 			}
 		).then((fn) => (unlistenError = fn));
 
+		// Aborted by user: remove the partial streaming message entirely.
+		listen<{ requestId: string }>('ai://chat_aborted', () => {
+			chatMessages = chatMessages.filter((m) => !m.isStreaming);
+		}).then((fn) => (unlistenAborted = fn));
+
 		// LaTeX support bundle download progress (first compile only).
 		listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
 			const p = event.payload;
@@ -2325,6 +2339,7 @@
 			if (unlistenChunk) unlistenChunk();
 			if (unlistenDone) unlistenDone();
 			if (unlistenError) unlistenError();
+			if (unlistenAborted) unlistenAborted();
 			if (unlistenTool) unlistenTool();
 			if (unlistenApproval) unlistenApproval();
 			if (unlistenNoteWritten) unlistenNoteWritten();
@@ -2336,8 +2351,6 @@
 	});
 
 	onDestroy(() => {
-		// Note view closing — stop llama-server (after a short grace) to free RAM/VRAM.
-		noteClosed();
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
 		if (vditorInstance) vditorInstance.destroy();
@@ -2838,12 +2851,23 @@
 										<button
 											type="button"
 											class="send-btn"
-											onclick={() => { if (chatInput.trim() && !isChatStreaming) sendChatMessage(); }}
-											disabled={!chatInput.trim() || isChatStreaming}
-											aria-label="Send"
-											title={isChatStreaming ? 'Waiting for the current reply to finish…' : 'Send (Enter)'}
+											class:stop={isChatStreaming}
+											onclick={() => {
+												if (isChatStreaming) {
+													invoke('abort_ai_stream').catch(console.error);
+												} else if (chatInput.trim()) {
+													sendChatMessage();
+												}
+											}}
+											disabled={!isChatStreaming && !chatInput.trim()}
+											aria-label={isChatStreaming ? 'Stop' : 'Send'}
+											title={isChatStreaming ? 'Stop generation' : 'Send (Enter)'}
 										>
-											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+											{#if isChatStreaming}
+												<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+											{:else}
+												<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+											{/if}
 										</button>
 									</div>
 								</div>
@@ -3376,7 +3400,6 @@
 		height: 100%;
 		display: grid;
 		grid-template-rows: auto 1fr;
-		animation: fade-in var(--duration-page) var(--ease-out);
 		background: var(--bg-page);
 	}
 
@@ -4854,6 +4877,13 @@
 	}
 	.send-btn:hover:not(:disabled) {
 		background: var(--accent-100);
+	}
+	.send-btn.stop:not(:disabled) {
+		background: #e5484d;
+		color: white;
+	}
+	.send-btn.stop:hover:not(:disabled) {
+		background: #d1393e;
 	}
 	.send-btn:disabled {
 		background: transparent;

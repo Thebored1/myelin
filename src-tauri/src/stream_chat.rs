@@ -66,6 +66,12 @@ pub async fn run_chat(
     const MAX_WEB_FETCHES: usize = 2;
 
     for _turn in 0..max_turns {
+        if state.check_abort_chat() {
+            log::info!("[stream_chat] abort requested before turn {_turn}");
+            state.mark_chat_aborted();
+            return Ok(messages);
+        }
+
         let mut body = json!({
             "model": model,
             "messages": messages,
@@ -237,6 +243,12 @@ pub async fn run_chat(
             if done {
                 break;
             }
+            // Check for abort between chunks so the stop button is responsive.
+            if state.check_abort_chat() {
+                log::info!("[stream_chat] abort during turn {_turn}");
+                state.mark_chat_aborted();
+                return Ok(messages);
+            }
         }
 
         // Diagnostics: surface exactly what the model emitted this turn so we can
@@ -329,6 +341,12 @@ pub async fn run_chat(
         // instead of looping on fetches forever (models drown otherwise).
         if fetch_count >= MAX_WEB_FETCHES {
             tools.retain(|t| t["function"]["name"].as_str() != Some("fetch_web_page"));
+        }
+        // Check for abort before the next turn so we don't start a new request.
+        if state.check_abort_chat() {
+            log::info!("[stream_chat] abort between turns");
+            state.mark_chat_aborted();
+            return Ok(messages);
         }
     }
 

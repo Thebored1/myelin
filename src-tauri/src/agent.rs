@@ -46,7 +46,8 @@ pub const MYELIN_PREAMBLE: &str = concat!(
     "- Write real Markdown: a heading line starts with \"# \" (a hash then a space), \"## \" for a sub-heading; bullets start with \"- \". \"**bold**\" is NOT a heading.\n",
     "- When editing, reproduce every line that should stay and change only what was asked. Never return an empty or much-shorter note unless the user explicitly asked to clear or shorten it.\n",
     "- When the user asks you to write what you found, researched, learned, or understood, put the ACTUAL information into the note as a finished, self-contained note — the real facts, perspectives, and details (use what you found in the conversation plus what you reliably know about the topic). NEVER write a question, an offer to do more (e.g. \"Would you like me to fetch the full text?\"), or a promise to act later (e.g. \"I will now fetch...\") as the note's content — the note holds finished information, not conversation. If you lack some detail, still write the best complete note you can from what you know rather than asking or deferring.\n",
-    "- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.\n\n",
+    "- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.\n",
+    "- NEVER write to or edit the note unless the user's message is a direct instruction to write, edit, or modify. Questions about what a word means (\"what does append mean\"), what you can do, or general inquiries are NOT requests to write — just answer in chat. Likewise, never simulate a tool call with handwritten XML or JSON in your text reply — the only way to call a tool is through the real tool call mechanism.\n\n",
     "Worked examples show only the editing style — the resulting note text you must pass as write_note's `content` (always via the tool call, never printed in chat):\n\n",
     "Example 1\n",
     "NOTE:\n**Cars**\nThey have engines.\n",
@@ -373,6 +374,10 @@ pub fn plan_write(
 /// Word-boundary check: true if any of `words` (lowercase literals/phrases)
 /// appears as a whole word in the already-lowercased `haystack`. Avoids
 /// substring false hits like "fix" inside "prefix" or "add" inside "address".
+fn starts_with_any(s: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| s.starts_with(p))
+}
+
 fn contains_any_word(haystack: &str, words: &[&str]) -> bool {
     let alternation = words
         .iter()
@@ -414,6 +419,16 @@ pub fn note_write_intent(message: &str) -> bool {
     let first_word = affirmation.split_whitespace().next().unwrap_or("");
     if LEADING_AFFIRMATIONS.contains(&first_word) {
         return true;
+    }
+
+    // Questions about what something IS / MEANS are not write requests, even if
+    // the subject happens to be a write verb ("what does append mean" triggers
+    // WRITE_VERBS but is a question, not a directive).
+    if starts_with_any(&m, &["what is ", "what are ", "what does ", "what do ", "what's "])
+        || starts_with_any(&m, &["what can you ", "what cannot you ", "what can't you "])
+        || starts_with_any(&m, &["define ", "definition of ", "meaning of "])
+    {
+        return false;
     }
 
     // Strong create/edit verbs. In this app these always target the open note.
@@ -1124,7 +1139,7 @@ impl Tool for WriteNoteTool {
         ToolDefinition {
             name: "write_note".to_string(),
             description:
-                "Edit the note currently OPEN in the editor — this tool only ever changes that one open note and NEVER creates a separate new note. It handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the open note. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder."
+                "Edit the note currently OPEN in the editor — this tool only ever changes that one open note and NEVER creates a separate new note. It handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the open note. Only call this tool when the user EXPLICITLY asked to write or edit the note — never on its own. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1499,7 +1514,7 @@ impl Tool for FetchWebPageTool {
         self.state.record_chat_tool("Fetch Web Page", url.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": "Fetch Web Page", "details": url }),
+            serde_json::json!({ "tool": "Fetch Web Page", "details": url.clone() }),
         );
 
         let response = crate::web_search::web_client()
@@ -1526,9 +1541,25 @@ impl Tool for FetchWebPageTool {
         })?;
         let text = html_to_text(&body);
         if text.trim().is_empty() {
-            Ok(format!("Fetched {url}, but no readable text was found."))
+            let result = format!("Fetched {url}, but no readable text was found.");
+            let _ = self.state.handle.emit(
+                "ai://chat_tool",
+                serde_json::json!({ "tool": "Fetch Web Page", "details": &result, "isUpdate": true }),
+            );
+            Ok(result)
         } else {
-            Ok(text.chars().take(WEB_FETCH_LIMIT).collect())
+            let full = text.chars().take(WEB_FETCH_LIMIT).collect::<String>();
+            let snippet = full.trim();
+            let ui = if snippet.len() > 1500 {
+                format!("{}…\n\n[truncated; full text is {} chars]", &snippet[..1500], snippet.len())
+            } else {
+                snippet.to_string()
+            };
+            let _ = self.state.handle.emit(
+                "ai://chat_tool",
+                serde_json::json!({ "tool": "Fetch Web Page", "details": ui, "isUpdate": true }),
+            );
+            Ok(snippet.to_string())
         }
     }
 }
@@ -1686,7 +1717,14 @@ impl Tool for WebSearchTool {
         );
         let searxng = self.state.searxng_url();
         match crate::web_search::web_search(&args.query, count, searxng.as_deref()).await {
-            Ok(results) => Ok(crate::web_search::format_results(&args.query, &results)),
+            Ok(results) => {
+                let formatted = crate::web_search::format_results(&args.query, &results);
+                let _ = self.state.handle.emit(
+                    "ai://chat_tool",
+                    serde_json::json!({ "tool": "Web Search", "details": formatted, "isUpdate": true }),
+                );
+                Ok(formatted)
+            }
             Err(e) => Ok(format!("Web search failed: {e}")),
         }
     }
@@ -2290,6 +2328,18 @@ mod tests {
         ] {
             assert!(!note_write_intent(msg), "expected no write intent: {msg}");
         }
+    }
+
+    #[test]
+    fn write_intent_rejects_definition_questions() {
+        // "what does append mean" must NOT trigger write intent even though
+        // "append" is a WRITE_VERB — it's a question, not a directive.
+        assert!(!note_write_intent("what does append mean"));
+        assert!(!note_write_intent("what is append"));
+        assert!(!note_write_intent("what are appendices"));
+        assert!(!note_write_intent("what does edit do"));
+        assert!(!note_write_intent("what can you do"));
+        assert!(!note_write_intent("define append"));
     }
 
     #[test]

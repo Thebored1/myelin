@@ -412,6 +412,12 @@ async fn ask_ai_stream(
 }
 
 #[tauri::command]
+async fn abort_ai_stream(state: State<'_, AppState>) -> Result<(), String> {
+    state.signal_abort_chat();
+    Ok(())
+}
+
+#[tauri::command]
 async fn save_chat_history(
     state: State<'_, AppState>,
     note_id: String,
@@ -638,6 +644,7 @@ pub fn run() {
             summarise_note,
             ask_ai,
             ask_ai_stream,
+            abort_ai_stream,
             save_chat_history,
             get_note_history,
             get_note_version,

@@ -1275,7 +1275,6 @@
 		grid-template-columns: 300px 1fr;
 		height: calc(100vh - 32px);
 		overflow: hidden;
-		animation: fade-in 0.2s ease-out;
 		transition: grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 		position: relative;
 	}
