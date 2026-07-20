@@ -163,6 +163,35 @@
     
     let enableJupyterExecution = $state(false);
 
+    // openharn sidecar settings (Settings > Agent).
+    type OpenharnSettings = {
+        port: number | null;
+        bin_path: string | null;
+        strict: boolean;
+        prompt_tools: boolean;
+        no_think: boolean;
+        narrow: boolean;
+        slm: boolean;
+        max_calls: number | null;
+        total_max: number | null;
+        tool_timeout_secs: number | null;
+        tool_subset: string | null;
+        base_url: string | null;
+    };
+    let ohPort = $state<number | null>(null);
+    let ohBinPath = $state('');
+    let ohStrict = $state(false);
+    let ohPromptTools = $state(false);
+    let ohNoThink = $state(false);
+    let ohNarrow = $state(false);
+    let ohSlm = $state(false);
+    let ohToolSubset = $state('');
+    let ohMaxCalls = $state<number | null>(null);
+    let ohTotalMax = $state<number | null>(null);
+    let ohToolTimeout = $state<number | null>(null);
+    let ohBaseUrl = $state('');
+    let ohSaving = $state(false);
+
     // Web search + embeddings/RAG + model compatibility (Phase 5).
     let searxngUrl = $state('');
     let embedModelPath = $state('');
@@ -234,6 +263,23 @@
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
             quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
+            try {
+                const oh = await invoke<OpenharnSettings>('get_openharn_settings');
+                ohPort = oh.port ?? null;
+                ohBinPath = oh.bin_path ?? '';
+                ohStrict = oh.strict ?? false;
+                ohPromptTools = oh.prompt_tools ?? false;
+                ohNoThink = oh.no_think ?? false;
+                ohNarrow = oh.narrow ?? false;
+                ohSlm = oh.slm ?? false;
+                ohToolSubset = oh.tool_subset ?? '';
+                ohMaxCalls = oh.max_calls ?? null;
+                ohTotalMax = oh.total_max ?? null;
+                ohToolTimeout = oh.tool_timeout_secs ?? null;
+                ohBaseUrl = oh.base_url ?? '';
+            } catch (e) {
+                console.error('Failed to load openharn settings:', e);
+            }
             try {
                 modelProfiles = await invoke<ProfileInfo[]>('list_model_profiles');
             } catch (e) {
@@ -439,6 +485,45 @@
     function toggleJupyterExecution() {
         enableJupyterExecution = !enableJupyterExecution;
         localStorage.setItem('myelin_jupyter_exec', enableJupyterExecution.toString());
+    }
+
+    async function pickOpenharnBin() {
+        const picked = await open({ multiple: false, title: 'Choose openharn-myelin binary' });
+        if (typeof picked === 'string') {
+            ohBinPath = picked;
+            await saveOpenharn();
+        }
+    }
+
+    async function saveOpenharn() {
+        ohSaving = true;
+        try {
+            await invoke('set_openharn_settings', {
+                settings: {
+                    port: ohPort || null,
+                    bin_path: ohBinPath.trim() || null,
+                    strict: ohStrict,
+                    prompt_tools: ohPromptTools,
+                    no_think: ohNoThink,
+                    narrow: ohNarrow,
+                    slm: ohSlm,
+                    tool_subset: ohToolSubset.trim() || null,
+                    max_calls: ohMaxCalls || null,
+                    total_max: ohTotalMax || null,
+                    tool_timeout_secs: ohToolTimeout || null,
+                    base_url: ohBaseUrl.trim() || null
+                }
+            });
+            saved = true;
+            setTimeout(() => {
+                saved = false;
+            }, 3000);
+        } catch (error) {
+            console.error('Failed to save agent settings:', error);
+            alert('Failed to save agent settings: ' + error);
+        } finally {
+            ohSaving = false;
+        }
     }
 </script>
 
@@ -769,6 +854,107 @@
                     </span>
                 </span>
             </label>
+        </section>
+
+        <section class="settings-section">
+            <h2>Agent (openharn)</h2>
+            <p class="description">
+                Myelin runs the openharn agent harness as a sidecar process that drives the local model
+                and calls back into Myelin for the real note / search / web tools. These settings tune
+                that sidecar. Leave a field blank to use the built-in default.
+            </p>
+
+            <div class="advanced-grid">
+                <div class="input-group">
+                    <label for="oh_port">Sidecar port</label>
+                    <input type="number" id="oh_port" bind:value={ohPort} onchange={saveOpenharn} placeholder="8091" />
+                </div>
+                <div class="input-group">
+                    <label for="oh_maxcalls">Max tool calls / turn</label>
+                    <input type="number" min="1" id="oh_maxcalls" bind:value={ohMaxCalls} onchange={saveOpenharn} placeholder="auto" />
+                </div>
+                <div class="input-group">
+                    <label for="oh_totalmax">Max tool calls / chat</label>
+                    <input type="number" min="1" id="oh_totalmax" bind:value={ohTotalMax} onchange={saveOpenharn} placeholder="auto" />
+                </div>
+                <div class="input-group">
+                    <label for="oh_timeout">Tool timeout (s)</label>
+                    <input type="number" min="1" id="oh_timeout" bind:value={ohToolTimeout} onchange={saveOpenharn} placeholder="300" />
+                </div>
+            </div>
+
+            <div class="model-picker">
+                <input
+                    type="text"
+                    class="path-display"
+                    bind:value={ohBaseUrl}
+                    placeholder="llama-server base URL override, e.g. http://127.0.0.1:39281/v1"
+                    onchange={saveOpenharn}
+                />
+            </div>
+            <p class="compute-hint">
+                Override the llama-server URL the sidecar calls. Blank = the model server Myelin is
+                already configured to use.
+            </p>
+
+            <div class="model-picker">
+                <div class="path-display" class:empty={!ohBinPath}>
+                    {ohBinPath || 'Bundled openharn-myelin (auto-detected)'}
+                </div>
+                <button class="browse-btn" onclick={pickOpenharnBin} disabled={ohSaving}>
+                    Browse…
+                </button>
+            </div>
+            <p class="compute-hint">Explicit path to the sidecar binary. Blank = bundled / resource-dir lookup.</p>
+
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohStrict} onchange={saveOpenharn} />
+                <span class="toggle-text">
+                    <strong>Strict grammar tool-calling</strong>
+                    <span class="toggle-hint">Constrain tool calls with a GBNF grammar — most reliable for models that emit malformed JSON.</span>
+                </span>
+            </label>
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohPromptTools} onchange={saveOpenharn} />
+                <span class="toggle-text">
+                    <strong>Text-form tool calls (prompt-tools)</strong>
+                    <span class="toggle-hint">Have the model emit tool calls as marked text instead of native function-calling JSON.</span>
+                </span>
+            </label>
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohNoThink} onchange={saveOpenharn} />
+                <span class="toggle-text">
+                    <strong>Strip model reasoning</strong>
+                    <span class="toggle-hint">Remove the model's <code>&lt;think&gt;</code> block from replies (ignored when strict grammar is on).</span>
+                </span>
+            </label>
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohNarrow} onchange={saveOpenharn} />
+                <span class="toggle-text">
+                    <strong>Read-only mode (narrow)</strong>
+                    <span class="toggle-hint">Preset: strict grammar + text-form tool calls, and only non-mutating tools (search / read / web) — the agent can't write or edit your notes.</span>
+                </span>
+            </label>
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohSlm} onchange={saveOpenharn} />
+                <span class="toggle-text">
+                    <strong>Compact observations (SLM)</strong>
+                    <span class="toggle-hint">Tighten tool-result caps so small/weak models don't drown in observation text.</span>
+                </span>
+            </label>
+
+            <div class="model-picker">
+                <input
+                    type="text"
+                    class="path-display"
+                    bind:value={ohToolSubset}
+                    placeholder="Tool subset, e.g. write_note,web_search,search_notes"
+                    onchange={saveOpenharn}
+                />
+            </div>
+            <p class="compute-hint">
+                Restrict the agent to a named subset of tools (comma-separated function names). Blank = all tools Myelin offers this turn.
+            </p>
         </section>
 
         <section class="settings-section">

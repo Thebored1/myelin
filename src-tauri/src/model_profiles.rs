@@ -31,6 +31,10 @@ pub struct ModelProfile {
     /// Whether the model reliably does tool-calling. None → derive/probe.
     #[serde(default)]
     pub supports_tools: Option<bool>,
+    /// Model cannot do native tool-calling reliably; needs prompt-tools + strict grammar
+    /// (e.g. LFM2 at low quants). Overrides user settings when true.
+    #[serde(default)]
+    pub prefers_prompt_tools: Option<bool>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -58,6 +62,7 @@ pub struct ResolvedProfile {
     pub role: ModelRole,
     pub chat_template: Option<String>,
     pub supports_tools: Option<bool>,
+    pub prefers_prompt_tools: Option<bool>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub is_recurrent_or_hybrid: bool,
@@ -71,6 +76,7 @@ impl ResolvedProfile {
             role: ModelRole::Chat,
             chat_template: None,
             supports_tools: None,
+            prefers_prompt_tools: None,
             temperature: None,
             top_p: None,
             is_recurrent_or_hybrid: gguf.map(|g| g.is_recurrent_or_hybrid()).unwrap_or(false),
@@ -95,6 +101,9 @@ impl ResolvedProfile {
         }
         if p.supports_tools.is_some() {
             self.supports_tools = p.supports_tools;
+        }
+        if p.prefers_prompt_tools.is_some() {
+            self.prefers_prompt_tools = p.prefers_prompt_tools;
         }
         if p.temperature.is_some() {
             self.temperature = p.temperature;

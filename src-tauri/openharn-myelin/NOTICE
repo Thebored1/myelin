@@ -1,0 +1,19 @@
+openharn-myelin is the openharn agent harness (https://github.com/Thebored1/openharn,
+MIT) adapted into a streaming sidecar for the Myelin desktop app.
+
+Adapted / ported components (all MIT):
+  - src/harness.rs  — openharn's reliability primitives ported verbatim in spirit
+                      from openharn/src/agent.rs: cap_result, fit_context,
+                      parse_text_tool_calls, flatten_for_prompt_tools, tool_grammar,
+                      strip_think. Made schema-driven (works for Myelin's tool set,
+                      not just openharn's coding tools).
+  - src/agent.rs    — openharn's run() loop, made async + streaming (SSE) and
+                      retargeted to execute tools via HTTP callbacks to the host
+                      (Myelin) instead of a local tools::Session.
+  - src/harness.rs::extract_partial_content / partial_field — ported from Myelin's
+                      own src-tauri/src/stream_chat.rs (live write_note streaming).
+
+openharn incorporates code and prompt text adapted from opencode
+(https://github.com/sst/opencode), used under the MIT License; the opencode
+license text is included at LICENSES/opencode-MIT.txt. The openharn license is at
+LICENSE.openharn.

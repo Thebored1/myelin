@@ -171,6 +171,11 @@ pub struct ResolvedLlamaConfig {
     /// unknown → the capability probe decides (and caches) at first use.
     #[serde(default)]
     pub supports_tools: Option<bool>,
+    /// Model cannot do native tool-calling reliably; needs prompt-tools + strict
+    /// grammar (e.g. LFM2 at low quants). True → forces prompt_tools + strict
+    /// on the sidecar, overriding user settings for this model.
+    #[serde(default)]
+    pub prefers_prompt_tools: Option<bool>,
     /// Deterministic correctness tools (format_note / find_in_note / write
     /// guard). Default true; on a more capable model they can be disabled.
     #[serde(default = "default_true")]
@@ -765,6 +770,7 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
             crate::model_profiles::ModelRole::Chat => "chat".to_string(),
         },
         supports_tools: profile.supports_tools,
+        prefers_prompt_tools: profile.prefers_prompt_tools,
         deterministic_tools: app_config.deterministic_tools.unwrap_or(true),
         // Default OFF: the model gets the full toolset every turn (model-agnostic).
         // Gating is opt-in only for sub-2B models that misfire on tools.

@@ -15,10 +15,11 @@
     "role": "chat",
     "chatTemplate": "lfm2",
     "supportsTools": true,
+    "prefersPromptTools": true,
     "temperature": 0.3,
     "topP": 0.9,
     "verified": false,
-    "notes": "Embedded chat template is broken for multi-turn tools; the corrected template is applied automatically."
+    "notes": "Embedded chat template is broken for multi-turn tools; the corrected template is applied automatically. Requires prompt-tools + strict grammar for reliable tool-calling at low quants."
   },
   {
     "name": "Nomic Embed Text v1.5",

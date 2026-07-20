@@ -7,6 +7,7 @@ mod models;
 mod notebook;
 mod rag;
 pub mod state;
+mod sidecar;
 mod stream_chat;
 mod tool_capability;
 mod wayland_shortcut;
@@ -119,6 +120,23 @@ async fn list_llama_devices(
     backend: String,
 ) -> Result<Vec<crate::llama_server::DeviceInfo>, String> {
     Ok(state.list_llama_devices(backend))
+}
+
+#[tauri::command]
+async fn get_openharn_settings(
+    state: State<'_, AppState>,
+) -> Result<crate::state::OpenharnSettings, String> {
+    Ok(state.openharn_settings())
+}
+
+#[tauri::command]
+async fn set_openharn_settings(
+    state: State<'_, AppState>,
+    settings: crate::state::OpenharnSettings,
+) -> Result<(), String> {
+    state
+        .set_openharn_settings(settings)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -654,7 +672,9 @@ pub fn run() {
             set_require_tool_approval,
             set_deterministic_tools,
             set_tool_gating,
-            resolve_tool_approval
+            resolve_tool_approval,
+            get_openharn_settings,
+            set_openharn_settings
         ])
         .on_window_event(|window, event| {
             // Closing the main window quits the whole app (not just the window —

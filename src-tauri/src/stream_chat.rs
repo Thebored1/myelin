@@ -34,6 +34,7 @@ struct ToolAccum {
 /// Run a multi-turn streaming chat. Emits `ai://chat_chunk` for assistant text,
 /// `ai://note_delta` (+ start/cancel) for live note content, and relies on the
 /// reused tools to emit `ai://chat_tool` / `ai://note_written`.
+#[allow(dead_code)]
 pub async fn run_chat(
     state: &AppState,
     config: &ResolvedLlamaConfig,
@@ -337,8 +338,9 @@ pub async fn run_chat(
 
 /// Deserialize the arguments for a named tool and run the matching rig `Tool`,
 /// reusing all of its guard rails / save logic. Returns the tool's result text
-/// (tools return `Ok(message)` even for refusals).
-async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
+/// (tools return `Ok(message)` even for refusals). Reused by the openharn
+/// sidecar path (`crate::sidecar`), so the real tools stay in Myelin's process.
+pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
     let v: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
     match name {
         "write_note" => match serde_json::from_value::<WriteNoteArgs>(v) {

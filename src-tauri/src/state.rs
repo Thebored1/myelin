@@ -1,4 +1,5 @@
 use crate::llama_server::{self, ManagedLlamaServer};
+use crate::sidecar::ManagedSidecar;
 use crate::models::{
     AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
     ProviderStatus, SearchResponse, SearchResult, Task,
@@ -371,10 +372,10 @@ fn describe_prompt_error(error: &PromptError) -> String {
 #[derive(Clone)]
 pub struct AppState {
     pub handle: AppHandle,
-    inner: Arc<InnerState>,
+    pub(crate) inner: Arc<InnerState>,
 }
 
-struct InnerState {
+pub(crate) struct InnerState {
     app_data_dir: PathBuf,
     runtime: RwLock<RuntimeState>,
     watcher: Mutex<Option<RecommendedWatcher>>,
@@ -384,6 +385,11 @@ struct InnerState {
     tectonic_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
     embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
+    /// The openharn-myelin agent sidecar: a long-lived `openharn-myelin` process
+    /// that runs the agent loop and calls back to Myelin for tool execution.
+    pub(crate) sidecar: AsyncMutex<Option<ManagedSidecar>>,
+    /// Live mirror of the persisted openharn sidecar settings, refreshed on save.
+    openharn_settings: Mutex<OpenharnSettings>,
     llama_client: Client,
     chat_tools: Mutex<Vec<ChatTool>>,
     latest_chat_question: Mutex<Option<String>>,
@@ -430,6 +436,48 @@ struct IndexedNote {
 struct PersistedSettings {
     workspace_path: Option<String>,
     custom_note_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "OpenharnSettings::is_default")]
+    openharn: OpenharnSettings,
+}
+
+/// Configuration for the openharn-myelin agent sidecar. Persisted in
+/// settings.json and surfaced in the Settings UI. Every field is optional /
+/// overridable; defaults (see `OpenharnSettings::default`) are used when unset.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct OpenharnSettings {
+    /// Sidecar listen port (Myelin -> sidecar). None = default (8091).
+    pub port: Option<u16>,
+    /// Explicit path to the openharn-myelin binary; overrides bundled/resource
+    /// resolution (same as the OPENHARN_MYELIN_BIN env var).
+    pub bin_path: Option<String>,
+    /// Harness tuning forwarded to the sidecar's `/v1/chat/stream` `options`:
+    /// `strict` enables the GBNF grammar + text-form tool calls; `prompt_tools`
+    /// forces text-form tool calls without the grammar; `no_think` strips a
+    /// model's `<think>` block; `narrow` is the read-only preset (strict +
+    /// prompt-tools + only non-mutating tools); `slm` tightens tool-result caps
+    /// for weak models; the rest bound the tool-call budget.
+    pub strict: bool,
+    pub prompt_tools: bool,
+    pub no_think: bool,
+    pub narrow: bool,
+    pub slm: bool,
+    pub max_calls: Option<usize>,
+    pub total_max: Option<usize>,
+    pub tool_timeout_secs: Option<u64>,
+    /// Restrict the agent to a named subset of tools (comma-separated function
+    /// names, e.g. "write_note,web_search"). Blank = all tools Myelin offers.
+    pub tool_subset: Option<String>,
+    /// Override the llama-server base URL the sidecar calls
+    /// (e.g. "http://127.0.0.1:39281/v1"). None = derived from the resolved
+    /// llama config (config.base_url() + "/v1").
+    pub base_url: Option<String>,
+}
+
+impl OpenharnSettings {
+    fn is_default(&self) -> bool {
+        *self == OpenharnSettings::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -473,6 +521,7 @@ impl AppState {
 
         let settings = load_settings(&app_data_dir)?;
         let workspace_path = settings.workspace_path.map(PathBuf::from);
+        let openharn_settings = settings.openharn.clone();
 
         Ok(Self {
             handle,
@@ -494,6 +543,8 @@ impl AppState {
                 tectonic_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
                 embed_server: AsyncMutex::new(None),
+                sidecar: AsyncMutex::new(None),
+                openharn_settings: Mutex::new(openharn_settings),
                 llama_client: Client::builder()
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
@@ -640,6 +691,25 @@ impl AppState {
         self.inner.tool_gating.store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// The openharn sidecar settings (port, binary override, harness tuning).
+    pub fn openharn_settings(&self) -> OpenharnSettings {
+        self.inner.openharn_settings.lock().clone()
+    }
+
+    /// Persist new openharn settings and update the live mirror. Drops any
+    /// running sidecar so the next chat respawns it with the new port / binary /
+    /// harness tuning (the running process keeps the old launch args).
+    pub fn set_openharn_settings(&self, settings: OpenharnSettings) -> Result<()> {
+        let mut all = load_settings(&self.inner.app_data_dir)?;
+        all.openharn = settings.clone();
+        save_settings(&self.inner.app_data_dir, &all)?;
+        *self.inner.openharn_settings.lock() = settings;
+        if let Ok(mut guard) = self.inner.sidecar.try_lock() {
+            *guard = None;
+        }
+        Ok(())
+    }
+
     pub fn register_pending_approval(&self, id: String, tx: tokio::sync::oneshot::Sender<bool>) {
         self.inner.pending_approvals.lock().insert(id, tx);
     }
@@ -671,13 +741,10 @@ impl AppState {
             runtime.workspace_path = Some(workspace.clone());
         }
 
-        save_settings(
-            &self.inner.app_data_dir,
-            &PersistedSettings {
-                workspace_path: Some(workspace.to_string_lossy().into_owned()),
-                custom_note_order: self.inner.runtime.read().custom_note_order.clone(),
-            },
-        )?;
+        let mut settings = load_settings(&self.inner.app_data_dir)?;
+        settings.workspace_path = Some(workspace.to_string_lossy().into_owned());
+        settings.custom_note_order = self.inner.runtime.read().custom_note_order.clone();
+        save_settings(&self.inner.app_data_dir, &settings)?;
 
         self.start_watcher(&workspace)?;
         self.reindex_workspace(workspace).await?;
@@ -1638,7 +1705,7 @@ impl AppState {
             let sent_len = messages.len();
 
             let final_messages =
-                crate::stream_chat::run_chat(self, &config, messages, tools, &request_id).await?;
+                crate::sidecar::run_chat(self, &config, messages, tools, &request_id, &nid).await?;
 
             // Persist the conversation for the next turn: prior turns + the RAW user
             // question (the note context is rebuilt fresh each turn, so it is not
@@ -2259,16 +2326,14 @@ impl AppState {
 
     fn persist_runtime_settings(&self) -> Result<()> {
         let runtime = self.inner.runtime.read();
-        save_settings(
-            &self.inner.app_data_dir,
-            &PersistedSettings {
-                workspace_path: runtime
-                    .workspace_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned()),
-                custom_note_order: runtime.custom_note_order.clone(),
-            },
-        )
+        let mut settings = load_settings(&self.inner.app_data_dir)?;
+        settings.workspace_path = runtime
+            .workspace_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        settings.custom_note_order = runtime.custom_note_order.clone();
+        save_settings(&self.inner.app_data_dir, &settings)?;
+        Ok(())
     }
 
     async fn run_llama_prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
