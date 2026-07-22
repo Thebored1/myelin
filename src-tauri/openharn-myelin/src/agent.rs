@@ -81,6 +81,11 @@ pub struct Options {
     /// `prefersPromptTools` models.
     #[serde(default)]
     pub friendly_results: bool,
+    /// When `friendly_results` classifies a turn as TOOL and `strict` is on,
+    /// force the call-only grammar (root ::= call, no text alternative) so a
+    /// weak model MUST output a tool call instead of answering in prose.
+    #[serde(default)]
+    pub call_only: bool,
     /// Pre-computed TOOL/CHAT result supplied by the host. When absent, the
     /// sidecar runs model-based intent detection.
     #[serde(default)]
@@ -123,6 +128,7 @@ impl Default for Options {
             tool_choice: None,
             template_kwargs: None,
             friendly_results: false,
+            call_only: false,
             intent_is_tool: None,
         }
     }
@@ -407,7 +413,12 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             // no tools available — text only
         } else if prompt_tools {
             if strict {
-                body["grammar"] = json!(harness::tool_grammar(&effective_schemas, "call | text"));
+                let grammar_root = if opts.call_only && friendly && intent_is_tool {
+                    "call"
+                } else {
+                    "call | text"
+                };
+                body["grammar"] = json!(harness::tool_grammar(&effective_schemas, grammar_root));
             }
         } else {
             body["tools"] = effective_schemas.clone();

@@ -253,35 +253,20 @@ pub async fn run_chat(
     let force_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
     let mut options = json!({
-        "strict": oh.strict,
-        "prompt_tools": oh.prompt_tools,
+        "strict": force_prompt_tools || oh.strict,
+        "prompt_tools": force_prompt_tools || oh.prompt_tools,
         // Model-based TOOL/CHAT classification: classifies the user's latest
         // turn as TOOL or CHAT before the tool loop. A CHAT turn (greetings,
         // questions) skips tools and answers directly; a TOOL turn enters the
         // tool loop with the full toolset.
         "friendly_results": force_prompt_tools,
+        // When classified as TOOL, force the call-only grammar so weak models
+        // must call a tool instead of answering in prose.
+        "call_only": force_prompt_tools,
         "no_think": oh.no_think,
         "narrow": oh.narrow,
         "slm": oh.slm,
     });
-    if force_prompt_tools {
-        // DSGoal approach: instead of prompt-tools + call_only grammar (which
-        // forces a foreign <tool_call>[...] text format), use native FC with
-        // tool_choice=required. This forces the server to grammar-constrain
-        // the model's OWN template-derived call format, which the model was
-        // trained on and understands natively.
-        options["tool_choice"] = json!("required");
-        // Disable thinking by default to prevent think-budget deaths under
-        // the forced call grammar (a thinking model returns nothing when it
-        // runs out of budget mid-think). User setting overrides this.
-        if oh
-            .template_kwargs
-            .as_ref()
-            .map_or(true, |s| s.trim().is_empty())
-        {
-            options["template_kwargs"] = json!(r#"{"enable_thinking":false}"#);
-        }
-    }
     if let Some(mc) = oh.max_calls {
         options["max_calls"] = json!(mc);
     }
