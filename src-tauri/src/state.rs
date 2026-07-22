@@ -1756,6 +1756,31 @@ impl AppState {
             messages.push(serde_json::json!({ "role": "user", "content": question }));
             let sent_len = messages.len();
 
+            let tool_names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            log::info!(
+                "[ask_ai_stream] tools_offered={} gating={} deterministic={} edit_thread={} supports_tools={}",
+                tool_names.join(","), config.tool_gating, config.deterministic_tools, edit_thread, config.supports_tools.unwrap_or(false)
+            );
+            let _ = self.handle.emit(
+                "ai://debug_event",
+                serde_json::json!({
+                    "kind": "config",
+                    "msg": format!(
+                        "tools: {}, gate={}, determ={}, edit={}, tools_supported={}, prompt_tools={}",
+                        tool_names.join(", "),
+                        config.tool_gating,
+                        config.deterministic_tools,
+                        edit_thread,
+                        config.supports_tools.unwrap_or(false),
+                        config.prefers_prompt_tools.unwrap_or(false),
+                    ),
+                    "requestId": request_id,
+                }),
+            );
+
             let final_messages =
                 crate::sidecar::run_chat(self, &config, messages, tools, &request_id, &nid).await?;
 

@@ -259,17 +259,30 @@ pub async fn run_chat(
         // turn as TOOL or CHAT before the tool loop. A CHAT turn (greetings,
         // questions) skips tools and answers directly; a TOOL turn enters the
         // tool loop with the full toolset.
+        // Set to true even when intent_is_tool pre-classifies, because call_only
+        // requires both friendly_results AND intent_is_tool to activate the
+        // forced-call grammar. Without friendly_results=true the grammar falls
+        // back to "call | text" and weak models choose text (prose) every time.
         "friendly_results": force_prompt_tools,
-        // When classified as TOOL, force the call-only grammar so weak models
-        // must call a tool instead of answering in prose.
+        // When the turn is classified as TOOL, force the call-only grammar so
+        // weak models must call a tool instead of answering in prose.
         "call_only": force_prompt_tools,
+        // Pre-classify: the model is already known to need tools (the profile
+        // says prefersPromptTools). Bypass the model-based intent detection
+        // (costly extra inference) and go straight to the tool loop.
+        // paired with friendly_results=true this enables call_only.
+        "intent_is_tool": force_prompt_tools,
         "no_think": oh.no_think,
         "narrow": oh.narrow,
         "slm": oh.slm,
     });
-    if let Some(mc) = oh.max_calls {
-        options["max_calls"] = json!(mc);
-    }
+    // For force_prompt_tools models (weak quants), the model often splits
+    // content across multiple tool calls. Allow 3 calls per turn so both the
+    // partial and the full content calls execute (write_note overwrites, so
+    // only the last non-empty call matters). User override via settings wins.
+    options["max_calls"] = json!(oh
+        .max_calls
+        .unwrap_or(if force_prompt_tools { 3 } else { 1 }));
     if let Some(tm) = oh.total_max {
         options["total_max"] = json!(tm);
     }
@@ -341,6 +354,42 @@ pub async fn run_chat(
     let mut final_messages: Vec<Value> = Vec::new();
     let handle = &state.handle;
 
+    // Emit a debug event so the frontend can show what the model is doing.
+    let emit_debug = |kind: &str, msg: &str| {
+        let _ = handle.emit(
+            "ai://debug_event",
+            json!({
+                "kind": kind,
+                "msg": msg,
+                "requestId": request_id,
+            }),
+        );
+    };
+
+    emit_debug(
+        "config",
+        &format!(
+            "options: strict={}, prompt_tools={}, call_only={}, intent_is_tool={}, max_calls={}",
+            options["strict"],
+            options["prompt_tools"],
+            options["call_only"],
+            options
+                .get("intent_is_tool")
+                .map_or(false, |v| v.as_bool().unwrap_or(false)),
+            options
+                .get("max_calls")
+                .map_or(1, |v| v.as_u64().unwrap_or(1))
+        ),
+    );
+
+    let tool_names: Vec<String> = tools
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+        .collect();
+    if !tool_names.is_empty() {
+        emit_debug("tools", &format!("offered: {}", tool_names.join(", ")));
+    }
+
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| anyhow!("sidecar stream error: {e}"))?;
         buf.extend_from_slice(&bytes);
@@ -399,10 +448,14 @@ pub async fn run_chat(
                             if name.is_empty() {
                                 continue;
                             }
+                            let args_preview: String = args.chars().take(80).collect();
+                            emit_debug("tool", &format!("executing {name}(…{args_preview}…)"));
                             // Run the REAL Myelin tool (emits ai://chat_tool and,
                             // for write_note, ai://note_written on its own).
                             let result =
                                 crate::stream_chat::execute_tool(state, &name, &args).await;
+                            let result_preview: String = result.chars().take(40).collect();
+                            emit_debug("tool_result", &format!("{name} -> {result_preview}"));
                             // Unblock the harness.
                             let post = client
                                 .post(format!("{base}/v1/tool-result"))
@@ -423,19 +476,27 @@ pub async fn run_chat(
                                     final_messages = msgs.clone();
                                 }
                                 last_tool = v["last_tool"].as_str().map(|s| s.to_string());
+                                if let Some(ref lt) = last_tool {
+                                    emit_debug("done", &format!("turn complete (last tool: {lt})"));
+                                } else {
+                                    emit_debug("done", "turn complete (chat)");
+                                }
                             }
                         }
                         "usage" => {
                             if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                                let pt = v["prompt_tokens"].as_u64().unwrap_or(0);
+                                let ct = v["completion_tokens"].as_u64().unwrap_or(0);
                                 let _ = handle.emit(
                                     "ai://chat_usage",
                                     json!({
                                         "requestId": request_id,
-                                        "promptTokens": v["prompt_tokens"].as_u64().unwrap_or(0),
-                                        "completionTokens": v["completion_tokens"].as_u64().unwrap_or(0),
+                                        "promptTokens": pt,
+                                        "completionTokens": ct,
                                         "totalTokens": v["total_tokens"].as_u64().unwrap_or(0),
                                     }),
                                 );
+                                emit_debug("usage", &format!("prompt={pt}, completion={ct}"));
                             }
                         }
                         "error" => {

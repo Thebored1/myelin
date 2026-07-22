@@ -583,11 +583,27 @@ pub fn run() {
             // pay the cold-start cost of loading the model into memory. Clone
             // before the move into manage(). Best-effort — if it fails the first
             // chat will start the server normally.
+            //
+            // Spawn from a std thread with its own Tokio runtime because the
+            // Tauri setup closure may not have a Tokio context active (depends
+            // on the backend and how tauri initialises the main thread).
             let warmup_state = app_state.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = warmup_state.warm_llama_server().await {
-                    log::warn!("startup warm-up failed: {e}");
-                }
+            std::thread::spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        log::warn!("startup warm-up: failed to build runtime: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    if let Err(e) = warmup_state.warm_llama_server().await {
+                        log::warn!("startup warm-up failed: {e}");
+                    }
+                });
             });
 
             app.manage(app_state);

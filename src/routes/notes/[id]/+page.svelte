@@ -60,7 +60,7 @@
 
 	// Debug window state for AI performance metrics.
 	let showDebugWindow = $state(false);
-	type DebugTraceEntry = { time: number; msg: string; kind: 'send' | 'gen' | 'tool' | 'note' | 'done' | 'error' };
+	type DebugTraceEntry = { time: number; msg: string; kind: 'send' | 'gen' | 'tool' | 'tool_result' | 'note' | 'done' | 'error' | 'config' | 'usage' | 'done'; };
 	let debugInfo = $state<{
 		requestStart: number | null;
 		firstChunk: number | null;
@@ -2378,9 +2378,21 @@
 					};
 				}
 			}
-		).then((fn) => (unlistenError = fn));
+		            ).then((fn) => (unlistenError = fn));
 
-		// LaTeX support bundle download progress (first compile only).
+		            // Debug event: model behavior, tool calls, grammar config, etc.
+		            let unlistenDebug: UnlistenFn | undefined;
+		            listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
+		                if (showDebugWindow && debugInfo) {
+		                    const entry = { time: Date.now(), msg: `[${event.payload.kind}] ${event.payload.msg}`, kind: event.payload.kind as any };
+		                    debugInfo = {
+		                        ...debugInfo,
+		                        trace: [...debugInfo.trace, entry]
+		                    };
+		                }
+		            }).then((fn) => (unlistenDebug = fn));
+
+		            // LaTeX support bundle download progress (first compile only).
 		listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
 			const p = event.payload;
 			const mb = ((p.bytes ?? 0) / (1024 * 1024)).toFixed(1);
@@ -2414,6 +2426,7 @@
 			if (unlistenUsage) unlistenUsage();
 			if (unlistenTool) unlistenTool();
 			if (unlistenApproval) unlistenApproval();
+			if (unlistenDebug) unlistenDebug();
 			if (unlistenNoteWritten) unlistenNoteWritten();
 			if (unlistenNoteStreamStart) unlistenNoteStreamStart();
 			if (unlistenNoteDelta) unlistenNoteDelta();
@@ -2888,65 +2901,74 @@
 							<div class="chat-input-area">
 								{#if showDebugWindow && debugInfo}
 									<div class="debug-window">
-										<div class="debug-window-header">
-											<span class="debug-title">AI Debug</span>
-											<button
-												class="debug-toggle"
-												onclick={() => (showDebugWindow = false)}
-												title="Close debug window"
-											>×</button>
-										</div>
-										<div class="debug-grid">
-											<div class="debug-row">
-												<span class="debug-label">Prompt → First token:</span>
-												<span class="debug-value">{debugInfo.firstChunk && debugInfo.requestStart ? ((debugInfo.firstChunk - debugInfo.requestStart) / 1000).toFixed(2) + 's' : '—'}</span>
-											</div>
-											<div class="debug-row">
-												<span class="debug-label">First token → Done:</span>
-												<span class="debug-value">{debugInfo.done && debugInfo.firstChunk ? ((debugInfo.done - debugInfo.firstChunk) / 1000).toFixed(2) + 's' : '—'}</span>
-											</div>
-											<div class="debug-row">
-												<span class="debug-label">Total elapsed:</span>
-												<span class="debug-value">{debugInfo.done ? ((debugInfo.done - (debugInfo.requestStart ?? 0)) / 1000).toFixed(2) + 's' : debugInfo.requestStart ? (((Date.now() - debugInfo.requestStart) / 1000).toFixed(2) + 's (live)') : '—'}</span>
-											</div>
-											<div class="debug-row">
-												<span class="debug-label">Prompt tokens:</span>
-												<span class="debug-value">{debugInfo.promptTokens || '—'}</span>
-											</div>
-											<div class="debug-row">
-												<span class="debug-label">Completion tokens:</span>
-												<span class="debug-value">{debugInfo.completionTokens || '—'}</span>
-											</div>
-											<div class="debug-row">
-												<span class="debug-label">Tokens/s (gen):</span>
-												<span class="debug-value">
-													{#if debugInfo.done && debugInfo.firstChunk}
-														{@const genSec = (debugInfo.done - debugInfo.firstChunk) / 1000}
-														{@const fromServer = debugInfo.completionTokens > 0}
-														{@const tokCount = fromServer
-															? debugInfo.completionTokens
-															: Math.round(debugInfo.replyChars / 4)}
-														{fromServer ? '' : '~'}{(tokCount / genSec).toFixed(1)}
-													{:else}
-														—
-													{/if}
-												</span>
-											</div>
-											{#if !debugInfo.completionTokens && debugInfo.replyChars > 0}
-												<div class="debug-note">Token counts estimated from characters (~¼ tok/char). Enable server usage tracking for exact numbers.</div>
-											{/if}
-										</div>
-										{#if debugInfo.trace.length > 1}
-											<div class="debug-trace" bind:this={debugTraceEl}>
-												{#each debugInfo.trace as entry, i}
-													<div class="trace-entry {entry.kind}">
-														<span class="trace-time">+{((entry.time - (debugInfo.requestStart ?? entry.time)) / 1000).toFixed(1)}s</span>
-														<span class="trace-msg">{entry.msg}</span>
-													</div>
-												{/each}
-											</div>
-										{/if}
-									</div>
+																			<div class="debug-window-header">
+																				<span class="debug-title">AI Debug</span>
+																				<button
+																					class="debug-toggle"
+																					onclick={() => (showDebugWindow = false)}
+																					title="Close debug window"
+																				>×</button>
+																			</div>
+																			<div class="debug-grid">
+																				<div class="debug-row">
+																					<span class="debug-label">Prompt → First token:</span>
+																					<span class="debug-value">{debugInfo.firstChunk && debugInfo.requestStart ? ((debugInfo.firstChunk - debugInfo.requestStart) / 1000).toFixed(2) + 's' : '—'}</span>
+																				</div>
+																				<div class="debug-row">
+																					<span class="debug-label">First token → Done:</span>
+																					<span class="debug-value">{debugInfo.done && debugInfo.firstChunk ? ((debugInfo.done - debugInfo.firstChunk) / 1000).toFixed(2) + 's' : '—'}</span>
+																				</div>
+																				<div class="debug-row">
+																					<span class="debug-label">Total elapsed:</span>
+																					<span class="debug-value">{debugInfo.done ? ((debugInfo.done - (debugInfo.requestStart ?? 0)) / 1000).toFixed(2) + 's' : debugInfo.requestStart ? (((Date.now() - debugInfo.requestStart) / 1000).toFixed(2) + 's (live)') : '—'}</span>
+																				</div>
+																				<div class="debug-row">
+																					<span class="debug-label">Prompt tokens:</span>
+																					<span class="debug-value">{debugInfo.promptTokens || '—'}</span>
+																				</div>
+																				<div class="debug-row">
+																					<span class="debug-label">Completion tokens:</span>
+																					<span class="debug-value">{debugInfo.completionTokens || '—'}</span>
+																				</div>
+																				<div class="debug-row">
+																					<span class="debug-label">Tokens/s (gen):</span>
+																					<span class="debug-value">
+																						{#if debugInfo.done && debugInfo.firstChunk}
+																							{@const genSec = (debugInfo.done - debugInfo.firstChunk) / 1000}
+																							{@const fromServer = debugInfo.completionTokens > 0}
+																							{@const tokCount = fromServer
+																								? debugInfo.completionTokens
+																								: Math.round(debugInfo.replyChars / 4)}
+																							{fromServer ? '' : '~'}{(tokCount / genSec).toFixed(1)}
+																						{:else}
+																							—
+																						{/if}
+																					</span>
+																				</div>
+																			</div>
+																			<div class="debug-trace" bind:this={debugTraceEl}>
+																				{#each debugInfo.trace as entry, i}
+																					<div class="trace-entry {entry.kind}">
+																						<span class="trace-time">+{((entry.time - (debugInfo.requestStart ?? entry.time)) / 1000).toFixed(1)}s</span>
+																						{#if entry.kind === 'tool'}
+																							<span class="trace-msg trace-tool">🔧 {entry.msg}</span>
+																						{:else if entry.kind === 'tool_result'}
+																							<span class="trace-msg trace-tool-result">✅ {entry.msg}</span>
+																						{:else if entry.kind === 'config'}
+																							<span class="trace-msg trace-config">⚙️ {entry.msg}</span>
+																						{:else if entry.kind === 'error'}
+																							<span class="trace-msg trace-error">❌ {entry.msg}</span>
+																						{:else if entry.kind === 'gen'}
+																							<span class="trace-msg trace-gen">💬 {entry.msg}</span>
+																						{:else if entry.kind === 'done'}
+																							<span class="trace-msg trace-done">✓ {entry.msg}</span>
+																						{:else}
+																							<span class="trace-msg">{entry.msg}</span>
+																						{/if}
+																					</div>
+																				{/each}
+																			</div>
+																		</div>
 								{/if}
 								<div class="prompt-box">
 									<textarea
@@ -5197,6 +5219,15 @@
 	}
 	.trace-entry.send .trace-msg {
 		color: var(--text-tertiary, #777);
+	}
+	.trace-entry.config .trace-msg {
+		color: #c084fc;
+	}
+	.trace-entry.usage .trace-msg {
+		color: #38bdf8;
+	}
+	.trace-entry.tool_result .trace-msg {
+		color: #4ade80;
 	}
 
 	.loading-dots

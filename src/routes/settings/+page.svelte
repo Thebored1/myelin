@@ -984,13 +984,13 @@
                     type="text"
                     class="path-display"
                     bind:value={ohTemplateKwargs}
-                    placeholder="Template kwargs JSON, e.g. {"enable_thinking":false}"
+                    placeholder={"Template kwargs JSON, e.g. {\"enable_thinking\":false}"}
                     onchange={saveOpenharn}
                 />
             </div>
             <p class="compute-hint">
                 Raw JSON forwarded as <code>chat_template_kwargs</code>. Canonical use:
-                <code>{"enable_thinking":false}</code> disables chain-of-thought on thinking models
+                <code>{'{'}&quot;enable_thinking&quot;:false{'}'}</code> disables chain-of-thought on thinking models
                 (no-op on templates without the switch). Pairs with <code>tool_choice=required</code>.
             </p>
         </section>

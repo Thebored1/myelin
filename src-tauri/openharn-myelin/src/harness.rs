@@ -94,7 +94,7 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
     let s = s.trim();
     let mut calls = Vec::new();
 
-    // JSON tool-call format first (Granite / llama-server style).
+    // JSON tool-call format (Granite / llama-server style).
     if let Some(open) = s.find(['[', '{']) {
         let is_arr = s.as_bytes()[open] == b'[';
         let close = if is_arr { s.rfind(']') } else { s.rfind('}') };
@@ -127,107 +127,70 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
                 }
             }
         }
-    }
-
-    // XML tool-call format: <tool_call><tool>name</tool>key=value|key=value</tool_call>
-    // Used by Granite-family and some quant-degraded LFM2 models.
-    if let Some(rest) = s.strip_prefix("<tool>") {
-        if let Some(end_tag) = rest.find("</tool>") {
-            let name = rest[..end_tag].trim();
-            if !name.is_empty() {
-                let after = rest[end_tag + "</tool>".len()..].trim();
-                // Parse key=value|key=value into a JSON object
-                let mut args_map = serde_json::Map::new();
-                for pair in after.split('|') {
-                    let pair = pair.trim();
-                    if let Some(eq) = pair.find('=') {
-                        let k = pair[..eq].trim();
-                        let v = pair[eq + 1..].trim();
-                        if !k.is_empty() {
-                            args_map.insert(k.to_string(), json!(v));
+        // Incomplete array: no closing bracket found — repair by appending `]`
+        if is_arr && close.is_none() {
+            let tail = &s[open..];
+            let repaired = format!("{tail}]");
+            if let Ok(val) = serde_json::from_str::<Value>(&repaired) {
+                if let Value::Array(a) = val {
+                    for (i, item) in a.iter().enumerate() {
+                        let f = item.get("function").unwrap_or(item);
+                        if let Some(name) = f.get("name").and_then(|v| v.as_str()) {
+                            let args_str = f
+                                .get("arguments")
+                                .or_else(|| f.get("parameters"))
+                                .map(|a| {
+                                    if a.is_string() {
+                                        a.as_str().unwrap_or("{}").to_string()
+                                    } else if !a.is_null() {
+                                        a.to_string()
+                                    } else {
+                                        "{}".to_string()
+                                    }
+                                })
+                                .unwrap_or_else(|| "{}".to_string());
+                            calls.push(json!({
+                                "id": format!("call_{i}"),
+                                "type": "function",
+                                "function": { "name": name, "arguments": args_str }
+                            }));
                         }
                     }
-                }
-                let known = |n: &str| {
-                    schemas.as_array().map_or(false, |a| {
-                        a.iter().any(|t| t["function"]["name"].as_str() == Some(n))
-                    })
-                };
-                if known(name) {
-                    let args_str = if args_map.is_empty() {
-                        "{}".to_string()
-                    } else {
-                        serde_json::Value::Object(args_map).to_string()
-                    };
-                    calls.push(json!({
-                        "id": "call_0",
-                        "type": "function",
-                        "function": { "name": name, "arguments": args_str }
-                    }));
-                    return Some(calls);
+                    if !calls.is_empty() {
+                        return Some(calls);
+                    }
                 }
             }
         }
     }
 
-    // Function-call format: name(key="value"|key="value")
-    // The model naturally outputs this format when prompted.
-    let fc_pattern = regex::Regex::new(r"(?m)(?:^|\s)(\w+)\((.*?)\)$").ok();
-    if let Some(re) = fc_pattern {
-        if let Some(cap) = re.captures(s) {
-            let name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            let args_body = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-            if !name.is_empty() {
-                let known = |n: &str| {
-                    schemas.as_array().map_or(false, |a| {
-                        a.iter().any(|t| t["function"]["name"].as_str() == Some(n))
-                    })
-                };
-                if known(name) {
-                    let mut args_map = serde_json::Map::new();
-                    for pair in args_body.split('|') {
-                        let pair = pair.trim();
-                        if let Some(eq) = pair.find('=') {
-                            let k = pair[..eq].trim();
-                            let v_raw = pair[eq + 1..].trim();
-                            // Strip surrounding quotes if present
-                            let v = if (v_raw.starts_with('"') && v_raw.ends_with('"'))
-                                || (v_raw.starts_with('\'') && v_raw.ends_with('\''))
-                            {
-                                &v_raw[1..v_raw.len() - 1]
-                            } else {
-                                v_raw
-                            };
-                            if !k.is_empty() {
-                                args_map.insert(k.to_string(), json!(v));
-                            }
-                        }
-                    }
-                    let args_str = if args_map.is_empty() {
-                        "{}".to_string()
-                    } else {
-                        serde_json::Value::Object(args_map).to_string()
-                    };
-                    calls.push(json!({
-                        "id": "call_0",
-                        "type": "function",
-                        "function": { "name": name, "arguments": args_str }
-                    }));
-                    return Some(calls);
-                }
+    // Fallback: `name({"k":"v"})` or `name(positional)`.
+    fn tool_param(name: &str, schemas: &Value) -> Option<&'static str> {
+        // Myelin-specific mapping for positional args
+        let known: &[(&str, &str)] = &[
+            ("write_note", "content"),
+            ("search_notes", "query"),
+            ("read_note", "note_id"),
+            ("fetch_web_page", "url"),
+            ("web_search", "query"),
+            ("format_note", "operation"),
+            ("find_in_note", "query"),
+            ("search_documents", "query"),
+        ];
+        for (n, p) in known {
+            if *n == name {
+                return Some(p);
             }
         }
+        // Fall back to first required param from schema
+        first_required_param(schemas, name).map(|s| Box::leak(s.into_boxed_str()) as &str)
     }
-
-    // Fallback: `name({"k":"v"})` or `name(positional)`. Only match at line start
-    // or after whitespace/backtick so it never fires on code like `fs::write(...)`.
-    let pattern = regex::Regex::new(r"(?m)(?:^|\s)`?(\w+)\((\{.*?\}|[^)]*)\)`?").ok()?;
-    let known = |n: &str| {
-        schemas
-            .as_array()
-            .map(|a| a.iter().any(|t| t["function"]["name"].as_str() == Some(n)))
-            .unwrap_or(false)
+    let known = |n: &str| -> bool {
+        schemas.as_array().map_or(false, |a| {
+            a.iter().any(|t| t["function"]["name"].as_str() == Some(n))
+        })
     };
+    let pattern = regex::Regex::new(r"(?m)(?:^|\s)`?(\w+)\((\{.*?\}|[^)]*)\)`?").ok()?;
     for cap in pattern.captures_iter(s) {
         let name = cap.get(1).map(|m| m.as_str())?;
         if !known(name) {
@@ -239,7 +202,7 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
         }
         let args = if args_str.starts_with('{') {
             args_str.to_string()
-        } else if let Some(param) = first_required_param(schemas, name) {
+        } else if let Some(param) = tool_param(name, schemas) {
             json!({ param: args_str }).to_string()
         } else {
             continue;
@@ -262,9 +225,9 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
 /// native tool-calling API.
 fn tool_prompt(schemas: &Value) -> String {
     let mut s = String::from(
-        "You do NOT have a tool API. To call a tool, reply with ONLY:\n\
-         write_note(content=\"your text here\"|mode=\"replace\")\n\
-         Put arguments in quotes. Use | to separate multiple arguments. Call a tool whenever the user wants to change, create, add to, or remove content from the note — never put that content in a plain-text reply. Reply in plain text ONLY for genuine conversation (greetings, questions, clarifications, refusals); never for note content. Available tools:\n",
+        "You do NOT have a tool API. To call a tool, reply with ONLY this line and nothing else:\n\
+         <tool_call>[{\"name\": \"<tool>\", \"arguments\": { ... }}]\n\
+         Call a tool whenever the user wants to change, create, add to, or remove content from the note — never put that content in a plain-text reply. Reply in plain text ONLY for genuine conversation (greetings, questions, clarifications, refusals); never for note content. Available tools:\n",
     );
     if let Some(arr) = schemas.as_array() {
         for t in arr {
@@ -313,21 +276,7 @@ fn render_calls_text(tool_calls: &Value) -> String {
                 .collect()
         })
         .unwrap_or_default();
-    if let Some(tc) = items.first() {
-        let name = tc["name"].as_str().unwrap_or("");
-        let args = &tc["arguments"];
-        let pairs: Vec<String> = args
-            .as_object()
-            .map(|o| {
-                o.iter()
-                    .map(|(k, v)| format!(r#"{k}="{}""#, v.as_str().unwrap_or(&v.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        format!("{name}({})", pairs.join("|"))
-    } else {
-        String::new()
-    }
+    format!("<tool_call>{}", Value::Array(items))
 }
 
 /// Flatten history into plain system/user/assistant messages a tool-unaware
@@ -361,36 +310,124 @@ pub fn flatten_for_prompt_tools(history: &[Value], schemas: &Value) -> Vec<Value
 
 // ---- GBNF grammar (strict mode) -------------------------------------------
 
+const GRAMMAR_TAIL: &str = r#"string ::= "\"" ( [^"\\] | "\\" . )* "\""
+integer ::= "-"? [0-9]+
+"#;
+
+/// The GBNF grammar for a single argument value, tightened by JSON-schema type/enum where
+/// we can (string / integer / boolean / one-of-enum), falling back to generic `value`.
+fn value_rule_for(spec: &Value) -> String {
+    // Enum constraint: restrict to enums when available (most"/"relevant"/" for format_op).
+    if let Some(en) = spec["enum"].as_array() {
+        let q = |s: &str| format!("\"\\\"{s}\\\"\"");
+        let alts: Vec<String> = en.iter().filter_map(|v| v.as_str()).map(q).collect();
+        if !alts.is_empty() {
+            return format!("( {} )", alts.join(" | "));
+        }
+    }
+    // For the grammar to work with highly-quantized models, keep argument rules
+    // simple: string covers most tool arguments; integer covers count/index.
+    match spec["type"].as_str().unwrap_or("") {
+        "integer" | "number" => "integer".into(),
+        _ => "string".into(),
+    }
+}
+
 pub fn tool_grammar(schemas: &Value, root: &str) -> String {
     let lit = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
     let mut g = String::new();
-    g.push_str(&format!("root ::= {root}\n"));
-    g.push_str("text ::= [ -~\\t\\n]+\n");
-    // name(key="value"|key="value") format — the format this model family
-    // naturally outputs (function-call syntax with quoted values).
-    g.push_str("call ::= toolname \"(\" argpairs \")\"\n");
-    g.push_str("argpairs ::= keyval ( \"|\" keyval )*\n");
-    g.push_str("keyval ::= key \"=\" quoted_value\n");
-    g.push_str("key ::= [a-z_]+\n");
-    g.push_str("quoted_value ::= \"\\\"\" [^\"\\\\]+ \"\\\"\"\n");
-    // tool alternatives
-    let mut tool_alts: Vec<String> = Vec::new();
+    match root {
+        "call" => g.push_str("root ::= call\n"),
+        "abstain" => {
+            g.push_str("root ::= call | abstain\n");
+            g.push_str("abstain ::= \"NO_TOOL\"\n");
+        }
+        _ => {
+            g.push_str("root ::= call | text\n");
+            g.push_str("text ::= [^<[{] | [^<[{] textrest\n");
+            g.push_str("textrest ::= [^<] | [^<] textrest\n");
+        }
+    }
+    // Compact flat grammar: no whitespace rules (ws), no recursive value/object
+    // rules. Each tool call is inlined as a flat sequence of literal characters
+    // and simple rules (string, integer, enum). This avoids the model getting
+    // stuck in infinite whitespace expansion, which Q2 models do with complex
+    // recursive grammars.
+    //
+    // Allow multiple tool calls. Q2 models sometimes split content across
+    // calls (first call has partial content, second has the rest). The sidecar
+    // executes all calls via max_calls; write_note overwrites so only the last
+    // non-empty call matters.
+    g.push_str(&format!(
+        "call ::= {} {} obj ( {} obj )* {}\n",
+        opt_lit("<tool_call>"),
+        lit("["),
+        lit(","),
+        lit("]")
+    ));
+    let mut obj_alts: Vec<String> = Vec::new();
+    let mut tool_rules = String::new();
     if let Some(arr) = schemas.as_array() {
         for t in arr {
             let name = match t["function"]["name"].as_str() {
                 Some(n) => n,
                 None => continue,
             };
-            tool_alts.push(lit(name));
+            // Build the inner arguments object: {"key1": rule1, "key2": rule2, ...}
+            let props = t["function"]["parameters"]["properties"].as_object();
+            let mut arg_pairs: Vec<String> = Vec::new();
+            if let Some(props) = props {
+                for (k, spec) in props {
+                    let key_lit = lit(&format!("\"{k}\""));
+                    let val_rule = value_rule_for(spec);
+                    arg_pairs.push(format!("{key_lit} {} {val_rule}", lit(":")));
+                }
+            }
+            let args_obj = if arg_pairs.is_empty() {
+                format!("{}{}", lit("{"), lit("}"))
+            } else {
+                let sep = lit(",");
+                format!("{}{}{}", lit("{"), arg_pairs.join(&sep), lit("}"))
+            };
+            // Full tool object: {"name": "tool_name", "arguments": {args}}
+            let mut tool_rule = String::new();
+            tool_rule.push_str(&lit("{"));
+            tool_rule.push_str(&lit("\"name\""));
+            tool_rule.push_str(&lit(":"));
+            tool_rule.push_str(&lit(&format!("\"{name}\"")));
+            tool_rule.push_str(&lit(","));
+            tool_rule.push_str(&lit("\"arguments\""));
+            tool_rule.push_str(&lit(":"));
+            tool_rule.push_str(&args_obj);
+            tool_rule.push_str(&lit("}"));
+            tool_rules.push_str(&format!(
+                "t-{} ::= {}\n",
+                name.replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
+                tool_rule
+            ));
+            obj_alts.push(format!(
+                "t-{}",
+                name.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+            ));
         }
     }
-    if tool_alts.is_empty() {
-        g.push_str("toolname ::= [a-z_]+\n");
+    let obj = if obj_alts.is_empty() {
+        // No tools defined: fall back to a generic JSON value (can only match
+        // the text branch anyway since the grammar allows it).
+        "string".to_string()
     } else {
-        g.push_str(&format!("toolname ::= {}\n", tool_alts.join(" | ")));
-    }
-    g.push_str("ws ::= [ \\t]?\n");
+        obj_alts.join(" | ")
+    };
+    g.push_str(&format!("obj ::= {obj}\n"));
+    g.push_str(&tool_rules);
+    g.push_str(GRAMMAR_TAIL);
     g
+}
+
+/// Like `lit` but wraps in optional sequence (the caller is responsible for
+/// spacing). Emits `( lit )?` — zero-or-one of the literal.
+fn opt_lit(s: &str) -> String {
+    format!("( \"{}\" )?", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 // ---- live note streaming (ported from Myelin stream_chat.rs) ---------------
@@ -512,9 +549,13 @@ mod tests {
     fn grammar_names_tools_and_has_text_escape() {
         let g = tool_grammar(&schemas(), "call | text");
         assert!(g.contains("root ::= call | text"));
-        assert!(g.contains("write_note"));
-        assert!(g.contains("</tool>"));
-        assert!(g.contains("argpairs"));
+        assert!(g.contains(r#""\"write_note\""#));
+        assert!(g.contains(r#""\"content\""#));
+        assert!(g.contains("string ::= \"\""));
+        assert!(g.contains("t-"));
+        // The new compact grammar has no ws rules and no recursive value/object.
+        assert!(!g.contains("ws ::="));
+        assert!(!g.contains("value ::= object"));
     }
 
     #[test]
