@@ -1,13 +1,13 @@
-pub mod git_history;
 mod embeddings;
 mod gguf;
+pub mod git_history;
 mod llama_server;
 mod model_profiles;
 mod models;
 mod notebook;
 mod rag;
-pub mod state;
 mod sidecar;
+pub mod state;
 mod stream_chat;
 mod tool_capability;
 mod wayland_shortcut;
@@ -145,10 +145,7 @@ async fn downloadable_backends(state: State<'_, AppState>) -> Result<Vec<String>
 }
 
 #[tauri::command]
-async fn download_llama_backend(
-    state: State<'_, AppState>,
-    backend: String,
-) -> Result<(), String> {
+async fn download_llama_backend(state: State<'_, AppState>, backend: String) -> Result<(), String> {
     state
         .download_llama_backend(backend)
         .await
@@ -171,7 +168,9 @@ async fn create_note(
 
 #[tauri::command]
 async fn create_notebook(state: State<'_, AppState>, name: String) -> Result<Vec<String>, String> {
-    state.create_notebook(name).map_err(|error| error.to_string())
+    state
+        .create_notebook(name)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -302,7 +301,10 @@ async fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String>
 /// Warm the llama-server when a note is opened so the first chat is instant.
 #[tauri::command]
 async fn warm_llama_server(state: State<'_, AppState>) -> Result<(), String> {
-    state.warm_llama_server().await.map_err(|error| error.to_string())
+    state
+        .warm_llama_server()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Stop the llama-server when the open note is closed, freeing RAM/VRAM.
@@ -321,7 +323,9 @@ async fn get_searxng_url(state: State<'_, AppState>) -> Result<Option<String>, S
 /// Set (or clear) the SearXNG base URL for web search.
 #[tauri::command]
 async fn set_searxng_url(state: State<'_, AppState>, url: Option<String>) -> Result<(), String> {
-    state.set_searxng_url(url).map_err(|error| error.to_string())
+    state
+        .set_searxng_url(url)
+        .map_err(|error| error.to_string())
 }
 
 /// Current embedding model GGUF path (empty = embeddings/RAG disabled).
@@ -332,8 +336,13 @@ async fn get_embed_model_path(state: State<'_, AppState>) -> Result<Option<Strin
 
 /// Set (or clear) the embedding model GGUF path.
 #[tauri::command]
-async fn set_embed_model_path(state: State<'_, AppState>, path: Option<String>) -> Result<(), String> {
-    state.set_embed_model_path(path).map_err(|error| error.to_string())
+async fn set_embed_model_path(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    state
+        .set_embed_model_path(path)
+        .map_err(|error| error.to_string())
 }
 
 /// Ingest a document into the RAG store (chunk → embed → store). `contextual`
@@ -355,7 +364,10 @@ async fn ingest_document(
 /// Remove a document's chunks from the RAG store.
 #[tauri::command]
 async fn delete_document(state: State<'_, AppState>, doc_id: String) -> Result<(), String> {
-    state.delete_document(&doc_id).await.map_err(|error| error.to_string())
+    state
+        .delete_document(&doc_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// All known model profiles (bundled + user) for the compatibility list.
@@ -540,7 +552,9 @@ fn set_quick_shortcut(
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
     gs.register(parsed).map_err(|e| e.to_string())?;
-    state.set_quick_shortcut(shortcut).map_err(|e| e.to_string())?;
+    state
+        .set_quick_shortcut(shortcut)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -564,8 +578,19 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let app_state = AppState::new(app.handle().clone())?;
-            app.manage(app_state);
 
+            // Warm the llama-server in the background so the first chat doesn't
+            // pay the cold-start cost of loading the model into memory. Clone
+            // before the move into manage(). Best-effort — if it fails the first
+            // chat will start the server normally.
+            let warmup_state = app_state.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = warmup_state.warm_llama_server().await {
+                    log::warn!("startup warm-up failed: {e}");
+                }
+            });
+
+            app.manage(app_state);
             app.handle().plugin(tauri_plugin_dialog::init())?;
 
             if cfg!(debug_assertions) {
@@ -602,11 +627,7 @@ pub fn run() {
                 // plugin can't fire there — go through the xdg-desktop-portal
                 // GlobalShortcuts interface instead. Everywhere else, the plugin works.
                 #[cfg(target_os = "linux")]
-                wayland_shortcut::spawn(
-                    app.handle().clone(),
-                    sc,
-                    app.config().identifier.clone(),
-                );
+                wayland_shortcut::spawn(app.handle().clone(), sc, app.config().identifier.clone());
                 #[cfg(not(target_os = "linux"))]
                 {
                     use tauri_plugin_global_shortcut::GlobalShortcutExt;

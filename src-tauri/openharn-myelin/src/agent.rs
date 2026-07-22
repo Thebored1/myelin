@@ -14,6 +14,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -76,6 +77,11 @@ pub struct Options {
     /// Requires `prompt_tools`. Set by the host for `prefersPromptTools` models.
     #[serde(default)]
     pub friendly_results: bool,
+    /// Deterministic TOOL/CHAT result supplied by the host. When present, this
+    /// avoids an extra model inference for intent classification. None keeps the
+    /// legacy model-based fallback for standalone sidecar callers.
+    #[serde(default)]
+    pub intent_is_tool: Option<bool>,
 }
 
 fn default_max_calls() -> usize {
@@ -86,6 +92,17 @@ fn default_total_max() -> usize {
 }
 fn default_tool_timeout() -> u64 {
     300
+}
+
+fn upstream_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(2)
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("valid upstream HTTP client")
+    })
 }
 
 impl Default for Options {
@@ -103,6 +120,7 @@ impl Default for Options {
             force_tool: None,
             call_only: false,
             friendly_results: false,
+            intent_is_tool: None,
         }
     }
 }
@@ -136,17 +154,37 @@ pub enum Out {
     NoteStart,
     NoteDelta(String),
     NoteCancel,
-    Tool { id: String, name: String, arguments: String },
-    ToolResult { id: String, name: String, result: String },
-    Done { messages: Vec<Value>, last_tool: Option<String> },
+    Tool {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        id: String,
+        name: String,
+        result: String,
+    },
+    Done {
+        messages: Vec<Value>,
+        last_tool: Option<String>,
+    },
     Error(String),
+    /// Token usage from llama-server's `include_usage` stream option.
+    Usage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+    },
 }
 
 /// True if `schemas` (OpenAI tool list) contains a tool named `name`.
 fn schema_has_tool(schemas: &Value, name: &str) -> bool {
     schemas
         .as_array()
-        .map(|a| a.iter().any(|t| t["function"]["name"].as_str() == Some(name)))
+        .map(|a| {
+            a.iter()
+                .any(|t| t["function"]["name"].as_str() == Some(name))
+        })
         .unwrap_or(false)
 }
 
@@ -231,17 +269,10 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let opts = req.options.clone();
 
     let url = format!("{}/chat/completions", req.base_url.trim_end_matches('/'));
-    let client = match reqwest::Client::builder()
-        .pool_max_idle_per_host(0)
-        .connect_timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(Out::Error(format!("http client: {e}"))).await;
-            return;
-        }
-    };
+    // One pooled client is shared by all requests to llama-server. Cloning a
+    // reqwest Client is cheap, but using one process-wide instance lets the
+    // connection pool survive across chat turns as well as tool-loop turns.
+    let client = upstream_client();
 
     let schemas = if req.tools.is_array() {
         req.tools.clone()
@@ -297,14 +328,20 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     // forced to call via the call-only grammar. Requires prompt_tools.
     let friendly = opts.friendly_results && prompt_tools;
     let intent_is_tool = if friendly {
-        let user_text = history
-            .iter()
-            .rev()
-            .find(|m| m["role"].as_str() == Some("user"))
-            .and_then(|m| m["content"].as_str())
-            .unwrap_or("")
-            .to_string();
-        run_intent_detection(&client, &url, req.api_key.as_deref(), &model, &user_text).await
+        if let Some(classified) = opts.intent_is_tool {
+            classified
+        } else {
+            // Compatibility fallback for standalone sidecar clients that do not
+            // provide the host's deterministic classification yet.
+            let user_text = history
+                .iter()
+                .rev()
+                .find(|m| m["role"].as_str() == Some("user"))
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .to_string();
+            run_intent_detection(&client, &url, req.api_key.as_deref(), &model, &user_text).await
+        }
     } else {
         true
     };
@@ -329,14 +366,18 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         let resp = match client.post(&url).json(&body).send().await {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.send(Out::Error(format!("chat request failed: {e}"))).await;
+                let _ = tx
+                    .send(Out::Error(format!("chat request failed: {e}")))
+                    .await;
                 return;
             }
         };
         if !resp.status().is_success() {
             let status = resp.status();
             let txt = resp.text().await.unwrap_or_default();
-            let _ = tx.send(Out::Error(format!("upstream HTTP {status}: {txt}"))).await;
+            let _ = tx
+                .send(Out::Error(format!("upstream HTTP {status}: {txt}")))
+                .await;
             return;
         }
         let (content, _calls) = match stream_upstream(resp, &tx, no_think).await {
@@ -350,7 +391,12 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         // turn can never be recovered into a tool call.
         let mut h = history.clone();
         h.push(json!({ "role": "assistant", "content": content }));
-        let _ = tx.send(Out::Done { messages: h, last_tool: None }).await;
+        let _ = tx
+            .send(Out::Done {
+                messages: h,
+                last_tool: None,
+            })
+            .await;
         return;
     }
 
@@ -382,8 +428,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 // explicitly requested OR the turn was classified as TOOL. This keeps
                 // greetings/chat as prose while still forcing weak models to call on
                 // genuine tool turns.
-                let force_call =
-                    opts.force_tool.is_some() || (opts.call_only && intent_is_tool);
+                let force_call = opts.force_tool.is_some() || (opts.call_only && intent_is_tool);
                 let grammar = if force_call {
                     harness::tool_grammar_call_only(&effective_schemas)
                 } else {
@@ -395,7 +440,8 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             body["tools"] = effective_schemas.clone();
             match &opts.force_tool {
                 Some(name) if schema_has_tool(&effective_schemas, name) => {
-                    body["tool_choice"] = json!({ "type": "function", "function": { "name": name } });
+                    body["tool_choice"] =
+                        json!({ "type": "function", "function": { "name": name } });
                 }
                 _ => {
                     body["tool_choice"] = json!("auto");
@@ -444,7 +490,9 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 budget /= 2;
                 continue;
             }
-            let _ = tx.send(Out::Error(format!("upstream HTTP {status}: {txt}"))).await;
+            let _ = tx
+                .send(Out::Error(format!("upstream HTTP {status}: {txt}")))
+                .await;
             return;
         }
 
@@ -475,7 +523,11 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
 
         // Record the assistant turn.
         let mut assistant = json!({ "role": "assistant" });
-        assistant["content"] = if content.is_empty() { Value::Null } else { json!(content) };
+        assistant["content"] = if content.is_empty() {
+            Value::Null
+        } else {
+            json!(content)
+        };
         if !tool_calls.is_empty() {
             assistant["tool_calls"] = json!(tool_calls);
         }
@@ -495,7 +547,10 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         for tc in &tool_calls {
             let id = tc["id"].as_str().unwrap_or("").to_string();
             let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
-            let args_raw = tc["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+            let args_raw = tc["function"]["arguments"]
+                .as_str()
+                .unwrap_or("{}")
+                .to_string();
             let args_val: Value = serde_json::from_str(&args_raw).unwrap_or_else(|_| json!({}));
 
             let result = if !seen_calls.insert(format!("{name}:{args_val}")) {
@@ -503,7 +558,16 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 "You already made this exact tool call and saw its result. Repeating it will not change anything. Take a DIFFERENT action, or answer the user with what you know (including telling them something was not found).".to_string()
             } else {
                 last_tool = Some(name.clone());
-                dispatch_tool(&tx, &pending, &request_id, &id, &name, &args_raw, opts.tool_timeout_secs).await
+                dispatch_tool(
+                    &tx,
+                    &pending,
+                    &request_id,
+                    &id,
+                    &name,
+                    &args_raw,
+                    opts.tool_timeout_secs,
+                )
+                .await
             };
 
             let cap = if opts.slm {
@@ -642,6 +706,21 @@ async fn stream_upstream(
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            // llama-server emits usage on the final chunk when include_usage is set.
+            // Always forward the event even when values are zero so the frontend can
+            // distinguish "no usage data yet" from "usage is zero".
+            if let Some(usage) = chunk_json.get("usage") {
+                let pt = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+                let ct = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+                let tt = usage["total_tokens"].as_u64().unwrap_or(0) as u32;
+                let _ = tx
+                    .send(Out::Usage {
+                        prompt_tokens: pt,
+                        completion_tokens: ct,
+                        total_tokens: tt,
+                    })
+                    .await;
+            }
             let choice = match chunk_json["choices"].get(0) {
                 Some(c) => c,
                 None => continue,
@@ -678,13 +757,19 @@ async fn stream_upstream(
                         }
                     }
                     if let Some(a) = tc["function"]["arguments"].as_str() {
-                        let prev = slot["function"]["arguments"].as_str().unwrap_or("").to_string();
+                        let prev = slot["function"]["arguments"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
                         slot["function"]["arguments"] = json!(prev + a);
                     }
 
                     // Live-stream write_note's whole-body content into the editor.
                     let slot_name = slot["function"]["name"].as_str().unwrap_or("").to_string();
-                    let slot_args = slot["function"]["arguments"].as_str().unwrap_or("").to_string();
+                    let slot_args = slot["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
                     if slot_name == "write_note" && !note_cancelled {
                         let mode = harness::partial_field(&slot_args, "mode");
                         let find = harness::partial_field(&slot_args, "find");

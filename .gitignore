@@ -8,6 +8,7 @@ node_modules
 /.svelte-kit
 /build
 /src-tauri/target
+/src-tauri/openharn-myelin/target
 *.db
 *.tmp
 

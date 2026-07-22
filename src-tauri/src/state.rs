@@ -1,9 +1,9 @@
 use crate::llama_server::{self, ManagedLlamaServer};
-use crate::sidecar::ManagedSidecar;
 use crate::models::{
     AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
     ProviderStatus, SearchResponse, SearchResult, Task,
 };
+use crate::sidecar::ManagedSidecar;
 use anyhow::{anyhow, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
@@ -80,7 +80,14 @@ pub fn compile_tex_source(raw: &str) -> std::result::Result<Vec<u8>, String> {
 // \mathbb but only load amsmath. geometry/inputenc are intentionally excluded:
 // they change layout, and a note with its own preamble may set them itself.
 const ENSURE_PACKAGES: &[&str] = &[
-    "amsmath", "amssymb", "amsfonts", "mathtools", "graphicx", "booktabs", "enumitem", "xcolor",
+    "amsmath",
+    "amssymb",
+    "amsfonts",
+    "mathtools",
+    "graphicx",
+    "booktabs",
+    "enumitem",
+    "xcolor",
     "hyperref",
 ];
 
@@ -294,7 +301,9 @@ fn parse_tex_log(log: &str, body_line_offset: usize) -> Vec<serde_json::Value> {
             }
         };
         if let Some(num) = line.strip_prefix("l.").and_then(leading_number) {
-            let msg = current_msg.take().unwrap_or_else(|| "LaTeX error".to_string());
+            let msg = current_msg
+                .take()
+                .unwrap_or_else(|| "LaTeX error".to_string());
             push(num, msg);
         } else if let Some(idx) = line.find("on input line ") {
             if let Some(num) = leading_number(&line[idx + "on input line ".len()..]) {
@@ -512,11 +521,7 @@ impl AppState {
 
         // Register the bundled-binary directory (shipped CPU/Vulkan builds) so
         // the backend resolver finds them automatically in a packaged app.
-        let resource_bin = handle
-            .path()
-            .resource_dir()
-            .ok()
-            .map(|dir| dir.join("bin"));
+        let resource_bin = handle.path().resource_dir().ok().map(|dir| dir.join("bin"));
         crate::llama_server::set_resource_bin_dir(resource_bin);
 
         let settings = load_settings(&app_data_dir)?;
@@ -588,7 +593,11 @@ impl AppState {
 
     /// The user's current chat message (for intent checks during tool calls).
     pub fn latest_chat_question(&self) -> String {
-        self.inner.latest_chat_question.lock().clone().unwrap_or_default()
+        self.inner
+            .latest_chat_question
+            .lock()
+            .clone()
+            .unwrap_or_default()
     }
 
     pub fn set_current_selection(&self, selection: Option<crate::agent::SelectionArg>) {
@@ -625,12 +634,20 @@ impl AppState {
 
     /// The live conversation (real message array) for a note — empty if none yet.
     pub fn conversation(&self, note_id: &str) -> Vec<serde_json::Value> {
-        self.inner.conversations.lock().get(note_id).cloned().unwrap_or_default()
+        self.inner
+            .conversations
+            .lock()
+            .get(note_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Replace a note's live conversation after a turn (already trimmed by caller).
     pub fn save_conversation(&self, note_id: &str, msgs: Vec<serde_json::Value>) {
-        self.inner.conversations.lock().insert(note_id.to_string(), msgs);
+        self.inner
+            .conversations
+            .lock()
+            .insert(note_id.to_string(), msgs);
     }
 
     /// Forget a note's live conversation (e.g. when the user clears chat).
@@ -668,27 +685,39 @@ impl AppState {
     }
 
     pub fn is_tool_approval_required(&self) -> bool {
-        self.inner.require_tool_approval.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .require_tool_approval
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_require_tool_approval(&self, require: bool) {
-        self.inner.require_tool_approval.store(require, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .require_tool_approval
+            .store(require, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn deterministic_tools_enabled(&self) -> bool {
-        self.inner.deterministic_tools.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .deterministic_tools
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_deterministic_tools_runtime(&self, enabled: bool) {
-        self.inner.deterministic_tools.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .deterministic_tools
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn tool_gating_enabled(&self) -> bool {
-        self.inner.tool_gating.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .tool_gating
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_tool_gating_runtime(&self, enabled: bool) {
-        self.inner.tool_gating.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .tool_gating
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The openharn sidecar settings (port, binary override, harness tuning).
@@ -905,7 +934,12 @@ impl AppState {
         let _ = fs::remove_dir_all(&staging);
         match result {
             Ok(()) => {
-                self.emit_download(&backend, "done", 100.0, &format!("{backend} backend installed"));
+                self.emit_download(
+                    &backend,
+                    "done",
+                    100.0,
+                    &format!("{backend} backend installed"),
+                );
                 Ok(())
             }
             Err(error) => {
@@ -1614,10 +1648,10 @@ impl AppState {
                     sel.text
                 ));
             }
-            // The note context (current note) goes in THIS turn's user message;
-            // prior turns (incl. tool results) come from the live conversation array
-            // built below — not flattened to a lossy text summary.
-            let user_content = format!("{}\n\nUser request: {}", context, question);
+            // The note context is embedded in the system message so that
+            // llama-server's prompt cache (cache_prompt) sees a matching prefix
+            // across requests. When the note hasn't changed, the entire system
+            // message is cached and only the short question needs evaluation.
 
             // Per-message tool gating: hand the model ONLY the tools this message
             // warrants so it can't misfire on one it was never given. We also pass
@@ -1696,20 +1730,25 @@ impl AppState {
                 // results — those were never persisted) so we don't lose continuity.
                 convo = chat_history_to_messages(&note.chat_history);
             }
+            // Embed the note context in the system message so cache_prompt
+            // reuses the KV prefix across requests (the note stays constant
+            // between turns when no tool modifies it). Only the short question
+            // at the end needs re-evaluation each turn.
+            let system_content = format!("{}\n\n{}", crate::agent::MYELIN_PREAMBLE, context);
             let mut messages = vec![serde_json::json!({
                 "role": "system",
-                "content": crate::agent::MYELIN_PREAMBLE,
+                "content": system_content,
             })];
             messages.extend(convo.iter().cloned());
-            messages.push(serde_json::json!({ "role": "user", "content": user_content }));
+            messages.push(serde_json::json!({ "role": "user", "content": question }));
             let sent_len = messages.len();
 
             let final_messages =
                 crate::sidecar::run_chat(self, &config, messages, tools, &request_id, &nid).await?;
 
-            // Persist the conversation for the next turn: prior turns + the RAW user
-            // question (the note context is rebuilt fresh each turn, so it is not
-            // stored) + this turn's new assistant/tool messages (incl. results).
+            // Persist the conversation for the next turn: the raw question
+            // (no note context — it's in the system message and rebuilt fresh
+            // each turn) + this turn's new assistant/tool messages.
             convo.push(serde_json::json!({ "role": "user", "content": question }));
             if final_messages.len() > sent_len {
                 convo.extend(final_messages[sent_len..].iter().cloned());
@@ -2025,7 +2064,10 @@ impl AppState {
         let workspace = self.require_workspace()?;
         let path = {
             let runtime = self.inner.runtime.read();
-            let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
+            let note = runtime
+                .notes
+                .get(&note_id)
+                .ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
         let raw = fs::read_to_string(&path)?;
@@ -2034,7 +2076,9 @@ impl AppState {
         // \documentclass and LaTeX fails with "Missing \begin{document}" at line 1.
         let tex_content = split_frontmatter(&raw).1;
         if tex_content.trim().is_empty() {
-            return Err(anyhow!("This note is empty — add some LaTeX before compiling."));
+            return Err(anyhow!(
+                "This note is empty — add some LaTeX before compiling."
+            ));
         }
 
         // Bare notes get the full default preamble prepended; notes with their own
@@ -2042,7 +2086,10 @@ impl AppState {
         // returned offset is how many lines we added before the body, so TeX error
         // lines map back to what the editor shows.
         let (final_tex, offset) = if !tex_content.contains("\\documentclass") {
-            (wrap_bare_latex(&tex_content), DEFAULT_TEX_PREAMBLE.lines().count())
+            (
+                wrap_bare_latex(&tex_content),
+                DEFAULT_TEX_PREAMBLE.lines().count(),
+            )
         } else {
             ensure_packages(&tex_content)
         };
@@ -2258,9 +2305,14 @@ impl AppState {
             for link in links {
                 let target_note = notes
                     .iter()
-                    .find(|n| (n.document.title == link.target || n.document.id == link.target) && n.document.id != note.document.id)
+                    .find(|n| {
+                        (n.document.title == link.target || n.document.id == link.target)
+                            && n.document.id != note.document.id
+                    })
                     .or_else(|| {
-                        notes.iter().find(|n| n.document.title == link.target || n.document.id == link.target)
+                        notes.iter().find(|n| {
+                            n.document.title == link.target || n.document.id == link.target
+                        })
                     });
                 if let Some(target) = target_note {
                     let backlink = Backlink {
@@ -2359,7 +2411,12 @@ impl AppState {
 
     /// Context window (tokens) the running llama-server launched with, if any.
     async fn running_ctx_size(&self) -> Option<u32> {
-        self.inner.llama_server.lock().await.as_ref().map(|s| s.ctx_size)
+        self.inner
+            .llama_server
+            .lock()
+            .await
+            .as_ref()
+            .map(|s| s.ctx_size)
     }
 
     /// The configured SearXNG base URL for web search (None → DuckDuckGo).
@@ -2424,8 +2481,9 @@ impl AppState {
     /// return its base URL. The embed server runs alongside the chat server on
     /// chat_port + 1. Errors if no embedding model is configured.
     async fn ensure_embed_server(&self) -> Result<String> {
-        let model = llama_server::embed_model_path(&self.inner.app_data_dir)
-            .ok_or_else(|| anyhow::anyhow!("no embedding model configured (set one in Settings)"))?;
+        let model = llama_server::embed_model_path(&self.inner.app_data_dir).ok_or_else(|| {
+            anyhow::anyhow!("no embedding model configured (set one in Settings)")
+        })?;
         let model_path = std::path::PathBuf::from(&model);
         let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
         let host = config.host.clone();
@@ -2739,9 +2797,7 @@ fn format_chat_history_for_prompt(
 /// Seed a live conversation from the frontend's saved chat history on the first
 /// turn of a session. Only text turns survive (tool results were never persisted),
 /// but it keeps continuity after an app restart instead of starting blank.
-fn chat_history_to_messages(
-    chat_history: &[crate::models::ChatMessage],
-) -> Vec<serde_json::Value> {
+fn chat_history_to_messages(chat_history: &[crate::models::ChatMessage]) -> Vec<serde_json::Value> {
     chat_history
         .iter()
         .filter(|m| m.error != Some(true) && m.is_streaming != Some(true))
@@ -2760,10 +2816,7 @@ fn chat_history_to_messages(
 /// budget. A "turn" starts at a `user` message and includes the assistant/tool
 /// messages that follow it, so trimming never orphans a tool result from its
 /// assistant tool_call (which llama-server would reject).
-fn trim_conversation(
-    msgs: Vec<serde_json::Value>,
-    max_chars: usize,
-) -> Vec<serde_json::Value> {
+fn trim_conversation(msgs: Vec<serde_json::Value>, max_chars: usize) -> Vec<serde_json::Value> {
     let mut groups: Vec<Vec<serde_json::Value>> = Vec::new();
     for m in msgs {
         if m["role"] == "user" || groups.is_empty() {
@@ -2779,7 +2832,10 @@ fn trim_conversation(
             .map(|arr| {
                 arr.iter()
                     .map(|t| {
-                        t["function"]["arguments"].as_str().map(|s| s.len()).unwrap_or(0)
+                        t["function"]["arguments"]
+                            .as_str()
+                            .map(|s| s.len())
+                            .unwrap_or(0)
                     })
                     .sum::<usize>()
             })
@@ -2829,7 +2885,9 @@ fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) -> Result<V
     {
         if entry.file_type().is_file() && is_note_file(entry.path()) {
             if let Some(extension) = entry.path().extension().and_then(std::ffi::OsStr::to_str) {
-                let doc_result = if extension.eq_ignore_ascii_case("pdf") || extension.eq_ignore_ascii_case("epub") {
+                let doc_result = if extension.eq_ignore_ascii_case("pdf")
+                    || extension.eq_ignore_ascii_case("epub")
+                {
                     parse_pdf_file(workspace, workspace_data_dir, entry.path())
                 } else {
                     parse_note_file(workspace, workspace_data_dir, entry.path())
@@ -2919,7 +2977,7 @@ fn parse_note_file(
     let title = metadata
         .title
         .unwrap_or_else(|| first_heading(&body).unwrap_or_else(|| default_title_from_path(path)));
-    
+
     let (file_created, file_updated) = get_file_timestamps(path);
     let created_at = metadata.created_at.unwrap_or(file_created);
     let updated_at = metadata.updated_at.unwrap_or(file_updated);
@@ -3341,8 +3399,12 @@ fn timestamp_now() -> String {
 fn get_file_timestamps(path: &Path) -> (String, String) {
     let fallback = timestamp_now();
     if let Ok(metadata) = std::fs::metadata(path) {
-        let created = metadata.created().unwrap_or_else(|_| std::time::SystemTime::now());
-        let modified = metadata.modified().unwrap_or_else(|_| std::time::SystemTime::now());
+        let created = metadata
+            .created()
+            .unwrap_or_else(|_| std::time::SystemTime::now());
+        let modified = metadata
+            .modified()
+            .unwrap_or_else(|_| std::time::SystemTime::now());
         let created_dt: chrono::DateTime<Utc> = created.into();
         let modified_dt: chrono::DateTime<Utc> = modified.into();
         (created_dt.to_rfc3339(), modified_dt.to_rfc3339())

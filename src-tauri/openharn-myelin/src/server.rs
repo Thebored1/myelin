@@ -102,7 +102,11 @@ fn to_event(out: Out) -> Event {
         Out::NoteStart => ("note_start", json!({})),
         Out::NoteDelta(delta) => ("note_delta", json!({ "delta": delta })),
         Out::NoteCancel => ("note_cancel", json!({})),
-        Out::Tool { id, name, arguments } => (
+        Out::Tool {
+            id,
+            name,
+            arguments,
+        } => (
             "tool",
             json!({ "id": id, "name": name, "arguments": arguments }),
         ),
@@ -110,11 +114,22 @@ fn to_event(out: Out) -> Event {
             "tool_result",
             json!({ "id": id, "name": name, "result": result }),
         ),
-        Out::Done { messages, last_tool } => (
+        Out::Done {
+            messages,
+            last_tool,
+        } => (
             "done",
             json!({ "messages": messages, "last_tool": last_tool }),
         ),
         Out::Error(message) => ("error", json!({ "message": message })),
+        Out::Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        } => (
+            "usage",
+            json!({ "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens }),
+        ),
     };
     Event::default().event(name).data(data.to_string())
 }

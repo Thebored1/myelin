@@ -12,9 +12,9 @@
 
 use crate::agent::{
     EditNotebookArgs, EditNotebookTool, FetchWebPageArgs, FetchWebPageTool, FindInNoteArgs,
-    FindInNoteTool, FormatNoteArgs, FormatNoteTool, ReadNoteArgs, ReadNoteTool, SearchDocumentsArgs,
-    SearchDocumentsTool, SearchNotesArgs, SearchNotesTool, WebSearchArgs, WebSearchTool,
-    WriteNoteArgs, WriteNoteTool,
+    FindInNoteTool, FormatNoteArgs, FormatNoteTool, ReadNoteArgs, ReadNoteTool,
+    SearchDocumentsArgs, SearchDocumentsTool, SearchNotesArgs, SearchNotesTool, WebSearchArgs,
+    WebSearchTool, WriteNoteArgs, WriteNoteTool,
 };
 use crate::llama_server::ResolvedLlamaConfig;
 use crate::state::AppState;
@@ -79,12 +79,6 @@ pub async fn run_chat(
             body["tools"] = json!(tools);
             body["tool_choice"] = json!("auto");
         }
-        // DEBUG (temporary): dump each turn's exact request so the failing flow
-        // can be replayed verbatim as a test fixture.
-        let _ = std::fs::write(
-            std::env::temp_dir().join(format!("myelin-req-turn{_turn}.json")),
-            serde_json::to_vec_pretty(&body).unwrap_or_default(),
-        );
 
         let resp = client
             .post(&url)
@@ -195,8 +189,7 @@ pub async fn run_chat(
                             let m = mode.as_deref().unwrap_or("");
                             let is_append = m == "append";
                             let explicit_replace = m == "replace";
-                            let has_find =
-                                find.map(|f| !f.trim().is_empty()).unwrap_or(false);
+                            let has_find = find.map(|f| !f.trim().is_empty()).unwrap_or(false);
                             let snippet = has_find && !explicit_replace && !is_append;
                             let is_replace = !is_append && !snippet;
                             if !is_replace {
@@ -214,10 +207,9 @@ pub async fn run_chat(
                                 (&note_id, extract_partial_content(&slot.args))
                             {
                                 if !note_streaming {
-                                    let _ = state.handle.emit(
-                                        "ai://note_stream_start",
-                                        json!({ "noteId": nid }),
-                                    );
+                                    let _ = state
+                                        .handle
+                                        .emit("ai://note_stream_start", json!({ "noteId": nid }));
                                     note_streaming = true;
                                 }
                                 if content.len() > note_emitted.len()
@@ -270,8 +262,7 @@ pub async fn run_chat(
                     || matches!(
                         last_tool.as_deref(),
                         Some("write_note") | Some("format_note") | Some("edit_notebook")
-                    )
-                {
+                    ) {
                     "Done — I've updated your note."
                 } else if last_tool.is_some() {
                     "Done."
@@ -344,66 +335,84 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
     let v: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
     match name {
         "write_note" => match serde_json::from_value::<WriteNoteArgs>(v) {
-            Ok(a) => WriteNoteTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => WriteNoteTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid write_note arguments: {e}"),
         },
         "read_note" => match serde_json::from_value::<ReadNoteArgs>(v) {
-            Ok(a) => ReadNoteTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => ReadNoteTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid read_note arguments: {e}"),
         },
         "search_notes" => match serde_json::from_value::<SearchNotesArgs>(v) {
-            Ok(a) => SearchNotesTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => SearchNotesTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid search_notes arguments: {e}"),
         },
         "fetch_web_page" => match serde_json::from_value::<FetchWebPageArgs>(v) {
-            Ok(a) => FetchWebPageTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => FetchWebPageTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid fetch_web_page arguments: {e}"),
         },
         "web_search" => match serde_json::from_value::<WebSearchArgs>(v) {
-            Ok(a) => WebSearchTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => WebSearchTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid web_search arguments: {e}"),
         },
         "search_documents" => match serde_json::from_value::<SearchDocumentsArgs>(v) {
-            Ok(a) => SearchDocumentsTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => SearchDocumentsTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid search_documents arguments: {e}"),
         },
         "find_in_note" => match serde_json::from_value::<FindInNoteArgs>(v) {
-            Ok(a) => FindInNoteTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => FindInNoteTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid find_in_note arguments: {e}"),
         },
         "format_note" => match serde_json::from_value::<FormatNoteArgs>(v) {
-            Ok(a) => FormatNoteTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => FormatNoteTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid format_note arguments: {e}"),
         },
         "edit_notebook" => match serde_json::from_value::<EditNotebookArgs>(v) {
-            Ok(a) => EditNotebookTool { state: state.clone() }
-                .call(a)
-                .await
-                .unwrap_or_else(|e| e.to_string()),
+            Ok(a) => EditNotebookTool {
+                state: state.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Invalid edit_notebook arguments: {e}"),
         },
         other => format!("Unknown tool: {other}"),
@@ -502,7 +511,10 @@ mod tests {
     #[test]
     fn decodes_escapes() {
         let raw = r#"{"content":"line1\nline2\t!"}"#;
-        assert_eq!(extract_partial_content(raw).as_deref(), Some("line1\nline2\t!"));
+        assert_eq!(
+            extract_partial_content(raw).as_deref(),
+            Some("line1\nline2\t!")
+        );
     }
 
     #[test]
@@ -519,7 +531,10 @@ mod tests {
 
     #[test]
     fn partial_field_reads_closed_value_only() {
-        assert_eq!(partial_field(r#"{"mode":"append"}"#, "mode").as_deref(), Some("append"));
+        assert_eq!(
+            partial_field(r#"{"mode":"append"}"#, "mode").as_deref(),
+            Some("append")
+        );
         assert_eq!(partial_field(r#"{"mode":"app"#, "mode"), None); // not closed yet
         assert_eq!(partial_field(r#"{"content":"x"}"#, "mode"), None); // absent
     }

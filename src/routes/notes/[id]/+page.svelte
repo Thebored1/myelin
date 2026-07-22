@@ -58,6 +58,21 @@
 	let chatInput = $state('');
 	let copiedIdx = $state<number | null>(null);
 
+	// Debug window state for AI performance metrics.
+	let showDebugWindow = $state(false);
+	type DebugTraceEntry = { time: number; msg: string; kind: 'send' | 'gen' | 'tool' | 'note' | 'done' | 'error' };
+	let debugInfo = $state<{
+		requestStart: number | null;
+		firstChunk: number | null;
+		done: number | null;
+		promptTokens: number;
+		completionTokens: number;
+		totalTokens: number;
+		turnCount: number;
+		replyChars: number;
+		trace: DebugTraceEntry[];
+	} | null>(null);
+
 	async function copyMessage(idx: number, text: string) {
 		try {
 			await navigator.clipboard.writeText(text);
@@ -126,6 +141,7 @@
 	let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
 	let chatMessagesEl: HTMLDivElement | undefined = $state();
 	let currentTime = $state(Date.now());
+	let debugTimer: ReturnType<typeof setInterval> | null = null;
 
 	let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
 
@@ -1583,6 +1599,19 @@
 		if (!note) return;
 		const requestId = Date.now().toString();
 		const startTime = Date.now();
+		if (showDebugWindow) {
+			debugInfo = {
+				requestStart: startTime,
+				firstChunk: null,
+				done: null,
+				promptTokens: 0,
+				completionTokens: 0,
+				totalTokens: 0,
+				turnCount: 0,
+				replyChars: 0,
+				trace: [{ time: startTime, msg: 'Request sent', kind: 'send' }]
+			};
+		}
 		const snapshot: NoteSnapshot = {
 			noteBody: draftBody,
 			draftTitle: draftTitle,
@@ -2156,6 +2185,7 @@
 		let unlistenChunk: UnlistenFn;
 		let unlistenDone: UnlistenFn;
 		let unlistenError: UnlistenFn;
+		let unlistenUsage: UnlistenFn;
 		let unlistenApproval: UnlistenFn;
 		let unlistenNoteWritten: UnlistenFn;
 		let unlistenNoteStreamStart: UnlistenFn;
@@ -2184,6 +2214,12 @@
 				const { noteId, content, mode } = event.payload;
 				if (!note || note.id !== noteId) return;
 				applyNoteWrite(content, mode);
+				if (showDebugWindow && debugInfo) {
+					debugInfo = {
+						...debugInfo,
+						trace: [...debugInfo.trace, { time: Date.now(), msg: `Note written (${content.length}c ${mode})`, kind: 'note' as const }]
+					};
+				}
 				// If a selection was armed, re-select the modified span once the
 				// editor has re-rendered, so follow-up edits target the new text.
 				if (armedSelection) setTimeout(reselectAfterEdit, 60);
@@ -2193,6 +2229,12 @@
 		listen<{ noteId: string }>('ai://note_stream_start', (event) => {
 			if (!note || note.id !== event.payload.noteId) return;
 			beginNoteStream();
+			if (showDebugWindow && debugInfo) {
+				debugInfo = {
+					...debugInfo,
+					trace: [...debugInfo.trace, { time: Date.now(), msg: 'Streaming note to editor…', kind: 'note' as const }]
+				};
+			}
 		}).then((fn) => (unlistenNoteStreamStart = fn));
 
 		listen<{ noteId: string; delta: string }>('ai://note_delta', (event) => {
@@ -2207,6 +2249,12 @@
 
 		listen<{ tool: string; details: string; mutatesNote?: boolean }>('ai://chat_tool', (event) => {
 			let lastStartTime = Date.now();
+			if (showDebugWindow && debugInfo) {
+				debugInfo = {
+					...debugInfo,
+					trace: [...debugInfo.trace, { time: Date.now(), msg: `Tool: ${event.payload.tool}`, kind: 'tool' as const }]
+				};
+			}
 			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) {
 					lastStartTime = m.startTime || lastStartTime;
@@ -2278,19 +2326,56 @@
 				if (m.isStreaming) return { ...m, content: m.content + event.payload.delta };
 				return m;
 			});
+			if (showDebugWindow && debugInfo) {
+				if (debugInfo.firstChunk === null) {
+					debugInfo = {
+						...debugInfo,
+						firstChunk: Date.now(),
+						trace: [...debugInfo.trace, { time: Date.now(), msg: 'Generation started', kind: 'gen' as const }]
+					};
+				}
+				debugInfo = { ...debugInfo, replyChars: debugInfo.replyChars + event.payload.delta.length };
+			}
 		}).then((fn) => (unlistenChunk = fn));
 
 		listen<{ requestId: string; tools?: { name: string; details: string }[] }>(
 			'ai://chat_done',
 			(event) => {
 				finishStreamingChatMessage(event.payload.tools || []);
+				if (showDebugWindow && debugInfo) {
+					debugInfo = {
+						...debugInfo,
+						done: Date.now(),
+						trace: [...debugInfo.trace, { time: Date.now(), msg: 'Done', kind: 'done' as const }]
+					};
+				}
 			}
 		).then((fn) => (unlistenDone = fn));
+
+		listen<{ requestId: string; promptTokens: number; completionTokens: number; totalTokens: number }>(
+			'ai://chat_usage',
+			(event) => {
+				if (showDebugWindow && debugInfo) {
+					debugInfo = {
+						...debugInfo,
+						promptTokens: event.payload.promptTokens,
+						completionTokens: event.payload.completionTokens,
+						totalTokens: event.payload.totalTokens
+					};
+				}
+			}
+		).then((fn) => (unlistenUsage = fn));
 
 		listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>(
 			'ai://chat_error',
 			(event) => {
 				failStreamingChatMessage(event.payload.message, event.payload.tools || []);
+				if (showDebugWindow && debugInfo) {
+					debugInfo = {
+						...debugInfo,
+						trace: [...debugInfo.trace, { time: Date.now(), msg: `Error: ${event.payload.message}`, kind: 'error' as const }]
+					};
+				}
 			}
 		).then((fn) => (unlistenError = fn));
 
@@ -2325,6 +2410,7 @@
 			if (unlistenChunk) unlistenChunk();
 			if (unlistenDone) unlistenDone();
 			if (unlistenError) unlistenError();
+			if (unlistenUsage) unlistenUsage();
 			if (unlistenTool) unlistenTool();
 			if (unlistenApproval) unlistenApproval();
 			if (unlistenNoteWritten) unlistenNoteWritten();
@@ -2352,6 +2438,30 @@
 		if (!routeNoteId || routeNoteId === loadedRouteNoteId) return;
 		loadedRouteNoteId = routeNoteId;
 		void loadCurrentNote(routeNoteId);
+	});
+
+	// Debug window: update the live elapsed timer while a request is in progress.
+	let debugTraceEl: HTMLDivElement | undefined = $state();
+	$effect(() => {
+		if (debugInfo && debugTraceEl) {
+			debugTraceEl.scrollTop = debugTraceEl.scrollHeight;
+		}
+	});
+	$effect(() => {
+		if (!showDebugWindow) {
+			if (debugTimer) {
+				clearInterval(debugTimer);
+				debugTimer = null;
+			}
+			return;
+		}
+		if (!debugTimer) {
+			debugTimer = setInterval(() => {
+				if (debugInfo && !debugInfo.done) {
+					debugInfo = { ...debugInfo };
+				}
+			}, 100);
+		}
 	});
 </script>
 
@@ -2774,6 +2884,68 @@
 							{/if}
 							
 							<div class="chat-input-area">
+								{#if showDebugWindow && debugInfo}
+									<div class="debug-window">
+										<div class="debug-window-header">
+											<span class="debug-title">AI Debug</span>
+											<button
+												class="debug-toggle"
+												onclick={() => (showDebugWindow = false)}
+												title="Close debug window"
+											>×</button>
+										</div>
+										<div class="debug-grid">
+											<div class="debug-row">
+												<span class="debug-label">Prompt → First token:</span>
+												<span class="debug-value">{debugInfo.firstChunk && debugInfo.requestStart ? ((debugInfo.firstChunk - debugInfo.requestStart) / 1000).toFixed(2) + 's' : '—'}</span>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">First token → Done:</span>
+												<span class="debug-value">{debugInfo.done && debugInfo.firstChunk ? ((debugInfo.done - debugInfo.firstChunk) / 1000).toFixed(2) + 's' : '—'}</span>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Total elapsed:</span>
+												<span class="debug-value">{debugInfo.done ? ((debugInfo.done - (debugInfo.requestStart ?? 0)) / 1000).toFixed(2) + 's' : debugInfo.requestStart ? (((Date.now() - debugInfo.requestStart) / 1000).toFixed(2) + 's (live)') : '—'}</span>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Prompt tokens:</span>
+												<span class="debug-value">{debugInfo.promptTokens || '—'}</span>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Completion tokens:</span>
+												<span class="debug-value">{debugInfo.completionTokens || '—'}</span>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Tokens/s (gen):</span>
+												<span class="debug-value">
+													{#if debugInfo.done && debugInfo.firstChunk}
+														{@const genSec = (debugInfo.done - debugInfo.firstChunk) / 1000}
+														{@const fromServer = debugInfo.completionTokens > 0}
+														{@const tokCount = fromServer
+															? debugInfo.completionTokens
+															: Math.round(debugInfo.replyChars / 4)}
+														{fromServer ? '' : '~'}{(tokCount / genSec).toFixed(1)}
+													{:else}
+														—
+													{/if}
+												</span>
+											</div>
+											{#if !debugInfo.completionTokens && debugInfo.replyChars > 0}
+												<div class="debug-note">Token counts estimated from characters (~¼ tok/char). Enable server usage tracking for exact numbers.</div>
+											{/if}
+										</div>
+										{#if debugInfo.trace.length > 1}
+											<div class="debug-trace" bind:this={debugTraceEl}>
+												{#each debugInfo.trace as entry, i}
+													<div class="trace-entry {entry.kind}">
+														<span class="trace-time">+{((entry.time - (debugInfo.requestStart ?? entry.time)) / 1000).toFixed(1)}s</span>
+														<span class="trace-msg">{entry.msg}</span>
+													</div>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/if}
 								<div class="prompt-box">
 									<textarea
 										bind:this={chatTextareaEl}
@@ -2829,6 +3001,14 @@
 												</button>
 											{/if}
 											<div class="prompt-spacer"></div>
+											<button
+												type="button"
+												class="prompt-icon-btn debug-btn"
+												class:active={showDebugWindow}
+												onclick={() => (showDebugWindow = !showDebugWindow)}
+												title={showDebugWindow ? 'Hide debug window' : 'Show debug window'}
+												aria-label="Toggle debug window"
+											>🐞</button>
 										<div class="context-ring" title={`~${contextPercent}% of the context window used`}>
 											<svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
 												<circle class="ring-track" cx="18" cy="18" r="15.5"></circle>
@@ -4845,6 +5025,17 @@
 		background: color-mix(in srgb, var(--accent-100) 22%, transparent);
 	}
 
+	.debug-btn {
+		font-size: 0.78rem;
+		line-height: 1;
+		opacity: 0.5;
+		transition: opacity 0.14s ease;
+	}
+	.debug-btn:hover,
+	.debug-btn.active {
+		opacity: 1;
+	}
+
 	.send-btn {
 		width: 28px;
 	}
@@ -4895,6 +5086,118 @@
 		background: var(--neutral-500, #666);
 	}
 
+	.debug-window {
+		background: var(--neutral-900, #1a1a2e);
+		border: 1px solid var(--border-subtle, #333);
+		border-radius: var(--radius-md);
+		font-size: 0.7rem;
+		font-family: var(--font-mono, monospace);
+		color: var(--text-secondary, #aaa);
+		overflow: hidden;
+	}
+	.debug-window-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 4px 8px;
+		border-bottom: 1px solid var(--border-subtle, #333);
+		background: var(--neutral-950, #0d0d1a);
+	}
+	.debug-title {
+		font-weight: 600;
+		font-size: 0.68rem;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: var(--text-tertiary, #777);
+	}
+	.debug-toggle {
+		background: none;
+		border: none;
+		color: var(--text-tertiary, #777);
+		cursor: pointer;
+		padding: 0 2px;
+		font-size: 0.85rem;
+		line-height: 1;
+		border-radius: 3px;
+	}
+	.debug-toggle:hover {
+		color: var(--text-primary);
+		background: var(--neutral-800, #222);
+	}
+	.debug-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 1px;
+		padding: 4px 8px;
+	}
+	.debug-row {
+		display: flex;
+		justify-content: space-between;
+		padding: 1px 0;
+	}
+	.debug-label {
+		color: var(--text-tertiary, #777);
+	}
+	.debug-value {
+		color: var(--text-primary, #ddd);
+		font-weight: 500;
+		text-align: right;
+	}
+	.debug-note {
+		grid-column: 1 / -1;
+		color: var(--text-tertiary, #777);
+		font-size: 0.65rem;
+		padding: 2px 8px 4px;
+		font-style: italic;
+	}
+	.debug-trace {
+		max-height: 120px;
+		overflow-y: auto;
+		border-top: 1px solid var(--border-subtle, #333);
+		padding: 4px 8px;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		font-size: 0.65rem;
+	}
+	.trace-entry {
+		display: flex;
+		gap: 6px;
+		align-items: baseline;
+		padding: 1px 0;
+	}
+	.trace-time {
+		color: var(--text-tertiary, #555);
+		flex-shrink: 0;
+		min-width: 38px;
+		font-variant-numeric: tabular-nums;
+	}
+	.trace-msg {
+		color: var(--text-secondary, #aaa);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.trace-entry.tool .trace-msg {
+		color: var(--accent-200, #6ea8fe);
+	}
+	.trace-entry.gen .trace-msg {
+		color: var(--text-primary, #ddd);
+	}
+	.trace-entry.note .trace-msg {
+		color: var(--accent-100, #93c5fd);
+	}
+	.trace-entry.done .trace-msg {
+		color: #4ade80;
+	}
+	.trace-entry.error .trace-msg {
+		color: var(--danger, #ef4444);
+	}
+	.trace-entry.send .trace-msg {
+		color: var(--text-tertiary, #777);
+	}
+
+	.loading-dots
 	.loading-dots::after {
 		content: '...';
 		animation: blink 1.5s steps(4, end) infinite;

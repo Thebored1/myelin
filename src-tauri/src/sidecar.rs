@@ -20,11 +20,20 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 
 const SIDECAR_NAME: &str = "openharn-myelin";
 const DEFAULT_PORT: u16 = 8091;
+
+/// Reuse loopback connections for health checks and sidecar requests. The
+/// sidecar is long-lived, so constructing a new client for every chat turn
+/// needlessly throws away the connection pool.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
 
 /// A running sidecar process plus the HTTP base we talk to it on.
 pub struct ManagedSidecar {
@@ -144,10 +153,12 @@ pub async fn ensure_sidecar(state: &AppState) -> Result<String> {
                 .filter(|p| p.exists())
         })
         .or_else(|| resolve_sidecar_bin(resource_dir.as_deref()))
-        .ok_or_else(|| anyhow!(
-            "openharn-myelin sidecar binary not found. Build it (npm run build:sidecar) and \
+        .ok_or_else(|| {
+            anyhow!(
+                "openharn-myelin sidecar binary not found. Build it (npm run build:sidecar) and \
              place it under the app's bin dir, or set its path in Settings > Agent (openharn)."
-        ))?;
+            )
+        })?;
 
     let port = oh
         .port
@@ -203,8 +214,7 @@ pub async fn ensure_sidecar(state: &AppState) -> Result<String> {
 }
 
 async fn health_ok(base: &str) -> bool {
-    let client = reqwest::Client::new();
-    client
+    http_client()
         .get(format!("{base}/health"))
         .timeout(Duration::from_secs(1))
         .send()
@@ -242,6 +252,28 @@ pub async fn run_chat(
     // force that mode regardless of user settings — native tool-calling doesn't work.
     let force_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
+    // The host already has deterministic, per-message routing heuristics. Pass
+    // their result to the sidecar so weak prompt-tool models do not spend a
+    // second inference merely classifying TOOL vs CHAT.
+    let intent_is_tool = if force_prompt_tools {
+        let recent_user_msgs: Vec<&str> = messages
+            .iter()
+            .filter(|m| m["role"].as_str() == Some("user"))
+            .filter_map(|m| m["content"].as_str())
+            .collect();
+        let edit_thread = crate::agent::in_edit_thread(&recent_user_msgs);
+        let selected = crate::agent::select_tools_cfg(
+            recent_user_msgs.last().copied().unwrap_or(""),
+            true,
+            edit_thread,
+            true,
+            config.deterministic_tools,
+        );
+        Some(!selected.is_empty())
+    } else {
+        None
+    };
+
     let mut options = json!({
         "strict": force_prompt_tools || oh.strict,
         "prompt_tools": force_prompt_tools || oh.prompt_tools,
@@ -257,6 +289,9 @@ pub async fn run_chat(
         "narrow": oh.narrow,
         "slm": oh.slm,
     });
+    if let Some(intent) = intent_is_tool {
+        options["intent_is_tool"] = json!(intent);
+    }
     if let Some(mc) = oh.max_calls {
         options["max_calls"] = json!(mc);
     }
@@ -288,7 +323,7 @@ pub async fn run_chat(
         "options": options,
     });
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(format!("{base}/v1/chat/stream"))
         .json(&body)
@@ -340,10 +375,8 @@ pub async fn run_chat(
                             }
                         }
                         "note_start" => {
-                            let _ = handle.emit(
-                                "ai://note_stream_start",
-                                json!({ "noteId": note_id }),
-                            );
+                            let _ =
+                                handle.emit("ai://note_stream_start", json!({ "noteId": note_id }));
                         }
                         "note_delta" => {
                             if let Ok(v) = serde_json::from_str::<Value>(&data) {
@@ -356,10 +389,8 @@ pub async fn run_chat(
                             }
                         }
                         "note_cancel" => {
-                            let _ = handle.emit(
-                                "ai://note_stream_cancel",
-                                json!({ "noteId": note_id }),
-                            );
+                            let _ = handle
+                                .emit("ai://note_stream_cancel", json!({ "noteId": note_id }));
                         }
                         "tool" => {
                             let v: Value = match serde_json::from_str(&data) {
@@ -374,7 +405,8 @@ pub async fn run_chat(
                             }
                             // Run the REAL Myelin tool (emits ai://chat_tool and,
                             // for write_note, ai://note_written on its own).
-                            let result = crate::stream_chat::execute_tool(state, &name, &args).await;
+                            let result =
+                                crate::stream_chat::execute_tool(state, &name, &args).await;
                             // Unblock the harness.
                             let post = client
                                 .post(format!("{base}/v1/tool-result"))
@@ -395,6 +427,19 @@ pub async fn run_chat(
                                     final_messages = msgs.clone();
                                 }
                                 last_tool = v["last_tool"].as_str().map(|s| s.to_string());
+                            }
+                        }
+                        "usage" => {
+                            if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                                let _ = handle.emit(
+                                    "ai://chat_usage",
+                                    json!({
+                                        "requestId": request_id,
+                                        "promptTokens": v["prompt_tokens"].as_u64().unwrap_or(0),
+                                        "completionTokens": v["completion_tokens"].as_u64().unwrap_or(0),
+                                        "totalTokens": v["total_tokens"].as_u64().unwrap_or(0),
+                                    }),
+                                );
                             }
                         }
                         "error" => {
