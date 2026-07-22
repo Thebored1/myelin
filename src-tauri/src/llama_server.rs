@@ -56,7 +56,10 @@ impl GpuBackend {
 
     /// Whether this backend offloads work to a GPU.
     pub fn is_gpu(self) -> bool {
-        matches!(self, GpuBackend::Cuda | GpuBackend::Vulkan | GpuBackend::Metal)
+        matches!(
+            self,
+            GpuBackend::Cuda | GpuBackend::Vulkan | GpuBackend::Metal
+        )
     }
 }
 
@@ -176,6 +179,14 @@ pub struct ResolvedLlamaConfig {
     /// on the sidecar, overriding user settings for this model.
     #[serde(default)]
     pub prefers_prompt_tools: Option<bool>,
+    /// Force tool_choice in native FC mode ("auto", "required", "none", or a
+    /// tool name). From metadata or model profile; overridable by user settings.
+    #[serde(default)]
+    pub tool_choice: Option<String>,
+    /// Raw JSON for chat_template_kwargs, e.g. {"enable_thinking":false}.
+    /// Forwarded directly to llama-server. From model profile; overridable.
+    #[serde(default)]
+    pub template_kwargs: Option<String>,
     /// Deterministic correctness tools (format_note / find_in_note / write
     /// guard). Default true; on a more capable model they can be disabled.
     #[serde(default = "default_true")]
@@ -343,7 +354,9 @@ pub fn detect_gpus() -> (Vec<String>, bool) {
                         .lines()
                         .filter(|l| {
                             let l = l.to_lowercase();
-                            l.contains("vga") || l.contains("3d controller") || l.contains("display")
+                            l.contains("vga")
+                                || l.contains("3d controller")
+                                || l.contains("display")
                         })
                         .map(|l| l.trim().to_string())
                         .collect();
@@ -366,10 +379,18 @@ pub fn gpu_available() -> bool {
 }
 
 /// Backend subfolders that actually contain a binary, across the tiering roots.
-pub fn installed_backends(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -> Vec<String> {
+pub fn installed_backends(
+    app_data_dir: &Path,
+    workspace_config: &WorkspaceLlamaConfig,
+) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for root in tiering_roots(app_data_dir, workspace_config) {
-        for backend in [GpuBackend::Cuda, GpuBackend::Vulkan, GpuBackend::Metal, GpuBackend::Cpu] {
+        for backend in [
+            GpuBackend::Cuda,
+            GpuBackend::Vulkan,
+            GpuBackend::Metal,
+            GpuBackend::Cpu,
+        ] {
             if let Some(dir) = backend.dir_name() {
                 let label = backend.label().to_string();
                 if root.join(dir).join(executable_name()).is_file() && !found.contains(&label) {
@@ -450,8 +471,15 @@ fn list_devices_on(exe: &Path, backend_label: &str) -> Vec<DeviceInfo> {
 /// Heuristic: does this GPU name look like an integrated GPU (shares system RAM)?
 fn is_integrated_gpu_name(name: &str) -> bool {
     const HINTS: [&str; 9] = [
-        "uhd", "iris", "integrated", "radeon graphics", "hd graphics", "renoir",
-        "cezanne", "rembrandt", "phoenix",
+        "uhd",
+        "iris",
+        "integrated",
+        "radeon graphics",
+        "hd graphics",
+        "renoir",
+        "cezanne",
+        "rembrandt",
+        "phoenix",
     ];
     let n = name.to_lowercase();
     HINTS.iter().any(|h| n.contains(h))
@@ -736,7 +764,10 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
     // Resolve the model profile (GGUF auto ← bundled ← user) for chat-template
     // overrides, role, and recommended sampling. Cheap header read of the GGUF.
     let gguf = crate::gguf::read_gguf_info(&model_path).ok();
-    let model_filename = model_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let model_filename = model_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
     let profile = crate::model_profiles::resolve(app_data_dir, gguf.as_ref(), model_filename);
 
     Ok(ResolvedLlamaConfig {
@@ -771,6 +802,8 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         },
         supports_tools: profile.supports_tools,
         prefers_prompt_tools: profile.prefers_prompt_tools,
+        tool_choice: profile.tool_choice.clone(),
+        template_kwargs: profile.template_kwargs.clone(),
         deterministic_tools: app_config.deterministic_tools.unwrap_or(true),
         // Default OFF: the model gets the full toolset every turn (model-agnostic).
         // Gating is opt-in only for sub-2B models that misfire on tools.
@@ -835,15 +868,24 @@ pub fn probe_gpu_budget() -> Option<GpuBudget> {
                     let gtt_free = read_u64(format!("{base}/mem_info_gtt_total"))
                         .unwrap_or(0)
                         .saturating_sub(read_u64(format!("{base}/mem_info_gtt_used")).unwrap_or(0));
-                    return Some(GpuBudget { bytes: vram_free + gtt_free, integrated: true });
+                    return Some(GpuBudget {
+                        bytes: vram_free + gtt_free,
+                        integrated: true,
+                    });
                 }
-                return Some(GpuBudget { bytes: vram_free, integrated: false });
+                return Some(GpuBudget {
+                    bytes: vram_free,
+                    integrated: false,
+                });
             }
         }
     }
     // NVIDIA via nvidia-smi — discrete, separate VRAM (Linux + Windows).
     if let Some(v) = nvidia_smi_free_vram() {
-        return Some(GpuBudget { bytes: v, integrated: false });
+        return Some(GpuBudget {
+            bytes: v,
+            integrated: false,
+        });
     }
     // Windows AMD/Intel/iGPU via DXGI.
     #[cfg(target_os = "windows")]
@@ -899,9 +941,15 @@ fn dxgi_gpu_budget() -> Option<GpuBudget> {
         }
         // Prefer the discrete GPU (real VRAM); else the integrated budget.
         if discrete > 0 {
-            Some(GpuBudget { bytes: discrete, integrated: false })
+            Some(GpuBudget {
+                bytes: discrete,
+                integrated: false,
+            })
         } else if integrated > 0 {
-            Some(GpuBudget { bytes: integrated, integrated: true })
+            Some(GpuBudget {
+                bytes: integrated,
+                integrated: true,
+            })
         } else {
             None
         }
@@ -954,7 +1002,12 @@ const IGPU_RAM_RESERVE: u64 = 1536 * 1024 * 1024; // 1.5 GiB
 /// headroom, then offer the remaining RAM for weights — capped by what the iGPU
 /// can actually address (its GTT budget). This maximises offload without
 /// over-committing RAM and OOM-ing, while keeping the full context window.
-fn integrated_weight_budget(available_ram: u64, kv_bytes: u64, gtt_budget: u64, reserve: u64) -> u64 {
+fn integrated_weight_budget(
+    available_ram: u64,
+    kv_bytes: u64,
+    gtt_budget: u64,
+    reserve: u64,
+) -> u64 {
     available_ram
         .saturating_sub(kv_bytes)
         .saturating_sub(reserve)
@@ -1036,9 +1089,7 @@ fn launch_plans(
         let ngl = if forced_cpu {
             0
         } else {
-            config
-                .gpu_layers
-                .unwrap_or(if is_gpu { 999 } else { 0 })
+            config.gpu_layers.unwrap_or(if is_gpu { 999 } else { 0 })
         };
         let mut plans = vec![LaunchPlan {
             ngl,
@@ -1053,7 +1104,10 @@ fn launch_plans(
         // starts for models with a broken/unsupported template (chat works,
         // tool calling may not).
         if jinja {
-            plans.push(LaunchPlan { jinja: false, ..plans[0].clone() });
+            plans.push(LaunchPlan {
+                jinja: false,
+                ..plans[0].clone()
+            });
         }
         return plans;
     }
@@ -1068,7 +1122,9 @@ fn launch_plans(
     // CPU — the iGPU/CPU split). When VRAM is unknown, request full offload (999)
     // and let the ladder degrade. This makes the FIRST launch land instead of
     // burning a failed full-offload attempt on small-VRAM machines.
-    let model_bytes = std::fs::metadata(&config.model_path).map(|m| m.len()).unwrap_or(0);
+    let model_bytes = std::fs::metadata(&config.model_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     // KV-cache bytes at the chosen context (0 for recurrent/hybrid archs, which
     // keep a small fixed state — see kv_bytes_per_token).
     let kv_bytes = gguf
@@ -1079,28 +1135,33 @@ fn launch_plans(
         0
     } else {
         match (probe_gpu_budget(), n_layers) {
-        (Some(mem), Some(layers)) if model_bytes > 0 => {
-            let weight_budget = if mem.integrated {
-                // iGPU: weight memory (GTT) and the KV cache (RAM) are the same
-                // physical RAM — keep the full context, then offload the rest.
-                integrated_weight_budget(available_ram_bytes(), kv_bytes, mem.bytes, IGPU_RAM_RESERVE)
-            } else {
-                // Discrete: VRAM holds weights; the KV cache lives in separate RAM.
-                mem.bytes
-            };
-            // A model whose weights fit the GPU's addressable budget is FULLY
-            // offloaded: a partial GPU/CPU split is both unnecessary and crashes
-            // llama.cpp's scheduler (GGML_ASSERT n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)
-            // on some backends (notably Vulkan/RADV iGPUs). The KV cache stays in
-            // RAM via --no-kv-offload, so it does NOT compete for this budget —
-            // only the weights need to fit. Fall back to a computed split only
-            // when the model genuinely can't fit the GPU.
-            let ngl = if model_bytes <= (mem.bytes as f64 * 0.9) as u64 {
-                layers as i32
-            } else {
-                fit_ngl(weight_budget, model_bytes, layers)
-            };
-            log::info!(
+            (Some(mem), Some(layers)) if model_bytes > 0 => {
+                let weight_budget = if mem.integrated {
+                    // iGPU: weight memory (GTT) and the KV cache (RAM) are the same
+                    // physical RAM — keep the full context, then offload the rest.
+                    integrated_weight_budget(
+                        available_ram_bytes(),
+                        kv_bytes,
+                        mem.bytes,
+                        IGPU_RAM_RESERVE,
+                    )
+                } else {
+                    // Discrete: VRAM holds weights; the KV cache lives in separate RAM.
+                    mem.bytes
+                };
+                // A model whose weights fit the GPU's addressable budget is FULLY
+                // offloaded: a partial GPU/CPU split is both unnecessary and crashes
+                // llama.cpp's scheduler (GGML_ASSERT n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)
+                // on some backends (notably Vulkan/RADV iGPUs). The KV cache stays in
+                // RAM via --no-kv-offload, so it does NOT compete for this budget —
+                // only the weights need to fit. Fall back to a computed split only
+                // when the model genuinely can't fit the GPU.
+                let ngl = if model_bytes <= (mem.bytes as f64 * 0.9) as u64 {
+                    layers as i32
+                } else {
+                    fit_ngl(weight_budget, model_bytes, layers)
+                };
+                log::info!(
                 "offload plan: gpu {} MiB ({}), model {} MiB/{} layers, ctx {} (kv {} MiB) -> ngl={}",
                 mem.bytes / 1_048_576,
                 if mem.integrated { "integrated" } else { "discrete" },
@@ -1110,8 +1171,8 @@ fn launch_plans(
                 kv_bytes / 1_048_576,
                 ngl
             );
-            ngl
-        }
+                ngl
+            }
             _ => 999,
         }
     };
@@ -1119,24 +1180,63 @@ fn launch_plans(
     // Quantize the KV cache to q8_0 (near-lossless, ~half of f16) so the 32k
     // target fits in RAM on all systems — CPU included. Only for transformer KV;
     // recurrent/hybrid archs keep a tiny fixed state (no KV to quantize).
-    let cache_type: Option<&'static str> = gguf
-        .and_then(|g| g.kv_bytes_per_token())
-        .map(|_| "q8_0");
+    let cache_type: Option<&'static str> =
+        gguf.and_then(|g| g.kv_bytes_per_token()).map(|_| "q8_0");
 
     let mut plans = vec![
-        LaunchPlan { ngl: primary_ngl, ctx: base_ctx, no_kv_offload: true, flash_attn: true, ubatch: Some(256), cache_type, jinja },
-        LaunchPlan { ngl: primary_ngl, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), cache_type, jinja },
-        LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128), cache_type, jinja },
+        LaunchPlan {
+            ngl: primary_ngl,
+            ctx: base_ctx,
+            no_kv_offload: true,
+            flash_attn: true,
+            ubatch: Some(256),
+            cache_type,
+            jinja,
+        },
+        LaunchPlan {
+            ngl: primary_ngl,
+            ctx: (base_ctx / 2).max(2048),
+            no_kv_offload: true,
+            flash_attn: true,
+            ubatch: Some(256),
+            cache_type,
+            jinja,
+        },
+        LaunchPlan {
+            ngl: half_layers,
+            ctx: (base_ctx / 2).max(2048),
+            no_kv_offload: true,
+            flash_attn: true,
+            ubatch: Some(128),
+            cache_type,
+            jinja,
+        },
     ];
     // If a model/backend rejects quantized KV (rare), retry once with f16 KV at a
     // reduced context before falling back further.
     if cache_type.is_some() {
-        plans.push(LaunchPlan { ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(128), cache_type: None, jinja });
+        plans.push(LaunchPlan {
+            ngl: half_layers,
+            ctx: (base_ctx / 2).max(2048),
+            no_kv_offload: true,
+            flash_attn: true,
+            ubatch: Some(128),
+            cache_type: None,
+            jinja,
+        });
     }
     // Last resort: start without --jinja so a model with a missing/broken
     // template still runs (chat-only; tools may not work).
     if jinja {
-        plans.push(LaunchPlan { jinja: false, ngl: half_layers, ctx: (base_ctx / 2).max(2048), no_kv_offload: true, flash_attn: true, ubatch: Some(256), cache_type: None });
+        plans.push(LaunchPlan {
+            jinja: false,
+            ngl: half_layers,
+            ctx: (base_ctx / 2).max(2048),
+            no_kv_offload: true,
+            flash_attn: true,
+            ubatch: Some(256),
+            cache_type: None,
+        });
     }
     plans
 }
@@ -1196,7 +1296,15 @@ pub async fn start_server(
     let mut last_error: Option<String> = None;
     for candidate in &config.candidates {
         for plan in launch_plans(config, candidate, gguf.as_ref()) {
-            match try_start_candidate(client, config, candidate, &plan, chat_template_file.as_deref()).await {
+            match try_start_candidate(
+                client,
+                config,
+                candidate,
+                &plan,
+                chat_template_file.as_deref(),
+            )
+            .await
+            {
                 Ok(server) => return Ok(server),
                 Err(error) => {
                     log::warn!(
@@ -1293,7 +1401,10 @@ async fn try_start_candidate(
                 discrete_device_id(&devices)
             };
             if let Some(id) = pick {
-                log::info!("vulkan: pinning device {id} (pref={})", config.backend_preference);
+                log::info!(
+                    "vulkan: pinning device {id} (pref={})",
+                    config.backend_preference
+                );
                 command.arg("--device").arg(id);
             }
         }
@@ -1536,7 +1647,10 @@ pub async fn start_embed_server(
             .map(|r| r.status().is_success())
             .unwrap_or(false)
         {
-            log::info!("embedding server ready on port {port} ({})", model_path.display());
+            log::info!(
+                "embedding server ready on port {port} ({})",
+                model_path.display()
+            );
             return Ok(ManagedEmbedServer {
                 child,
                 port,
@@ -1728,7 +1842,11 @@ pub fn set_advanced_config(
     }
     if let Some(dev) = gpu_device {
         // Empty string clears the pin (back to automatic device choice).
-        config.gpu_device = if dev.trim().is_empty() { None } else { Some(dev) };
+        config.gpu_device = if dev.trim().is_empty() {
+            None
+        } else {
+            Some(dev)
+        };
     }
     if let Some(t) = thinking {
         config.thinking = Some(t);
@@ -2055,9 +2173,15 @@ mod tests {
         let g = GIB;
         // 16 GiB RAM, 2 GiB KV, 1.5 GiB reserve, 7 GiB GTT → RAM-KV-reserve=12.5,
         // capped at GTT → 7 GiB.
-        assert_eq!(integrated_weight_budget(16 * g, 2 * g, 7 * g, 3 * g / 2), 7 * g);
+        assert_eq!(
+            integrated_weight_budget(16 * g, 2 * g, 7 * g, 3 * g / 2),
+            7 * g
+        );
         // Low RAM dominates: 6 GiB RAM, 3 GiB KV, 1.5 reserve → 1.5 GiB (< 7 GTT).
-        assert_eq!(integrated_weight_budget(6 * g, 3 * g, 7 * g, 3 * g / 2), 3 * g / 2);
+        assert_eq!(
+            integrated_weight_budget(6 * g, 3 * g, 7 * g, 3 * g / 2),
+            3 * g / 2
+        );
         // Over-committed RAM → 0 (fall to CPU), never underflows.
         assert_eq!(integrated_weight_budget(2 * g, 3 * g, 7 * g, 3 * g / 2), 0);
     }

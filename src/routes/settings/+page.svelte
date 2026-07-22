@@ -177,6 +177,8 @@
         tool_timeout_secs: number | null;
         tool_subset: string | null;
         base_url: string | null;
+        tool_choice: string | null;
+        template_kwargs: string | null;
     };
     let ohPort = $state<number | null>(null);
     let ohBinPath = $state('');
@@ -190,6 +192,8 @@
     let ohTotalMax = $state<number | null>(null);
     let ohToolTimeout = $state<number | null>(null);
     let ohBaseUrl = $state('');
+    let ohToolChoice = $state('');
+    let ohTemplateKwargs = $state('');
     let ohSaving = $state(false);
 
     // Web search + embeddings/RAG + model compatibility (Phase 5).
@@ -277,6 +281,8 @@
                 ohTotalMax = oh.total_max ?? null;
                 ohToolTimeout = oh.tool_timeout_secs ?? null;
                 ohBaseUrl = oh.base_url ?? '';
+                ohToolChoice = oh.tool_choice ?? '';
+                ohTemplateKwargs = oh.template_kwargs ?? '';
             } catch (e) {
                 console.error('Failed to load openharn settings:', e);
             }
@@ -511,7 +517,9 @@
                     max_calls: ohMaxCalls || null,
                     total_max: ohTotalMax || null,
                     tool_timeout_secs: ohToolTimeout || null,
-                    base_url: ohBaseUrl.trim() || null
+                    base_url: ohBaseUrl.trim() || null,
+                    tool_choice: ohToolChoice.trim() || null,
+                    template_kwargs: ohTemplateKwargs.trim() || null,
                 }
             });
             saved = true;
@@ -954,6 +962,36 @@
             </div>
             <p class="compute-hint">
                 Restrict the agent to a named subset of tools (comma-separated function names). Blank = all tools Myelin offers this turn.
+            </p>
+
+            <div class="model-picker">
+                <input
+                    type="text"
+                    class="path-display"
+                    bind:value={ohToolChoice}
+                    placeholder="Tool choice, e.g. required (native FC mode only)"
+                    onchange={saveOpenharn}
+                />
+            </div>
+            <p class="compute-hint">
+                Force <code>tool_choice</code> in native FC mode: <code>auto</code> (default), <code>required</code>
+                (grammar-force a call in the model's own format — rescues quant-degraded native FC),
+                <code>none</code>, or a specific tool name.
+            </p>
+
+            <div class="model-picker">
+                <input
+                    type="text"
+                    class="path-display"
+                    bind:value={ohTemplateKwargs}
+                    placeholder="Template kwargs JSON, e.g. {"enable_thinking":false}"
+                    onchange={saveOpenharn}
+                />
+            </div>
+            <p class="compute-hint">
+                Raw JSON forwarded as <code>chat_template_kwargs</code>. Canonical use:
+                <code>{"enable_thinking":false}</code> disables chain-of-thought on thinking models
+                (no-op on templates without the switch). Pairs with <code>tool_choice=required</code>.
             </p>
         </section>
 

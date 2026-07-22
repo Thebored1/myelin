@@ -481,6 +481,19 @@ pub struct OpenharnSettings {
     /// (e.g. "http://127.0.0.1:39281/v1"). None = derived from the resolved
     /// llama config (config.base_url() + "/v1").
     pub base_url: Option<String>,
+    /// Force `tool_choice` in native FC mode: "auto" (default), "required"
+    /// (server grammar-forces a call in the model's own format — rescues
+    /// quant-degraded native FC), "none", or a specific tool name.
+    /// From openharn DSGoal: tool_choice=required + enable_thinking:false
+    /// recovers ~71% of quant-gap on MiniCPM-V Q4_0 (47.5% -> 72.5%).
+    #[serde(default)]
+    pub tool_choice: Option<String>,
+    /// Raw JSON forwarded as `chat_template_kwargs` into llama-server's request
+    /// body. The canonical use is `{"enable_thinking":false}` — disables
+    /// chain-of-thought on thinking models (a no-op on templates without the
+    /// switch). Pairs with tool_choice=required to prevent think-budget deaths.
+    #[serde(default)]
+    pub template_kwargs: Option<String>,
 }
 
 impl OpenharnSettings {

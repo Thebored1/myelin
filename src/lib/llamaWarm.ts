@@ -1,41 +1,21 @@
 import { invoke } from '@tauri-apps/api/core';
 
-// Tie the llama-server lifecycle to whether a note is open in the editor: keep it
-// warm while a note is open (so the first chat is instant and later ones reuse
-// the warm slot), and stop it — freeing RAM/VRAM — once the last note closes.
+// Keep the llama-server warm for the entire app session. The server is started
+// on app startup (see lib.rs setup hook) and lives until the app exits — there's
+// no need to stop it when navigating between notes or closing the sidebar.
+// The server process is killed automatically when the app closes (ManagedLlamaServer's
+// Drop impl + shutdown_servers_sync in the close handler).
 //
-// A short grace period bridges leave→return navigation (and any transient
-// double-mount) so we don't churn the model load. Switching note→note doesn't
-// touch this at all: SvelteKit keeps the /notes/[id] component mounted and only
-// updates the route param, so onMount/onDestroy fire just once per note session.
+// noteOpened is kept as a harmless safety net: if the server somehow wasn't
+// started at boot (e.g. a config issue fixed mid-session), opening a note will
+// trigger the warm-up and subsequent chats will be fast.
 
-let openNotes = 0;
-let stopTimer: ReturnType<typeof setTimeout> | null = null;
-const STOP_GRACE_MS = 2500;
-
-function cancelPendingStop() {
-	if (stopTimer !== null) {
-		clearTimeout(stopTimer);
-		stopTimer = null;
-	}
-}
-
-/** Call when a note view mounts: warm the server, cancel any pending shutdown. */
+/** Call when a note view mounts: warm the server if it isn't already. */
 export function noteOpened(): void {
-	openNotes += 1;
-	cancelPendingStop();
-	// Fire-and-forget — the first chat still cold-starts correctly if this races.
 	invoke('warm_llama_server').catch(() => {});
 }
 
-/** Call when a note view unmounts: shut the server down once no note remains. */
+/** Called when a note view unmounts — no-op: the server stays warm. */
 export function noteClosed(): void {
-	openNotes = Math.max(0, openNotes - 1);
-	if (openNotes === 0) {
-		cancelPendingStop();
-		stopTimer = setTimeout(() => {
-			stopTimer = null;
-			if (openNotes === 0) invoke('stop_llama_server').catch(() => {});
-		}, STOP_GRACE_MS);
-	}
+	// Server stays running for the whole app session.
 }

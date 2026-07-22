@@ -39,6 +39,15 @@ pub struct ModelProfile {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    /// Force `tool_choice` in native FC mode: "auto", "required" (llama.cpp
+    /// grammar-forces a call in the model's own format), "none", or a tool name.
+    /// From openharn DSGoal: required + template_kwargs recovers quant degradation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
+    /// Raw JSON forwarded as `chat_template_kwargs`. Canonical:
+    /// `{"enable_thinking":false}` disables chain-of-thought on thinking models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_kwargs: Option<String>,
     /// Curated + tested by us (UI "verified" badge) vs auto/experimental.
     #[serde(default)]
     pub verified: bool,
@@ -66,6 +75,10 @@ pub struct ResolvedProfile {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub is_recurrent_or_hybrid: bool,
+    /// Force tool_choice in native FC mode.
+    pub tool_choice: Option<String>,
+    /// Raw JSON for chat_template_kwargs (e.g. {"enable_thinking":false}).
+    pub template_kwargs: Option<String>,
     pub verified: bool,
 }
 
@@ -80,6 +93,8 @@ impl ResolvedProfile {
             temperature: None,
             top_p: None,
             is_recurrent_or_hybrid: gguf.map(|g| g.is_recurrent_or_hybrid()).unwrap_or(false),
+            tool_choice: None,
+            template_kwargs: None,
             verified: false,
         }
     }
@@ -110,6 +125,16 @@ impl ResolvedProfile {
         }
         if p.top_p.is_some() {
             self.top_p = p.top_p;
+        }
+        if let Some(ref tc) = p.tool_choice {
+            if !tc.is_empty() {
+                self.tool_choice = Some(tc.clone());
+            }
+        }
+        if let Some(ref kw) = p.template_kwargs {
+            if !kw.is_empty() {
+                self.template_kwargs = Some(kw.clone());
+            }
         }
         self.verified = p.verified;
     }
@@ -204,7 +229,11 @@ mod tests {
 
     #[test]
     fn granite_is_verified_chat_with_tools() {
-        let r = resolve(nowhere(), Some(&gguf("granitehybrid")), "granite-4.0-h-1b-Q4_K_M.gguf");
+        let r = resolve(
+            nowhere(),
+            Some(&gguf("granitehybrid")),
+            "granite-4.0-h-1b-Q4_K_M.gguf",
+        );
         assert_eq!(r.role, ModelRole::Chat);
         assert_eq!(r.supports_tools, Some(true));
         assert!(r.verified);
@@ -214,14 +243,22 @@ mod tests {
 
     #[test]
     fn lfm2_gets_template_override() {
-        let r = resolve(nowhere(), Some(&gguf("lfm2")), "LFM2.5-1.2B-Instruct-Q4_K_M.gguf");
+        let r = resolve(
+            nowhere(),
+            Some(&gguf("lfm2")),
+            "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+        );
         assert_eq!(r.chat_template.as_deref(), Some("lfm2"));
         assert!(r.is_recurrent_or_hybrid);
     }
 
     #[test]
     fn nomic_matches_by_filename_as_embed() {
-        let r = resolve(nowhere(), Some(&gguf("nomic-bert")), "nomic-embed-text-v1.5.Q4_K_M.gguf");
+        let r = resolve(
+            nowhere(),
+            Some(&gguf("nomic-bert")),
+            "nomic-embed-text-v1.5.Q4_K_M.gguf",
+        );
         assert_eq!(r.role, ModelRole::Embed);
     }
 

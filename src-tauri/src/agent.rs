@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::Emitter;
 
-async fn check_tool_approval(state: &AppState, tool_name: &str, title: &str, content_preview: &str) -> Result<(), String> {
+async fn check_tool_approval(
+    state: &AppState,
+    tool_name: &str,
+    title: &str,
+    content_preview: &str,
+) -> Result<(), String> {
     if !state.is_tool_approval_required() {
         return Ok(());
     }
@@ -259,7 +264,8 @@ pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)
     // a FORMATTED span where the rendered selection dropped the markdown markers
     // (**bold**, `code`, a heading's `# `). find_tolerant matches the inner words
     // (whitespace-tolerant), so we splice inside the markers and keep them.
-    best.map(|(_, s, e)| (s, e)).or_else(|| find_tolerant(body, text))
+    best.map(|(_, s, e)| (s, e))
+        .or_else(|| find_tolerant(body, text))
 }
 
 /// If the user armed a selection, build a plan that replaces ONLY that span with
@@ -362,11 +368,17 @@ pub fn plan_write(
         } else {
             format!("{}\n\n{}", current_body.trim_end(), content.trim_start())
         };
-        Ok(WritePlan { new_body: body, op: WriteOp::Append })
+        Ok(WritePlan {
+            new_body: body,
+            op: WriteOp::Append,
+        })
     } else {
         // Whole-body replace: explicit replace (find ignored), mode:"edit" with
         // no find, or unspecified mode.
-        Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace })
+        Ok(WritePlan {
+            new_body: content.to_string(),
+            op: WriteOp::Replace,
+        })
     }
 }
 
@@ -384,6 +396,45 @@ fn contains_any_word(haystack: &str, words: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Negation words that invert the intent of a following keyword.
+const NEGATIONS: &[&str] = &[
+    "don't",
+    "doesn't",
+    "didn't",
+    "won't",
+    "wouldn't",
+    "shouldn't",
+    "couldn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "haven't",
+    "hasn't",
+    "hadn't",
+    "can't",
+    "cannot",
+    "without",
+    "never",
+    "not",
+    "no",
+];
+
+/// Check if a negation word appears before the FIRST occurrence of any keyword
+/// in the lowercased message. This catches "don't search notes" (negated) but
+/// not "search notes" (not negated). A heuristic — it won't catch every
+/// construction, but it prevents the common false positives where a negated
+/// request still triggers a tool offer.
+fn is_negated(message: &str, keywords: &[&str]) -> bool {
+    let m = message.to_lowercase();
+    let first_pos = keywords.iter().filter_map(|kw| m.find(kw)).min();
+    if let Some(pos) = first_pos {
+        let before = &m[..pos];
+        return NEGATIONS.iter().any(|n| before.contains(n));
+    }
+    false
+}
+
 /// Heuristic: does this user message ask to CREATE or MODIFY the open note (as
 /// opposed to just chatting / asking a question)? Used by `select_tools` to
 /// decide whether to offer `write_note` this turn. In Myelin the chat is a
@@ -399,9 +450,24 @@ pub fn note_write_intent(message: &str) -> bool {
     // also treats these as "proceed now", so honour them here too.
     let affirmation = m.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     const AFFIRMATIONS: &[&str] = &[
-        "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "k", "go ahead",
-        "do it", "please do", "go for it", "sounds good", "anything", "you decide",
-        "proceed", "go",
+        "yes",
+        "y",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "ok",
+        "okay",
+        "k",
+        "go ahead",
+        "do it",
+        "please do",
+        "go for it",
+        "sounds good",
+        "anything",
+        "you decide",
+        "proceed",
+        "go",
     ];
     if AFFIRMATIONS.contains(&affirmation) {
         return true;
@@ -409,8 +475,15 @@ pub fn note_write_intent(message: &str) -> bool {
     // Leading affirmation word ("yes please", "sure, go for it"). Limited to
     // strong single-word affirmations so a question like "ok what is X" is not
     // mistaken for a write.
-    const LEADING_AFFIRMATIONS: &[&str] =
-        &["yes", "yeah", "yep", "yup", "sure", "absolutely", "definitely"];
+    const LEADING_AFFIRMATIONS: &[&str] = &[
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "absolutely",
+        "definitely",
+    ];
     let first_word = affirmation.split_whitespace().next().unwrap_or("");
     if LEADING_AFFIRMATIONS.contains(&first_word) {
         return true;
@@ -418,60 +491,210 @@ pub fn note_write_intent(message: &str) -> bool {
 
     // Strong create/edit verbs. In this app these always target the open note.
     const WRITE_VERBS: &[&str] = &[
-        "write", "rewrite", "re-write", "create", "draft", "compose", "add",
-        "append", "insert", "generate", "produce", "jot", "fill", "format",
-        "reformat", "restructure", "reorganize", "reorganise", "organize",
-        "organise", "clean up", "cleanup", "tidy", "fix", "correct", "proofread",
-        "improve", "polish", "edit", "revise", "update", "change", "modify",
-        "shorten", "condense", "trim", "expand", "lengthen", "elaborate",
-        "reorder", "rearrange", "remove", "delete", "erase", "replace", "swap",
-        "clear", "empty", "wipe", "blank", "scrap",
-        "bold", "italic", "italicize", "capitalize", "capitalise", "continue",
-        "extend", "finish", "translate", "rephrase", "reword",
+        "write",
+        "rewrite",
+        "re-write",
+        "create",
+        "draft",
+        "compose",
+        "add",
+        "append",
+        "insert",
+        "generate",
+        "produce",
+        "jot",
+        "fill",
+        "format",
+        "reformat",
+        "restructure",
+        "reorganize",
+        "reorganise",
+        "organize",
+        "organise",
+        "clean up",
+        "cleanup",
+        "tidy",
+        "fix",
+        "correct",
+        "proofread",
+        "improve",
+        "polish",
+        "edit",
+        "revise",
+        "update",
+        "change",
+        "modify",
+        "shorten",
+        "condense",
+        "trim",
+        "expand",
+        "lengthen",
+        "elaborate",
+        "reorder",
+        "rearrange",
+        "remove",
+        "delete",
+        "erase",
+        "replace",
+        "swap",
+        "clear",
+        "empty",
+        "wipe",
+        "blank",
+        "scrap",
+        "bold",
+        "italic",
+        "italicize",
+        "capitalize",
+        "capitalise",
+        "continue",
+        "extend",
+        "finish",
+        "translate",
+        "rephrase",
+        "reword",
         // Transform phrasings that don't use a bare edit verb.
-        "make it", "make this", "make the", "turn it", "turn this", "convert it",
-        "convert this", "shorter", "longer", "concise",
+        "make it",
+        "make this",
+        "make the",
+        "turn it",
+        "turn this",
+        "convert it",
+        "convert this",
+        "shorter",
+        "longer",
+        "concise",
     ];
-    if contains_any_word(&m, WRITE_VERBS) {
+    // Negation guard: "don't write a note about X" must NOT match — the user
+    // is declining a write, not requesting one. Only applies to the verb list,
+    // not to affirmations (which are inherently positive).
+    if !is_negated(message, WRITE_VERBS) && contains_any_word(&m, WRITE_VERBS) {
         return true;
     }
 
     // Soft content verbs (explain/describe/...) only count as a note write when
     // the message explicitly points at the note ("explain X in the note").
     const NOTE_TARGETS: &[&str] = &[
-        "the note", "this note", "in the note", "to the note", "into the note",
-        "my note", "the document", "the doc", "the page",
+        "the note",
+        "this note",
+        "in the note",
+        "to the note",
+        "into the note",
+        "my note",
+        "the document",
+        "the doc",
+        "the page",
     ];
     const SOFT_VERBS: &[&str] = &[
-        "explain", "describe", "list", "summarize", "summarise", "answer",
-        "outline", "detail", "note down", "record",
+        "explain",
+        "describe",
+        "list",
+        "summarize",
+        "summarise",
+        "answer",
+        "outline",
+        "detail",
+        "note down",
+        "record",
     ];
     let targets_note = NOTE_TARGETS.iter().any(|t| m.contains(t));
-    if targets_note && contains_any_word(&m, SOFT_VERBS) {
+    if targets_note && !is_negated(message, SOFT_VERBS) && contains_any_word(&m, SOFT_VERBS) {
         return true;
     }
 
     false
 }
 
-/// Pure greeting / acknowledgement vocabulary. If the whole message (<=4 words)
-/// is made of these, it's small talk → offer NO tools so the model can't
-/// reflexively call one. (Pattern borrowed from the ggufplay experiment.)
+/// Pure greeting / acknowledgement vocabulary. If the whole message is made of
+/// these words, it's small talk → offer NO tools so the model can't reflexively
+/// call one. The word count is capped at 6 (not 4) to catch natural greetings
+/// like "thanks for the help" and "how are you doing today" without matching
+/// real requests. (Pattern borrowed from the ggufplay experiment.)
 const SMALL_TALK: &[&str] = &[
-    "hi", "hello", "hey", "yo", "sup", "hiya", "howdy", "gg", "wsg", "thanks",
-    "thank", "you", "thankyou", "thx", "ty", "cheers", "ok", "okay", "k", "kk",
-    "cool", "nice", "great", "awesome", "perfect", "got", "it", "gotcha",
-    "sounds", "good", "sure", "yep", "yeah", "yup", "yes", "no", "nope", "lol",
-    "haha", "hah", "np", "problem", "welcome", "morning", "afternoon", "evening",
-    "night", "so", "much", "please", "mate", "man", "bro", "how", "are", "whats",
-    "up", "doing", "going",
+    "hi",
+    "hello",
+    "hey",
+    "yo",
+    "sup",
+    "hiya",
+    "howdy",
+    "gg",
+    "wsg",
+    "thanks",
+    "thank",
+    "you",
+    "your",
+    "welcome",
+    "thankyou",
+    "thx",
+    "ty",
+    "cheers",
+    "ok",
+    "okay",
+    "k",
+    "kk",
+    "cool",
+    "nice",
+    "great",
+    "awesome",
+    "perfect",
+    "got",
+    "it",
+    "gotcha",
+    "sounds",
+    "good",
+    "sure",
+    "yep",
+    "yeah",
+    "yup",
+    "yes",
+    "no",
+    "nope",
+    "lol",
+    "haha",
+    "hah",
+    "np",
+    "problem",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "so",
+    "much",
+    "please",
+    "mate",
+    "man",
+    "bro",
+    "how",
+    "are",
+    "whats",
+    "up",
+    "doing",
+    "going",
+    "for",
+    "the",
+    "help",
+    "there",
+    "today",
+    "anytime",
+    "alright",
+    "aight",
+    "sup",
+    "wassup",
+    "waddup",
 ];
 
 pub fn is_small_talk(message: &str) -> bool {
     let words: Vec<String> = message
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '\'' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .map(|s| s.to_string())
@@ -479,7 +702,10 @@ pub fn is_small_talk(message: &str) -> bool {
     if words.is_empty() {
         return true;
     }
-    if words.len() > 4 {
+    // Cap at 6 words: long enough for "thanks for the help" / "how are you doing
+    // today" but short enough that real requests (which carry content words
+    // like "write", "search", "remove") are never mistaken for small talk.
+    if words.len() > 6 {
         return false;
     }
     words.iter().all(|w| SMALL_TALK.contains(&w.as_str()))
@@ -491,7 +717,30 @@ pub fn is_small_talk(message: &str) -> bool {
 /// match, or it would needlessly offer search/read.
 pub fn wants_other_notes(message: &str) -> bool {
     let m = message.to_lowercase();
-    m.contains("other note")
+    // Keywords whose presence signals "look at OTHER notes". If a negation
+    // word appears before the first match, the request is declined — don't offer
+    // search/read tools.
+    const KW: &[&str] = &[
+        "other note",
+        "my notes",
+        "another note",
+        "which note",
+        "note with id",
+        "note id",
+        "note titled",
+        "note called",
+        "read the note with",
+        "look up",
+        "search my note",
+        "search note",
+        "search for a note",
+        "find a note",
+        "find the note",
+        "find my note",
+        "search",
+        "find",
+    ];
+    let matched = m.contains("other note")
         || m.contains("my notes")
         || m.contains("another note")
         || m.contains("which note")
@@ -507,7 +756,8 @@ pub fn wants_other_notes(message: &str) -> bool {
         || m.contains("find a note")
         || m.contains("find the note")
         || m.contains("find my note")
-        || (contains_any_word(&m, &["search", "find"]) && m.contains("notes"))
+        || (contains_any_word(&m, &["search", "find"]) && m.contains("notes"));
+    matched && !is_negated(message, KW)
 }
 
 /// TLD allowlist used to spot a BARE domain (example.com, speediq.ai) in a
@@ -516,9 +766,11 @@ pub fn wants_other_notes(message: &str) -> bool {
 fn has_web_domain(m: &str) -> bool {
     const WEB_TLD: &str =
         "com|org|net|io|ai|dev|co|app|gov|edu|me|xyz|info|biz|us|uk|ca|de|fr|in|cloud|tech|news|gg|so";
-    regex::Regex::new(&format!(r"(?i)\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:{WEB_TLD})\b"))
-        .map(|re| re.is_match(m))
-        .unwrap_or(false)
+    regex::Regex::new(&format!(
+        r"(?i)\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:{WEB_TLD})\b"
+    ))
+    .map(|re| re.is_match(m))
+    .unwrap_or(false)
 }
 
 /// Real intent to SEARCH the open web (no URL in hand) — kept precise (explicit
@@ -527,7 +779,24 @@ fn has_web_domain(m: &str) -> bool {
 /// then opens one with fetch_web_page.
 pub fn wants_search(message: &str) -> bool {
     let m = message.to_lowercase();
-    m.contains("search the web")
+    // Keywords whose presence signals "search the open web". If a negation
+    // word appears before the first match, the request is declined.
+    const KW: &[&str] = &[
+        "search the web",
+        "search online",
+        "web search",
+        "search the internet",
+        "on the internet",
+        "browse the web",
+        "look online",
+        "look it up online",
+        "google",
+        "search",
+        "find",
+        "look",
+        "lookup",
+    ];
+    let matched = m.contains("search the web")
         || m.contains("search online")
         || m.contains("web search")
         || m.contains("search the internet")
@@ -537,7 +806,8 @@ pub fn wants_search(message: &str) -> bool {
         || m.contains("look it up online")
         || m.contains("google ")
         || (contains_any_word(&m, &["search", "find", "look", "lookup"])
-            && contains_any_word(&m, &["online", "web", "internet"]))
+            && contains_any_word(&m, &["online", "web", "internet"]));
+    matched && !is_negated(message, KW)
 }
 
 /// True only when the user explicitly asked to empty/clear/delete the WHOLE
@@ -567,7 +837,9 @@ pub fn wants_clear(message: &str) -> bool {
         "start fresh",
         "blank note",
     ];
-    PHRASES.iter().any(|p| m.contains(p))
+    let matched = PHRASES.iter().any(|p| m.contains(p));
+    // "don't clear the note" must NOT match — the user is declining, not requesting.
+    matched && !is_negated(message, PHRASES)
 }
 
 /// True for a request to remove PART of the open note (a paragraph, heading,
@@ -581,20 +853,20 @@ pub fn wants_partial_removal(message: &str) -> bool {
         return false;
     }
     let m = message.to_lowercase();
-    let has_remove = contains_any_word(&m, &["remove", "delete", "erase", "cut", "drop", "omit"])
+    let remove_kw = ["remove", "delete", "erase", "cut", "drop", "omit"];
+    let has_remove = contains_any_word(&m, &remove_kw)
         || m.contains("get rid of")
         || m.contains("take out")
         || m.contains("strip out");
     // A removal mixed with new/changed content ("delete X and add Y", "replace the
     // intro") is a real edit, not a pure deletion — leave it to the model's content.
-    let has_add = contains_any_word(
-        &m,
-        &[
-            "add", "insert", "append", "include", "put", "write", "replace", "change",
-            "rewrite", "rename", "make", "turn",
-        ],
-    );
-    has_remove && !has_add
+    let add_kw = [
+        "add", "insert", "append", "include", "put", "write", "replace", "change", "rewrite",
+        "rename", "make", "turn",
+    ];
+    let has_add = contains_any_word(&m, &add_kw);
+    // "don't remove the second item" must NOT match — the user is declining.
+    has_remove && !has_add && !is_negated(message, &remove_kw)
 }
 
 /// Every operation `apply_format_op` understands. Kept in sync with the
@@ -647,7 +919,9 @@ fn strip_emphasis(body: &str, bold: bool, italic: bool) -> String {
             s = s.replace("**", "\u{1}B").replace("__", "\u{1}U");
         }
         s = re(r"\*(.+?)\*").replace_all(&s, "$1").into_owned();
-        s = re(r"(?:^|\b)_(.+?)_(?:\b|$)").replace_all(&s, "$1").into_owned();
+        s = re(r"(?:^|\b)_(.+?)_(?:\b|$)")
+            .replace_all(&s, "$1")
+            .into_owned();
         if protect {
             s = s.replace("\u{1}B", "**").replace("\u{1}U", "__");
         }
@@ -694,7 +968,9 @@ fn to_title_case(body: &str) -> String {
                 .map(|word| {
                     let mut chars = word.chars();
                     match chars.next() {
-                        Some(c) => c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                        Some(c) => {
+                            c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                        }
                         None => String::new(),
                     }
                 })
@@ -713,18 +989,31 @@ pub fn detect_format_op(message: &str) -> Option<&'static str> {
     let m = message.to_lowercase();
     let creating = contains_any_word(
         &m,
-        &["write", "create", "draft", "compose", "generate", "give", "jot"],
+        &[
+            "write", "create", "draft", "compose", "generate", "give", "jot",
+        ],
+    );
+
+    // Negation guard: "don't remove the headings" must NOT trigger a format op.
+    let negated = is_negated(
+        message,
+        &["remove", "delete", "strip", "drop", "clear", "kill"],
     );
 
     // ---- removals (need a removal verb; very low false-positive) ----
-    let removal = contains_any_word(&m, &["remove", "delete", "strip", "drop", "clear", "kill"])
-        || m.contains("get rid of")
-        || m.contains("take out")
-        || m.contains("without the")
-        || m.contains("without any")
-        || m.contains("no more");
+    let removal = !negated
+        && (contains_any_word(&m, &["remove", "delete", "strip", "drop", "clear", "kill"])
+            || m.contains("get rid of")
+            || m.contains("take out")
+            || m.contains("without the")
+            || m.contains("without any")
+            || m.contains("no more"));
     if removal {
-        if m.contains("all formatting") || m.contains("all markdown") || m.contains("markdown formatting") || m.contains("plain text") {
+        if m.contains("all formatting")
+            || m.contains("all markdown")
+            || m.contains("markdown formatting")
+            || m.contains("plain text")
+        {
             return Some("strip_markdown");
         }
         if m.contains("heading") || m.contains("header") {
@@ -751,10 +1040,17 @@ pub fn detect_format_op(message: &str) -> Option<&'static str> {
         if m.contains("quote") {
             return Some("remove_blockquotes");
         }
-        if m.contains("strikethrough") || m.contains("strike-through") || m.contains("strike through") {
+        if m.contains("strikethrough")
+            || m.contains("strike-through")
+            || m.contains("strike through")
+        {
             return Some("remove_strikethrough");
         }
-        if m.contains("divider") || m.contains("horizontal rule") || m.contains("horizontal line") || m.contains("separator") {
+        if m.contains("divider")
+            || m.contains("horizontal rule")
+            || m.contains("horizontal line")
+            || m.contains("separator")
+        {
             return Some("remove_horizontal_rules");
         }
         if m.contains("blank line") || m.contains("empty line") || m.contains("extra line") {
@@ -778,7 +1074,11 @@ pub fn detect_format_op(message: &str) -> Option<&'static str> {
     }
 
     // ---- case transforms ----
-    if m.contains("uppercase") || m.contains("upper case") || m.contains("all caps") || m.contains("capital letters") {
+    if m.contains("uppercase")
+        || m.contains("upper case")
+        || m.contains("all caps")
+        || m.contains("capital letters")
+    {
         return Some("uppercase");
     }
     if m.contains("lowercase") || m.contains("lower case") {
@@ -792,7 +1092,11 @@ pub fn detect_format_op(message: &str) -> Option<&'static str> {
     if (m.contains("heading") || m.contains("header")) && m.contains("bold") {
         let hi = m.find("head").unwrap_or(usize::MAX);
         let bi = m.find("bold").unwrap_or(usize::MAX);
-        return Some(if hi < bi { "headings_to_bold" } else { "bold_to_headings" });
+        return Some(if hi < bi {
+            "headings_to_bold"
+        } else {
+            "bold_to_headings"
+        });
     }
     if m.contains("heading") || m.contains("header") {
         if m.contains("promote") || m.contains("up a level") || m.contains("larger") {
@@ -812,7 +1116,11 @@ pub fn detect_format_op(message: &str) -> Option<&'static str> {
         let number_pos = m.rfind("number").or_else(|| m.rfind("ordered"));
         match (bullet_pos, number_pos) {
             (Some(b), Some(n)) => {
-                return Some(if b > n { "numbered_to_bullets" } else { "bullets_to_numbered" })
+                return Some(if b > n {
+                    "numbered_to_bullets"
+                } else {
+                    "bullets_to_numbered"
+                })
             }
             (Some(_), None) => return Some("numbered_to_bullets"),
             (None, Some(_)) => return Some("bullets_to_numbered"),
@@ -828,25 +1136,39 @@ pub fn apply_format_op(body: &str, op: &str) -> String {
     let re = |p: &str| regex::Regex::new(p).unwrap();
     match op {
         // ---- removals ----
-        "remove_headings" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+").replace_all(body, "").into_owned(),
+        "remove_headings" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
+            .replace_all(body, "")
+            .into_owned(),
         "remove_bold" => strip_emphasis(body, true, false),
         "remove_italic" => strip_emphasis(body, false, true),
         "remove_emphasis" => strip_emphasis(body, true, true),
-        "remove_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+").replace_all(body, "$1").into_owned(),
-        "remove_numbering" => re(r"(?m)^([ \t]*)\d+[.)][ \t]+").replace_all(body, "$1").into_owned(),
+        "remove_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+")
+            .replace_all(body, "$1")
+            .into_owned(),
+        "remove_numbering" => re(r"(?m)^([ \t]*)\d+[.)][ \t]+")
+            .replace_all(body, "$1")
+            .into_owned(),
         // Keep link/alt text; drop the (url). Protect images during the link pass.
         "remove_links" => {
             let protected = body.replace("![", "\u{1}I");
-            let unlinked = re(r"\[([^\]]*)\]\([^)]*\)").replace_all(&protected, "$1").into_owned();
+            let unlinked = re(r"\[([^\]]*)\]\([^)]*\)")
+                .replace_all(&protected, "$1")
+                .into_owned();
             unlinked.replace("\u{1}I", "![")
         }
-        "remove_images" => re(r"!\[[^\]]*\]\([^)]*\)").replace_all(body, "").into_owned(),
+        "remove_images" => re(r"!\[[^\]]*\]\([^)]*\)")
+            .replace_all(body, "")
+            .into_owned(),
         // Fenced blocks first (keep inner code), then inline spans.
         "remove_code" => {
-            let no_fence = re(r"(?s)```[^\n]*\n(.*?)```").replace_all(body, "$1").into_owned();
+            let no_fence = re(r"(?s)```[^\n]*\n(.*?)```")
+                .replace_all(body, "$1")
+                .into_owned();
             re(r"`([^`\n]+)`").replace_all(&no_fence, "$1").into_owned()
         }
-        "remove_blockquotes" => re(r"(?m)^[ \t]{0,3}>[ \t]?").replace_all(body, "").into_owned(),
+        "remove_blockquotes" => re(r"(?m)^[ \t]{0,3}>[ \t]?")
+            .replace_all(body, "")
+            .into_owned(),
         "remove_strikethrough" => re(r"~~(.+?)~~").replace_all(body, "$1").into_owned(),
         "remove_horizontal_rules" => re(r"(?m)^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*\n?")
             .replace_all(body, "")
@@ -866,15 +1188,23 @@ pub fn apply_format_op(body: &str, op: &str) -> String {
             strip_emphasis(&s, true, true)
         }
         // ---- conversions ----
-        "headings_to_bold" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$").replace_all(body, "**$1**").into_owned(),
-        "bold_to_headings" => re(r"(?m)^[ \t]*\*\*(.+?)\*\*[ \t]*$").replace_all(body, "# $1").into_owned(),
+        "headings_to_bold" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$")
+            .replace_all(body, "**$1**")
+            .into_owned(),
+        "bold_to_headings" => re(r"(?m)^[ \t]*\*\*(.+?)\*\*[ \t]*$")
+            .replace_all(body, "# $1")
+            .into_owned(),
         // ##→# (one level up); h1 has no second # so is left alone.
         "promote_headings" => re(r"(?m)^#(#+[ \t])").replace_all(body, "$1").into_owned(),
         // #→## (one level down); h6 won't match so is capped.
-        "demote_headings" => re(r"(?m)^(#{1,5})([ \t])").replace_all(body, "#$1$2").into_owned(),
+        "demote_headings" => re(r"(?m)^(#{1,5})([ \t])")
+            .replace_all(body, "#$1$2")
+            .into_owned(),
         "bullets_to_numbered" => convert_lists(body, "number"),
         "numbered_to_bullets" => convert_lists(body, "bullet"),
-        "tasks_to_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+").replace_all(body, "$1- ").into_owned(),
+        "tasks_to_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+")
+            .replace_all(body, "$1- ")
+            .into_owned(),
         "uppercase" => body.to_uppercase(),
         "lowercase" => body.to_lowercase(),
         "title_case" => to_title_case(body),
@@ -887,12 +1217,42 @@ pub fn apply_format_op(body: &str, op: &str) -> String {
 /// the model doesn't have to eyeball-scan the text and get it wrong.
 pub fn wants_find(message: &str) -> bool {
     let m = message.to_lowercase();
-    m.contains("the word")
+    // Keywords whose presence signals "find a word in the open note". If a
+    // negation word appears before the first match, the request is declined.
+    const KW: &[&str] = &[
+        "the word",
+        "the phrase",
+        "the term",
+        "search the note",
+        "find",
+        "locate",
+        "see",
+        "contains",
+        "contain",
+        "appear",
+        "appears",
+        "mention",
+        "mentioned",
+    ];
+    let matched = m.contains("the word")
         || m.contains("the phrase")
         || m.contains("the term")
         || m.contains("search the note")
-        || (contains_any_word(&m, &["find", "locate", "see", "contains", "contain", "appear", "appears", "mention", "mentioned"])
-            && contains_any_word(&m, &["note", "here", "text", "above"]))
+        || (contains_any_word(
+            &m,
+            &[
+                "find",
+                "locate",
+                "see",
+                "contains",
+                "contain",
+                "appear",
+                "appears",
+                "mention",
+                "mentioned",
+            ],
+        ) && contains_any_word(&m, &["note", "here", "text", "above"]));
+    matched && !is_negated(message, KW)
 }
 
 /// Does the message ask about the user's ingested SOURCE documents (PDF/book/
@@ -900,7 +1260,23 @@ pub fn wants_find(message: &str) -> bool {
 /// doesn't fire on "this note".
 pub fn wants_documents(message: &str) -> bool {
     let m = message.to_lowercase();
-    m.contains("the pdf")
+    // Keywords whose presence signals "search my documents". If a negation word
+    // appears before the first match, the request is declined.
+    const KW: &[&str] = &[
+        "the pdf",
+        "this pdf",
+        "the document",
+        "this document",
+        "my document",
+        "the source",
+        "the book",
+        "this book",
+        "the paper",
+        "the article",
+        "according to the",
+        "in the text",
+    ];
+    let matched = m.contains("the pdf")
         || m.contains("this pdf")
         || m.contains("the document")
         || m.contains("this document")
@@ -911,19 +1287,31 @@ pub fn wants_documents(message: &str) -> bool {
         || m.contains("the paper")
         || m.contains("the article")
         || m.contains("according to the")
-        || m.contains("in the text")
+        || m.contains("in the text");
+    matched && !is_negated(message, KW)
 }
 
 /// Does the message ask to fetch a specific web page — a full URL, a bare
 /// domain, or an explicit "fetch/open/visit the page"?
 pub fn wants_fetch(message: &str) -> bool {
     let m = message.to_lowercase();
-    m.contains("http://")
+    // Keywords whose presence signals "fetch a web page". If a negation word
+    // appears before the first match, the request is declined.
+    const KW: &[&str] = &[
+        "http://", "https://", "www.", "fetch", "download", "open", "visit", "go to", "load",
+        "scrape", "page", "url", "site", "website", "link",
+    ];
+    let matched = m.contains("http://")
         || m.contains("https://")
         || m.contains("www.")
         || has_web_domain(&m)
-        || (contains_any_word(&m, &["fetch", "download", "open", "visit", "go to", "load", "scrape"])
-            && contains_any_word(&m, &["page", "url", "site", "website", "link"]))
+        || (contains_any_word(
+            &m,
+            &[
+                "fetch", "download", "open", "visit", "go to", "load", "scrape",
+            ],
+        ) && contains_any_word(&m, &["page", "url", "site", "website", "link"]));
+    matched && !is_negated(message, KW)
 }
 
 /// True when recent conversation shows an ACTIVE note-editing thread, so a
@@ -1218,12 +1606,20 @@ impl Tool for WriteNoteTool {
             WriteOp::EditSnippet => (
                 plan.new_body.clone(),
                 "write",
-                if content_empty { "Delete Text" } else { "Replace Text" },
+                if content_empty {
+                    "Delete Text"
+                } else {
+                    "Replace Text"
+                },
             ),
             WriteOp::Replace => (
                 plan.new_body.clone(),
                 "write",
-                if content_empty { "Clear Note" } else { "Write Note" },
+                if content_empty {
+                    "Clear Note"
+                } else {
+                    "Write Note"
+                },
             ),
         };
         let new_body = plan.new_body;
@@ -1263,7 +1659,10 @@ impl Tool for WriteNoteTool {
             "ai://note_written",
             serde_json::json!({ "noteId": existing.id, "content": emit_content, "mode": emit_mode }),
         );
-        Ok(format!("Note successfully updated with ID: {}", existing.id))
+        Ok(format!(
+            "Note successfully updated with ID: {}",
+            existing.id
+        ))
     }
 }
 
@@ -1319,7 +1718,9 @@ impl Tool for FormatNoteTool {
         let new_body = apply_format_op(&existing.body, &op);
         let pretty = op.replace('_', " ");
         if new_body == existing.body {
-            return Ok(format!("Nothing to change — no matching content to {pretty} in the note."));
+            return Ok(format!(
+                "Nothing to change — no matching content to {pretty} in the note."
+            ));
         }
 
         let display_name = "Format Note";
@@ -1351,7 +1752,10 @@ impl Tool for FormatNoteTool {
             "ai://note_written",
             serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );
-        Ok(format!("Note successfully updated with ID: {}", existing.id))
+        Ok(format!(
+            "Note successfully updated with ID: {}",
+            existing.id
+        ))
     }
 }
 
@@ -1571,7 +1975,8 @@ impl Tool for SearchDocumentsTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let k = args.count.unwrap_or(5).clamp(1, 10) as usize;
-        self.state.record_chat_tool("Search Documents", args.query.clone());
+        self.state
+            .record_chat_tool("Search Documents", args.query.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
@@ -1634,9 +2039,13 @@ impl Tool for FindInNoteTool {
         let body = self.state.open_note_body().unwrap_or_default();
         let count = body.to_lowercase().matches(&q.to_lowercase()).count();
         if count == 0 {
-            Ok(format!("The text \"{q}\" does NOT appear in the open note."))
+            Ok(format!(
+                "The text \"{q}\" does NOT appear in the open note."
+            ))
         } else {
-            Ok(format!("Yes — \"{q}\" appears {count} time(s) in the open note."))
+            Ok(format!(
+                "Yes — \"{q}\" appears {count} time(s) in the open note."
+            ))
         }
     }
 }
@@ -1679,7 +2088,8 @@ impl Tool for WebSearchTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let count = args.count.unwrap_or(5).clamp(1, 10) as usize;
-        self.state.record_chat_tool("Web Search", args.query.clone());
+        self.state
+            .record_chat_tool("Web Search", args.query.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Web Search", "details": args.query.clone() }),
@@ -1874,8 +2284,12 @@ mod tests {
     // line and drop only the leading # markers — done in code, not by the model.
     #[test]
     fn format_op_strips_headings_keeps_text() {
-        let body = "## Intro\nPersonal computers changed everything.\n### History\nIt began in the 1970s.";
-        assert_eq!(detect_format_op("remove all headings"), Some("remove_headings"));
+        let body =
+            "## Intro\nPersonal computers changed everything.\n### History\nIt began in the 1970s.";
+        assert_eq!(
+            detect_format_op("remove all headings"),
+            Some("remove_headings")
+        );
         assert_eq!(
             apply_format_op(body, "remove_headings"),
             "Intro\nPersonal computers changed everything.\nHistory\nIt began in the 1970s."
@@ -1885,34 +2299,97 @@ mod tests {
 
     #[test]
     fn format_op_removals() {
-        assert_eq!(apply_format_op("a **bold** word", "remove_bold"), "a bold word");
-        assert_eq!(apply_format_op("a *italic* word", "remove_italic"), "a italic word");
+        assert_eq!(
+            apply_format_op("a **bold** word", "remove_bold"),
+            "a bold word"
+        );
+        assert_eq!(
+            apply_format_op("a *italic* word", "remove_italic"),
+            "a italic word"
+        );
         // Italic-only must leave bold markers intact.
-        assert_eq!(apply_format_op("**b** and *i*", "remove_italic"), "**b** and i");
-        assert_eq!(apply_format_op("**b** and *i*", "remove_emphasis"), "b and i");
-        assert_eq!(apply_format_op("- one\n- two", "remove_bullets"), "one\ntwo");
-        assert_eq!(apply_format_op("1. one\n2. two", "remove_numbering"), "one\ntwo");
-        assert_eq!(apply_format_op("see [Rust](https://r.org) here", "remove_links"), "see Rust here");
+        assert_eq!(
+            apply_format_op("**b** and *i*", "remove_italic"),
+            "**b** and i"
+        );
+        assert_eq!(
+            apply_format_op("**b** and *i*", "remove_emphasis"),
+            "b and i"
+        );
+        assert_eq!(
+            apply_format_op("- one\n- two", "remove_bullets"),
+            "one\ntwo"
+        );
+        assert_eq!(
+            apply_format_op("1. one\n2. two", "remove_numbering"),
+            "one\ntwo"
+        );
+        assert_eq!(
+            apply_format_op("see [Rust](https://r.org) here", "remove_links"),
+            "see Rust here"
+        );
         // remove_links keeps images.
-        assert_eq!(apply_format_op("![p](a.png) and [x](y)", "remove_links"), "![p](a.png) and x");
-        assert_eq!(apply_format_op("![p](a.png) text", "remove_images"), " text");
-        assert_eq!(apply_format_op("use `code` now", "remove_code"), "use code now");
-        assert_eq!(apply_format_op("> quoted\n> more", "remove_blockquotes"), "quoted\nmore");
-        assert_eq!(apply_format_op("a ~~no~~ b", "remove_strikethrough"), "a no b");
-        assert_eq!(apply_format_op("x\n\n---\n\ny", "remove_horizontal_rules"), "x\n\n\ny");
-        assert_eq!(apply_format_op("a\n\n\n\nb", "remove_blank_lines"), "a\n\nb");
-        assert_eq!(apply_format_op("# H\n- **b** [l](u)", "strip_markdown"), "H\nb l");
+        assert_eq!(
+            apply_format_op("![p](a.png) and [x](y)", "remove_links"),
+            "![p](a.png) and x"
+        );
+        assert_eq!(
+            apply_format_op("![p](a.png) text", "remove_images"),
+            " text"
+        );
+        assert_eq!(
+            apply_format_op("use `code` now", "remove_code"),
+            "use code now"
+        );
+        assert_eq!(
+            apply_format_op("> quoted\n> more", "remove_blockquotes"),
+            "quoted\nmore"
+        );
+        assert_eq!(
+            apply_format_op("a ~~no~~ b", "remove_strikethrough"),
+            "a no b"
+        );
+        assert_eq!(
+            apply_format_op("x\n\n---\n\ny", "remove_horizontal_rules"),
+            "x\n\n\ny"
+        );
+        assert_eq!(
+            apply_format_op("a\n\n\n\nb", "remove_blank_lines"),
+            "a\n\nb"
+        );
+        assert_eq!(
+            apply_format_op("# H\n- **b** [l](u)", "strip_markdown"),
+            "H\nb l"
+        );
     }
 
     #[test]
     fn format_op_conversions() {
-        assert_eq!(apply_format_op("# Title\nbody", "headings_to_bold"), "**Title**\nbody");
-        assert_eq!(apply_format_op("**Title**\nbody", "bold_to_headings"), "# Title\nbody");
+        assert_eq!(
+            apply_format_op("# Title\nbody", "headings_to_bold"),
+            "**Title**\nbody"
+        );
+        assert_eq!(
+            apply_format_op("**Title**\nbody", "bold_to_headings"),
+            "# Title\nbody"
+        );
         assert_eq!(apply_format_op("## A\n# B", "promote_headings"), "# A\n# B");
-        assert_eq!(apply_format_op("# A\n## B", "demote_headings"), "## A\n### B");
-        assert_eq!(apply_format_op("- a\n- b\n- c", "bullets_to_numbered"), "1. a\n2. b\n3. c");
-        assert_eq!(apply_format_op("1. a\n2. b", "numbered_to_bullets"), "- a\n- b");
-        assert_eq!(apply_format_op("- [ ] todo\n- [x] done", "tasks_to_bullets"), "- todo\n- done");
+        assert_eq!(
+            apply_format_op("# A\n## B", "demote_headings"),
+            "## A\n### B"
+        );
+        assert_eq!(
+            apply_format_op("- a\n- b\n- c", "bullets_to_numbered"),
+            "1. a\n2. b\n3. c"
+        );
+        assert_eq!(
+            apply_format_op("1. a\n2. b", "numbered_to_bullets"),
+            "- a\n- b"
+        );
+        assert_eq!(
+            apply_format_op("- [ ] todo\n- [x] done", "tasks_to_bullets"),
+            "- todo\n- done"
+        );
         assert_eq!(apply_format_op("Hi There", "uppercase"), "HI THERE");
         assert_eq!(apply_format_op("Hi There", "lowercase"), "hi there");
         assert_eq!(apply_format_op("hello world", "title_case"), "Hello World");
@@ -1921,14 +2398,32 @@ mod tests {
     #[test]
     fn detect_format_op_routes_and_guards() {
         assert_eq!(detect_format_op("strip the bold"), Some("remove_bold"));
-        assert_eq!(detect_format_op("get rid of the bullet points"), Some("remove_bullets"));
+        assert_eq!(
+            detect_format_op("get rid of the bullet points"),
+            Some("remove_bullets")
+        );
         assert_eq!(detect_format_op("remove the links"), Some("remove_links"));
-        assert_eq!(detect_format_op("remove all the images"), Some("remove_images"));
-        assert_eq!(detect_format_op("strip all formatting"), Some("strip_markdown"));
+        assert_eq!(
+            detect_format_op("remove all the images"),
+            Some("remove_images")
+        );
+        assert_eq!(
+            detect_format_op("strip all formatting"),
+            Some("strip_markdown")
+        );
         assert_eq!(detect_format_op("make it all uppercase"), Some("uppercase"));
-        assert_eq!(detect_format_op("convert the bullets to a numbered list"), Some("bullets_to_numbered"));
-        assert_eq!(detect_format_op("turn the numbered list into bullets"), Some("numbered_to_bullets"));
-        assert_eq!(detect_format_op("change the headings to bold"), Some("headings_to_bold"));
+        assert_eq!(
+            detect_format_op("convert the bullets to a numbered list"),
+            Some("bullets_to_numbered")
+        );
+        assert_eq!(
+            detect_format_op("turn the numbered list into bullets"),
+            Some("numbered_to_bullets")
+        );
+        assert_eq!(
+            detect_format_op("change the headings to bold"),
+            Some("headings_to_bold")
+        );
         // Never hijack a request to CREATE fresh content.
         assert_eq!(detect_format_op("write a numbered list of fruits"), None);
         assert_eq!(detect_format_op("write this note in uppercase"), None);
@@ -1962,9 +2457,13 @@ mod tests {
         assert!(!wants_partial_removal("delete everything"));
         assert!(!wants_partial_removal("clear the note"));
         // Removal mixed with new/changed content is a real edit → false.
-        assert!(!wants_partial_removal("delete the intro and add a conclusion"));
+        assert!(!wants_partial_removal(
+            "delete the intro and add a conclusion"
+        ));
         assert!(!wants_partial_removal("replace the first paragraph"));
-        assert!(!wants_partial_removal("rewrite the summary without the last line"));
+        assert!(!wants_partial_removal(
+            "rewrite the summary without the last line"
+        ));
         // Non-removal requests → false.
         assert!(!wants_partial_removal("make the title a heading"));
         assert!(!wants_partial_removal("what does this note say"));
@@ -1983,13 +2482,17 @@ mod tests {
     #[test]
     fn gating_off_protects_write_note_but_keeps_search() {
         let has = |v: &[Value], name: &str| {
-            v.iter().any(|t| t["function"]["name"].as_str() == Some(name))
+            v.iter()
+                .any(|t| t["function"]["name"].as_str() == Some(name))
         };
         // gating OFF (default), deterministic ON.
         // A capability question must NOT get write_note (the "what can you do →
         // wrote the title" misfire), but read/search stay available.
         let q = select_tools_cfg("what can you do", true, false, false, true);
-        assert!(!has(&q, "write_note"), "a question must not offer write_note");
+        assert!(
+            !has(&q, "write_note"),
+            "a question must not offer write_note"
+        );
         assert!(has(&q, "web_search"), "read/search stay on with gating off");
         // An explicit edit request still gets write_note.
         let e = select_tools_cfg("rewrite the introduction", true, false, false, true);
@@ -1998,7 +2501,13 @@ mod tests {
         let f = select_tools_cfg("no, shorter", true, true, false, true);
         assert!(has(&f, "write_note"));
         // Web search is never withheld (the thing brittle gating used to break).
-        let s = select_tools_cfg("search the web for the latest rust release", true, false, false, true);
+        let s = select_tools_cfg(
+            "search the web for the latest rust release",
+            true,
+            false,
+            false,
+            true,
+        );
         assert!(has(&s, "web_search"));
         assert!(!has(&s, "write_note"));
     }
@@ -2030,7 +2539,8 @@ mod tests {
         let (s, e) = locate_selection(body, &sel).unwrap();
         assert_eq!(&body[s..e], "Food is essential and good.");
         // Splicing keeps the surrounding ** and the rest of the note.
-        let plan = selection_scoped_plan(body, "Food is vital, nutritious, and cultural.", &sel).unwrap();
+        let plan =
+            selection_scoped_plan(body, "Food is vital, nutritious, and cultural.", &sel).unwrap();
         assert_eq!(
             plan.new_body,
             "# Food\n\n## Intro\n\n**Food is vital, nutritious, and cultural.**\n\n## More\n\n- a"
@@ -2047,7 +2557,10 @@ mod tests {
         };
         let plan = selection_scoped_plan(body, "New paragraph.", &sel).unwrap();
         assert_eq!(plan.op, WriteOp::EditSnippet);
-        assert_eq!(plan.new_body, "Intro line.\n\nNew paragraph.\n\nClosing line.");
+        assert_eq!(
+            plan.new_body,
+            "Intro line.\n\nNew paragraph.\n\nClosing line."
+        );
     }
 
     #[test]
@@ -2084,12 +2597,18 @@ mod tests {
         // Models emit dash/spacing variants — all must be stripped.
         assert_eq!(strip_prompt_markers("hi\n--- END CURRENT NOTE --"), "hi");
         assert_eq!(strip_prompt_markers("---CURRENT NOTE---\nbody"), "body");
-        assert_eq!(strip_prompt_markers("body\n-- end current note ---"), "body");
+        assert_eq!(
+            strip_prompt_markers("body\n-- end current note ---"),
+            "body"
+        );
         assert_eq!(strip_prompt_markers("clean note"), "clean note");
         // Bled "--- Title" delimiter (dashes + text on one line) is stripped...
         assert_eq!(strip_prompt_markers("--- Example Domain"), "Example Domain");
         // ...but a real horizontal rule (dashes alone on a line) is preserved.
-        assert_eq!(strip_prompt_markers("# Title\n\n---\nmore"), "# Title\n\n---\nmore");
+        assert_eq!(
+            strip_prompt_markers("# Title\n\n---\nmore"),
+            "# Title\n\n---\nmore"
+        );
     }
 
     #[test]
@@ -2104,7 +2623,10 @@ mod tests {
     fn find_replaces_only_the_snippet() {
         let plan = plan_write(NOTE, "slow", "edit", "fast").unwrap();
         assert_eq!(plan.op, WriteOp::EditSnippet);
-        assert_eq!(plan.new_body, "Cars are slow. They have engines. People drive them daily.");
+        assert_eq!(
+            plan.new_body,
+            "Cars are slow. They have engines. People drive them daily."
+        );
     }
 
     // Regression: the live harness caught the model sending mode:"replace" with
@@ -2112,8 +2634,13 @@ mod tests {
     // replace must use the full content and IGNORE find (not splice it in).
     #[test]
     fn explicit_replace_ignores_stray_find() {
-        let plan = plan_write("The sky is blue today.", "The sky is green today.", "replace", "blue")
-            .unwrap();
+        let plan = plan_write(
+            "The sky is blue today.",
+            "The sky is green today.",
+            "replace",
+            "blue",
+        )
+        .unwrap();
         assert_eq!(plan.op, WriteOp::Replace);
         assert_eq!(plan.new_body, "The sky is green today.");
     }
@@ -2132,8 +2659,13 @@ mod tests {
     // the absorbed surrounding text and treat it as a replace.
     #[test]
     fn find_with_full_sentence_content_replaces() {
-        let plan =
-            plan_write("The sky is blue today.", "The sky is green today.", "edit", "blue").unwrap();
+        let plan = plan_write(
+            "The sky is blue today.",
+            "The sky is green today.",
+            "edit",
+            "blue",
+        )
+        .unwrap();
         assert_eq!(plan.op, WriteOp::Replace);
         assert_eq!(plan.new_body, "The sky is green today.");
     }
@@ -2151,7 +2683,10 @@ mod tests {
         assert!(select_tools("what is the capital of france?", true, false).is_empty());
         // other-notes intent → search + read
         let s = select_tools("search my other notes for cats", true, false);
-        let names: Vec<&str> = s.iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = s
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
         assert!(names.contains(&"search_notes"));
         assert!(names.contains(&"read_note"));
         // url → fetch
@@ -2170,7 +2705,10 @@ mod tests {
         // Small talk stays tool-free even in an edit thread.
         assert!(select_tools("thanks!", true, true).is_empty());
         // in_edit_thread fires when a recent user turn asked to write/edit.
-        assert!(in_edit_thread(&["write a note about cats", "no thats wrong"]));
+        assert!(in_edit_thread(&[
+            "write a note about cats",
+            "no thats wrong"
+        ]));
         assert!(!in_edit_thread(&["what is rust?", "who are you?"]));
     }
 
@@ -2179,7 +2717,7 @@ mod tests {
         assert!(is_small_talk("hi"));
         assert!(is_small_talk("thanks so much"));
         assert!(!is_small_talk("write a note about cats"));
-        assert!(!is_small_talk("what is the capital of france and why")); // > 4 words
+        assert!(!is_small_talk("what is the capital of france and why")); // > 6 words
     }
 
     #[test]
@@ -2232,10 +2770,68 @@ mod tests {
 
     #[test]
     fn normalize_url_adds_scheme_and_rejects_junk() {
-        assert_eq!(normalize_web_url("example.com").unwrap(), "https://example.com");
+        assert_eq!(
+            normalize_web_url("example.com").unwrap(),
+            "https://example.com"
+        );
         assert_eq!(normalize_web_url("http://x.io").unwrap(), "http://x.io");
         assert!(normalize_web_url("   ").is_err());
         assert!(normalize_web_url("has space.com").is_err());
+    }
+
+    #[test]
+    fn negation_prevents_false_positive_intents() {
+        // "don't search notes" must NOT trigger wants_other_notes.
+        assert!(!wants_other_notes("don't search notes for cats"));
+        assert!(!wants_other_notes("i don't want to search my notes"));
+        // "don't clear the note" must NOT trigger wants_clear.
+        assert!(!wants_clear("don't clear the note"));
+        assert!(!wants_clear("don't delete everything"));
+        // "don't write a note" must NOT trigger note_write_intent.
+        assert!(!note_write_intent("don't write a note about cats"));
+        // "don't remove the headings" must NOT trigger detect_format_op.
+        assert_eq!(detect_format_op("don't remove the headings"), None);
+        // "don't remove the second item" must NOT trigger wants_partial_removal.
+        assert!(!wants_partial_removal("don't remove the second item"));
+        // "don't search the web" must NOT trigger wants_search.
+        assert!(!wants_search("don't search the web for rust"));
+        // "don't fetch the page" must NOT trigger wants_fetch.
+        assert!(!wants_fetch("don't fetch https://example.com"));
+        // "don't find the word" must NOT trigger wants_find.
+        assert!(!wants_find("don't find the word cat in the note"));
+        // "don't read the document" must NOT trigger wants_documents.
+        assert!(!wants_documents("don't read the document about physics"));
+    }
+
+    #[test]
+    fn non_negated_intents_still_match() {
+        // Positive requests must still trigger their respective functions.
+        assert!(wants_other_notes("search my notes for cats"));
+        assert!(wants_clear("clear the note"));
+        assert!(note_write_intent("write a note about cats"));
+        assert_eq!(
+            detect_format_op("remove all the headings"),
+            Some("remove_headings")
+        );
+        assert!(wants_partial_removal("remove the second item"));
+        assert!(wants_search("search the web for rust"));
+        assert!(wants_fetch("fetch https://example.com"));
+        assert!(wants_find("find the word cat in the note"));
+        assert!(wants_documents("read the document about physics"));
+    }
+
+    #[test]
+    fn small_talk_detects_longer_greetings() {
+        // These previously failed the ≤4 word cap or missing-word check.
+        assert!(is_small_talk("thanks for the help"));
+        assert!(is_small_talk("how are you doing today"));
+        assert!(is_small_talk("thanks so much"));
+        assert!(is_small_talk("hey there"));
+        // Real requests are still NOT small talk.
+        assert!(!is_small_talk("write a note about cats"));
+        assert!(!is_small_talk("what is the capital of france and why"));
+        // Genuine questions with content words are not small talk even if short.
+        assert!(!is_small_talk("how do i use this"));
     }
 
     #[test]
@@ -2268,7 +2864,9 @@ mod tests {
     fn write_intent_soft_verb_needs_note_target() {
         // "explain X" alone is a chat answer; "explain X in the note" is a write.
         assert!(!note_write_intent("explain what you are"));
-        assert!(note_write_intent("explain what you are in the note with an h1"));
+        assert!(note_write_intent(
+            "explain what you are in the note with an h1"
+        ));
         assert!(note_write_intent("summarise this into the note"));
     }
 

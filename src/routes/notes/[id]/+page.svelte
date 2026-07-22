@@ -2169,7 +2169,8 @@
 	}
 
 	onMount(() => {
-		// Warm llama-server for as long as a note is open (stopped in onDestroy).
+		// Warm llama-server (safety net — the server is already started at app
+		// boot and stays warm for the entire session).
 		noteOpened();
 
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
@@ -2422,7 +2423,8 @@
 	});
 
 	onDestroy(() => {
-		// Note view closing — stop llama-server (after a short grace) to free RAM/VRAM.
+		// Note view closing — server stays warm (started at app boot, lives until
+		// app exit). Only the note-editor UI is torn down.
 		noteClosed();
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();

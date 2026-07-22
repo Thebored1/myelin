@@ -3,7 +3,7 @@
 //! they make a *small* local model drive tools reliably. Pure functions only —
 //! no I/O — so they are reused unchanged inside the async sidecar loop.
 //!
-//!   - `cap_result`             cap a single tool result so it can't blow context
+//!   - `cap_result_with`        cap a single tool result so it can't blow context
 //!   - `fit_context`            trim history to a char budget, keep system + whole turns
 //!   - `parse_text_tool_calls`  recover a tool call the server left as plain text
 //!   - `flatten_for_prompt_tools` render history for a server with no tool API
@@ -16,16 +16,12 @@ use serde_json::{json, Value};
 /// A single tool result can be huge; cap it so one result can't blow the context.
 pub const TOOL_RESULT_CAP: usize = 4_000;
 
-pub fn cap_result(s: String) -> String {
-    cap_result_with(s, TOOL_RESULT_CAP)
-}
-
-/// `cap_result` with an explicit cap — `slm` mode uses a much smaller cap so
-/// weak models don't drown in observation text.
 pub fn cap_result_with(mut s: String, cap: usize) -> String {
     if s.chars().count() > cap {
         s = s.chars().take(cap).collect();
-        s.push_str("\n…[result truncated — narrow your search (a more specific query) if you need more]");
+        s.push_str(
+            "\n…[result truncated — narrow your search (a more specific query) if you need more]",
+        );
     }
     s
 }
@@ -52,7 +48,10 @@ pub fn strip_think(s: &str) -> String {
         Some(i) => &s[i + "</think>".len()..],
         None => s,
     };
-    tail.replace("<think>", "").replace("</think>", "").trim().to_string()
+    tail.replace("<think>", "")
+        .replace("</think>", "")
+        .trim()
+        .to_string()
 }
 
 /// The first required parameter of a tool (used to map a positional text call
@@ -315,7 +314,12 @@ pub fn tool_grammar(schemas: &Value) -> String {
             let props = t["function"]["parameters"]["properties"].as_object();
             let required: Vec<String> = t["function"]["parameters"]["required"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .collect()
+                })
                 .unwrap_or_default();
             let mut key_rules: Vec<String> = Vec::new();
             if let Some(props) = props {
@@ -365,78 +369,6 @@ pub fn tool_grammar(schemas: &Value) -> String {
 /// Like `tool_grammar`, but with NO `text` branch — the model MUST emit a tool
 /// call. Used when the host has decided the user wants a tool (e.g. a clear
 /// note-write intent) and a weak model would otherwise answer in prose.
-pub fn tool_grammar_call_only(schemas: &Value) -> String {
-    let mut g = String::new();
-    g.push_str("root ::= call\n");
-    let lit = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-    g.push_str(&format!(
-        "call ::= {} ws {} ws obj ( {} ws obj )* {}\n",
-        lit("<tool_call>"),
-        lit("["),
-        lit(","),
-        lit("]")
-    ));
-    let rn = |s: &str| s.replace('_', "-");
-    let mut obj_alts: Vec<String> = Vec::new();
-    let mut rules = String::new();
-    if let Some(arr) = schemas.as_array() {
-        for t in arr {
-            let name = match t["function"]["name"].as_str() {
-                Some(n) => n,
-                None => continue,
-            };
-            let rname = rn(name);
-            obj_alts.push(format!("t-{rname}"));
-            let props = t["function"]["parameters"]["properties"].as_object();
-            let required: Vec<String> = t["function"]["parameters"]["required"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
-                .unwrap_or_default();
-            let mut key_rules: Vec<String> = Vec::new();
-            if let Some(props) = props {
-                for (k, spec) in props {
-                    let vr = value_rule_for(spec);
-                    let optional = !required.contains(k);
-                    let kv = format!(
-                        "{qkey} ws {colon} ws {vr}",
-                        qkey = lit(&format!("\"{k}\"")),
-                        colon = lit(":"),
-                    );
-                    if optional {
-                        key_rules.push(format!("( {kv} )?"));
-                    } else {
-                        key_rules.push(format!("( {kv} )"));
-                    }
-                }
-            }
-            let comma = lit(",");
-            let inner = key_rules.join(&format!(" ws {comma} ws "));
-            let open = lit("{");
-            let close = lit("}");
-            rules.push_str(&format!("a-{rname} ::= {open} ws {inner} ws {close}\n"));
-            let name_lit = lit(&format!("\"{name}\""));
-            rules.push_str(&format!(
-                "t-{rname} ::= {open} ws {qname} ws {colon} ws {name_lit} ws {comma} ws {qargs} ws {colon} ws a-{rname} ws {close}\n",
-                open = lit("{"),
-                qname = lit("\"name\""),
-                colon = lit(":"),
-                comma = lit(","),
-                qargs = lit("\"arguments\""),
-                close = lit("}"),
-            ));
-        }
-    }
-    let obj = if obj_alts.is_empty() {
-        "value".to_string()
-    } else {
-        obj_alts.join(" | ")
-    };
-    g.push_str(&format!("obj ::= {obj}\n"));
-    g.push_str(&rules);
-    g.push_str(GRAMMAR_TAIL);
-    g
-}
-
 // ---- live note streaming (ported from Myelin stream_chat.rs) ---------------
 
 /// Extract a complete simple string value for `key` from a partial JSON object
@@ -528,7 +460,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["function"]["name"], "web_search");
         let args = calls[0]["function"]["arguments"].as_str().unwrap();
-        assert_eq!(serde_json::from_str::<Value>(args).unwrap()["query"], "rust release");
+        assert_eq!(
+            serde_json::from_str::<Value>(args).unwrap()["query"],
+            "rust release"
+        );
     }
 
     #[test]
@@ -543,7 +478,10 @@ mod tests {
     fn positional_maps_to_first_required() {
         let calls = parse_text_tool_calls("web_search(latest rust)", &schemas()).expect("parse");
         let args = calls[0]["function"]["arguments"].as_str().unwrap();
-        assert_eq!(serde_json::from_str::<Value>(args).unwrap()["query"], "latest rust");
+        assert_eq!(
+            serde_json::from_str::<Value>(args).unwrap()["query"],
+            "latest rust"
+        );
     }
 
     #[test]
@@ -556,8 +494,14 @@ mod tests {
 
     #[test]
     fn extract_partial_content_mid_string() {
-        assert_eq!(extract_partial_content(r#"{"content":"hello wo"#).as_deref(), Some("hello wo"));
-        assert_eq!(extract_partial_content(r#"{"mode":"replace","content":"hi"}"#).as_deref(), Some("hi"));
+        assert_eq!(
+            extract_partial_content(r#"{"content":"hello wo"#).as_deref(),
+            Some("hello wo")
+        );
+        assert_eq!(
+            extract_partial_content(r#"{"mode":"replace","content":"hi"}"#).as_deref(),
+            Some("hi")
+        );
         assert_eq!(extract_partial_content(r#"{"mode":"replace""#), None);
     }
 

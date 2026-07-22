@@ -55,33 +55,23 @@ pub struct Options {
     /// tool-result caps so weak models don't drown in observation text.
     #[serde(default)]
     pub slm: bool,
-    /// Force a specific tool call (e.g. "write_note") instead of letting the
-    /// model choose. In native mode this sets `tool_choice` to that function;
-    /// in prompt-tools/strict mode the grammar drops the `text` branch so the
-    /// model MUST emit a call. Used when the host has already decided the user
-    /// wants a tool (e.g. a clear note-write intent) and a weak model would
-    /// otherwise answer in chat.
+    /// Force `tool_choice` in native FC mode: "auto" (default), "required"
+    /// (llama.cpp grammar-forces a call in the model's OWN native format),
+    /// "none", or a specific tool name. Works only when NOT using prompt_tools
+    /// (native tool-calling must be active). From openharn DSGoal research:
+    /// tool_choice=required + enable_thinking:false recovers ~71% of quant
+    /// degradation (MiniCPM-V Q4_0: 47.5% -> 72.5%).
     #[serde(default)]
-    pub force_tool: Option<String>,
-    /// Force the call-only grammar (no `text` branch) so a weak model cannot
-    /// answer in prose instead of calling a tool. Implies `strict` + `prompt_tools`.
-    /// Set automatically by the host when the model profile declares
-    /// `prefersPromptTools` (e.g. LFM2 at low quants, which otherwise emits the
-    /// note content as chat text).
+    pub tool_choice: Option<String>,
+    /// Raw JSON forwarded as `chat_template_kwargs` into the model's chat
+    /// template (a llama.cpp passthrough). The canonical use is
+    /// `{"enable_thinking":false}` — templates that support the switch render
+    /// a CLOSED think block so generation starts at the answer/call; templates
+    /// that don't simply ignore it. Pairs with tool_choice=required: a thinking
+    /// model otherwise burns its budget reasoning under the forced call grammar
+    /// and returns nothing.
     #[serde(default)]
-    pub call_only: bool,
-    /// Openharn FRIENDLY_RESULTS: classify the user's latest turn as `CHAT` or
-    /// `TOOL` before the tool loop. A `CHAT` turn skips tools and answers in
-    /// prose (so greetings don't become tool calls); a `TOOL` turn enters the
-    /// loop and is forced to call (via `call_only`) when the model is weak.
-    /// Requires `prompt_tools`. Set by the host for `prefersPromptTools` models.
-    #[serde(default)]
-    pub friendly_results: bool,
-    /// Deterministic TOOL/CHAT result supplied by the host. When present, this
-    /// avoids an extra model inference for intent classification. None keeps the
-    /// legacy model-based fallback for standalone sidecar callers.
-    #[serde(default)]
-    pub intent_is_tool: Option<bool>,
+    pub template_kwargs: Option<String>,
 }
 
 fn default_max_calls() -> usize {
@@ -117,10 +107,8 @@ impl Default for Options {
             narrow: false,
             tool_subset: Vec::new(),
             slm: false,
-            force_tool: None,
-            call_only: false,
-            friendly_results: false,
-            intent_is_tool: None,
+            tool_choice: None,
+            template_kwargs: None,
         }
     }
 }
@@ -175,84 +163,6 @@ pub enum Out {
         completion_tokens: u32,
         total_tokens: u32,
     },
-}
-
-/// True if `schemas` (OpenAI tool list) contains a tool named `name`.
-fn schema_has_tool(schemas: &Value, name: &str) -> bool {
-    schemas
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .any(|t| t["function"]["name"].as_str() == Some(name))
-        })
-        .unwrap_or(false)
-}
-
-/// Classify the user's request as `TOOL` vs `CHAT` (openharn FRIENDLY_RESULTS).
-/// One tiny non-streaming call; returns true when the intent is `TOOL`. On any
-/// error or ambiguous reply we treat the turn as `CHAT` (never force a tool call
-/// on a turn we couldn't classify), matching upstream's safe default.
-async fn run_intent_detection(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: Option<&str>,
-    model: &str,
-    user: &str,
-) -> bool {
-    let prompt = format!(
-        "This app is a note-taking assistant. The assistant's whole job is to work with the user's NOTES and DOCUMENTS.\n\
-         Classify the user's request. Reply with exactly one word: TOOL or CHAT.\n\
-         CHAT = pure conversation only: greetings, thanks, small talk, questions ABOUT how the app works, or requests for explanation.\n\
-         TOOL = ANY request that creates, writes, edits, formats, finds, searches, reads, or fetches note/document content — INCLUDING creative writing (poems, stories, lists) because those are written into a note.\n\n\
-         Examples:\n\
-         User: hello\nClassification: CHAT\n\
-         User: thanks!\nClassification: CHAT\n\
-         User: how do I use this app?\nClassification: CHAT\n\
-         User: write a poem\nClassification: TOOL\n\
-         User: write a short poem about the moon\nClassification: TOOL\n\
-         User: write a story about a cat\nClassification: TOOL\n\
-         User: summarize my note\nClassification: TOOL\n\
-         User: what is in note 13?\nClassification: TOOL\n\
-         User: search for TODO\nClassification: TOOL\n\
-         User: fetch https://example.com\nClassification: TOOL\n\n\
-         User: {user}\n\n\
-         Classification:"
-    );
-    let body = json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0,
-        "max_tokens": 10,
-        "stream": false,
-    });
-    let mut req = client.post(url).json(&body);
-    if let Some(k) = api_key {
-        if !k.is_empty() {
-            req = req.bearer_auth(k);
-        }
-    }
-    let text = match req.send().await {
-        Ok(r) => match r.json::<Value>().await {
-            Ok(v) => v["choices"]
-                .get(0)
-                .and_then(|c| c["message"]["content"].as_str())
-                .map(|s| s.to_uppercase())
-                .unwrap_or_default(),
-            Err(_) => String::new(),
-        },
-        Err(_) => String::new(),
-    };
-    // Default to TOOL on any ambiguity or failure: losing a genuine note-write is
-    // worse than a greeting occasionally triggering a call. Only an explicit CHAT
-    // (and not TOOL) is treated as conversation.
-    let is_tool = if text.contains("TOOL") {
-        true
-    } else if text.contains("CHAT") {
-        false
-    } else {
-        true
-    };
-    is_tool
 }
 
 /// Drive one user request to completion, streaming events on `tx` and requesting
@@ -322,84 +232,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let mut no_tools = !has_tools;
     let mut last_tool: Option<String> = None;
 
-    // FRIENDLY_RESULTS: classify the latest user turn as CHAT or TOOL before the
-    // tool loop. A CHAT turn skips tools and answers in prose (greetings don't
-    // become tool calls); a TOOL turn enters the loop and, for weak models, is
-    // forced to call via the call-only grammar. Requires prompt_tools.
-    let friendly = opts.friendly_results && prompt_tools;
-    let intent_is_tool = if friendly {
-        if let Some(classified) = opts.intent_is_tool {
-            classified
-        } else {
-            // Compatibility fallback for standalone sidecar clients that do not
-            // provide the host's deterministic classification yet.
-            let user_text = history
-                .iter()
-                .rev()
-                .find(|m| m["role"].as_str() == Some("user"))
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or("")
-                .to_string();
-            run_intent_detection(&client, &url, req.api_key.as_deref(), &model, &user_text).await
-        }
-    } else {
-        true
-    };
-
-    // CHAT intent: skip the tool loop, answer directly in prose.
-    if friendly && !intent_is_tool {
-        let mut wire = history.clone();
-        let mut body = json!({
-            "model": model,
-            "messages": wire,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-            "cache_prompt": true,
-        });
-        if no_think {
-            if let Some(arr) = body["messages"].as_array_mut() {
-                arr.push(json!({ "role": "assistant", "content": "<think></think>" }));
-            }
-        }
-        let resp = match client.post(&url).json(&body).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx
-                    .send(Out::Error(format!("chat request failed: {e}")))
-                    .await;
-                return;
-            }
-        };
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let txt = resp.text().await.unwrap_or_default();
-            let _ = tx
-                .send(Out::Error(format!("upstream HTTP {status}: {txt}")))
-                .await;
-            return;
-        }
-        let (content, _calls) = match stream_upstream(resp, &tx, no_think).await {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = tx.send(Out::Error(e)).await;
-                return;
-            }
-        };
-        // Note: we deliberately do NOT run parse_text_tool_calls here, so a CHAT
-        // turn can never be recovered into a tool call.
-        let mut h = history.clone();
-        h.push(json!({ "role": "assistant", "content": content }));
-        let _ = tx
-            .send(Out::Done {
-                messages: h,
-                last_tool: None,
-            })
-            .await;
-        return;
-    }
-
     for _turn in 0..max_turns {
         harness::fit_context(&mut history, budget);
 
@@ -424,28 +256,38 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             // no tools available — text only
         } else if prompt_tools {
             if strict {
-                // Force the call-only grammar (no `text` branch) only when a tool is
-                // explicitly requested OR the turn was classified as TOOL. This keeps
-                // greetings/chat as prose while still forcing weak models to call on
-                // genuine tool turns.
-                let force_call = opts.force_tool.is_some() || (opts.call_only && intent_is_tool);
-                let grammar = if force_call {
-                    harness::tool_grammar_call_only(&effective_schemas)
-                } else {
-                    harness::tool_grammar(&effective_schemas)
-                };
-                body["grammar"] = json!(grammar);
+                body["grammar"] = json!(harness::tool_grammar(&effective_schemas));
             }
         } else {
             body["tools"] = effective_schemas.clone();
-            match &opts.force_tool {
-                Some(name) if schema_has_tool(&effective_schemas, name) => {
-                    body["tool_choice"] =
-                        json!({ "type": "function", "function": { "name": name } });
+            // OPENHARN_TOOL_CHOICE: force tool_choice=required to grammar-force
+            // a well-formed call in the model's OWN native format (llama.cpp
+            // derives the grammar from the model's chat template). This is the
+            // strict-grammar idea without the format transplant: the model keeps
+            // its native (multi-call-capable) call syntax but physically cannot
+            // emit a malformed one. Rescues quant-degraded native FC.
+            let choice: Value = match &opts.tool_choice {
+                Some(c) if c == "required" || c == "none" || c == "auto" => {
+                    json!(c)
                 }
-                _ => {
-                    body["tool_choice"] = json!("auto");
+                Some(name) => {
+                    // Specific tool name: {'type':'function','function':{'name':tool}}
+                    json!({
+                        "type": "function",
+                        "function": { "name": name }
+                    })
                 }
+                None => json!("auto"),
+            };
+            body["tool_choice"] = choice;
+        }
+        // OPENHARN_TEMPLATE_KWARGS: apply to ALL requests (tool and chat paths)
+        // so thinking models skip the think phase when told to. The canonical use
+        // is `{"enable_thinking":false}` — templates that support the switch
+        // render a CLOSED think block; templates that don't simply ignore it.
+        if let Some(kw) = &opts.template_kwargs {
+            if let Ok(v) = serde_json::from_str::<Value>(kw) {
+                body["chat_template_kwargs"] = v;
             }
         }
 

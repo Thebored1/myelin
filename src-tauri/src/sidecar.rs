@@ -252,41 +252,13 @@ pub async fn run_chat(
     // force that mode regardless of user settings — native tool-calling doesn't work.
     let force_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
-    // Deterministic TOOL/CHAT classification: only clear small talk
-    // (greetings, thanks, short acknowledgments) is CHAT — everything else
-    // gets the full toolset. This replaces the model-based intent detection
-    // that LFM2 previously ran, matching its "default to TOOL on ambiguity"
-    // fallback while avoiding an extra inference pass.
-    let intent_is_tool = if force_prompt_tools {
-        let user_text = messages
-            .iter()
-            .rev()
-            .find(|m| m["role"].as_str() == Some("user"))
-            .and_then(|m| m["content"].as_str())
-            .unwrap_or("");
-        Some(!crate::agent::is_small_talk(user_text))
-    } else {
-        None
-    };
-
     let mut options = json!({
         "strict": force_prompt_tools || oh.strict,
         "prompt_tools": force_prompt_tools || oh.prompt_tools,
-        // Force the call-only grammar for models that evade tool calls by
-        // answering in prose (LFM2 at low quants). Without this, the model
-        // chat-replies the note content instead of calling write_note.
-        "call_only": force_prompt_tools,
-        // FRIENDLY_RESULTS: classify each turn as CHAT/TOOL so greetings answer in
-        // prose instead of being forced into a tool call. call_only is then applied
-        // only on TOOL-classified turns.
-        "friendly_results": force_prompt_tools,
         "no_think": oh.no_think,
         "narrow": oh.narrow,
         "slm": oh.slm,
     });
-    if let Some(intent) = intent_is_tool {
-        options["intent_is_tool"] = json!(intent);
-    }
     if let Some(mc) = oh.max_calls {
         options["max_calls"] = json!(mc);
     }
@@ -305,6 +277,27 @@ pub async fn run_chat(
         if !tools.is_empty() {
             options["tool_subset"] = json!(tools);
         }
+    }
+    // Model-profile defaults (from bundled model-profiles.json), overridable
+    // by the user's explicit OpenharnSettings. The config provides per-model
+    // baked-in values; the user's oh.* settings win when non-empty.
+    let tool_choice = oh
+        .tool_choice
+        .as_ref()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| config.tool_choice.as_ref())
+        .map(|v| v.trim().to_string());
+    if let Some(tc) = tool_choice {
+        options["tool_choice"] = json!(tc);
+    }
+    let template_kwargs = oh
+        .template_kwargs
+        .as_ref()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| config.template_kwargs.as_ref())
+        .map(|v| v.trim().to_string());
+    if let Some(kw) = template_kwargs {
+        options["template_kwargs"] = json!(kw);
     }
 
     let body = json!({
