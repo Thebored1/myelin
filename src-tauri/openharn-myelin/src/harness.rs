@@ -7,7 +7,7 @@
 //!   - `fit_context`            trim history to a char budget, keep system + whole turns
 //!   - `parse_text_tool_calls`  recover a tool call the server left as plain text
 //!   - `flatten_for_prompt_tools` render history for a server with no tool API
-//!   - `tool_grammar`           GBNF that forces a schema-valid call or plain text
+//!   - `tool_grammar`           GBNF that forces a schema-valid call (or text)
 //!   - `strip_think`            drop leaked <think>…</think> in reasoning-off mode
 //!   - `extract_partial_content` / `partial_field` — stream write_note's body live
 
@@ -287,11 +287,15 @@ fn value_rule_for(spec: &Value) -> String {
 /// call `<tool_call>[{"name": <known tool>, "arguments": {<known keys, typed>}}]`
 /// OR plain text. A weak model then physically cannot invent a field name,
 /// misname a tool, or malform a call.
-pub fn tool_grammar(schemas: &Value) -> String {
+///
+/// `root` controls what the model is allowed to emit:
+///   "call | text" — tool call or plain prose (default, safest)
+///   "call" — tool call ONLY (used when host has determined tools are needed)
+pub fn tool_grammar(schemas: &Value, root: &str) -> String {
     let lit = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
     let rn = |s: &str| s.replace('_', "-");
     let mut g = String::new();
-    g.push_str("root ::= call | text\n");
+    g.push_str(&format!("root ::= {root}\n"));
     g.push_str("text ::= [^<] | [^<] text\n");
     g.push_str(&format!(
         "call ::= {} ws {} ws obj ( {} ws obj )* {}\n",
@@ -366,9 +370,6 @@ pub fn tool_grammar(schemas: &Value) -> String {
     g
 }
 
-/// Like `tool_grammar`, but with NO `text` branch — the model MUST emit a tool
-/// call. Used when the host has decided the user wants a tool (e.g. a clear
-/// note-write intent) and a weak model would otherwise answer in prose.
 // ---- live note streaming (ported from Myelin stream_chat.rs) ---------------
 
 /// Extract a complete simple string value for `key` from a partial JSON object
@@ -486,7 +487,7 @@ mod tests {
 
     #[test]
     fn grammar_names_tools_and_has_text_escape() {
-        let g = tool_grammar(&schemas());
+        let g = tool_grammar(&schemas(), "call | text");
         assert!(g.contains("root ::= call | text"));
         assert!(g.contains(r#""\"write_note\"""#));
         assert!(g.contains(r#""\"content\"""#));

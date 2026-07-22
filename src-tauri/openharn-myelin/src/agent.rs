@@ -72,6 +72,24 @@ pub struct Options {
     /// and returns nothing.
     #[serde(default)]
     pub template_kwargs: Option<String>,
+    /// Model-based TOOL/CHAT classification: the sidecar asks the model to
+    /// classify the user's latest turn as "TOOL" or "CHAT" (1 word). A CHAT
+    /// turn (greetings, questions) skips tools and answers directly; a TOOL
+    /// turn enters the tool loop. After tool execution on a TOOL turn, the
+    /// model generates a friendly summary of what was done.
+    /// Requires `prompt_tools`. Set automatically by the host for
+    /// `prefersPromptTools` models.
+    #[serde(default)]
+    pub friendly_results: bool,
+    /// When `friendly_results` classifies a turn as TOOL, force the call-only
+    /// grammar (no `text` branch) so a weak model cannot answer in prose
+    /// instead of calling a tool.
+    #[serde(default)]
+    pub call_only: bool,
+    /// Pre-computed TOOL/CHAT result supplied by the host. When absent, the
+    /// sidecar runs model-based intent detection.
+    #[serde(default)]
+    pub intent_is_tool: Option<bool>,
 }
 
 fn default_max_calls() -> usize {
@@ -109,6 +127,9 @@ impl Default for Options {
             slm: false,
             tool_choice: None,
             template_kwargs: None,
+            friendly_results: false,
+            call_only: false,
+            intent_is_tool: None,
         }
     }
 }
@@ -165,6 +186,56 @@ pub enum Out {
     },
 }
 
+/// Classify the user's latest message as `TOOL` or `CHAT` using the model
+/// (1 word, cheap and fast). Returns `true` when the intent is `TOOL`.
+/// On any error or empty reply we default to `TOOL` (safer: losing a genuine
+/// tool request is worse than a greeting occasionally entering the tool loop).
+async fn detect_intent(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    model: &str,
+    user: &str,
+) -> bool {
+    let prompt = format!(
+        "You are a note-taking assistant. Classify the user's request with exactly one word: TOOL or CHAT.\n\
+         CHAT = greeting, thanks, small talk.\n\
+         TOOL = anything involving writing, editing, searching, reading, formatting, or fetching notes or documents.\n\n\
+         User: {user}\n\n\
+         Classification:"
+    );
+    let body = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 4,
+        "stream": false,
+    });
+    let mut req = client.post(url).json(&body);
+    if let Some(k) = api_key {
+        if !k.is_empty() {
+            req = req.bearer_auth(k);
+        }
+    }
+    let text = match req.send().await {
+        Ok(r) => match r.json::<Value>().await {
+            Ok(v) => v["choices"]
+                .get(0)
+                .and_then(|c| c["message"]["content"].as_str())
+                .map(|s| s.trim().to_uppercase())
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        },
+        Err(_) => String::new(),
+    };
+    // Default to TOOL on ambiguity: losing a genuine note-write is worse than
+    // a greeting occasionally calling a tool.
+    text.contains("TOOL")
+}
+
+/// After tool execution, generate a friendly natural-language response
+/// summarizing what was done. Streams it as chat chunks and pushes the
+/// assistant reply into history.
 /// Drive one user request to completion, streaming events on `tx` and requesting
 /// tool execution from Myelin via the `pending` registry.
 pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending) {
@@ -229,8 +300,88 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let mut budget = HISTORY_BUDGET;
     let mut repeats = 0usize;
     let mut total_calls = 0usize;
+    let mut tool_called_this_turn = false;
     let mut no_tools = !has_tools;
     let mut last_tool: Option<String> = None;
+
+    // Model-based TOOL/CHAT classification (friendly_results mode).
+    // Classify the latest user turn before entering the tool loop.
+    // CHAT = skip tools, answer directly.
+    // TOOL = run tool loop, then generate a friendly summary of results.
+    let friendly = opts.friendly_results && prompt_tools;
+    let intent_is_tool = if friendly {
+        if let Some(classified) = opts.intent_is_tool {
+            classified
+        } else {
+            let user_text = history
+                .iter()
+                .rev()
+                .find(|m| m["role"].as_str() == Some("user"))
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .to_string();
+            detect_intent(&client, &url, req.api_key.as_deref(), &model, &user_text).await
+        }
+    } else {
+        true
+    };
+
+    // CHAT intent: skip the tool loop, answer directly in prose.
+    if friendly && !intent_is_tool {
+        let wire = history.clone();
+        let mut body = json!({
+            "model": model,
+            "messages": wire,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "cache_prompt": true,
+        });
+        if no_think {
+            if let Some(arr) = body["messages"].as_array_mut() {
+                arr.push(json!({ "role": "assistant", "content": "<think></think>" }));
+            }
+        }
+        if let Some(kw) = &opts.template_kwargs {
+            if let Ok(v) = serde_json::from_str::<Value>(kw) {
+                body["chat_template_kwargs"] = v;
+            }
+        }
+        let resp = match client.post(&url).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx
+                    .send(Out::Error(format!("chat request failed: {e}")))
+                    .await;
+                return;
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let txt = resp.text().await.unwrap_or_default();
+            let _ = tx
+                .send(Out::Error(format!("upstream HTTP {status}: {txt}")))
+                .await;
+            return;
+        }
+        let (content, _) = match stream_upstream(resp, &tx, no_think).await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.send(Out::Error(e)).await;
+                return;
+            }
+        };
+        let mut h = history.clone();
+        h.push(json!({ "role": "assistant", "content": content }));
+        let _ = tx
+            .send(Out::Done {
+                messages: h,
+                last_tool: None,
+            })
+            .await;
+        return;
+    }
 
     for _turn in 0..max_turns {
         harness::fit_context(&mut history, budget);
@@ -256,7 +407,13 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             // no tools available — text only
         } else if prompt_tools {
             if strict {
-                body["grammar"] = json!(harness::tool_grammar(&effective_schemas));
+                let grammar_root =
+                    if opts.call_only && friendly && intent_is_tool && !tool_called_this_turn {
+                        "call"
+                    } else {
+                        "call | text"
+                    };
+                body["grammar"] = json!(harness::tool_grammar(&effective_schemas, grammar_root));
             }
         } else {
             body["tools"] = effective_schemas.clone();
@@ -400,6 +557,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 "You already made this exact tool call and saw its result. Repeating it will not change anything. Take a DIFFERENT action, or answer the user with what you know (including telling them something was not found).".to_string()
             } else {
                 last_tool = Some(name.clone());
+                tool_called_this_turn = true;
                 dispatch_tool(
                     &tx,
                     &pending,

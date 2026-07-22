@@ -255,6 +255,12 @@ pub async fn run_chat(
     let mut options = json!({
         "strict": force_prompt_tools || oh.strict,
         "prompt_tools": force_prompt_tools || oh.prompt_tools,
+        // Model-based TOOL/CHAT classification: classifies the user's latest
+        // turn as TOOL or CHAT before the tool loop.
+        "friendly_results": force_prompt_tools,
+        // When classified as TOOL, force the call-only grammar so weak models
+        // must call a tool instead of answering in prose.
+        "call_only": force_prompt_tools,
         "no_think": oh.no_think,
         "narrow": oh.narrow,
         "slm": oh.slm,
