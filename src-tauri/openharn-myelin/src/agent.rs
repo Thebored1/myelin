@@ -229,13 +229,20 @@ async fn detect_intent(
         Err(_) => String::new(),
     };
     // Default to TOOL on ambiguity: losing a genuine note-write is worse than
-    // a greeting occasionally calling a tool.
-    text.contains("TOOL")
+    // a greeting occasionally calling a tool. Only an explicit "CHAT" is treated
+    // as conversation.
+    if text.is_empty() {
+        return true;
+    }
+    if text.contains("TOOL") {
+        true
+    } else if text.contains("CHAT") {
+        false
+    } else {
+        true
+    }
 }
 
-/// After tool execution, generate a friendly natural-language response
-/// summarizing what was done. Streams it as chat chunks and pushes the
-/// assistant reply into history.
 /// Drive one user request to completion, streaming events on `tx` and requesting
 /// tool execution from Myelin via the `pending` registry.
 pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending) {
