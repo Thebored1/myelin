@@ -271,10 +271,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     // `narrow` (OPENHARN_NARROW) is a read-only preset: strict + prompt-tools +
     // restricted to non-mutating tools. Mirrors openharn's env-driven preset.
     let narrow = opts.narrow;
-    // strict grammar implies prompt-tools (text-form calls); mirror openharn.
-    let strict = opts.strict || narrow;
-    let prompt_tools = strict || opts.prompt_tools;
-    let no_think = opts.no_think && !strict;
 
     // Effective tool schemas after applying the narrow / subset restrictions.
     let mut effective_schemas = schemas.clone();
@@ -303,6 +299,34 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         .unwrap_or(false);
 
     let mut history: Vec<Value> = req.messages.clone();
+
+    // Per-request policy (from openharn paper, Table 1 / derive_policy):
+    // Decompose the user's request into sub-operations to decide the generation
+    // path. This is the key reliability ladder — each mode is used where it is
+    // strongest:
+    //   plan_len == 0  → no matching tool → abstain immediately (NO_TOOL)
+    //   plan_len <= 1  → native FC (model's best mode for one-shot calls, ~80%)
+    //   plan_len > 1   → prompt-tools + strict grammar (multi-call recovery)
+    let user_text = history
+        .iter()
+        .rev()
+        .find(|m| m["role"].as_str() == Some("user"))
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("");
+    let plan_len = if has_tools {
+        harness::harness_decompose(user_text, &effective_schemas).len()
+    } else {
+        0
+    };
+
+    // strict grammar implies prompt-tools (text-form calls); mirror openharn.
+    // Per-request policy: only use prompt-tools + strict for multi-call requests
+    // (plan_len > 1). Single-call requests use native FC, which scores ~80% vs
+    // 29.5% for forced prompt-tools (paper Table 1).
+    let strict = opts.strict || narrow || plan_len > 1;
+    let prompt_tools = strict || opts.prompt_tools;
+    let no_think = opts.no_think && !strict;
+
     let mut seen_calls: HashSet<String> = HashSet::new();
     let mut budget = HISTORY_BUDGET;
     let mut repeats = 0usize;
@@ -314,7 +338,9 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     // Classify the latest user turn before entering the tool loop.
     // CHAT = skip tools, answer directly.
     // TOOL = run tool loop, then generate a friendly summary of results.
-    let friendly = opts.friendly_results && prompt_tools;
+    // Independent of prompt_tools now — the relevance gate is a separate
+    // concern from the generation path.
+    let friendly = opts.friendly_results;
     let intent_is_tool = if friendly {
         if let Some(classified) = opts.intent_is_tool {
             classified
@@ -331,6 +357,23 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     } else {
         true
     };
+
+    // FAST PATH: plan_len==0 means harness_decompose found NO matching tool —
+    // this is definitely irrelevant. Skip the gate LLM call entirely and
+    // abstain immediately. This is cheaper AND more accurate than the gate
+    // (the gate still gets ~15% of irrelevance cases wrong due to the weak
+    // model's YES/NO quality). Note: if friendly mode classified this as CHAT,
+    // we already returned above — so reaching here means TOOL intent, and
+    // plan_len==0 is a definitive no-match.
+    if has_tools && plan_len == 0 {
+        let _ = tx
+            .send(Out::Done {
+                messages: history.clone(),
+                last_tool: None,
+            })
+            .await;
+        return;
+    }
 
     // CHAT intent: skip the tool loop, answer directly in prose.
     if friendly && !intent_is_tool {
@@ -413,7 +456,12 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             // no tools available — text only
         } else if prompt_tools {
             if strict {
-                let grammar_root = if opts.call_only && friendly && intent_is_tool {
+                // Call-only grammar for multi-call requests (forces the model
+                // to output a call array, not prose). For single-call requests
+                // the model uses native FC, so this path is only reached for
+                // plan_len > 1 (or explicit call_only override).
+                let grammar_root = if plan_len > 1 || (opts.call_only && friendly && intent_is_tool)
+                {
                     "call"
                 } else {
                     "call | text"
@@ -513,6 +561,73 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             if let Some(parsed) = harness::parse_text_tool_calls(&content, &effective_schemas) {
                 tool_calls = parsed;
                 content.clear();
+            }
+        }
+
+        // Native-empty fallback: when native FC returns NOTHING, retry with
+        // prompt-tools + strict grammar. Recovers text-gen failures without
+        // forcing strict on every case. Per openharn paper: this is the
+        // "native-empty fallback" that bridges the gap between native FC
+        // (good for single calls) and prompt-tools (needed for multi-call).
+        if !prompt_tools && tool_calls.is_empty() && has_tools && plan_len <= 1 {
+            let fb_wire = harness::flatten_for_prompt_tools(&history, &effective_schemas);
+            let mut fb_body = json!({
+                "model": model,
+                "messages": fb_wire,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": true,
+                "stream_options": { "include_usage": true },
+                "cache_prompt": true,
+                "grammar": json!(harness::tool_grammar(&effective_schemas, "call")),
+            });
+            if let Some(kw) = &opts.template_kwargs {
+                if let Ok(v) = serde_json::from_str::<Value>(kw) {
+                    fb_body["chat_template_kwargs"] = v;
+                }
+            }
+            let fb_resp = {
+                let mut attempt = 0u32;
+                const MAX_ATTEMPTS: u32 = 6;
+                loop {
+                    let mut rq = client.post(&url).json(&fb_body);
+                    if let Some(k) = &req.api_key {
+                        if !k.is_empty() {
+                            rq = rq.bearer_auth(k);
+                        }
+                    }
+                    match rq.send().await {
+                        Ok(r) => break Some(r),
+                        Err(e) => {
+                            attempt += 1;
+                            if attempt >= MAX_ATTEMPTS {
+                                break None;
+                            }
+                            tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+                        }
+                    }
+                }
+            };
+            if let Some(fb_resp) = fb_resp {
+                if fb_resp.status().is_success() {
+                    let (fb_content, fb_calls) = match stream_upstream(fb_resp, &tx, false).await {
+                        Ok(v) => v,
+                        Err(_) => (String::new(), Vec::new()),
+                    };
+                    if !fb_calls.is_empty() {
+                        tool_calls = fb_calls;
+                        content = fb_content;
+                    } else if !fb_content.is_empty() {
+                        if let Some(parsed) =
+                            harness::parse_text_tool_calls(&fb_content, &effective_schemas)
+                        {
+                            if !parsed.is_empty() {
+                                tool_calls = parsed;
+                                content = String::new();
+                            }
+                        }
+                    }
+                }
             }
         }
 

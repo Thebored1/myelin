@@ -503,6 +503,117 @@ pub fn extract_partial_content(raw: &str) -> Option<String> {
     Some(out)
 }
 
+/// The harness-as-crutch decomposer. A weak quantized model cannot split a
+/// multi-operation request into N tool calls on its own (the dominant BFCL
+/// failure). So the harness does the decomposition itself — purely from the
+/// request text and the tool schemas, no model call — and later drives the
+/// model to fill ONE forced slot per planned sub-operation. The model still
+/// supplies the arguments (what it is good at, one call at a time); the
+/// harness supplies the structure (count + which tool + focus) the model
+/// cannot.
+///
+/// Returns an ordered plan: one `(tool_name, clause)` per sub-operation.
+/// Empty request or no matching tool yields an empty plan (caller falls back
+/// to single-shot).
+pub fn harness_decompose(request: &str, tools: &Value) -> Vec<(String, String)> {
+    let req = request.trim();
+    if req.is_empty() {
+        return Vec::new();
+    }
+
+    // 1) Split the request into clauses on conjunctions / punctuation that signal
+    //    independent operations.
+    let clause_split = regex::Regex::new(
+        r"(?i)\b(?:,|;| and | plus | then | also | as well as | along with |&|/)\b",
+    )
+    .unwrap();
+    let mut clauses: Vec<String> = clause_split
+        .split(req)
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if clauses.is_empty() {
+        clauses.push(req.to_string());
+    }
+
+    // 2) Tokenize each clause into lowercased alnum words for keyword matching.
+    let word_re = regex::Regex::new(r"[a-z0-9_]+").unwrap();
+
+    // Precompute per-tool keyword sets (name + description + parameter names + enum values).
+    let mut tool_kw: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(arr) = tools.as_array() {
+        for t in arr {
+            let f = if t["function"].is_object() {
+                &t["function"]
+            } else {
+                t
+            };
+            let name = f["name"].as_str().unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let mut kw = Vec::new();
+            let d = f["description"].as_str().unwrap_or("").to_lowercase();
+            kw.extend(word_re.find_iter(&d).map(|m| m.as_str().to_string()));
+            // include the dotted name pieces too
+            kw.extend(name.split(['.', '_']).map(|s| s.to_string()));
+            if let Some(props) = f["parameters"]["properties"].as_object() {
+                for (pk, pv) in props {
+                    kw.extend(pk.split(['.', '_']).map(|s| s.to_string()));
+                    if let Some(en) = pv["enum"].as_array() {
+                        for e in en {
+                            if let Some(s) = e.as_str() {
+                                kw.extend(
+                                    word_re
+                                        .find_iter(&s.to_lowercase())
+                                        .map(|m| m.as_str().to_string()),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            tool_kw.push((name, kw));
+        }
+    }
+
+    // 3) Score each clause against each tool; pick the best tool for that clause.
+    fn score(clause_words: &[String], tool_words: &[String]) -> f64 {
+        if clause_words.is_empty() || tool_words.is_empty() {
+            return 0.0;
+        }
+        let mut hit = 0;
+        for w in clause_words {
+            if w.len() >= 3 && tool_words.iter().any(|t| t == w) {
+                hit += 1;
+            }
+        }
+        hit as f64 / clause_words.len() as f64
+    }
+
+    let mut plan: Vec<(String, String)> = Vec::new();
+    for clause in &clauses {
+        let cwords: Vec<String> = word_re
+            .find_iter(&clause.to_lowercase())
+            .map(|m| m.as_str().to_string())
+            .collect();
+        let mut best: Option<(f64, &String)> = None;
+        for (name, kw) in &tool_kw {
+            let s = score(&cwords, kw);
+            if s > 0.0 {
+                if best.as_ref().map(|(bs, _)| s > *bs).unwrap_or(true) {
+                    best = Some((s, name));
+                }
+            }
+        }
+        if let Some((_, name)) = best {
+            plan.push((name.clone(), clause.clone()));
+        }
+    }
+
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +694,32 @@ mod tests {
         fit_context(&mut h, 200);
         assert_eq!(h[0]["role"], "system");
         assert!(h.len() < 5);
+    }
+
+    #[test]
+    fn decompose_single_call() {
+        let plan = harness_decompose("write a note about rust", &schemas());
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, "write_note");
+    }
+
+    #[test]
+    fn decompose_multi_call() {
+        let plan = harness_decompose("search the web for rust and write a note", &schemas());
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].0, "web_search");
+        assert_eq!(plan[1].0, "write_note");
+    }
+
+    #[test]
+    fn decompose_no_match() {
+        let plan = harness_decompose("hello how are you today", &schemas());
+        assert_eq!(plan.len(), 0);
+    }
+
+    #[test]
+    fn decompose_empty() {
+        let plan = harness_decompose("", &schemas());
+        assert_eq!(plan.len(), 0);
     }
 }

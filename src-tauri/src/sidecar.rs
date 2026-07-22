@@ -248,41 +248,35 @@ pub async fn run_chat(
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| format!("{}/v1", config.base_url()));
 
-    // If the model profile says it prefers prompt-tools (e.g. LFM2 at low quants),
-    // force that mode regardless of user settings — native tool-calling doesn't work.
-    let force_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
+    // The model profile's `prefers_prompt_tools` flag is a HINT, not a mandate.
+    // Per the openharn paper (Table 1), forcing prompt-tools on ALL requests
+    // scores 29.5% — worse than native FC at 47.5% for single-call requests.
+    // The per-request policy in agent.rs::run_loop now decides per-request:
+    //   plan_len <= 1  → native FC (model's best mode for one-shot calls)
+    //   plan_len > 1   → prompt-tools + strict grammar (multi-call recovery)
+    //   plan_len == 0  → abstain immediately (NO_TOOL)
+    // So we no longer force prompt-tools globally. The profile hint is passed
+    // through as `prefers_prompt_tools` for the policy to consult if needed.
+    let prefers_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
     let mut options = json!({
-        "strict": force_prompt_tools || oh.strict,
-        "prompt_tools": force_prompt_tools || oh.prompt_tools,
-        // Model-based TOOL/CHAT classification: classifies the user's latest
-        // turn as TOOL or CHAT before the tool loop. A CHAT turn (greetings,
-        // questions) skips tools and answers directly; a TOOL turn enters the
-        // tool loop with the full toolset.
-        // Set to true even when intent_is_tool pre-classifies, because call_only
-        // requires both friendly_results AND intent_is_tool to activate the
-        // forced-call grammar. Without friendly_results=true the grammar falls
-        // back to "call | text" and weak models choose text (prose) every time.
-        "friendly_results": force_prompt_tools,
-        // When the turn is classified as TOOL, force the call-only grammar so
-        // weak models must call a tool instead of answering in prose.
-        "call_only": force_prompt_tools,
-        // Pre-classify: the model is already known to need tools (the profile
-        // says prefersPromptTools). Bypass the model-based intent detection
-        // (costly extra inference) and go straight to the tool loop.
-        // paired with friendly_results=true this enables call_only.
-        "intent_is_tool": force_prompt_tools,
+        "strict": oh.strict,
+        "prompt_tools": oh.prompt_tools,
+        // friendly_results enables the relevance gate (separate LLM YES/NO
+        // call to decide whether any tool applies before generating a call).
+        // This recovers the irrelevance category. Off by default; the per-request
+        // policy handles abstention via harness_decompose (plan_len==0 → NO_TOOL).
+        "friendly_results": oh.friendly_results,
         "no_think": oh.no_think,
         "narrow": oh.narrow,
         "slm": oh.slm,
     });
-    // For force_prompt_tools models (weak quants), the model often splits
-    // content across multiple tool calls. Allow 3 calls per turn so both the
-    // partial and the full content calls execute (write_note overwrites, so
-    // only the last non-empty call matters). User override via settings wins.
+    // Allow 3 calls per turn — the model may split content across calls
+    // (write_note overwrites, so only the last non-empty call matters).
+    // User override via settings wins.
     options["max_calls"] = json!(oh
         .max_calls
-        .unwrap_or(if force_prompt_tools { 3 } else { 1 }));
+        .unwrap_or(if prefers_prompt_tools { 3 } else { 1 }));
     if let Some(tm) = oh.total_max {
         options["total_max"] = json!(tm);
     }
