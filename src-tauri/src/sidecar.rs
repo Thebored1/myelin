@@ -252,24 +252,19 @@ pub async fn run_chat(
     // force that mode regardless of user settings — native tool-calling doesn't work.
     let force_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
-    // The host already has deterministic, per-message routing heuristics. Pass
-    // their result to the sidecar so weak prompt-tool models do not spend a
-    // second inference merely classifying TOOL vs CHAT.
+    // Deterministic TOOL/CHAT classification: only clear small talk
+    // (greetings, thanks, short acknowledgments) is CHAT — everything else
+    // gets the full toolset. This replaces the model-based intent detection
+    // that LFM2 previously ran, matching its "default to TOOL on ambiguity"
+    // fallback while avoiding an extra inference pass.
     let intent_is_tool = if force_prompt_tools {
-        let recent_user_msgs: Vec<&str> = messages
+        let user_text = messages
             .iter()
-            .filter(|m| m["role"].as_str() == Some("user"))
-            .filter_map(|m| m["content"].as_str())
-            .collect();
-        let edit_thread = crate::agent::in_edit_thread(&recent_user_msgs);
-        let selected = crate::agent::select_tools_cfg(
-            recent_user_msgs.last().copied().unwrap_or(""),
-            true,
-            edit_thread,
-            true,
-            config.deterministic_tools,
-        );
-        Some(!selected.is_empty())
+            .rev()
+            .find(|m| m["role"].as_str() == Some("user"))
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("");
+        Some(!crate::agent::is_small_talk(user_text))
     } else {
         None
     };
