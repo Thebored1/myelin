@@ -75,17 +75,12 @@ pub struct Options {
     /// Model-based TOOL/CHAT classification: the sidecar asks the model to
     /// classify the user's latest turn as "TOOL" or "CHAT" (1 word). A CHAT
     /// turn (greetings, questions) skips tools and answers directly; a TOOL
-    /// turn enters the tool loop. After tool execution on a TOOL turn, the
-    /// model generates a friendly summary of what was done.
+    /// turn enters the tool loop with the full toolset and the model's native
+    /// FC format (with tool_choice=required set by the host for weak models).
     /// Requires `prompt_tools`. Set automatically by the host for
     /// `prefersPromptTools` models.
     #[serde(default)]
     pub friendly_results: bool,
-    /// When `friendly_results` classifies a turn as TOOL, force the call-only
-    /// grammar (no `text` branch) so a weak model cannot answer in prose
-    /// instead of calling a tool.
-    #[serde(default)]
-    pub call_only: bool,
     /// Pre-computed TOOL/CHAT result supplied by the host. When absent, the
     /// sidecar runs model-based intent detection.
     #[serde(default)]
@@ -128,7 +123,6 @@ impl Default for Options {
             tool_choice: None,
             template_kwargs: None,
             friendly_results: false,
-            call_only: false,
             intent_is_tool: None,
         }
     }
@@ -307,7 +301,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let mut budget = HISTORY_BUDGET;
     let mut repeats = 0usize;
     let mut total_calls = 0usize;
-    let mut tool_called_this_turn = false;
     let mut no_tools = !has_tools;
     let mut last_tool: Option<String> = None;
 
@@ -414,13 +407,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             // no tools available — text only
         } else if prompt_tools {
             if strict {
-                let grammar_root =
-                    if opts.call_only && friendly && intent_is_tool && !tool_called_this_turn {
-                        "call"
-                    } else {
-                        "call | text"
-                    };
-                body["grammar"] = json!(harness::tool_grammar(&effective_schemas, grammar_root));
+                body["grammar"] = json!(harness::tool_grammar(&effective_schemas, "call | text"));
             }
         } else {
             body["tools"] = effective_schemas.clone();
@@ -564,7 +551,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 "You already made this exact tool call and saw its result. Repeating it will not change anything. Take a DIFFERENT action, or answer the user with what you know (including telling them something was not found).".to_string()
             } else {
                 last_tool = Some(name.clone());
-                tool_called_this_turn = true;
                 dispatch_tool(
                     &tx,
                     &pending,
