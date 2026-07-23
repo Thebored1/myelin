@@ -237,6 +237,7 @@ pub async fn run_chat(
     note_id: &str,
     use_model_tool_gate: bool,
     intent_override: Option<bool>,
+    chat_mode: bool,
 ) -> Result<Vec<Value>> {
     let base = ensure_sidecar(state).await?;
 
@@ -278,6 +279,7 @@ pub async fn run_chat(
         "no_think": oh.no_think,
         "narrow": oh.narrow,
         "slm": oh.slm,
+        "chat_mode": chat_mode,
     });
     // Use OpenHarn's model-based CHAT/TOOL relevance gate whenever tools are
     // available. CHAT skips the tool loop; TOOL enters its call-only grammar.

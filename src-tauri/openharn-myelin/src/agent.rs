@@ -90,6 +90,11 @@ pub struct Options {
     /// sidecar runs model-based intent detection.
     #[serde(default)]
     pub intent_is_tool: Option<bool>,
+    /// The user selected Chat mode. Read-only lookup tools may be used, but once
+    /// one returns the next turn must be a prose answer rather than another tool
+    /// planning pass.
+    #[serde(default)]
+    pub chat_mode: bool,
     /// Model-profile hint: the model's native FC is unreliable at low quants
     /// and benefits from prompt-tools + strict grammar even for single-call
     /// requests (e.g. LFM2 at Q2_K_XL). When true, the per-request policy
@@ -151,6 +156,7 @@ impl Default for Options {
             friendly_results: false,
             call_only: false,
             intent_is_tool: None,
+            chat_mode: false,
             prefers_prompt_tools: false,
         }
     }
@@ -212,73 +218,103 @@ pub enum Out {
     },
 }
 
-/// Classify the user's latest message as `TOOL` or `CHAT` using the model
-/// (1 word, cheap and fast). Returns `true` when the intent is `TOOL`.
-/// On any error or empty reply we default to `TOOL` (safer: losing a genuine
-/// tool request is worse than a greeting occasionally entering the tool loop).
-async fn detect_intent(
+const INTENT_ROUTING_RULES: &str = "Classify the latest user message by calling the classify_intent tool exactly once. TOOL means the user asks for any operation to be performed. Every instruction, command, or action request is TOOL; unless another target is named, it is work on the open note. Operations include creating, writing, adding, editing, revising, formatting, deleting, reading, finding, searching, fetching, browsing, looking up, and researching. CHAT means the user only wants a direct answer, explanation, capability description, greeting, thanks, small talk, opinion, or general knowledge without an operation. Questions are CHAT unless they explicitly ask you to perform an operation. Examples: \"write this on the note\", \"add a poem\", and \"search my notes for Rust\" are TOOL; \"hey\", \"what can you do?\", \"what does this poem mean?\", and \"what is Rust?\" are CHAT.";
+
+/// Ask the same model/session to classify the turn via a virtual tool call. This
+/// deliberately uses the live system/note history rather than a standalone
+/// completion, preserving the main conversation's KV-cache prefix in the single
+/// llama-server slot. The virtual call is consumed locally and never reaches the
+/// host or user-visible tool list.
+async fn detect_intent_in_session(
     client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
     model: &str,
-    user: &str,
+    history: &[Value],
     tx: &mpsc::Sender<Out>,
 ) -> bool {
-    let prompt = format!(
-        "Return exactly one word: TOOL or CHAT.\n\
-         This is a local notes app. TOOL means the user asks for any operation to be performed. Every operation is TOOL, never CHAT. Unless the user names another target, perform the operation on the currently open note.\n\
-         Operations include: create, write, draft, generate, add, append, insert, put, save, replace, update, edit, revise, rewrite, reword, correct, fix, improve, expand, shorten, summarize, translate, organize, restructure, move, merge, split, title, rename, add or remove headings, make lists, format, convert Markdown, clean up, remove, delete, clear, restore, read, inspect, find, count, search, fetch, browse, look up, and research.\n\
-         These are TOOL: \"write this on the note\", \"write this in my note\", \"add a poem\", \"put that in the note\", \"change the title\", \"summarize this\", \"make this a list\", \"remove this paragraph\", \"search my notes for Rust\", \"look up today's news\".\n\
-         CHAT means the user only wants a direct conversational answer, explanation, capability description, greeting, thanks, small talk, opinion, or general knowledge, without asking you to perform an operation.\n\
-         These are CHAT: \"hey\", \"what can you do?\", \"how does this work?\", \"what is Rust?\", \"explain Markdown\".\n\
-         A question is CHAT unless it asks you to perform an operation. Do not classify an instruction, command, or action request as CHAT.\n\n\
-         User: {user}\n\n\
-         Classification:"
-    );
+    let route_schemas = json!([{
+        "type": "function",
+        "function": {
+            "name": "classify_intent",
+            "description": "Classify the latest user message using the routing rules in the system prompt.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["CHAT", "TOOL"],
+                        "description": "CHAT for a direct answer; TOOL for an operation."
+                    }
+                },
+                "required": ["intent"]
+            }
+        }
+    }]);
+
+    let mut route_history = history.to_vec();
+    if let Some(system) = route_history
+        .iter_mut()
+        .find(|message| message["role"].as_str() == Some("system"))
+    {
+        let base = system["content"].as_str().unwrap_or("");
+        system["content"] = json!(format!("{base}\n\n{INTENT_ROUTING_RULES}"));
+    } else {
+        route_history.insert(
+            0,
+            json!({ "role": "system", "content": INTENT_ROUTING_RULES }),
+        );
+    }
+    let wire = harness::flatten_for_prompt_tools(&route_history, &route_schemas);
     let body = json!({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": wire,
         "temperature": 0.0,
-        "max_tokens": 4,
-        "stream": false,
+        "max_tokens": 32,
+        "stream": true,
+        "stream_options": { "include_usage": true },
+        "cache_prompt": true,
+        "grammar": harness::tool_grammar(&route_schemas, "call"),
     });
     let _ = tx
         .send(Out::Debug {
             kind: "intent_prompt".into(),
-            message: prompt.clone(),
+            message: format!("In-session classify_intent tool\n{INTENT_ROUTING_RULES}"),
         })
         .await;
-    let mut req = client.post(url).json(&body);
-    if let Some(k) = api_key {
-        if !k.is_empty() {
-            req = req.bearer_auth(k);
-        }
+    emit_model_prompt(tx, "INTENT virtual-tool request messages:", &body).await;
+
+    let mut request = client.post(url).json(&body);
+    if let Some(key) = api_key.filter(|key| !key.is_empty()) {
+        request = request.bearer_auth(key);
     }
-    let text = match req.send().await {
-        Ok(r) => match r.json::<Value>().await {
-            Ok(v) => v["choices"]
-                .get(0)
-                .and_then(|c| c["message"]["content"].as_str())
-                .map(|s| s.trim().to_uppercase())
-                .unwrap_or_default(),
-            Err(_) => String::new(),
-        },
-        Err(_) => String::new(),
+    let (content, mut calls) = match request.send().await {
+        Ok(response) if response.status().is_success() => {
+            match stream_upstream(response, tx, false, true).await {
+                Ok(result) => result,
+                Err(_) => (String::new(), Vec::new()),
+            }
+        }
+        _ => (String::new(), Vec::new()),
     };
+    if calls.is_empty() {
+        calls = harness::parse_text_tool_calls(&content, &route_schemas).unwrap_or_default();
+    }
+    let intent = calls
+        .first()
+        .and_then(|call| call["function"]["arguments"].as_str())
+        .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+        .and_then(|arguments| arguments["intent"].as_str().map(str::to_owned))
+        .map(|intent| intent.to_ascii_uppercase());
     // Default to TOOL on ambiguity: losing a genuine note-write is worse than
-    // a greeting occasionally calling a tool. Only an explicit "CHAT" is treated
-    // as conversation.
-    let is_tool = text.is_empty() || text.contains("TOOL") || !text.contains("CHAT");
-    let raw = if text.is_empty() {
-        "(no response; defaulting to TOOL)"
-    } else {
-        &text
-    };
+    // a greeting occasionally entering the tool loop.
+    let is_tool = intent.as_deref() != Some("CHAT");
+    let raw = intent.unwrap_or_else(|| "(no valid tool call; defaulting to TOOL)".into());
     let _ = tx
         .send(Out::Debug {
             kind: "intent_result".into(),
             message: format!(
-                "model response: {raw}; decision: {}",
+                "virtual tool result: {raw}; decision: {}",
                 if is_tool { "TOOL" } else { "CHAT" }
             ),
         })
@@ -376,10 +412,11 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         opts.strict || narrow || plan_len > 1 || (opts.prefers_prompt_tools && plan_len <= 1);
     let mut prompt_tools = strict || opts.prompt_tools;
     let mut no_think = opts.no_think && !strict;
-    // Call-only is useful until an operation has produced its write result. After
-    // that, let the model observe the result and decide whether to say it is done.
+    // Call-only keeps tool requests structured until the authoritative write
+    // result completes the operation.
     let mut call_only = opts.call_only;
     let mut write_completed = false;
+    let mut chat_lookup_completed = false;
 
     let mut seen_calls: HashSet<String> = HashSet::new();
     let mut budget = HISTORY_BUDGET;
@@ -403,22 +440,8 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         if let Some(classified) = opts.intent_is_tool {
             classified
         } else {
-            let user_text = history
-                .iter()
-                .rev()
-                .find(|m| m["role"].as_str() == Some("user"))
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or("")
-                .to_string();
-            detect_intent(
-                &client,
-                &url,
-                req.api_key.as_deref(),
-                &model,
-                &user_text,
-                &tx,
-            )
-            .await
+            detect_intent_in_session(&client, &url, req.api_key.as_deref(), &model, &history, &tx)
+                .await
         }
     } else {
         true
@@ -808,17 +831,11 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             } else {
                 harness::TOOL_RESULT_CAP
             };
-            // Once a note write succeeds, unlock normal text generation for the
-            // next turn. The model receives this result and decides whether it is
-            // done instead of the harness treating the write as an implicit end.
+            // A successful write is an authoritative completed side effect. Do
+            // not ask a weak model for a follow-up prose turn: it can hallucinate
+            // or repeat the whole note instead of acknowledging completion.
             if name == "write_note" && result.starts_with("Note successfully updated") {
                 write_completed = true;
-                call_only = false;
-                // The following model turn is a completion acknowledgement, not
-                // another tool-planning pass.
-                no_tools = true;
-                prompt_tools = false;
-                strict = false;
             }
             let capped = harness::cap_result_with(result.clone(), cap);
             let _ = tx
@@ -838,12 +855,32 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         total_calls += tool_calls.len();
 
         if write_completed {
-            // Let the model provide its own visible completion, but make the
-            // completed operation unambiguous and remove every tool so it cannot
-            // rewrite or echo the note as a further action.
+            // The tool result is the source of truth. Finish locally with a
+            // concise acknowledgement rather than allowing a second generation
+            // that could repeat or alter the newly written note.
+            let confirmation = "Done".to_string();
+            let _ = tx.send(Out::ChatChunk(confirmation.clone())).await;
+            history.push(json!({ "role": "assistant", "content": confirmation }));
+            let _ = tx
+                .send(Out::Done {
+                    messages: history.clone(),
+                    last_tool: last_tool.clone(),
+                })
+                .await;
+            return;
+        }
+
+        if opts.chat_mode && !chat_lookup_completed {
+            // A Chat-mode lookup is only evidence gathering. Remove tools for
+            // the next model turn and require a direct answer from its result.
+            chat_lookup_completed = true;
+            no_tools = true;
+            prompt_tools = false;
+            strict = false;
+            call_only = false;
             history.push(json!({
                 "role": "user",
-                "content": "The note write succeeded and the requested operation is complete. Reply with exactly: Done. Do not repeat the note content or call any tool."
+                "content": "Use the retrieved result to answer the user's question directly. Do not call any more tools."
             }));
             continue;
         }

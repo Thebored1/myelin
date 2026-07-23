@@ -662,7 +662,9 @@ mod tests {
         assert!(g.contains("root ::= call | text"));
         assert!(g.contains(r#""\"write_note\""#));
         assert!(g.contains(r#""\"content\""#));
-        assert!(g.contains("string ::= \"\""));
+        assert!(g.contains("string ::= "));
+        // Raw newlines, carriage returns, and tabs are excluded from JSON strings.
+        assert!(g.contains(r#"[^"\\\n\r\t]"#));
         assert!(g.contains("t-"));
         // The new compact grammar has no ws rules and no recursive value/object.
         assert!(!g.contains("ws ::="));

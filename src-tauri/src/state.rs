@@ -1868,6 +1868,7 @@ impl AppState {
                     "operation" => Some(true),
                     _ => None,
                 },
+                interaction_mode == "chat",
             )
             .await?;
 
