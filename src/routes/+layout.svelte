@@ -13,6 +13,8 @@
 
 	let windowWidth = $state(1024);
 	let wasSmallScreen = $state(false);
+	let isWindowMaximized = $state(false);
+	let isWindowFullscreen = $state(false);
 
 	$effect(() => {
 		const isSmallScreen = windowWidth < 1200;
@@ -25,10 +27,21 @@
 	});
 
 	onMount(() => {
+		let unlistenResize: (() => void) | undefined;
 		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
 			appWindow = getCurrentWindow();
+			const syncWindowState = async () => {
+				[isWindowMaximized, isWindowFullscreen] = await Promise.all([
+					appWindow.isMaximized(),
+					appWindow.isFullscreen()
+				]);
+			};
+			void syncWindowState();
+			void appWindow.onResized(() => void syncWindowState()).then((unlisten: () => void) => {
+				unlistenResize = unlisten;
+			});
 		}
-		
+
 		// Prevent Ctrl+A globally unless focused in an input or editor
 		const handleGlobalKeydown = (e: KeyboardEvent) => {
 			const target = e.target as HTMLElement;
@@ -92,7 +105,8 @@
 				window.removeEventListener('wheel', handleGlobalWheel);
 				window.removeEventListener('contextmenu', handleGlobalContextMenu);
 				window.removeEventListener('click', handleGlobalDialogClick);
-			};
+				unlistenResize?.();
+			}
 		}
 	});
 
@@ -102,9 +116,11 @@
 		}
 	}
 
-	function toggleMaximize() {
+	async function toggleMaximize() {
 		if (appWindow) {
-			appWindow.toggleMaximize();
+			await appWindow.toggleMaximize();
+			isWindowMaximized = await appWindow.isMaximized();
+			isWindowFullscreen = await appWindow.isFullscreen();
 		}
 	}
 
@@ -137,23 +153,25 @@
 	{@render children()}
 {:else}
 <div class="app-container">
-	<!-- Custom Window Resize Handles -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle top" onmousedown={(e) => startResize('North', e)}></div>
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle bottom" onmousedown={(e) => startResize('South', e)}></div>
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle left" onmousedown={(e) => startResize('West', e)}></div>
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle right" onmousedown={(e) => startResize('East', e)}></div>
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle top-left" onmousedown={(e) => startResize('NorthWest', e)}></div>
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle top-right" onmousedown={(e) => startResize('NorthEast', e)}></div>
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle bottom-left" onmousedown={(e) => startResize('SouthWest', e)}></div>
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="resize-handle bottom-right" onmousedown={(e) => startResize('SouthEast', e)}></div>
+	{#if !isWindowMaximized && !isWindowFullscreen}
+		<!-- Custom Window Resize Handles (hidden while maximized/fullscreen). -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle top" onmousedown={(e) => startResize('North', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle bottom" onmousedown={(e) => startResize('South', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle left" onmousedown={(e) => startResize('West', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle right" onmousedown={(e) => startResize('East', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle top-left" onmousedown={(e) => startResize('NorthWest', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle top-right" onmousedown={(e) => startResize('NorthEast', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle bottom-left" onmousedown={(e) => startResize('SouthWest', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle bottom-right" onmousedown={(e) => startResize('SouthEast', e)}></div>
+	{/if}
 
 	<header class="custom-titlebar" data-tauri-drag-region>
 		<div class="titlebar-drag-region" data-tauri-drag-region>
@@ -413,9 +431,9 @@
 	}
 
 	/* Re-enable text selection only where it's genuinely needed: form fields, any
-	   contenteditable, the Vditor note editor, math fields, and the PDF text layer
-	   (selection there powers quote/highlight/copy). Everything else stays
-	   unselectable so the app doesn't feel like a web page. */
+	   contenteditable, the Vditor note editor, math fields, the PDF text layer,
+	   and dynamic AI/tool output. Static app controls and chrome remain
+	   unselectable so the app retains its native feel. */
 	:global(input),
 	:global(textarea),
 	:global([contenteditable]:not([contenteditable='false'])),
@@ -430,7 +448,9 @@
 	:global(.vditor-textarea),
 	:global(math-field),
 	:global(.textLayer),
-	:global(.textLayer *) {
+	:global(.textLayer *),
+	:global(.selectable-content),
+	:global(.selectable-content *) {
 		user-select: text;
 		-webkit-user-select: text;
 	}
@@ -543,6 +563,12 @@
 		z-index: -1 !important;
 		opacity: 0;
 		pointer-events: none;
+	}
+
+	/* Vditor's editor fullscreen is still inside the app window; remove the
+	   custom resize hit targets so the top edge never shows a resize cursor. */
+	:global(.app-container:has(.vditor--fullscreen) .resize-handle) {
+		display: none;
 	}
 
 	.titlebar-drag-region {

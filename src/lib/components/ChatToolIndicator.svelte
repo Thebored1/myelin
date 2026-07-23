@@ -54,12 +54,12 @@
 		</svg>
 		<span class="tool-name" class:web={kind === 'web'}>{tool.name}</span>
 		{#if preview}
-			<span class="tool-detail-inline" title={tool.details}>· {preview}</span>
+			<span class="tool-detail-inline selectable-content" title={tool.details}>· {preview}</span>
 		{/if}
 	</button>
 	{#if expanded && tool.details}
 		<div class="indicator-content">
-			<pre class="tool-details-text">{tool.details}</pre>
+			<pre class="tool-details-text selectable-content">{tool.details}</pre>
 		</div>
 	{/if}
 </div>

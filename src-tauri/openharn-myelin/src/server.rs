@@ -130,6 +130,7 @@ fn to_event(out: Out) -> Event {
             "usage",
             json!({ "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens }),
         ),
+        Out::Debug { kind, message } => ("debug", json!({ "kind": kind, "message": message })),
     };
     Event::default().event(name).data(data.to_string())
 }

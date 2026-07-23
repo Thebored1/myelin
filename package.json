@@ -15,6 +15,7 @@
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"test:unit": "vitest",
+		"test:sidecar": "python3 scripts/test-sidecar.py",
 		"test": "npm run test:unit -- --run"
 	},
 	"devDependencies": {

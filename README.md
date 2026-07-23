@@ -10,6 +10,20 @@ Cross-platform local-first AI notes app built with Tauri 2, SvelteKit, and a Rus
 - **Split-Pane Viewer**: View source material (PDFs, Web pages, etc.) side-by-side with your working documents.
 - **Local AI & Vector Search**: Uses LanceDB for local vector indexing to provide intelligent search over your notes.
 
+## Sidecar tool self-test
+
+The sidecar can be tested independently of the desktop UI with a temporary Markdown workspace. This exercises the real sidecar SSE protocol, including tool events and `/v1/tool-result`, and prints every tool call so missing calls are visible:
+
+```bash
+# Test every GGUF in ~/Downloads
+npm run test:sidecar -- --models-dir ~/Downloads
+
+# Or test selected models
+npm run test:sidecar -- ~/Downloads/model-a.gguf ~/Downloads/model-b.gguf
+```
+
+The test never changes user notes. `write_note`, `read_note`, and `search_notes` operate on a temporary `open.md`/`other.md`; network-facing tools receive a synthetic result. Override `LLAMA_SERVER_BIN` and `SIDECAR_BIN` when the binaries are not on `PATH`. A non-zero exit status means at least one expected tool call was not observed.
+
 ## Setup and Development
 
 Myelin relies heavily on native Rust libraries (like Tectonic) to achieve a zero-dependency runtime.

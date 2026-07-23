@@ -14,6 +14,7 @@ export type ChatMessage = {
 	approvalStatus?: 'pending' | 'approved' | 'rejected';
 	startTime?: number;
 	endTime?: number;
+	debugTrace?: { time: number; msg: string; kind: string }[];
 };
 
 export type NoteSnapshot = {

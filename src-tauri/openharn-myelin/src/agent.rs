@@ -90,6 +90,13 @@ pub struct Options {
     /// sidecar runs model-based intent detection.
     #[serde(default)]
     pub intent_is_tool: Option<bool>,
+    /// Model-profile hint: the model's native FC is unreliable at low quants
+    /// and benefits from prompt-tools + strict grammar even for single-call
+    /// requests (e.g. LFM2 at Q2_K_XL). When true, the per-request policy
+    /// uses prompt-tools + strict grammar for ALL tool-bearing requests
+    /// (not just multi-call ones).
+    #[serde(default)]
+    pub prefers_prompt_tools: bool,
 }
 
 fn default_max_calls() -> usize {
@@ -100,6 +107,20 @@ fn default_total_max() -> usize {
 }
 fn default_tool_timeout() -> u64 {
     300
+}
+
+/// Emit the exact message array sent to the model. This deliberately excludes
+/// transport credentials; it is a local diagnostic requested by the user and is
+/// persisted with the note's debug trace by the Myelin host.
+async fn emit_model_prompt(tx: &mpsc::Sender<Out>, stage: &str, body: &Value) {
+    let messages = body.get("messages").cloned().unwrap_or(Value::Null);
+    let rendered = serde_json::to_string_pretty(&messages).unwrap_or_else(|_| messages.to_string());
+    let _ = tx
+        .send(Out::Debug {
+            kind: "model_prompt".into(),
+            message: format!("{stage}\n{rendered}"),
+        })
+        .await;
 }
 
 fn upstream_client() -> &'static reqwest::Client {
@@ -130,6 +151,7 @@ impl Default for Options {
             friendly_results: false,
             call_only: false,
             intent_is_tool: None,
+            prefers_prompt_tools: false,
         }
     }
 }
@@ -184,6 +206,10 @@ pub enum Out {
         completion_tokens: u32,
         total_tokens: u32,
     },
+    Debug {
+        kind: String,
+        message: String,
+    },
 }
 
 /// Classify the user's latest message as `TOOL` or `CHAT` using the model
@@ -196,11 +222,16 @@ async fn detect_intent(
     api_key: Option<&str>,
     model: &str,
     user: &str,
+    tx: &mpsc::Sender<Out>,
 ) -> bool {
     let prompt = format!(
-        "You are a note-taking assistant. Classify the user's request with exactly one word: TOOL or CHAT.\n\
-         CHAT = greeting, thanks, small talk.\n\
-         TOOL = anything involving writing, editing, searching, reading, formatting, or fetching notes or documents.\n\n\
+        "Return exactly one word: TOOL or CHAT.\n\
+         This is a local notes app. TOOL means the user asks for any operation to be performed. Every operation is TOOL, never CHAT. Unless the user names another target, perform the operation on the currently open note.\n\
+         Operations include: create, write, draft, generate, add, append, insert, put, save, replace, update, edit, revise, rewrite, reword, correct, fix, improve, expand, shorten, summarize, translate, organize, restructure, move, merge, split, title, rename, add or remove headings, make lists, format, convert Markdown, clean up, remove, delete, clear, restore, read, inspect, find, count, search, fetch, browse, look up, and research.\n\
+         These are TOOL: \"write this on the note\", \"write this in my note\", \"add a poem\", \"put that in the note\", \"change the title\", \"summarize this\", \"make this a list\", \"remove this paragraph\", \"search my notes for Rust\", \"look up today's news\".\n\
+         CHAT means the user only wants a direct conversational answer, explanation, capability description, greeting, thanks, small talk, opinion, or general knowledge, without asking you to perform an operation.\n\
+         These are CHAT: \"hey\", \"what can you do?\", \"how does this work?\", \"what is Rust?\", \"explain Markdown\".\n\
+         A question is CHAT unless it asks you to perform an operation. Do not classify an instruction, command, or action request as CHAT.\n\n\
          User: {user}\n\n\
          Classification:"
     );
@@ -211,6 +242,12 @@ async fn detect_intent(
         "max_tokens": 4,
         "stream": false,
     });
+    let _ = tx
+        .send(Out::Debug {
+            kind: "intent_prompt".into(),
+            message: prompt.clone(),
+        })
+        .await;
     let mut req = client.post(url).json(&body);
     if let Some(k) = api_key {
         if !k.is_empty() {
@@ -231,16 +268,22 @@ async fn detect_intent(
     // Default to TOOL on ambiguity: losing a genuine note-write is worse than
     // a greeting occasionally calling a tool. Only an explicit "CHAT" is treated
     // as conversation.
-    if text.is_empty() {
-        return true;
-    }
-    if text.contains("TOOL") {
-        true
-    } else if text.contains("CHAT") {
-        false
+    let is_tool = text.is_empty() || text.contains("TOOL") || !text.contains("CHAT");
+    let raw = if text.is_empty() {
+        "(no response; defaulting to TOOL)"
     } else {
-        true
-    }
+        &text
+    };
+    let _ = tx
+        .send(Out::Debug {
+            kind: "intent_result".into(),
+            message: format!(
+                "model response: {raw}; decision: {}",
+                if is_tool { "TOOL" } else { "CHAT" }
+            ),
+        })
+        .await;
+    is_tool
 }
 
 /// Drive one user request to completion, streaming events on `tx` and requesting
@@ -323,9 +366,20 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     // Per-request policy: only use prompt-tools + strict for multi-call requests
     // (plan_len > 1). Single-call requests use native FC, which scores ~80% vs
     // 29.5% for forced prompt-tools (paper Table 1).
-    let strict = opts.strict || narrow || plan_len > 1;
-    let prompt_tools = strict || opts.prompt_tools;
-    let no_think = opts.no_think && !strict;
+    //
+    // Exception: when the model profile says `prefers_prompt_tools` (e.g. LFM2
+    // at Q2_K_XL), native FC is unreliable — the model emits empty/incomplete
+    // arguments that llama-server rejects with "could not decode tool: unexpected
+    // end of JSON input". In that case, force prompt-tools + strict for ALL
+    // tool-bearing requests, not just multi-call ones.
+    let mut strict =
+        opts.strict || narrow || plan_len > 1 || (opts.prefers_prompt_tools && plan_len <= 1);
+    let mut prompt_tools = strict || opts.prompt_tools;
+    let mut no_think = opts.no_think && !strict;
+    // Call-only is useful until an operation has produced its write result. After
+    // that, let the model observe the result and decide whether to say it is done.
+    let mut call_only = opts.call_only;
+    let mut write_completed = false;
 
     let mut seen_calls: HashSet<String> = HashSet::new();
     let mut budget = HISTORY_BUDGET;
@@ -333,6 +387,10 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let mut total_calls = 0usize;
     let mut no_tools = !has_tools;
     let mut last_tool: Option<String> = None;
+    // A call-only prompt-tools request can still hit its token cap before a weak
+    // model closes a long string argument. Retry it once through the model's
+    // native tool template before giving up.
+    let mut forced_native_retry = false;
 
     // Model-based TOOL/CHAT classification (friendly_results mode).
     // Classify the latest user turn before entering the tool loop.
@@ -352,20 +410,24 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 .and_then(|m| m["content"].as_str())
                 .unwrap_or("")
                 .to_string();
-            detect_intent(&client, &url, req.api_key.as_deref(), &model, &user_text).await
+            detect_intent(
+                &client,
+                &url,
+                req.api_key.as_deref(),
+                &model,
+                &user_text,
+                &tx,
+            )
+            .await
         }
     } else {
         true
     };
 
-    // FAST PATH: plan_len==0 means harness_decompose found NO matching tool —
-    // this is definitely irrelevant. Skip the gate LLM call entirely and
-    // abstain immediately. This is cheaper AND more accurate than the gate
-    // (the gate still gets ~15% of irrelevance cases wrong due to the weak
-    // model's YES/NO quality). Note: if friendly mode classified this as CHAT,
-    // we already returned above — so reaching here means TOOL intent, and
-    // plan_len==0 is a definitive no-match.
-    if has_tools && plan_len == 0 {
+    // FAST PATH: if the model classified this as TOOL but decomposition found
+    // no matching tool, abstain. A CHAT classification must fall through to the
+    // prose path below even when the planner finds no tool match (e.g. "gg").
+    if has_tools && plan_len == 0 && (!friendly || intent_is_tool) {
         let _ = tx
             .send(Out::Done {
                 messages: history.clone(),
@@ -397,6 +459,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 body["chat_template_kwargs"] = v;
             }
         }
+        emit_model_prompt(&tx, "CHAT request messages:", &body).await;
         let resp = match client.post(&url).json(&body).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -414,7 +477,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 .await;
             return;
         }
-        let (content, _) = match stream_upstream(resp, &tx, no_think).await {
+        let (content, _) = match stream_upstream(resp, &tx, no_think, false).await {
             Ok(v) => v,
             Err(e) => {
                 let _ = tx.send(Out::Error(e)).await;
@@ -460,7 +523,8 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 // to output a call array, not prose). For single-call requests
                 // the model uses native FC, so this path is only reached for
                 // plan_len > 1 (or explicit call_only override).
-                let grammar_root = if plan_len > 1 || (opts.call_only && friendly && intent_is_tool)
+                let grammar_root = if !write_completed
+                    && (plan_len > 1 || (call_only && friendly && intent_is_tool))
                 {
                     "call"
                 } else {
@@ -500,6 +564,10 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 body["chat_template_kwargs"] = v;
             }
         }
+
+        // Show the exact system/history/user prompt after prompt-tools flattening
+        // and before sending it to the model.
+        emit_model_prompt(&tx, "AGENT request messages:", &body).await;
 
         // POST to llama-server, retrying with backoff. The host app starts the
         // server just before calling us, so the first attempt can land while it's
@@ -542,19 +610,47 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 budget /= 2;
                 continue;
             }
+            // Tool decoding error: llama-server rejected the model's native FC
+            // output (e.g. empty/incomplete arguments → "unexpected end of JSON
+            // input"). Retry with prompt-tools + strict grammar, which constrains
+            // the model to a flat, schema-valid call format that Q2 models handle
+            // reliably. This is the same recovery the native-empty fallback uses,
+            // but triggered by an HTTP error rather than an empty response.
+            if !prompt_tools
+                && (txt.contains("could not decode tool") || txt.contains("unexpected end of JSON"))
+            {
+                prompt_tools = true;
+                strict = true;
+                no_think = false;
+                continue;
+            }
             let _ = tx
                 .send(Out::Error(format!("upstream HTTP {status}: {txt}")))
                 .await;
             return;
         }
 
-        let (mut content, mut tool_calls) = match stream_upstream(resp, &tx, no_think).await {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = tx.send(Out::Error(e)).await;
-                return;
-            }
-        };
+        let suppress_text_call = call_only && friendly && intent_is_tool;
+        let (mut content, mut tool_calls) =
+            match stream_upstream(resp, &tx, no_think, suppress_text_call).await {
+                Ok(v) => v,
+                Err(e) => {
+                    // Tool decoding error in the stream: llama-server emitted an
+                    // error mid-stream (e.g. "could not decode tool: unexpected end
+                    // of JSON input"). Retry with prompt-tools + strict grammar.
+                    if !prompt_tools
+                        && (e.contains("could not decode tool")
+                            || e.contains("unexpected end of JSON"))
+                    {
+                        prompt_tools = true;
+                        strict = true;
+                        no_think = false;
+                        continue;
+                    }
+                    let _ = tx.send(Out::Error(e)).await;
+                    return;
+                }
+            };
 
         // Recover a tool call the server left as plain text.
         if tool_calls.is_empty() && !no_tools {
@@ -564,12 +660,28 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             }
         }
 
-        // Native-empty fallback: when native FC returns NOTHING, retry with
-        // prompt-tools + strict grammar. Recovers text-gen failures without
-        // forcing strict on every case. Per openharn paper: this is the
-        // "native-empty fallback" that bridges the gap between native FC
-        // (good for single calls) and prompt-tools (needed for multi-call).
-        if !prompt_tools && tool_calls.is_empty() && has_tools && plan_len <= 1 {
+        // A failed call-only text generation is not a valid chat response. It
+        // may have filled a long string argument until the token cap without
+        // closing JSON. Retry once using the model's native function-call mode.
+        if call_only && !forced_native_retry && tool_calls.is_empty() {
+            forced_native_retry = true;
+            prompt_tools = false;
+            strict = false;
+            no_think = false;
+            continue;
+        }
+
+        // Native-empty fallback: retry only when native FC returns genuinely
+        // nothing while tools are still enabled. A normal prose completion such
+        // as "Done" must end the turn; retrying it with a forced tool grammar
+        // would turn that completion into another write/search loop.
+        if !no_tools
+            && !prompt_tools
+            && tool_calls.is_empty()
+            && content.trim().is_empty()
+            && has_tools
+            && plan_len <= 1
+        {
             let fb_wire = harness::flatten_for_prompt_tools(&history, &effective_schemas);
             let mut fb_body = json!({
                 "model": model,
@@ -586,6 +698,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                     fb_body["chat_template_kwargs"] = v;
                 }
             }
+            emit_model_prompt(&tx, "PROMPT-TOOLS fallback request messages:", &fb_body).await;
             let fb_resp = {
                 let mut attempt = 0u32;
                 const MAX_ATTEMPTS: u32 = 6;
@@ -598,7 +711,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                     }
                     match rq.send().await {
                         Ok(r) => break Some(r),
-                        Err(e) => {
+                        Err(_e) => {
                             attempt += 1;
                             if attempt >= MAX_ATTEMPTS {
                                 break None;
@@ -610,10 +723,11 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             };
             if let Some(fb_resp) = fb_resp {
                 if fb_resp.status().is_success() {
-                    let (fb_content, fb_calls) = match stream_upstream(fb_resp, &tx, false).await {
-                        Ok(v) => v,
-                        Err(_) => (String::new(), Vec::new()),
-                    };
+                    let (fb_content, fb_calls) =
+                        match stream_upstream(fb_resp, &tx, false, true).await {
+                            Ok(v) => v,
+                            Err(_) => (String::new(), Vec::new()),
+                        };
                     if !fb_calls.is_empty() {
                         tool_calls = fb_calls;
                         content = fb_content;
@@ -694,6 +808,18 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             } else {
                 harness::TOOL_RESULT_CAP
             };
+            // Once a note write succeeds, unlock normal text generation for the
+            // next turn. The model receives this result and decides whether it is
+            // done instead of the harness treating the write as an implicit end.
+            if name == "write_note" && result.starts_with("Note successfully updated") {
+                write_completed = true;
+                call_only = false;
+                // The following model turn is a completion acknowledgement, not
+                // another tool-planning pass.
+                no_tools = true;
+                prompt_tools = false;
+                strict = false;
+            }
             let capped = harness::cap_result_with(result.clone(), cap);
             let _ = tx
                 .send(Out::ToolResult {
@@ -710,6 +836,17 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             }));
         }
         total_calls += tool_calls.len();
+
+        if write_completed {
+            // Let the model provide its own visible completion, but make the
+            // completed operation unambiguous and remove every tool so it cannot
+            // rewrite or echo the note as a further action.
+            history.push(json!({
+                "role": "user",
+                "content": "The note write succeeded and the requested operation is complete. Reply with exactly: Done. Do not repeat the note content or call any tool."
+            }));
+            continue;
+        }
 
         if repeats >= 3 {
             let _ = tx
@@ -790,6 +927,7 @@ async fn stream_upstream(
     resp: reqwest::Response,
     tx: &mpsc::Sender<Out>,
     no_think: bool,
+    suppress_text_call: bool,
 ) -> Result<(String, Vec<Value>), String> {
     let mut content = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -825,6 +963,17 @@ async fn stream_upstream(
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            // Detect error events in the streaming response. llama-server may
+            // emit an error mid-stream when it fails to decode a tool call
+            // (e.g. "could not decode tool: unexpected end of JSON input").
+            // Previously these were silently skipped (no "choices" key),
+            // causing the model to appear to return nothing and triggering
+            // the native-empty fallback — which adds a wasted round-trip.
+            // Surface the error so the caller can retry with prompt-tools.
+            if let Some(err) = chunk_json.get("error") {
+                let msg = err.as_str().unwrap_or("unknown error");
+                return Err(format!("completion parsing error: {msg}"));
+            }
             // llama-server emits usage on the final chunk when include_usage is set.
             // Always forward the event even when values are zero so the frontend can
             // distinguish "no usage data yet" from "usage is zero".
@@ -849,8 +998,41 @@ async fn stream_upstream(
             if let Some(t) = delta["content"].as_str() {
                 if !t.is_empty() {
                     content.push_str(t);
-                    if !suppress_prose {
+                    if !suppress_prose && !suppress_text_call {
                         let _ = tx.send(Out::ChatChunk(t.to_string())).await;
+                    }
+
+                    // Prompt-tools calls arrive as ordinary content rather than
+                    // OpenAI `tool_calls` deltas. For a forced write we know the
+                    // call is destined for write_note, so extract its incomplete
+                    // JSON string and stream the note body into the editor now;
+                    // the parsed call still performs the authoritative save later.
+                    if suppress_text_call && content.contains("write_note") && !note_cancelled {
+                        let mode = harness::partial_field(&content, "mode");
+                        let find = harness::partial_field(&content, "find");
+                        let m = mode.as_deref().unwrap_or("");
+                        let is_append = m == "append";
+                        let explicit_replace = m == "replace";
+                        let has_find = find.map(|f| !f.trim().is_empty()).unwrap_or(false);
+                        let snippet = has_find && !explicit_replace && !is_append;
+                        let is_replace = !is_append && !snippet;
+                        if !is_replace {
+                            if note_streaming {
+                                let _ = tx.send(Out::NoteCancel).await;
+                                note_streaming = false;
+                            }
+                            note_cancelled = true;
+                        } else if let Some(c) = harness::extract_partial_content(&content) {
+                            if !note_streaming {
+                                let _ = tx.send(Out::NoteStart).await;
+                                note_streaming = true;
+                            }
+                            if c.len() > note_emitted.len() && c.starts_with(&note_emitted) {
+                                let new_part = c[note_emitted.len()..].to_string();
+                                let _ = tx.send(Out::NoteDelta(new_part)).await;
+                                note_emitted = c;
+                            }
+                        }
                     }
                 }
             }

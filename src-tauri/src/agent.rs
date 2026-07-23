@@ -47,11 +47,12 @@ const WEB_FETCH_LIMIT: usize = 6_000;
 /// still passed separately via `tool_specs` on every request.
 pub const MYELIN_PREAMBLE: &str = concat!(
     "You are the assistant inside Myelin, a local notes app, powered by an open model running locally on the user's own machine. If asked what or who you are, identify yourself as Myelin's built-in AI assistant — do not claim to be proprietary or commercial software. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n",
-    "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call the write_note tool with the full result in `content`. The ONLY way to change the note is that tool call: never describe the edit, print the new note text, or type \"write_note\" or \"content:\" in your chat reply.\n",
+    "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call the write_note tool with the full result in `content`. The ONLY way to change the note is that tool call: never describe the edit, print the new note text, or type \"write_note\" or \"content:\" in your chat reply. When the user says \"write this\", \"put that in the note\", or similar, and a preceding assistant message contains the requested draft, copy that exact draft into `content` — do not compose a substitute or a different version. Preserve its Markdown exactly, including headings, blank lines, lists, bold text, and line breaks.\n",
     "- Write real Markdown: a heading line starts with \"# \" (a hash then a space), \"## \" for a sub-heading; bullets start with \"- \". \"**bold**\" is NOT a heading.\n",
     "- When editing, reproduce every line that should stay and change only what was asked. Never return an empty or much-shorter note unless the user explicitly asked to clear or shorten it.\n",
     "- When the user asks you to write what you found, researched, learned, or understood, put the ACTUAL information into the note as a finished, self-contained note — the real facts, perspectives, and details (use what you found in the conversation plus what you reliably know about the topic). NEVER write a question, an offer to do more (e.g. \"Would you like me to fetch the full text?\"), or a promise to act later (e.g. \"I will now fetch...\") as the note's content — the note holds finished information, not conversation. If you lack some detail, still write the best complete note you can from what you know rather than asking or deferring.\n",
-    "- Use fetch_web_page only when the user gives a URL or web address (like example.com), and search_notes only when the user asks about your other notes. For greetings or general questions, just reply briefly — do not read, search, or fetch.\n\n",
+    "- The currently open note is the default target for every request, including reading, explaining, finding, and editing. Its full text is already in this prompt: answer questions about it directly and never use search_notes or read_note for it. Use search_notes or read_note only when the user explicitly asks about another note, their other notes, or the workspace; use fetch_web_page only when the user explicitly gives or asks to visit a URL/web address. For greetings or general questions, just reply briefly — do not read, search, or fetch.\n",
+    "- ROUTING: In this notes app, every instruction, command, or action request is work to perform, never chat. Unless it explicitly names another target, perform it on the open note with the appropriate tool. Note operations include creating, writing, drafting, generating, adding, appending, inserting, replacing, updating, editing, revising, rewriting, correcting, improving, expanding, shortening, summarizing, translating, organizing, restructuring, moving, merging, splitting, titling, renaming, making lists, formatting, converting Markdown, cleaning up, removing, deleting, clearing, restoring, reading, finding, counting, searching, fetching, browsing, looking up, and researching. For example, \"write this on the note\", \"add a poem\", \"put that in the note\", \"summarize this\", \"make this a list\", \"change the title\", and \"remove this paragraph\" all require a tool call. Only a request for a direct answer, explanation, capability description, greeting, thanks, small talk, opinion, or general knowledge is chat; answer it directly and never modify, read, search, or fetch notes unless it explicitly asks you to do so.\n\n",
     "Worked examples show only the editing style — the resulting note text you must pass as write_note's `content` (always via the tool call, never printed in chat):\n\n",
     "Example 1\n",
     "NOTE:\n**Cars**\nThey have engines.\n",
@@ -603,6 +604,18 @@ pub fn note_write_intent(message: &str) -> bool {
     }
 
     false
+}
+
+/// Whether the request can be completed by one write to the currently open note.
+/// Requests that need information first must use the normal multi-tool loop so it
+/// can search/read/fetch before producing the final `write_note` call.
+pub fn is_pure_note_write_request(message: &str) -> bool {
+    note_write_intent(message)
+        && !wants_search(message)
+        && !wants_fetch(message)
+        && !wants_other_notes(message)
+        && !wants_documents(message)
+        && !wants_find(message)
 }
 
 /// Pure greeting / acknowledgement vocabulary. If the whole message is made of
@@ -2858,6 +2871,20 @@ mod tests {
         ] {
             assert!(note_write_intent(msg), "expected write intent: {msg}");
         }
+    }
+
+    #[test]
+    fn pure_note_write_excludes_research_workflows() {
+        assert!(is_pure_note_write_request("write a poem on the note"));
+        assert!(!is_pure_note_write_request(
+            "search the web for Rust news and write the findings in my note"
+        ));
+        assert!(!is_pure_note_write_request(
+            "read my other notes about Rust, then write a summary in this note"
+        ));
+        assert!(!is_pure_note_write_request(
+            "fetch https://example.com and add a summary to the note"
+        ));
     }
 
     #[test]

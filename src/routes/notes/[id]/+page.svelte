@@ -32,6 +32,13 @@
 	import DOMPurify from 'dompurify';
 
 	let requireToolApproval = $state(false);
+	type AiInteractionMode = 'auto' | 'chat' | 'operation';
+	let aiInteractionMode = $state<AiInteractionMode>('auto');
+
+	function setAiInteractionMode(mode: AiInteractionMode) {
+		aiInteractionMode = mode;
+		localStorage.setItem('myelin_ai_interaction_mode', mode);
+	}
 
 	let note = $state<NoteDocument | null>(null);
 	let draftBody = $state('');
@@ -60,7 +67,8 @@
 
 	// Debug window state for AI performance metrics.
 	let showDebugWindow = $state(false);
-	type DebugTraceEntry = { time: number; msg: string; kind: 'send' | 'gen' | 'tool' | 'tool_result' | 'note' | 'done' | 'error' | 'config' | 'usage' | 'done'; };
+	type DebugTraceEntry = { time: number; msg: string; kind: string };
+	let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
 	let debugInfo = $state<{
 		requestStart: number | null;
 		firstChunk: number | null;
@@ -1587,6 +1595,33 @@
 		}
 	}
 
+	function stopChat() {
+		if (!isChatStreaming) return;
+		void invoke('cancel_ai');
+	}
+
+	function toggleDebugWindow() {
+		showDebugWindow = !showDebugWindow;
+		if (showDebugWindow && !debugInfo) {
+			const saved = [...chatMessages]
+				.reverse()
+				.find((message) => message.role === 'assistant' && message.debugTrace?.length)?.debugTrace;
+			if (saved?.length) {
+				debugInfo = {
+					requestStart: saved[0].time,
+					firstChunk: null,
+					done: null,
+					promptTokens: 0,
+					completionTokens: 0,
+					totalTokens: 0,
+					turnCount: 0,
+					replyChars: 0,
+					trace: saved
+				};
+			}
+		}
+	}
+
 	async function sendChatMessage() {
 		if (!note || !chatInput.trim() || isChatStreaming) return;
 		const userText = chatInput.trim();
@@ -1599,6 +1634,10 @@
 		if (!note) return;
 		const requestId = Date.now().toString();
 		const startTime = Date.now();
+		pendingDebugTrace = [
+			{ time: startTime, msg: 'Request sent', kind: 'send' },
+			{ time: startTime, msg: `Composer mode: ${aiInteractionMode}`, kind: 'config' }
+		];
 		if (showDebugWindow) {
 			debugInfo = {
 				requestStart: startTime,
@@ -1609,7 +1648,7 @@
 				totalTokens: 0,
 				turnCount: 0,
 				replyChars: 0,
-				trace: [{ time: startTime, msg: 'Request sent', kind: 'send' }]
+				trace: pendingDebugTrace
 			};
 		}
 		const snapshot: NoteSnapshot = {
@@ -1632,7 +1671,8 @@
 				// so several edits can target the same span.
 				selection: armedSelection
 					? { text: armedSelection.text, before: armedSelection.before, after: armedSelection.after }
-					: null
+					: null,
+				interactionMode: aiInteractionMode
 			});
 		} catch (e) {
 			console.error('AI Error:', e);
@@ -1713,7 +1753,7 @@
 
 	function finishStreamingChatMessage(tools: { name: string; details: string }[] = []) {
 		chatMessages = chatMessages.map((m) => {
-			if (m.isStreaming) return { ...m, isStreaming: false, endTime: Date.now() };
+			if (m.isStreaming) return { ...m, isStreaming: false, endTime: Date.now(), debugTrace: pendingDebugTrace };
 			return m;
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
@@ -2172,6 +2212,14 @@
 		// Warm llama-server (safety net — the server is already started at app
 		// boot and stays warm for the entire session).
 		noteOpened();
+		const savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
+		if (
+			savedInteractionMode === 'auto' ||
+			savedInteractionMode === 'chat' ||
+			savedInteractionMode === 'operation'
+		) {
+			aiInteractionMode = savedInteractionMode;
+		}
 
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
@@ -2382,15 +2430,22 @@
 
 		            // Debug event: model behavior, tool calls, grammar config, etc.
 		            let unlistenDebug: UnlistenFn | undefined;
-		            listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
-		                if (showDebugWindow && debugInfo) {
-		                    const entry = { time: Date.now(), msg: `[${event.payload.kind}] ${event.payload.msg}`, kind: event.payload.kind as any };
-		                    debugInfo = {
-		                        ...debugInfo,
-		                        trace: [...debugInfo.trace, entry]
-		                    };
-		                }
-		            }).then((fn) => (unlistenDebug = fn));
+		    listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
+		        const entry: DebugTraceEntry = {
+		            time: Date.now(),
+		            msg: `[${event.payload.kind}] ${event.payload.msg}`,
+		            kind: event.payload.kind
+		        };
+		        // Keep every trace even with the panel closed; it is attached to
+		        // the completed assistant turn and persisted in chat history.
+		        pendingDebugTrace = [...pendingDebugTrace, entry];
+		        if (showDebugWindow && debugInfo) {
+		            debugInfo = {
+		                ...debugInfo,
+		                trace: [...debugInfo.trace, entry]
+		            };
+		        }
+		    }).then((fn) => (unlistenDebug = fn));
 
 		            // LaTeX support bundle download progress (first compile only).
 		listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
@@ -2837,9 +2892,9 @@
 													{:else if msg.isApprovalRequest && msg.approvalStatus !== 'approved'}
 														<ChatToolIndicator tool={{ name: (msg.approvalStatus === 'rejected' ? 'Rejected tool: ' : 'Pending tool: ') + msg.approvalTool, details: msg.approvalDetails || '' }} />
 													{:else if msg.role === 'assistant' && msg.content}
-														{@html DOMPurify.sanitize(marked.parse(msg.content) as string, { ADD_TAGS: ['think'] })}
+														<div class="selectable-content">{@html DOMPurify.sanitize(marked.parse(msg.content) as string, { ADD_TAGS: ['think'] })}</div>
 													{:else if msg.content}
-														{msg.content}
+														<span class="selectable-content">{msg.content}</span>
 													{/if}
 													{#if msg.isStreaming && msg.startTime}
 														{#if !msg.content}
@@ -2946,11 +3001,16 @@
 																					</span>
 																				</div>
 																			</div>
-																			<div class="debug-trace" bind:this={debugTraceEl}>
-																				{#each debugInfo.trace as entry, i}
+																			<div class="debug-trace selectable-content" bind:this={debugTraceEl}>
+																				{#each debugInfo.trace as entry}
 																					<div class="trace-entry {entry.kind}">
 																						<span class="trace-time">+{((entry.time - (debugInfo.requestStart ?? entry.time)) / 1000).toFixed(1)}s</span>
-																						{#if entry.kind === 'tool'}
+																						{#if entry.kind === 'model_prompt' || entry.kind === 'intent_prompt'}
+																							<details class="trace-prompt">
+																								<summary>{entry.kind === 'intent_prompt' ? 'Intent classifier prompt' : 'Model request prompt'}</summary>
+																								<pre>{entry.msg}</pre>
+																							</details>
+																						{:else if entry.kind === 'tool'}
 																							<span class="trace-msg trace-tool">🔧 {entry.msg}</span>
 																						{:else if entry.kind === 'tool_result'}
 																							<span class="trace-msg trace-tool-result">✅ {entry.msg}</span>
@@ -2989,6 +3049,11 @@
 										rows="1"
 									></textarea>
 									<div class="prompt-toolbar">
+										<div class="interaction-mode" role="group" aria-label="AI interaction mode">
+											<button type="button" class:active={aiInteractionMode === 'auto'} onclick={() => setAiInteractionMode('auto')} title="Auto: let the model choose chat or an operation">Auto</button>
+											<button type="button" class:active={aiInteractionMode === 'chat'} onclick={() => setAiInteractionMode('chat')} title="Chat: answer, search, or look up information without modifying the note">Chat</button>
+											<button type="button" class:active={aiInteractionMode === 'operation'} onclick={() => setAiInteractionMode('operation')} title="Operation: perform the request on the open note using tools">Operation</button>
+										</div>
 										<button
 											type="button"
 											class="mode-pill"
@@ -2998,10 +3063,10 @@
 												invoke('set_require_tool_approval', { require: requireToolApproval });
 											}}
 											title={requireToolApproval
-												? 'Ask: confirms before each tool action — click for Auto'
-												: 'Auto: edits freely without asking — click to require permission'}
+												? 'Ask: confirms before each tool action — click to allow tool actions'
+												: 'Allow: tool actions run without confirmation — click to ask first'}
 										>
-											{requireToolApproval ? 'Ask' : 'Auto'}
+											{requireToolApproval ? 'Ask' : 'Allow'}
 										</button>
 										<button
 											type="button"
@@ -3029,7 +3094,7 @@
 												type="button"
 												class="prompt-icon-btn debug-btn"
 												class:active={showDebugWindow}
-												onclick={() => (showDebugWindow = !showDebugWindow)}
+												onclick={toggleDebugWindow}
 												title={showDebugWindow ? 'Hide debug window' : 'Show debug window'}
 												aria-label="Toggle debug window"
 											>🐞</button>
@@ -3039,16 +3104,28 @@
 												<circle class="ring-value" cx="18" cy="18" r="15.5" style={`stroke-dasharray:${RING_CIRC};stroke-dashoffset:${ringOffset};stroke:${ringColor};`}></circle>
 											</svg>
 										</div>
-										<button
-											type="button"
-											class="send-btn"
-											onclick={() => { if (chatInput.trim() && !isChatStreaming) sendChatMessage(); }}
-											disabled={!chatInput.trim() || isChatStreaming}
-											aria-label="Send"
-											title={isChatStreaming ? 'Waiting for the current reply to finish…' : 'Send (Enter)'}
-										>
-											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
-										</button>
+										{#if isChatStreaming}
+											<button
+												type="button"
+												class="send-btn stop-btn"
+												onclick={stopChat}
+												aria-label="Stop AI"
+												title="Stop AI generation"
+											>
+												<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+											</button>
+										{:else}
+											<button
+												type="button"
+												class="send-btn"
+												onclick={() => { if (chatInput.trim()) sendChatMessage(); }}
+												disabled={!chatInput.trim()}
+												aria-label="Send"
+												title="Send (Enter)"
+											>
+												<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+											</button>
+										{/if}
 									</div>
 								</div>
 							</div>
@@ -4966,6 +5043,32 @@
 		flex: 1;
 	}
 
+	.interaction-mode {
+		display: inline-flex;
+		height: 28px;
+		padding: 2px;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-md);
+		background: var(--neutral-950);
+	}
+	.interaction-mode button {
+		padding: 0 7px;
+		border: 0;
+		border-radius: calc(var(--radius-md) - 2px);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 0.68rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.interaction-mode button:hover {
+		color: var(--text-primary);
+	}
+	.interaction-mode button.active {
+		background: var(--accent-100);
+		color: var(--bg-base);
+	}
+
 	/* Shared control baseline: same height, calm by default, theme-consistent. */
 	.mode-pill,
 	.prompt-icon-btn,
@@ -5201,6 +5304,27 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.trace-prompt {
+		flex: 1;
+		min-width: 0;
+		color: var(--accent-100, #93c5fd);
+	}
+	.trace-prompt summary {
+		cursor: pointer;
+		user-select: none;
+	}
+	.trace-prompt pre {
+		margin: 0.4rem 0 0;
+		padding: 0.45rem;
+		max-height: 18rem;
+		overflow: auto;
+		white-space: pre-wrap;
+		word-break: break-word;
+		font: inherit;
+		color: var(--text-secondary, #aaa);
+		background: var(--bg-raised, rgba(0, 0, 0, 0.2));
+		border-radius: 3px;
 	}
 	.trace-entry.tool .trace-msg {
 		color: var(--accent-200, #6ea8fe);

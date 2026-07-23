@@ -310,7 +310,7 @@ pub fn flatten_for_prompt_tools(history: &[Value], schemas: &Value) -> Vec<Value
 
 // ---- GBNF grammar (strict mode) -------------------------------------------
 
-const GRAMMAR_TAIL: &str = r#"string ::= "\"" ( [^"\\] | "\\" . )* "\""
+const GRAMMAR_TAIL: &str = r#"string ::= "\"" ( [^"\\\n\r\t] | "\\" . )* "\""
 integer ::= "-"? [0-9]+
 "#;
 

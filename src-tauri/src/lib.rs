@@ -427,6 +427,11 @@ async fn ask_ai(
 }
 
 #[tauri::command]
+fn cancel_ai(state: State<'_, AppState>) {
+    state.request_ai_cancel();
+}
+
+#[tauri::command]
 async fn ask_ai_stream(
     state: State<'_, AppState>,
     note_id: String,
@@ -434,9 +439,17 @@ async fn ask_ai_stream(
     request_id: String,
     selection: Option<crate::agent::SelectionArg>,
     doc_type: Option<String>,
+    interaction_mode: Option<String>,
 ) -> Result<(), String> {
     state
-        .ask_ai_stream(note_id, question, request_id, selection, doc_type)
+        .ask_ai_stream(
+            note_id,
+            question,
+            request_id,
+            selection,
+            doc_type,
+            interaction_mode,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -693,6 +706,7 @@ pub fn run() {
             summarise_note,
             ask_ai,
             ask_ai_stream,
+            cancel_ai,
             save_chat_history,
             get_note_history,
             get_note_version,

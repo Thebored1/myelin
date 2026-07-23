@@ -43,6 +43,16 @@ pub struct ChatTool {
     pub details: String,
 }
 
+/// Debug trace entry attached to an assistant chat turn. Persisted with the
+/// note's chat history so tool-gate decisions remain inspectable after reload.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDebugEntry {
+    pub time: i64,
+    pub msg: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
@@ -56,6 +66,8 @@ pub struct ChatMessage {
     pub error: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatTool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_trace: Option<Vec<ChatDebugEntry>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<NoteSnapshot>,
 }

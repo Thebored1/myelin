@@ -235,6 +235,8 @@ pub async fn run_chat(
     tools: Vec<Value>,
     request_id: &str,
     note_id: &str,
+    use_model_tool_gate: bool,
+    intent_override: Option<bool>,
 ) -> Result<Vec<Value>> {
     let base = ensure_sidecar(state).await?;
 
@@ -260,8 +262,14 @@ pub async fn run_chat(
     let prefers_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
     let mut options = json!({
-        "strict": oh.strict,
-        "prompt_tools": oh.prompt_tools,
+        "strict": oh.strict || use_model_tool_gate,
+        "prompt_tools": oh.prompt_tools || use_model_tool_gate,
+        // Pass the model-profile hint through so the per-request policy in
+        // agent.rs can force prompt-tools + strict for single-call requests
+        // when the model's native FC is unreliable at low quants (e.g. LFM2
+        // at Q2_K_XL). The user's explicit settings still win via oh.strict /
+        // oh.prompt_tools above.
+        "prefers_prompt_tools": prefers_prompt_tools,
         // friendly_results enables the relevance gate (separate LLM YES/NO
         // call to decide whether any tool applies before generating a call).
         // This recovers the irrelevance category. Off by default; the per-request
@@ -271,12 +279,30 @@ pub async fn run_chat(
         "narrow": oh.narrow,
         "slm": oh.slm,
     });
-    // Allow 3 calls per turn — the model may split content across calls
-    // (write_note overwrites, so only the last non-empty call matters).
-    // User override via settings wins.
-    options["max_calls"] = json!(oh
-        .max_calls
-        .unwrap_or(if prefers_prompt_tools { 3 } else { 1 }));
+    // Use OpenHarn's model-based CHAT/TOOL relevance gate whenever tools are
+    // available. CHAT skips the tool loop; TOOL enters its call-only grammar.
+    // Do not pre-classify here: short or ambiguous messages are precisely where
+    // brittle host-side keyword routing caused false writes.
+    if use_model_tool_gate {
+        options["call_only"] = json!(true);
+        options["friendly_results"] = json!(true);
+    }
+    // An explicit composer mode overrides model classification for this turn:
+    // true is Operation mode; false is reserved for callers that retain tools
+    // but want a direct response.
+    if let Some(is_tool) = intent_override {
+        options["intent_is_tool"] = json!(is_tool);
+    }
+    // Operation mode executes one action per model turn. This gives the model the
+    // real result before it chooses the next action or emits its own completion,
+    // preventing several competing write_note calls from one generation.
+    // Auto mode keeps the existing configured/default limit.
+    options["max_calls"] = json!(if intent_override == Some(true) {
+        1
+    } else {
+        oh.max_calls
+            .unwrap_or(if prefers_prompt_tools { 3 } else { 1 })
+    });
     if let Some(tm) = oh.total_max {
         options["total_max"] = json!(tm);
     }
@@ -320,6 +346,9 @@ pub async fn run_chat(
         "base_url": llama_base,
         "model": config.model_name(),
         "temperature": config.temperature,
+        // A forced write is a structured call, not an open-ended chat answer.
+        // Keep malformed generations bounded so a weak model cannot flood the UI.
+        "max_tokens": if use_model_tool_gate { 768 } else { 4096 },
         "max_turns": config.max_turns.max(1) as usize,
         "messages": messages,
         "tools": tools,
@@ -363,9 +392,10 @@ pub async fn run_chat(
     emit_debug(
         "config",
         &format!(
-            "options: strict={}, prompt_tools={}, call_only={}, intent_is_tool={}, max_calls={}",
+            "options: strict={}, prompt_tools={}, prefers_prompt_tools={}, call_only={}, intent_is_tool={}, max_calls={}",
             options["strict"],
             options["prompt_tools"],
+            options["prefers_prompt_tools"],
             options["call_only"],
             options
                 .get("intent_is_tool")
@@ -385,6 +415,10 @@ pub async fn run_chat(
     }
 
     while let Some(chunk) = stream.next().await {
+        if state.ai_cancel_requested() {
+            emit_debug("cancel", "generation stopped by user");
+            break;
+        }
         let bytes = chunk.map_err(|e| anyhow!("sidecar stream error: {e}"))?;
         buf.extend_from_slice(&bytes);
 
@@ -475,6 +509,13 @@ pub async fn run_chat(
                                 } else {
                                     emit_debug("done", "turn complete (chat)");
                                 }
+                            }
+                        }
+                        "debug" => {
+                            if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                                let kind = v["kind"].as_str().unwrap_or("sidecar");
+                                let message = v["message"].as_str().unwrap_or("");
+                                emit_debug(kind, message);
                             }
                         }
                         "usage" => {

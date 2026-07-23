@@ -409,6 +409,7 @@ pub(crate) struct InnerState {
     /// Steers the prompt (LaTeX/notebook vs Markdown) and notebook-aware tools.
     current_doc_type: Mutex<Option<String>>,
     current_note_id: Mutex<Option<String>>,
+    cancel_ai: std::sync::atomic::AtomicBool,
     require_tool_approval: std::sync::atomic::AtomicBool,
     /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
     /// tools (e.g. the write guard) can read it without re-resolving the config.
@@ -471,6 +472,12 @@ pub struct OpenharnSettings {
     pub no_think: bool,
     pub narrow: bool,
     pub slm: bool,
+    /// Enable the relevance gate (model-based TOOL/CHAT classification) before
+    /// entering the tool loop. Recovers the irrelevance category. Off by
+    /// default; the per-request policy handles abstention via harness_decompose
+    /// (plan_len==0 → NO_TOOL).
+    #[serde(default)]
+    pub friendly_results: bool,
     pub max_calls: Option<usize>,
     pub total_max: Option<usize>,
     pub tool_timeout_secs: Option<u64>,
@@ -572,6 +579,7 @@ impl AppState {
                 current_selection: Mutex::new(None),
                 current_doc_type: Mutex::new(None),
                 current_note_id: Mutex::new(None),
+                cancel_ai: std::sync::atomic::AtomicBool::new(false),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
                 tool_gating: std::sync::atomic::AtomicBool::new(false),
@@ -631,6 +639,18 @@ impl AppState {
             .lock()
             .clone()
             .unwrap_or_else(|| "md".to_string())
+    }
+
+    pub fn request_ai_cancel(&self) {
+        self.inner
+            .cancel_ai
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn ai_cancel_requested(&self) -> bool {
+        self.inner
+            .cancel_ai
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn set_current_note_id(&self, note_id: impl Into<String>) {
@@ -1210,7 +1230,16 @@ impl AppState {
             &path,
             &updated,
         )?;
-        crate::git_history::commit_changes(&workspace, &format!("Update note: {}", updated.title))?;
+        // Version history is useful, but it must never make a successfully
+        // persisted Markdown edit look like a failed note write. A workspace may
+        // have an inaccessible Git index or an unsupported file type; keep the
+        // note and report history failure only in the application log.
+        if let Err(error) = crate::git_history::commit_changes(
+            &workspace,
+            &format!("Update note: {}", updated.title),
+        ) {
+            log::warn!("saved note but could not create Git history entry: {error}");
+        }
 
         let state = self.clone();
         let workspace_clone = workspace.clone();
@@ -1583,8 +1612,18 @@ impl AppState {
         request_id: String,
         selection: Option<crate::agent::SelectionArg>,
         doc_type: Option<String>,
+        interaction_mode: Option<String>,
     ) -> Result<()> {
+        let interaction_mode = match interaction_mode.as_deref() {
+            None | Some("auto") => "auto",
+            Some("chat") => "chat",
+            Some("operation") => "operation",
+            Some(mode) => return Err(anyhow!("unknown AI interaction mode: {mode}")),
+        };
         self.reset_chat_tools();
+        self.inner
+            .cancel_ai
+            .store(false, std::sync::atomic::Ordering::Release);
         self.set_latest_chat_question(question.clone());
         // An armed selection is only meaningful if it carries text; ignore empties.
         let selection = selection.filter(|s| !s.text.trim().is_empty());
@@ -1695,12 +1734,33 @@ impl AppState {
                     &question,
                     true,
                     edit_thread,
-                    config.tool_gating,
+                    // An explicit Operation-mode choice must not be narrowed by
+                    // the optional heuristic gate; the user already chose work.
+                    config.tool_gating && interaction_mode != "operation",
                     config.deterministic_tools,
                 )
             } else {
                 Vec::new()
             };
+
+            // Chat mode is non-mutating, not tool-free. The open note is already
+            // in context; other-note tools remain available only when the user
+            // explicitly asks about another note or the workspace.
+            if interaction_mode == "chat" {
+                tools.retain(|tool| {
+                    matches!(
+                        tool["function"]["name"].as_str(),
+                        Some(
+                            "read_note"
+                                | "fetch_web_page"
+                                | "web_search"
+                                | "search_documents"
+                                | "find_in_note"
+                                | "search_notes"
+                        )
+                    )
+                });
+            }
 
             // A notebook is edited cell-by-cell via edit_notebook, never with the
             // text tools (write_note/format_note/find_in_note would mangle the JSON).
@@ -1747,7 +1807,17 @@ impl AppState {
             // reuses the KV prefix across requests (the note stays constant
             // between turns when no tool modifies it). Only the short question
             // at the end needs re-evaluation each turn.
-            let system_content = format!("{}\n\n{}", crate::agent::MYELIN_PREAMBLE, context);
+            let mode_instruction = match interaction_mode {
+                "chat" => "COMPOSER MODE: Chat. The open note is already included below and is the default target for every read or question. Answer questions about it directly; do not call search_notes or read_note unless the user explicitly asks about another note, their notes/workspace, or names a different note. Use web/document retrieval only when explicitly requested. Never modify the note for this turn.",
+                "operation" => "COMPOSER MODE: Operation. Perform the user's requested operation using the appropriate tool. The open note is the default target.",
+                _ => "COMPOSER MODE: Auto. Decide whether the user needs a direct answer or an operation.",
+            };
+            let system_content = format!(
+                "{}\n\n{}\n\n{}",
+                crate::agent::MYELIN_PREAMBLE,
+                mode_instruction,
+                context
+            );
             let mut messages = vec![serde_json::json!({
                 "role": "system",
                 "content": system_content,
@@ -1761,17 +1831,18 @@ impl AppState {
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             log::info!(
-                "[ask_ai_stream] tools_offered={} gating={} deterministic={} edit_thread={} supports_tools={}",
-                tool_names.join(","), config.tool_gating, config.deterministic_tools, edit_thread, config.supports_tools.unwrap_or(false)
+                "[ask_ai_stream] mode={} tools_offered={} gating={} deterministic={} edit_thread={} supports_tools={}",
+                interaction_mode, tool_names.join(","), config.tool_gating && interaction_mode != "operation", config.deterministic_tools, edit_thread, config.supports_tools.unwrap_or(false)
             );
             let _ = self.handle.emit(
                 "ai://debug_event",
                 serde_json::json!({
                     "kind": "config",
                     "msg": format!(
-                        "tools: {}, gate={}, determ={}, edit={}, tools_supported={}, prompt_tools={}",
+                        "mode={}, tools: {}, gate={}, determ={}, edit={}, tools_supported={}, prompt_tools={}",
+                        interaction_mode,
                         tool_names.join(", "),
-                        config.tool_gating,
+                        config.tool_gating && interaction_mode != "operation",
                         config.deterministic_tools,
                         edit_thread,
                         config.supports_tools.unwrap_or(false),
@@ -1781,8 +1852,24 @@ impl AppState {
                 }),
             );
 
-            let final_messages =
-                crate::sidecar::run_chat(self, &config, messages, tools, &request_id, &nid).await?;
+            let use_model_tool_gate = !tools.is_empty();
+            let final_messages = crate::sidecar::run_chat(
+                self,
+                &config,
+                messages,
+                tools,
+                &request_id,
+                &nid,
+                // Let the sidecar's model-based CHAT/TOOL classifier decide
+                // whether tools apply. This avoids brittle keyword routing for
+                // short chat messages and ambiguous phrasing.
+                use_model_tool_gate,
+                match interaction_mode {
+                    "operation" => Some(true),
+                    _ => None,
+                },
+            )
+            .await?;
 
             // Persist the conversation for the next turn: the raw question
             // (no note context — it's in the system message and rebuilt fresh
