@@ -266,10 +266,10 @@ pub async fn run_chat(
     let prefers_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
     let mut options = json!({
-        // These legacy global toggles are intentionally ignored. The model
-        // profile and per-request policy choose the format for each turn.
-        "strict": false,
-        "prompt_tools": false,
+        // Explicit tool intent uses the model's reliable structured prompt
+        // format. Chat intent stays prose-only; Auto keeps the profile policy.
+        "strict": intent_is_tool == Some(true),
+        "prompt_tools": intent_is_tool == Some(true),
         // Pass the model-profile hint through so the per-request policy in
         // agent.rs can force prompt-tools + strict for single-call requests
         // when the model's native FC is unreliable at low quants (e.g. LFM2
@@ -285,6 +285,9 @@ pub async fn run_chat(
         // but it must not run the model classifier: intent_is_tool below is
         // authoritative and already computed by Myelin.
         "friendly_results": intent_is_tool.is_some(),
+        // In prompt-tools mode this selects the call-only grammar, preventing
+        // an explicit Operation request from being answered as prose.
+        "call_only": intent_is_tool == Some(true),
         "no_think": false,
         "narrow": false,
         "slm": false,
