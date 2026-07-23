@@ -285,9 +285,6 @@ pub async fn run_chat(
         // but it must not run the model classifier: intent_is_tool below is
         // authoritative and already computed by Myelin.
         "friendly_results": intent_is_tool.is_some(),
-        // An explicit TOOL intent (Operation mode or a deterministic Auto
-        // route) must produce a tool call rather than a prose answer.
-        "call_only": intent_is_tool == Some(true),
         "no_think": false,
         "narrow": false,
         "slm": false,
@@ -320,11 +317,7 @@ pub async fn run_chat(
     // by the user's explicit OpenharnSettings. The config provides per-model
     // baked-in values; the user's oh.* settings win when non-empty.
     let tool_choice = config.tool_choice.as_ref().map(|v| v.trim().to_string());
-    if intent_is_tool == Some(true) {
-        // Operation requests are explicit actions; native tool-capable models
-        // must not be allowed to satisfy them with ordinary prose.
-        options["tool_choice"] = json!("required");
-    } else if let Some(tc) = tool_choice {
+    if let Some(tc) = tool_choice {
         options["tool_choice"] = json!(tc);
     }
     let template_kwargs = config.template_kwargs.clone();
