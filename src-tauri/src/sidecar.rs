@@ -235,8 +235,11 @@ pub async fn run_chat(
     tools: Vec<Value>,
     request_id: &str,
     note_id: &str,
-    use_model_tool_gate: bool,
-    intent_override: Option<bool>,
+    // Host-computed deterministic TOOL/CHAT intent:
+    //   Some(true)  → enter the tool loop (user wants an operation)
+    //   Some(false) → skip the tool loop and answer directly (chat mode)
+    //   None        → let the sidecar's per-request policy decide
+    intent_is_tool: Option<bool>,
     chat_mode: bool,
 ) -> Result<Vec<Value>> {
     let base = ensure_sidecar(state).await?;
@@ -263,43 +266,41 @@ pub async fn run_chat(
     let prefers_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
 
     let mut options = json!({
-        "strict": oh.strict || use_model_tool_gate,
-        "prompt_tools": oh.prompt_tools || use_model_tool_gate,
+        // These legacy global toggles are intentionally ignored. The model
+        // profile and per-request policy choose the format for each turn.
+        "strict": false,
+        "prompt_tools": false,
         // Pass the model-profile hint through so the per-request policy in
         // agent.rs can force prompt-tools + strict for single-call requests
         // when the model's native FC is unreliable at low quants (e.g. LFM2
         // at Q2_K_XL). The user's explicit settings still win via oh.strict /
         // oh.prompt_tools above.
         "prefers_prompt_tools": prefers_prompt_tools,
-        // friendly_results enables the relevance gate (separate LLM YES/NO
-        // call to decide whether any tool applies before generating a call).
-        // This recovers the irrelevance category. Off by default; the per-request
-        // policy handles abstention via harness_decompose (plan_len==0 → NO_TOOL).
-        "friendly_results": oh.friendly_results,
-        "no_think": oh.no_think,
-        "narrow": oh.narrow,
-        "slm": oh.slm,
+        // Model-based intent classification is skipped when the host provides
+        // a deterministic intent_is_tool below. When intent_is_tool is None,
+        // the sidecar defaults to friendly_results=false and enters the tool
+        // loop normally — the per-request policy handles abstention via
+        // harness_decompose (plan_len==0 → NO_TOOL).
+        // An explicit host intent must use the friendly CHAT/TOOL branches,
+        // but it must not run the model classifier: intent_is_tool below is
+        // authoritative and already computed by Myelin.
+        "friendly_results": intent_is_tool.is_some(),
+        "no_think": false,
+        "narrow": false,
+        "slm": false,
         "chat_mode": chat_mode,
     });
-    // Use OpenHarn's model-based CHAT/TOOL relevance gate whenever tools are
-    // available. CHAT skips the tool loop; TOOL enters its call-only grammar.
-    // Do not pre-classify here: short or ambiguous messages are precisely where
-    // brittle host-side keyword routing caused false writes.
-    if use_model_tool_gate {
-        options["call_only"] = json!(true);
-        options["friendly_results"] = json!(true);
-    }
-    // An explicit composer mode overrides model classification for this turn:
-    // true is Operation mode; false is reserved for callers that retain tools
-    // but want a direct response.
-    if let Some(is_tool) = intent_override {
+    // Host-computed deterministic intent overrides model-based classification.
+    // The sidecar uses this value directly and skips the separate model
+    // inference that used to cost ~8s per turn.
+    if let Some(is_tool) = intent_is_tool {
         options["intent_is_tool"] = json!(is_tool);
     }
     // Operation mode executes one action per model turn. This gives the model the
     // real result before it chooses the next action or emits its own completion,
     // preventing several competing write_note calls from one generation.
     // Auto mode keeps the existing configured/default limit.
-    options["max_calls"] = json!(if intent_override == Some(true) {
+    options["max_calls"] = json!(if intent_is_tool == Some(true) {
         1
     } else {
         oh.max_calls
@@ -311,34 +312,15 @@ pub async fn run_chat(
     if let Some(tt) = oh.tool_timeout_secs {
         options["tool_timeout_secs"] = json!(tt);
     }
-    if let Some(subset) = oh.tool_subset.as_ref() {
-        let tools: Vec<String> = subset
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !tools.is_empty() {
-            options["tool_subset"] = json!(tools);
-        }
-    }
+
     // Model-profile defaults (from bundled model-profiles.json), overridable
     // by the user's explicit OpenharnSettings. The config provides per-model
     // baked-in values; the user's oh.* settings win when non-empty.
-    let tool_choice = oh
-        .tool_choice
-        .as_ref()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| config.tool_choice.as_ref())
-        .map(|v| v.trim().to_string());
+    let tool_choice = config.tool_choice.as_ref().map(|v| v.trim().to_string());
     if let Some(tc) = tool_choice {
         options["tool_choice"] = json!(tc);
     }
-    let template_kwargs = oh
-        .template_kwargs
-        .as_ref()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| config.template_kwargs.as_ref())
-        .map(|v| v.trim().to_string());
+    let template_kwargs = config.template_kwargs.clone();
     if let Some(kw) = template_kwargs {
         options["template_kwargs"] = json!(kw);
     }
@@ -348,9 +330,7 @@ pub async fn run_chat(
         "base_url": llama_base,
         "model": config.model_name(),
         "temperature": config.temperature,
-        // A forced write is a structured call, not an open-ended chat answer.
-        // Keep malformed generations bounded so a weak model cannot flood the UI.
-        "max_tokens": if use_model_tool_gate { 768 } else { 4096 },
+        "max_tokens": 4096,
         "max_turns": config.max_turns.max(1) as usize,
         "messages": messages,
         "tools": tools,
@@ -394,14 +374,13 @@ pub async fn run_chat(
     emit_debug(
         "config",
         &format!(
-            "options: strict={}, prompt_tools={}, prefers_prompt_tools={}, call_only={}, intent_is_tool={}, max_calls={}",
+            "options: strict={}, prompt_tools={}, prefers_prompt_tools={}, intent_is_tool={}, max_calls={}",
             options["strict"],
             options["prompt_tools"],
             options["prefers_prompt_tools"],
-            options["call_only"],
             options
                 .get("intent_is_tool")
-                .map_or(false, |v| v.as_bool().unwrap_or(false)),
+                .map_or("null".to_string(), |v| v.to_string()),
             options
                 .get("max_calls")
                 .map_or(1, |v| v.as_u64().unwrap_or(1))

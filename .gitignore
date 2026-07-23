@@ -9,6 +9,8 @@ node_modules
 /build
 /src-tauri/target
 /src-tauri/openharn-myelin/target
+/src-tauri/resources/bin/openharn-myelin
+/src-tauri/target/release/bundle
 *.db
 *.tmp
 

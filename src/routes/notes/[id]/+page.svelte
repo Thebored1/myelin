@@ -17,16 +17,9 @@
 	import { noteOpened, noteClosed } from '$lib/llamaWarm';
 	import { showSidebarToggle, noteSidebarOpen } from '$lib/stores';
 	import { theme } from '$lib/theme';
-	import Vditor from 'vditor';
-	import 'vditor/dist/index.css';
-	import 'mathlive';
+	import type Vditor from 'vditor';
 	import 'mathlive/fonts.css';
-	import katex from 'katex';
-	import PdfViewer from '$lib/components/PdfViewer.svelte';
-	import EpubViewer from '$lib/components/EpubViewer.svelte';
-	import HtmlViewer from '$lib/components/HtmlViewer.svelte';
-	import TexEditor from '$lib/components/TexEditor.svelte';
-	import IpynbEditor from '$lib/components/IpynbEditor.svelte';
+
 	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
@@ -41,6 +34,7 @@
 	}
 
 	let note = $state<NoteDocument | null>(null);
+	let isLoadingNote = $state(false);
 	let draftBody = $state('');
 	let draftTitle = $state('');
 	let draftTags = $state('');
@@ -51,7 +45,9 @@
 	// .tex live-preview state.
 	let texAutoCompile = $state(false);
 	let texCompiling = $state(false);
-	let texDiagnostics = $state<{ line: number; message: string; severity?: 'error' | 'warning' }[]>([]);
+	let texDiagnostics = $state<{ line: number; message: string; severity?: 'error' | 'warning' }[]>(
+		[]
+	);
 	let texAutoTimer: ReturnType<typeof setTimeout> | undefined;
 
 	let activeSidebarTab = $state<'info' | 'chat' | 'versions'>('info');
@@ -156,6 +152,11 @@
 	let relatedNotes = $state<NoteSummary[]>([]);
 	let vditorContainer: HTMLElement | undefined = $state();
 	let vditorInstance: Vditor | null = null;
+	let VditorConstructor = $state<any>(null);
+	let vditorLoading = false;
+		// Keep the note render separate from the editor/tool bundle. The bundle is
+		// requested only after the note has had a chance to paint.
+		let toolsReady = $state(false);
 	let fullscreenShortcut = $state('Esc');
 	let noteAnimationTimer: ReturnType<typeof setTimeout> | undefined;
 	// Live note streaming (real token-by-token writes from the backend).
@@ -168,6 +169,13 @@
 	let isSourceMaterial = $state(false);
 	let sourceMaterialType = $state<'pdf' | 'epub' | 'html' | null>(null);
 	let workingDocType = $state<'md' | 'tex' | 'ipynb'>('md');
+	// Optional document viewers/editors stay out of the Markdown cold path. They
+	// are loaded only when the current document actually needs them.
+	let PdfViewerComponent = $state<any>(null);
+	let EpubViewerComponent = $state<any>(null);
+	let HtmlViewerComponent = $state<any>(null);
+	let TexEditorComponent = $state<any>(null);
+	let IpynbEditorComponent = $state<any>(null);
 	let activeSourceId = $state<string | null>(null);
 	let activeSourceBytes = $state<Uint8Array | null>(null);
 	let scratchpadSavedId = $state<string | null>(null);
@@ -367,7 +375,9 @@
 	// visible even when focus leaves the editor (e.g. while typing in the prompt).
 	// It's independent of the browser's native selection, which collapses on blur.
 	const HIGHLIGHT_SUPPORTED =
-		typeof CSS !== 'undefined' && !!(CSS as any).highlights && typeof (window as any).Highlight !== 'undefined';
+		typeof CSS !== 'undefined' &&
+		!!(CSS as any).highlights &&
+		typeof (window as any).Highlight !== 'undefined';
 
 	function setArmedHighlight(range: Range | null) {
 		if (!HIGHLIGHT_SUPPORTED) return;
@@ -545,14 +555,32 @@
 
 	let mathDialog: HTMLDialogElement | undefined = $state();
 	let mathValue = $state('');
+	let mathLiveReady = $state(false);
+	let katexRenderer = $state<any>(null);
 	// Non-empty when the current formula won't render in KaTeX (the engine Vditor
 	// uses for $$…$$). Surfaced in the dialog so a bad formula isn't inserted only
 	// to silently fail — or render as a red error — later in the note.
 	let mathError = $state('');
 
 	function mathToKatex(raw: string): string {
-		// MathLive emits \placeholder tokens KaTeX doesn't know; map them to a box.
+		// MathLive emits \\placeholder tokens KaTeX doesn't know; map them to a box.
 		return raw.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
+	}
+
+	async function openMathDialog() {
+		try {
+			const [{ default: katex }, _mathlive] = await Promise.all([
+				import('katex'),
+				import('mathlive')
+			]);
+			katexRenderer = katex;
+			mathLiveReady = true;
+			mathValue = '';
+			mathDialog?.showModal();
+		} catch (error) {
+			console.error('Failed to load math support', error);
+			message = 'Could not load math support.';
+		}
 	}
 
 	$effect(() => {
@@ -561,8 +589,12 @@
 			mathError = '';
 			return;
 		}
+		if (!katexRenderer) {
+			mathError = '';
+			return;
+		}
 		try {
-			katex.renderToString(mathToKatex(v), { throwOnError: true, displayMode: true });
+			katexRenderer.renderToString(mathToKatex(v), { throwOnError: true, displayMode: true });
 			mathError = '';
 		} catch (e: any) {
 			mathError = e?.message ? String(e.message) : 'KaTeX cannot render this formula.';
@@ -633,6 +665,34 @@
 	let shouldInitEditor = $derived(note !== null && (!isSourceMaterial || showAttachedNote));
 	let loadedRouteNoteId = $state('');
 
+	$effect(() => {
+		if (sourceMaterialType === 'pdf' && !PdfViewerComponent) {
+			import('$lib/components/PdfViewer.svelte').then(({ default: component }) => {
+				PdfViewerComponent = component;
+			});
+		}
+		if (sourceMaterialType === 'epub' && !EpubViewerComponent) {
+			import('$lib/components/EpubViewer.svelte').then(({ default: component }) => {
+				EpubViewerComponent = component;
+			});
+		}
+		if (sourceMaterialType === 'html' && !HtmlViewerComponent) {
+			import('$lib/components/HtmlViewer.svelte').then(({ default: component }) => {
+				HtmlViewerComponent = component;
+			});
+		}
+		if (workingDocType === 'tex' && !TexEditorComponent) {
+			import('$lib/components/TexEditor.svelte').then(({ default: component }) => {
+				TexEditorComponent = component;
+			});
+		}
+		if (workingDocType === 'ipynb' && !IpynbEditorComponent) {
+			import('$lib/components/IpynbEditor.svelte').then(({ default: component }) => {
+				IpynbEditorComponent = component;
+			});
+		}
+	});
+
 	function appendToNoteBody(content: string) {
 		showAttachedNote = true;
 		if (vditorInstance) {
@@ -665,7 +725,10 @@
 	function insertMath() {
 		if (vditorInstance && mathValue) {
 			const cleanMath = mathToKatex(mathValue);
-			if (mathError && !confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)) {
+			if (
+				mathError &&
+				!confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)
+			) {
 				return; // keep the dialog open so the user can fix it
 			}
 			vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
@@ -710,7 +773,10 @@
 		try {
 			const parsed = JSON.parse(raw);
 			if (parsed && Array.isArray(parsed.diagnostics)) {
-				return { message: parsed.message ?? 'LaTeX compilation failed', diagnostics: parsed.diagnostics };
+				return {
+					message: parsed.message ?? 'LaTeX compilation failed',
+					diagnostics: parsed.diagnostics
+				};
 			}
 		} catch {
 			/* not structured — show the raw string */
@@ -756,7 +822,7 @@
 			// Need a tiny delay to ensure previewNoteContainer is bound
 			setTimeout(() => {
 				if (previewNoteContainer && previewNoteTarget) {
-					Vditor.preview(previewNoteContainer, previewNoteTarget.body, {
+					VditorConstructor?.preview(previewNoteContainer, previewNoteTarget.body, {
 						mode: 'dark',
 						theme: { current: 'dark' }
 					});
@@ -1092,70 +1158,104 @@
 	}
 
 	async function loadCurrentNote(noteId: string) {
+		isLoadingNote = true;
+		toolsReady = false;
 		destroyEditorInstance();
 		activeSourceBytes = null;
 		activeSourceId = null;
 		showAttachedNote = false;
+		note = null;
 
-		note = await invoke<NoteDocument>('load_note', { noteId });
-		const loadedNote = note;
-		chatMessages = loadedNote.chatHistory || [];
-		noteHistory = [];
-		versionPreviewContent = null;
-		activeSidebarTab = 'info';
+		try {
+			note = await invoke<NoteDocument>('load_note', { noteId });
+			const loadedNote = note;
+			chatMessages = loadedNote.chatHistory || [];
+			noteHistory = [];
+			versionPreviewContent = null;
+			activeSidebarTab = 'info';
 
-		const relLower = loadedNote.relativePath.toLowerCase();
-		isSourceMaterial = relLower.endsWith('.pdf') || relLower.endsWith('.epub') || relLower.endsWith('.html');
-		
-		if (isSourceMaterial) {
-			sourceMaterialType = relLower.endsWith('.pdf') ? 'pdf' : relLower.endsWith('.epub') ? 'epub' : 'html';
-			workingDocType = 'md';
-			
-			const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
-			const existingScratchpad =
-				allNotes
-					.filter((candidate) => candidate.sourcePdf === loadedNote.id)
-					.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
-			draftTitle = loadedNote.title;
-			draftBody = existingScratchpad?.body ?? '';
-			draftTags = loadedNote.tags.join(', ');
-			activeSourceId = loadedNote.id;
-			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.id });
-			activeSourceBytes = new Uint8Array(bytes);
-			scratchpadSavedId = existingScratchpad?.id ?? null;
-			showAttachedNote = draftBody.trim().length > 0;
-		} else {
-			workingDocType = relLower.endsWith('.tex') ? 'tex' : relLower.endsWith('.ipynb') ? 'ipynb' : 'md';
-			
-			draftTitle = loadedNote.title;
-			draftBody = loadedNote.body;
-			draftTags = loadedNote.tags.join(', ');
+			const relLower = loadedNote.relativePath.toLowerCase();
+			isSourceMaterial =
+				relLower.endsWith('.pdf') || relLower.endsWith('.epub') || relLower.endsWith('.html');
 
-			if (loadedNote.sourcePdf) {
-				activeSourceId = loadedNote.sourcePdf;
-				const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.sourcePdf });
+			if (isSourceMaterial) {
+				sourceMaterialType = relLower.endsWith('.pdf')
+					? 'pdf'
+					: relLower.endsWith('.epub')
+						? 'epub'
+						: 'html';
+				workingDocType = 'md';
+
+				const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
+				const existingScratchpad =
+					allNotes
+						.filter((candidate) => candidate.sourcePdf === loadedNote.id)
+						.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+				draftTitle = loadedNote.title;
+				draftBody = existingScratchpad?.body ?? '';
+				draftTags = loadedNote.tags.join(', ');
+				activeSourceId = loadedNote.id;
+				const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.id });
 				activeSourceBytes = new Uint8Array(bytes);
+				scratchpadSavedId = existingScratchpad?.id ?? null;
 				showAttachedNote = draftBody.trim().length > 0;
-				// If a working document has a sourcePdf, we need to know its type. 
-				// We'll query it or assume it's PDF for now unless we know otherwise.
-				// (We can load it to find out)
-				try {
-					const sourceDoc = await invoke<NoteDocument>('load_note', { noteId: loadedNote.sourcePdf });
-					const sRel = sourceDoc.relativePath.toLowerCase();
-					sourceMaterialType = sRel.endsWith('.pdf') ? 'pdf' : sRel.endsWith('.epub') ? 'epub' : 'html';
-				} catch (e) {
-					sourceMaterialType = 'pdf'; // fallback
-				}
 			} else {
-				activeSourceId = null;
-				activeSourceBytes = null;
-				sourceMaterialType = null;
-				showAttachedNote = true;
+				workingDocType = relLower.endsWith('.tex')
+					? 'tex'
+					: relLower.endsWith('.ipynb')
+						? 'ipynb'
+						: 'md';
+
+				draftTitle = loadedNote.title;
+				draftBody = loadedNote.body;
+				draftTags = loadedNote.tags.join(', ');
+
+				if (loadedNote.sourcePdf) {
+					activeSourceId = loadedNote.sourcePdf;
+					const bytes = await invoke<ArrayBuffer>('read_pdf_binary', {
+						noteId: loadedNote.sourcePdf
+					});
+					activeSourceBytes = new Uint8Array(bytes);
+					showAttachedNote = draftBody.trim().length > 0;
+					// If a working document has a sourcePdf, we need to know its type.
+					// We'll query it or assume it's PDF for now unless we know otherwise.
+					// (We can load it to find out)
+					try {
+						const sourceDoc = await invoke<NoteDocument>('load_note', {
+							noteId: loadedNote.sourcePdf
+						});
+						const sRel = sourceDoc.relativePath.toLowerCase();
+						sourceMaterialType = sRel.endsWith('.pdf')
+							? 'pdf'
+							: sRel.endsWith('.epub')
+								? 'epub'
+								: 'html';
+					} catch (e) {
+						sourceMaterialType = 'pdf'; // fallback
+					}
+				} else {
+					activeSourceId = null;
+					activeSourceBytes = null;
+					sourceMaterialType = null;
+					showAttachedNote = true;
+				}
+			}
+
+			message = '';
+			void fetchRelatedNotes();
+		} catch (error) {
+			console.error('Failed to open note', error);
+			message = 'Could not open this note.';
+		} finally {
+			isLoadingNote = false;
+			// Let the note and its surrounding layout paint before requesting the
+			// comparatively heavy editor/tool bundle.
+			if (note) {
+				await tick();
+				await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+				toolsReady = true;
 			}
 		}
-
-		message = '';
-		void fetchRelatedNotes();
 	}
 
 	async function refreshCurrentNoteFromBackend(skipEditorUpdate = false) {
@@ -1222,10 +1322,10 @@
 	}
 
 	function initVditor() {
-		if (!vditorContainer || vditorInstance) return;
+		if (!VditorConstructor || !vditorContainer || vditorInstance) return;
 
 		try {
-			vditorInstance = new Vditor(vditorContainer, {
+			vditorInstance = new VditorConstructor(vditorContainer, {
 				value: draftBody,
 				placeholder: isSourceMaterial ? 'Scratchpad for notes...' : 'Start typing here...',
 				mode: 'ir',
@@ -1276,8 +1376,7 @@
 						tip: 'MathLive Editor',
 						icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"></path></svg>',
 						click: () => {
-							mathValue = '';
-							mathDialog?.showModal();
+							void openMathDialog();
 						}
 					},
 					{
@@ -1378,7 +1477,7 @@
 						if (redoBtn) redoBtn.click();
 					}
 				},
-				input: (value) => {
+				input: (value: string) => {
 					draftBody = value;
 					triggerAutoSave();
 				}
@@ -1389,7 +1488,21 @@
 	}
 
 	$effect(() => {
-		if (shouldInitEditor && vditorContainer && !vditorInstance) {
+		if (!toolsReady || !shouldInitEditor || !vditorContainer || vditorInstance) return;
+		if (!VditorConstructor && !vditorLoading) {
+			vditorLoading = true;
+			Promise.all([import('vditor'), import('vditor/dist/index.css')])
+				.then(([{ default: component }]) => {
+					VditorConstructor = component;
+					vditorLoading = false;
+					initVditor();
+				})
+				.catch((error) => {
+					vditorLoading = false;
+					message = 'Could not load the Markdown editor.';
+					console.error('Failed to load Vditor', error);
+				});
+		} else if (VditorConstructor) {
 			initVditor();
 		}
 	});
@@ -1657,8 +1770,14 @@
 			draftTags: draftTags,
 			chatLength: chatMessages.length
 		};
-		chatMessages = [...chatMessages, { role: 'user', content: userText, snapshotId: requestId, snapshot }];
-		chatMessages = [...chatMessages, { role: 'assistant', content: '', isStreaming: true, startTime }];
+		chatMessages = [
+			...chatMessages,
+			{ role: 'user', content: userText, snapshotId: requestId, snapshot }
+		];
+		chatMessages = [
+			...chatMessages,
+			{ role: 'assistant', content: '', isStreaming: true, startTime }
+		];
 		setTimeout(() => scrollChatToBottom(true), 50);
 		try {
 			await invoke('ask_ai_stream', {
@@ -1670,7 +1789,11 @@
 				// Armed selection persists across sends (cleared only by the ✕ pill),
 				// so several edits can target the same span.
 				selection: armedSelection
-					? { text: armedSelection.text, before: armedSelection.before, after: armedSelection.after }
+					? {
+							text: armedSelection.text,
+							before: armedSelection.before,
+							after: armedSelection.after
+						}
 					: null,
 				interactionMode: aiInteractionMode
 			});
@@ -1753,7 +1876,8 @@
 
 	function finishStreamingChatMessage(tools: { name: string; details: string }[] = []) {
 		chatMessages = chatMessages.map((m) => {
-			if (m.isStreaming) return { ...m, isStreaming: false, endTime: Date.now(), debugTrace: pendingDebugTrace };
+			if (m.isStreaming)
+				return { ...m, isStreaming: false, endTime: Date.now(), debugTrace: pendingDebugTrace };
 			return m;
 		});
 		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
@@ -1787,7 +1911,14 @@
 		cancelNoteStream();
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming) {
-				return { ...m, isStreaming: false, error: true, content: m.content + '\n\n' + errorMsg, tools, endTime: Date.now() };
+				return {
+					...m,
+					isStreaming: false,
+					error: true,
+					content: m.content + '\n\n' + errorMsg,
+					tools,
+					endTime: Date.now()
+				};
 			}
 			return m;
 		});
@@ -2041,7 +2172,10 @@
 		attachPdfDialog?.close();
 		isBusy = true;
 		try {
-			const pdfNote = await invoke<NoteDocument>('import_pdf_file', { filePath, notebook: openNoteNotebook() });
+			const pdfNote = await invoke<NoteDocument>('import_pdf_file', {
+				filePath,
+				notebook: openNoteNotebook()
+			});
 			await attachPdf(pdfNote);
 		} catch (err) {
 			message = `Failed to import PDF: ${err}`;
@@ -2266,7 +2400,14 @@
 				if (showDebugWindow && debugInfo) {
 					debugInfo = {
 						...debugInfo,
-						trace: [...debugInfo.trace, { time: Date.now(), msg: `Note written (${content.length}c ${mode})`, kind: 'note' as const }]
+						trace: [
+							...debugInfo.trace,
+							{
+								time: Date.now(),
+								msg: `Note written (${content.length}c ${mode})`,
+								kind: 'note' as const
+							}
+						]
 					};
 				}
 				// If a selection was armed, re-select the modified span once the
@@ -2281,7 +2422,10 @@
 			if (showDebugWindow && debugInfo) {
 				debugInfo = {
 					...debugInfo,
-					trace: [...debugInfo.trace, { time: Date.now(), msg: 'Streaming note to editor…', kind: 'note' as const }]
+					trace: [
+						...debugInfo.trace,
+						{ time: Date.now(), msg: 'Streaming note to editor…', kind: 'note' as const }
+					]
 				};
 			}
 		}).then((fn) => (unlistenNoteStreamStart = fn));
@@ -2301,7 +2445,10 @@
 			if (showDebugWindow && debugInfo) {
 				debugInfo = {
 					...debugInfo,
-					trace: [...debugInfo.trace, { time: Date.now(), msg: `Tool: ${event.payload.tool}`, kind: 'tool' as const }]
+					trace: [
+						...debugInfo.trace,
+						{ time: Date.now(), msg: `Tool: ${event.payload.tool}`, kind: 'tool' as const }
+					]
 				};
 			}
 			chatMessages = chatMessages.map((m) => {
@@ -2380,7 +2527,10 @@
 					debugInfo = {
 						...debugInfo,
 						firstChunk: Date.now(),
-						trace: [...debugInfo.trace, { time: Date.now(), msg: 'Generation started', kind: 'gen' as const }]
+						trace: [
+							...debugInfo.trace,
+							{ time: Date.now(), msg: 'Generation started', kind: 'gen' as const }
+						]
 					};
 				}
 				debugInfo = { ...debugInfo, replyChars: debugInfo.replyChars + event.payload.delta.length };
@@ -2401,19 +2551,21 @@
 			}
 		).then((fn) => (unlistenDone = fn));
 
-		listen<{ requestId: string; promptTokens: number; completionTokens: number; totalTokens: number }>(
-			'ai://chat_usage',
-			(event) => {
-				if (showDebugWindow && debugInfo) {
-					debugInfo = {
-						...debugInfo,
-						promptTokens: event.payload.promptTokens,
-						completionTokens: event.payload.completionTokens,
-						totalTokens: event.payload.totalTokens
-					};
-				}
+		listen<{
+			requestId: string;
+			promptTokens: number;
+			completionTokens: number;
+			totalTokens: number;
+		}>('ai://chat_usage', (event) => {
+			if (showDebugWindow && debugInfo) {
+				debugInfo = {
+					...debugInfo,
+					promptTokens: event.payload.promptTokens,
+					completionTokens: event.payload.completionTokens,
+					totalTokens: event.payload.totalTokens
+				};
 			}
-		).then((fn) => (unlistenUsage = fn));
+		}).then((fn) => (unlistenUsage = fn));
 
 		listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>(
 			'ai://chat_error',
@@ -2422,32 +2574,35 @@
 				if (showDebugWindow && debugInfo) {
 					debugInfo = {
 						...debugInfo,
-						trace: [...debugInfo.trace, { time: Date.now(), msg: `Error: ${event.payload.message}`, kind: 'error' as const }]
+						trace: [
+							...debugInfo.trace,
+							{ time: Date.now(), msg: `Error: ${event.payload.message}`, kind: 'error' as const }
+						]
 					};
 				}
 			}
-		            ).then((fn) => (unlistenError = fn));
+		).then((fn) => (unlistenError = fn));
 
-		            // Debug event: model behavior, tool calls, grammar config, etc.
-		            let unlistenDebug: UnlistenFn | undefined;
-		    listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
-		        const entry: DebugTraceEntry = {
-		            time: Date.now(),
-		            msg: `[${event.payload.kind}] ${event.payload.msg}`,
-		            kind: event.payload.kind
-		        };
-		        // Keep every trace even with the panel closed; it is attached to
-		        // the completed assistant turn and persisted in chat history.
-		        pendingDebugTrace = [...pendingDebugTrace, entry];
-		        if (showDebugWindow && debugInfo) {
-		            debugInfo = {
-		                ...debugInfo,
-		                trace: [...debugInfo.trace, entry]
-		            };
-		        }
-		    }).then((fn) => (unlistenDebug = fn));
+		// Debug event: model behavior, tool calls, grammar config, etc.
+		let unlistenDebug: UnlistenFn | undefined;
+		listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
+			const entry: DebugTraceEntry = {
+				time: Date.now(),
+				msg: `[${event.payload.kind}] ${event.payload.msg}`,
+				kind: event.payload.kind
+			};
+			// Keep every trace even with the panel closed; it is attached to
+			// the completed assistant turn and persisted in chat history.
+			pendingDebugTrace = [...pendingDebugTrace, entry];
+			if (showDebugWindow && debugInfo) {
+				debugInfo = {
+					...debugInfo,
+					trace: [...debugInfo.trace, entry]
+				};
+			}
+		}).then((fn) => (unlistenDebug = fn));
 
-		            // LaTeX support bundle download progress (first compile only).
+		// LaTeX support bundle download progress (first compile only).
 		listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
 			const p = event.payload;
 			const mb = ((p.bytes ?? 0) / (1024 * 1024)).toFixed(1);
@@ -2557,12 +2712,7 @@
 >
 	<header class="editor-header">
 		<div class="header-copy">
-			<button
-				class="back-link"
-				onclick={goBack}
-				aria-label="Go back"
-				title="Go back"
-			>
+			<button class="back-link" onclick={goBack} aria-label="Go back" title="Go back">
 				<svg
 					viewBox="0 0 24 24"
 					width="20"
@@ -2619,40 +2769,86 @@
 		</div>
 	</header>
 
+	{#if isLoadingNote}
+		<div class="note-loading" role="status" aria-live="polite">
+			<svg
+				class="note-loading-spinner"
+				viewBox="0 0 24 24"
+				width="18"
+				height="18"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+			>
+				<path d="M21 12a9 9 0 1 1-6.219-8.56" />
+			</svg>
+			<span>Opening note…</span>
+		</div>
+	{/if}
+
 	<div
 		class="main-layout"
 		class:split-layout={activeSourceBytes !== null && showAttachedNote}
 		bind:this={mainLayoutEl}
 	>
 		{#if activeSourceBytes}
-			<section class="pdf-pane" class:tex-pane={workingDocType === 'tex'} style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}">
+			<section
+				class="pdf-pane"
+				class:tex-pane={workingDocType === 'tex'}
+				style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}"
+			>
 				{#if workingDocType === 'tex'}
 					<div class="tex-pane-badge">PDF preview</div>
 				{/if}
-				{#if sourceMaterialType === 'pdf'}
-					<PdfViewer
+				{#if sourceMaterialType === 'pdf' && PdfViewerComponent}
+					<PdfViewerComponent
 						pdfBytes={activeSourceBytes}
 						annotations={note?.annotations || []}
 						onQuote={handlePdfQuote}
 						onAnnotationsChange={handleAnnotationsChange}
 						onImageExtract={handleImageExtract}
-						onClosePdf={workingDocType === 'tex' ? closeTexPreview : ((activeSourceBytes !== null && showAttachedNote) ? requestDetachPdf : undefined)}
+						onClosePdf={workingDocType === 'tex'
+							? closeTexPreview
+							: activeSourceBytes !== null && showAttachedNote
+								? requestDetachPdf
+								: undefined}
 						onAttachNote={() => {
 							showAttachedNote = true;
 							setTimeout(() => initVditor(), 100);
 						}}
 						showAttachButton={!showAttachedNote}
 					/>
-				{:else if sourceMaterialType === 'epub'}
-					<EpubViewer epubBytes={activeSourceBytes} />
+				{:else if sourceMaterialType === 'pdf'}
+					<div class="viewer-loading">Loading PDF viewer…</div>
+				{:else if sourceMaterialType === 'epub' && EpubViewerComponent}
+					<EpubViewerComponent epubBytes={activeSourceBytes} />
 					{#if !showAttachedNote}
-						<button style="position: absolute; top: 10px; right: 10px;" class="primary" onclick={() => { showAttachedNote = true; setTimeout(() => initVditor(), 100); }}>Attach Note</button>
+						<button
+							style="position: absolute; top: 10px; right: 10px;"
+							class="primary"
+							onclick={() => {
+								showAttachedNote = true;
+								setTimeout(() => initVditor(), 100);
+							}}>Attach Note</button
+						>
+					{/if}
+				{:else if sourceMaterialType === 'epub'}
+					<div class="viewer-loading">Loading EPUB viewer…</div>
+				{:else if sourceMaterialType === 'html' && HtmlViewerComponent}
+					<HtmlViewerComponent htmlBytes={activeSourceBytes} />
+					{#if !showAttachedNote}
+						<button
+							style="position: absolute; top: 10px; right: 10px;"
+							class="primary"
+							onclick={() => {
+								showAttachedNote = true;
+								setTimeout(() => initVditor(), 100);
+							}}>Attach Note</button
+						>
 					{/if}
 				{:else if sourceMaterialType === 'html'}
-					<HtmlViewer htmlBytes={activeSourceBytes} />
-					{#if !showAttachedNote}
-						<button style="position: absolute; top: 10px; right: 10px;" class="primary" onclick={() => { showAttachedNote = true; setTimeout(() => initVditor(), 100); }}>Attach Note</button>
-					{/if}
+					<div class="viewer-loading">Loading document viewer…</div>
 				{/if}
 			</section>
 			{#if showAttachedNote}
@@ -2663,7 +2859,11 @@
 
 		<!-- Main Content Area -->
 		{#if shouldRenderEditor}
-			<section class="main-pane" class:tex-pane={workingDocType === 'tex'} style={activeSourceBytes ? `width: ${100 - splitRatio}%` : ''}>
+			<section
+				class="main-pane"
+				class:tex-pane={workingDocType === 'tex'}
+				style={activeSourceBytes ? `width: ${100 - splitRatio}%` : ''}
+			>
 				<div class="content-area" style="position: relative;">
 					{#if workingDocType === 'md'}
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -2671,6 +2871,7 @@
 						<div
 							bind:this={vditorContainer}
 							class="vditor-wrapper"
+							class:tools-loading={!toolsReady || vditorLoading}
 							class:toolbar-expanded={toolbarExpanded}
 							class:has-pdf-note={!!activeSourceBytes || (!isSourceMaterial && !!note)}
 							onclickcapture={handleVditorClick}
@@ -2682,26 +2883,40 @@
 									e.stopPropagation();
 								}
 							}}
-						></div>
+						>
+							{#if !toolsReady || vditorLoading}
+								<div class="tools-loading-overlay" aria-live="polite">Loading editing tools…</div>
+							{/if}
+						</div>
 						<div class="fullscreen-indicator">
 							Press <span>{fullscreenShortcut}</span> to toggle
 						</div>
-					{:else if workingDocType === 'tex'}
-							<TexEditor
-								value={draftBody}
-								onInput={(val) => { draftBody = val; triggerAutoSave(); }}
-								diagnostics={texDiagnostics}
-								onCompile={() => compileTex({ manual: true })}
-								autoCompile={texAutoCompile}
-								onToggleAuto={() => (texAutoCompile = !texAutoCompile)}
-								busy={isBusy}
-								statusMsg={latexDownloadMsg ?? (texCompiling ? 'Compiling…' : null)}
-							/>
-						{:else if workingDocType === 'ipynb'}
-						<IpynbEditor
+					{:else if workingDocType === 'tex' && TexEditorComponent}
+						<TexEditorComponent
 							value={draftBody}
-							onInput={(val) => { draftBody = val; triggerAutoSave(); }}
+							onInput={(val: string) => {
+								draftBody = val;
+								triggerAutoSave();
+							}}
+							diagnostics={texDiagnostics}
+							onCompile={() => compileTex({ manual: true })}
+							autoCompile={texAutoCompile}
+							onToggleAuto={() => (texAutoCompile = !texAutoCompile)}
+							busy={isBusy}
+							statusMsg={latexDownloadMsg ?? (texCompiling ? 'Compiling…' : null)}
 						/>
+					{:else if workingDocType === 'tex'}
+						<div class="editor-loading">Loading LaTeX editor…</div>
+					{:else if workingDocType === 'ipynb' && IpynbEditorComponent}
+						<IpynbEditorComponent
+							value={draftBody}
+							onInput={(val: string) => {
+								draftBody = val;
+								triggerAutoSave();
+							}}
+						/>
+					{:else}
+						<div class="editor-loading">Loading notebook editor…</div>
 					{/if}
 
 					{#if isSourceMaterial && activeSourceBytes && showAttachedNote}
@@ -2876,7 +3091,11 @@
 								{:else}
 									{#each chatMessages as msg, i}
 										{#if msg.role === 'user' || msg.content || (msg.tools && msg.tools.length > 0) || (msg.isApprovalRequest && msg.approvalStatus !== 'approved') || msg.isStreaming || msg.error}
-											<div class="chat-message {msg.role}" class:tool-only={!msg.content && ((msg.tools && msg.tools.length > 0) || msg.isApprovalRequest)}>
+											<div
+												class="chat-message {msg.role}"
+												class:tool-only={!msg.content &&
+													((msg.tools && msg.tools.length > 0) || msg.isApprovalRequest)}
+											>
 												<div class="chat-bubble" class:error={msg.error}>
 													{#if msg.tools && msg.tools.length > 0}
 														<div class="chat-tools">
@@ -2890,19 +3109,37 @@
 															{msg.content || 'Failed to generate response.'}
 														</span>
 													{:else if msg.isApprovalRequest && msg.approvalStatus !== 'approved'}
-														<ChatToolIndicator tool={{ name: (msg.approvalStatus === 'rejected' ? 'Rejected tool: ' : 'Pending tool: ') + msg.approvalTool, details: msg.approvalDetails || '' }} />
+														<ChatToolIndicator
+															tool={{
+																name:
+																	(msg.approvalStatus === 'rejected'
+																		? 'Rejected tool: '
+																		: 'Pending tool: ') + msg.approvalTool,
+																details: msg.approvalDetails || ''
+															}}
+														/>
 													{:else if msg.role === 'assistant' && msg.content}
-														<div class="selectable-content">{@html DOMPurify.sanitize(marked.parse(msg.content) as string, { ADD_TAGS: ['think'] })}</div>
+														<div class="selectable-content">
+															{@html DOMPurify.sanitize(marked.parse(msg.content) as string, {
+																ADD_TAGS: ['think']
+															})}
+														</div>
 													{:else if msg.content}
 														<span class="selectable-content">{msg.content}</span>
 													{/if}
 													{#if msg.isStreaming && msg.startTime}
 														{#if !msg.content}
-									<span class="chat-working" aria-label="Working"><span></span><span></span><span></span></span>
-								{/if}
-								<span class="chat-time-taken live">{((currentTime - msg.startTime) / 1000).toFixed(1)}s</span>
+															<span class="chat-working" aria-label="Working"
+																><span></span><span></span><span></span></span
+															>
+														{/if}
+														<span class="chat-time-taken live"
+															>{((currentTime - msg.startTime) / 1000).toFixed(1)}s</span
+														>
 													{:else if msg.endTime && msg.startTime}
-														<span class="chat-time-taken">{((msg.endTime - msg.startTime) / 1000).toFixed(1)}s</span>
+														<span class="chat-time-taken"
+															>{((msg.endTime - msg.startTime) / 1000).toFixed(1)}s</span
+														>
 													{/if}
 												</div>
 												{#if msg.role === 'user' && msg.snapshot}
@@ -2928,7 +3165,19 @@
 															aria-label="Copy response"
 														>
 															{#if copiedIdx === i}✓{:else}
-																<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+																<svg
+																	width="13"
+																	height="13"
+																	viewBox="0 0 24 24"
+																	fill="none"
+																	stroke="currentColor"
+																	stroke-width="2"
+																	stroke-linecap="round"
+																	stroke-linejoin="round"
+																	><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path
+																		d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+																	/></svg
+																>
 															{/if}
 														</button>
 													</div>
@@ -2938,97 +3187,133 @@
 									{/each}
 								{/if}
 							</div>
-							
-							{#if chatMessages.find(m => m.isApprovalRequest && m.approvalStatus === 'pending')}
-								{@const pendingReq = chatMessages.find(m => m.isApprovalRequest && m.approvalStatus === 'pending')}
+
+							{#if chatMessages.find((m) => m.isApprovalRequest && m.approvalStatus === 'pending')}
+								{@const pendingReq = chatMessages.find(
+									(m) => m.isApprovalRequest && m.approvalStatus === 'pending'
+								)}
 								<div class="pending-approval-bar">
 									<div class="pending-info">
 										<span class="tool-icon">⚡</span>
-										<span class="pending-text">AI wants to use <strong>{pendingReq?.approvalTool}</strong></span>
+										<span class="pending-text"
+											>AI wants to use <strong>{pendingReq?.approvalTool}</strong></span
+										>
 									</div>
 									<div class="pending-actions">
-										<button class="primary" onclick={() => resolveApproval(pendingReq!.approvalId!, true)}>Approve</button>
-										<button class="secondary" onclick={() => resolveApproval(pendingReq!.approvalId!, false)}>Reject</button>
+										<button
+											class="primary"
+											onclick={() => resolveApproval(pendingReq!.approvalId!, true)}>Approve</button
+										>
+										<button
+											class="secondary"
+											onclick={() => resolveApproval(pendingReq!.approvalId!, false)}>Reject</button
+										>
 									</div>
 								</div>
 							{/if}
-							
+
 							<div class="chat-input-area">
 								{#if showDebugWindow && debugInfo}
 									<div class="debug-window">
-																			<div class="debug-window-header">
-																				<span class="debug-title">AI Debug</span>
-																				<button
-																					class="debug-toggle"
-																					onclick={() => (showDebugWindow = false)}
-																					title="Close debug window"
-																				>×</button>
-																			</div>
-																			<div class="debug-grid">
-																				<div class="debug-row">
-																					<span class="debug-label">Prompt → First token:</span>
-																					<span class="debug-value">{debugInfo.firstChunk && debugInfo.requestStart ? ((debugInfo.firstChunk - debugInfo.requestStart) / 1000).toFixed(2) + 's' : '—'}</span>
-																				</div>
-																				<div class="debug-row">
-																					<span class="debug-label">First token → Done:</span>
-																					<span class="debug-value">{debugInfo.done && debugInfo.firstChunk ? ((debugInfo.done - debugInfo.firstChunk) / 1000).toFixed(2) + 's' : '—'}</span>
-																				</div>
-																				<div class="debug-row">
-																					<span class="debug-label">Total elapsed:</span>
-																					<span class="debug-value">{debugInfo.done ? ((debugInfo.done - (debugInfo.requestStart ?? 0)) / 1000).toFixed(2) + 's' : debugInfo.requestStart ? (((Date.now() - debugInfo.requestStart) / 1000).toFixed(2) + 's (live)') : '—'}</span>
-																				</div>
-																				<div class="debug-row">
-																					<span class="debug-label">Prompt tokens:</span>
-																					<span class="debug-value">{debugInfo.promptTokens || '—'}</span>
-																				</div>
-																				<div class="debug-row">
-																					<span class="debug-label">Completion tokens:</span>
-																					<span class="debug-value">{debugInfo.completionTokens || '—'}</span>
-																				</div>
-																				<div class="debug-row">
-																					<span class="debug-label">Tokens/s (gen):</span>
-																					<span class="debug-value">
-																						{#if debugInfo.done && debugInfo.firstChunk}
-																							{@const genSec = (debugInfo.done - debugInfo.firstChunk) / 1000}
-																							{@const fromServer = debugInfo.completionTokens > 0}
-																							{@const tokCount = fromServer
-																								? debugInfo.completionTokens
-																								: Math.round(debugInfo.replyChars / 4)}
-																							{fromServer ? '' : '~'}{(tokCount / genSec).toFixed(1)}
-																						{:else}
-																							—
-																						{/if}
-																					</span>
-																				</div>
-																			</div>
-																			<div class="debug-trace selectable-content" bind:this={debugTraceEl}>
-																				{#each debugInfo.trace as entry}
-																					<div class="trace-entry {entry.kind}">
-																						<span class="trace-time">+{((entry.time - (debugInfo.requestStart ?? entry.time)) / 1000).toFixed(1)}s</span>
-																						{#if entry.kind === 'model_prompt' || entry.kind === 'intent_prompt'}
-																							<details class="trace-prompt">
-																								<summary>{entry.kind === 'intent_prompt' ? 'Intent classifier prompt' : 'Model request prompt'}</summary>
-																								<pre>{entry.msg}</pre>
-																							</details>
-																						{:else if entry.kind === 'tool'}
-																							<span class="trace-msg trace-tool">🔧 {entry.msg}</span>
-																						{:else if entry.kind === 'tool_result'}
-																							<span class="trace-msg trace-tool-result">✅ {entry.msg}</span>
-																						{:else if entry.kind === 'config'}
-																							<span class="trace-msg trace-config">⚙️ {entry.msg}</span>
-																						{:else if entry.kind === 'error'}
-																							<span class="trace-msg trace-error">❌ {entry.msg}</span>
-																						{:else if entry.kind === 'gen'}
-																							<span class="trace-msg trace-gen">💬 {entry.msg}</span>
-																						{:else if entry.kind === 'done'}
-																							<span class="trace-msg trace-done">✓ {entry.msg}</span>
-																						{:else}
-																							<span class="trace-msg">{entry.msg}</span>
-																						{/if}
-																					</div>
-																				{/each}
-																			</div>
-																		</div>
+										<div class="debug-window-header">
+											<span class="debug-title">AI Debug</span>
+											<button
+												class="debug-toggle"
+												onclick={() => (showDebugWindow = false)}
+												title="Close debug window">×</button
+											>
+										</div>
+										<div class="debug-grid">
+											<div class="debug-row">
+												<span class="debug-label">Prompt → First token:</span>
+												<span class="debug-value"
+													>{debugInfo.firstChunk && debugInfo.requestStart
+														? ((debugInfo.firstChunk - debugInfo.requestStart) / 1000).toFixed(2) +
+															's'
+														: '—'}</span
+												>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">First token → Done:</span>
+												<span class="debug-value"
+													>{debugInfo.done && debugInfo.firstChunk
+														? ((debugInfo.done - debugInfo.firstChunk) / 1000).toFixed(2) + 's'
+														: '—'}</span
+												>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Total elapsed:</span>
+												<span class="debug-value"
+													>{debugInfo.done
+														? ((debugInfo.done - (debugInfo.requestStart ?? 0)) / 1000).toFixed(2) +
+															's'
+														: debugInfo.requestStart
+															? ((Date.now() - debugInfo.requestStart) / 1000).toFixed(2) +
+																's (live)'
+															: '—'}</span
+												>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Prompt tokens:</span>
+												<span class="debug-value">{debugInfo.promptTokens || '—'}</span>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Completion tokens:</span>
+												<span class="debug-value">{debugInfo.completionTokens || '—'}</span>
+											</div>
+											<div class="debug-row">
+												<span class="debug-label">Tokens/s (gen):</span>
+												<span class="debug-value">
+													{#if debugInfo.done && debugInfo.firstChunk}
+														{@const genSec = (debugInfo.done - debugInfo.firstChunk) / 1000}
+														{@const fromServer = debugInfo.completionTokens > 0}
+														{@const tokCount = fromServer
+															? debugInfo.completionTokens
+															: Math.round(debugInfo.replyChars / 4)}
+														{fromServer ? '' : '~'}{(tokCount / genSec).toFixed(1)}
+													{:else}
+														—
+													{/if}
+												</span>
+											</div>
+										</div>
+										<div class="debug-trace selectable-content" bind:this={debugTraceEl}>
+											{#each debugInfo.trace as entry}
+												<div class="trace-entry {entry.kind}">
+													<span class="trace-time"
+														>+{(
+															(entry.time - (debugInfo.requestStart ?? entry.time)) /
+															1000
+														).toFixed(1)}s</span
+													>
+													{#if entry.kind === 'model_prompt' || entry.kind === 'intent_prompt'}
+														<details class="trace-prompt">
+															<summary
+																>{entry.kind === 'intent_prompt'
+																	? 'Intent classifier prompt'
+																	: 'Model request prompt'}</summary
+															>
+															<pre>{entry.msg}</pre>
+														</details>
+													{:else if entry.kind === 'tool'}
+														<span class="trace-msg trace-tool">🔧 {entry.msg}</span>
+													{:else if entry.kind === 'tool_result'}
+														<span class="trace-msg trace-tool-result">✅ {entry.msg}</span>
+													{:else if entry.kind === 'config'}
+														<span class="trace-msg trace-config">⚙️ {entry.msg}</span>
+													{:else if entry.kind === 'error'}
+														<span class="trace-msg trace-error">❌ {entry.msg}</span>
+													{:else if entry.kind === 'gen'}
+														<span class="trace-msg trace-gen">💬 {entry.msg}</span>
+													{:else if entry.kind === 'done'}
+														<span class="trace-msg trace-done">✓ {entry.msg}</span>
+													{:else}
+														<span class="trace-msg">{entry.msg}</span>
+													{/if}
+												</div>
+											{/each}
+										</div>
+									</div>
 								{/if}
 								<div class="prompt-box">
 									<textarea
@@ -3050,9 +3335,26 @@
 									></textarea>
 									<div class="prompt-toolbar">
 										<div class="interaction-mode" role="group" aria-label="AI interaction mode">
-											<button type="button" class:active={aiInteractionMode === 'auto'} onclick={() => setAiInteractionMode('auto')} title="Auto: let the model choose chat or an operation">Auto</button>
-											<button type="button" class:active={aiInteractionMode === 'chat'} onclick={() => setAiInteractionMode('chat')} title="Chat: answer, search, or look up information without modifying the note">Chat</button>
-											<button type="button" class:active={aiInteractionMode === 'operation'} onclick={() => setAiInteractionMode('operation')} title="Operation: perform the request on the open note using tools">Operation</button>
+											<button
+												type="button"
+												class:active={aiInteractionMode === 'auto'}
+												onclick={() => setAiInteractionMode('auto')}
+												title="Auto: let the model choose chat or an operation">Auto</button
+											>
+											<button
+												type="button"
+												class:active={aiInteractionMode === 'chat'}
+												onclick={() => setAiInteractionMode('chat')}
+												title="Chat: answer, search, or look up information without modifying the note"
+												>Chat</button
+											>
+											<button
+												type="button"
+												class:active={aiInteractionMode === 'operation'}
+												onclick={() => setAiInteractionMode('operation')}
+												title="Operation: perform the request on the open note using tools"
+												>Operation</button
+											>
 										</div>
 										<button
 											type="button"
@@ -3075,33 +3377,69 @@
 											title="Attach a file"
 											aria-label="Attach a file"
 										>
-											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+											<svg
+												width="16"
+												height="16"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="2"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												><line x1="12" y1="5" x2="12" y2="19" /><line
+													x1="5"
+													y1="12"
+													x2="19"
+													y2="12"
+												/></svg
+											>
 										</button>
 										{#if armedSelection}
-												<button
-													type="button"
-													class="selection-pill"
-													onclick={() => clearArmedSelection()}
-													title={`The AI will edit only your selection — ${armedSelection.chars} chars, ${armedSelection.words} word${armedSelection.words === 1 ? '' : 's'}. Click to clear.`}
-												>
-													<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/></svg>
-													<span>{armedSelection.chars} sel</span>
-													<span class="sel-x">✕</span>
-												</button>
-											{/if}
-											<div class="prompt-spacer"></div>
 											<button
 												type="button"
-												class="prompt-icon-btn debug-btn"
-												class:active={showDebugWindow}
-												onclick={toggleDebugWindow}
-												title={showDebugWindow ? 'Hide debug window' : 'Show debug window'}
-												aria-label="Toggle debug window"
-											>🐞</button>
-										<div class="context-ring" title={`~${contextPercent}% of the context window used`}>
+												class="selection-pill"
+												onclick={() => clearArmedSelection()}
+												title={`The AI will edit only your selection — ${armedSelection.chars} chars, ${armedSelection.words} word${armedSelection.words === 1 ? '' : 's'}. Click to clear.`}
+											>
+												<svg
+													width="13"
+													height="13"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													><path
+														d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"
+													/></svg
+												>
+												<span>{armedSelection.chars} sel</span>
+												<span class="sel-x">✕</span>
+											</button>
+										{/if}
+										<div class="prompt-spacer"></div>
+										<button
+											type="button"
+											class="prompt-icon-btn debug-btn"
+											class:active={showDebugWindow}
+											onclick={toggleDebugWindow}
+											title={showDebugWindow ? 'Hide debug window' : 'Show debug window'}
+											aria-label="Toggle debug window">🐞</button
+										>
+										<div
+											class="context-ring"
+											title={`~${contextPercent}% of the context window used`}
+										>
 											<svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
 												<circle class="ring-track" cx="18" cy="18" r="15.5"></circle>
-												<circle class="ring-value" cx="18" cy="18" r="15.5" style={`stroke-dasharray:${RING_CIRC};stroke-dashoffset:${ringOffset};stroke:${ringColor};`}></circle>
+												<circle
+													class="ring-value"
+													cx="18"
+													cy="18"
+													r="15.5"
+													style={`stroke-dasharray:${RING_CIRC};stroke-dashoffset:${ringOffset};stroke:${ringColor};`}
+												></circle>
 											</svg>
 										</div>
 										{#if isChatStreaming}
@@ -3112,18 +3450,39 @@
 												aria-label="Stop AI"
 												title="Stop AI generation"
 											>
-												<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+												<svg
+													width="15"
+													height="15"
+													viewBox="0 0 24 24"
+													fill="currentColor"
+													aria-hidden="true"
+													><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg
+												>
 											</button>
 										{:else}
 											<button
 												type="button"
 												class="send-btn"
-												onclick={() => { if (chatInput.trim()) sendChatMessage(); }}
+												onclick={() => {
+													if (chatInput.trim()) sendChatMessage();
+												}}
 												disabled={!chatInput.trim()}
 												aria-label="Send"
 												title="Send (Enter)"
 											>
-												<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+												<svg
+													width="16"
+													height="16"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2.2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													><line x1="12" y1="19" x2="12" y2="5" /><polyline
+														points="5 12 12 5 19 12"
+													/></svg
+												>
 											</button>
 										{/if}
 									</div>
@@ -3190,16 +3549,27 @@
 	</div>
 </dialog>
 
-<dialog bind:this={mathDialog} class="math-dialog" onclose={() => { mathValue = ''; mathError = ''; }}>
+<dialog
+	bind:this={mathDialog}
+	class="math-dialog"
+	onclose={() => {
+		mathValue = '';
+		mathError = '';
+	}}
+>
 	<div class="dialog-content">
 		<h3>Insert Math</h3>
 		<div class="math-container">
-			<svelte:element
-				this={'math-field'}
-				oninput={(e: any) => (mathValue = e.target.value)}
-				style="width: 100%; font-size: 1.5rem; padding: 0.5rem; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-xs);"
-				>{mathValue}</svelte:element
-			>
+			{#if mathLiveReady}
+				<svelte:element
+					this={'math-field'}
+					oninput={(e: any) => (mathValue = e.target.value)}
+					style="width: 100%; font-size: 1.5rem; padding: 0.5rem; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-xs);"
+					>{mathValue}</svelte:element
+				>
+			{:else}
+				<span class="editor-loading">Loading math editor…</span>
+			{/if}
 		</div>
 		{#if mathError}
 			<p style="margin: 8px 0 0; font-size: 0.8rem; color: var(--danger, #e5534b);">
@@ -3208,7 +3578,9 @@
 		{/if}
 		<div class="dialog-actions">
 			<button class="secondary" onclick={() => mathDialog?.close()}>Cancel</button>
-			<button class="primary" onclick={insertMath} disabled={!mathValue}>{mathError ? 'Insert anyway' : 'Insert'}</button>
+			<button class="primary" onclick={insertMath} disabled={!mathValue}
+				>{mathError ? 'Insert anyway' : 'Insert'}</button
+			>
 		</div>
 	</div>
 </dialog>
@@ -3583,7 +3955,14 @@
 
 {#if aiModal}
 	<div class="ai-modal-overlay" role="presentation" onclick={() => (aiModal = null)}>
-		<div class="ai-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+		<div
+			class="ai-modal"
+			role="dialog"
+			aria-modal="true"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={(e) => e.stopPropagation()}
+		>
 			<h3 class="ai-modal-title">{aiModal.title}</h3>
 			<div class="ai-modal-body">{aiModal.body}</div>
 			<div class="dialog-actions">
@@ -3655,6 +4034,7 @@
 
 	.editor-shell {
 		height: 100%;
+		position: relative;
 		display: grid;
 		grid-template-rows: auto 1fr;
 		animation: fade-in var(--duration-page) var(--ease-out);
@@ -3701,6 +4081,27 @@
 	.back-link:hover {
 		color: var(--text-primary);
 		border-color: var(--neutral-600);
+	}
+
+	.note-loading {
+		position: absolute;
+		inset: 4.5rem 0 0;
+		z-index: 30;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-3);
+		background: color-mix(in srgb, var(--bg-page) 88%, transparent);
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		pointer-events: none;
+	}
+
+	.note-loading-spinner {
+		animation: spin 1s linear infinite;
 	}
 
 	.status {
@@ -3775,7 +4176,6 @@
 		overflow: hidden;
 		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
-
 
 	.pdf-pane {
 		min-width: 26rem;
@@ -3878,9 +4278,30 @@
 	}
 
 	.vditor-wrapper {
+		position: relative;
 		border: none !important;
 		flex: 1;
 		min-height: 0;
+	}
+
+	.tools-loading-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 20;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
+		color: var(--text-muted);
+		font-size: 0.8rem;
+		pointer-events: auto;
+		cursor: wait;
+	}
+
+	.vditor-wrapper.tools-loading :global(.vditor-toolbar) {
+		opacity: 0.35;
+		filter: grayscale(1);
+		pointer-events: none;
 	}
 
 	:global(.vditor) {
@@ -4875,7 +5296,7 @@
 		border-left: 3px solid var(--danger);
 		background-color: var(--danger-bg);
 	}
-	
+
 	.approval-card {
 		background: var(--bg-code);
 		border: 1px solid var(--accent-200);
@@ -4895,13 +5316,13 @@
 	.approval-card.rejected .title {
 		color: var(--danger-text);
 	}
-	
+
 	.approval-card .title {
 		margin: 0;
 		font-size: 0.85rem;
 		color: var(--accent-300);
 	}
-	
+
 	.approval-card pre {
 		background: var(--bg-code);
 		padding: var(--space-2);
@@ -4915,7 +5336,7 @@
 		margin: 0;
 		color: var(--text-muted);
 	}
-	
+
 	.approval-card pre::-webkit-scrollbar {
 		width: 6px;
 		height: 6px;
@@ -4930,13 +5351,13 @@
 	.approval-card pre::-webkit-scrollbar-thumb:hover {
 		background: var(--neutral-500, #666);
 	}
-	
+
 	.approval-actions {
 		display: flex;
 		gap: var(--space-2);
 		flex-wrap: wrap; /* Fix responsiveness for narrow sidebars */
 	}
-	
+
 	.pending-approval-bar {
 		display: flex;
 		justify-content: space-between;
@@ -5003,7 +5424,9 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		transition: border-color 0.15s ease, box-shadow 0.15s ease;
+		transition:
+			border-color 0.15s ease,
+			box-shadow 0.15s ease;
 	}
 	.prompt-box:focus-within {
 		border-color: color-mix(in srgb, var(--accent-200) 55%, var(--border-default));
@@ -5084,8 +5507,12 @@
 		cursor: pointer;
 		border-radius: var(--radius-md);
 		white-space: nowrap;
-		transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease,
-			box-shadow 0.14s ease, opacity 0.14s ease;
+		transition:
+			background 0.14s ease,
+			color 0.14s ease,
+			border-color 0.14s ease,
+			box-shadow 0.14s ease,
+			opacity 0.14s ease;
 	}
 
 	.mode-pill {
@@ -5102,7 +5529,9 @@
 		height: 6px;
 		border-radius: 50%;
 		background: var(--neutral-500);
-		transition: background 0.14s ease, box-shadow 0.14s ease;
+		transition:
+			background 0.14s ease,
+			box-shadow 0.14s ease;
 	}
 	.mode-pill.auto::before {
 		background: var(--accent-100);
@@ -5197,7 +5626,9 @@
 		fill: none;
 		stroke-width: 3;
 		stroke-linecap: round;
-		transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;
+		transition:
+			stroke-dashoffset 0.3s ease,
+			stroke 0.3s ease;
 	}
 	.chat-input-area textarea::-webkit-scrollbar {
 		width: 6px;
@@ -5354,8 +5785,7 @@
 		color: #4ade80;
 	}
 
-	.loading-dots
-	.loading-dots::after {
+	.loading-dots .loading-dots::after {
 		content: '...';
 		animation: blink 1.5s steps(4, end) infinite;
 	}
@@ -5452,7 +5882,7 @@
 		font-size: 0.75rem;
 		padding: var(--space-1) 0;
 	}
-	
+
 	.chat-time-taken {
 		display: block;
 		font-size: 0.75rem;
@@ -5461,7 +5891,7 @@
 		margin-top: var(--space-2);
 		user-select: none;
 	}
-	
+
 	.chat-time-taken.live {
 		color: var(--accent);
 		opacity: 0.9;
@@ -5496,7 +5926,9 @@
 	}
 
 	@keyframes chat-working-pulse {
-		0%, 80%, 100% {
+		0%,
+		80%,
+		100% {
 			opacity: 0.25;
 			transform: scale(0.8);
 		}

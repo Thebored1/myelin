@@ -787,7 +787,20 @@ impl AppState {
         if let Some(workspace) = workspace {
             crate::git_history::init_repo(&workspace)?;
             self.start_watcher(&workspace)?;
-            self.reindex_workspace(workspace).await?;
+            {
+                let mut runtime = self.inner.runtime.write();
+                runtime.index_state.is_indexing = true;
+                runtime.index_state.backend = "scanning".to_string();
+            }
+            // Startup only needs enough data to open notes. Keep the expensive
+            // embedding and LanceDB work off the first-paint path; reindex emits a
+            // status event as soon as parsed notes are available.
+            let state = self.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = state.reindex_workspace(workspace).await {
+                    log::error!("startup workspace index failed: {error}");
+                }
+            });
         }
         Ok(self.snapshot())
     }
@@ -1696,7 +1709,7 @@ impl AppState {
             // model still needs to see the selected text to rewrite it well.
             if let Some(sel) = &selection {
                 context.push_str(&format!(
-                    "\n\nThe user has SELECTED the following part of the note, and their request applies to the SELECTION ONLY — rewrite/edit just this text and leave the rest of the note unchanged:\n\"\"\"\n{}\n\"\"\"",
+                    "\n\nThe user has SELECTED the following part of the note, and their request applies to the SELECTION ONLY — rewrite/edit just this text and leave the rest of the note unchanged:\n\"\"\"\n{}\n\"\"\"\n\nUse write_note for this selection. For a rewrite or update, send ONLY the replacement for the selection as `content`; do not send the whole note. For a removal, call write_note with `mode` set to `edit`, an exact `find` value copied from the current note (including Markdown markers when they are part of what should be removed), and an empty `content`. Do not send an unchanged whole-note replacement.",
                     sel.text
                 ));
             }
@@ -1852,7 +1865,14 @@ impl AppState {
                 }),
             );
 
-            let use_model_tool_gate = !tools.is_empty();
+            // Deterministic TOOL/CHAT intent from the same routing predicates
+            // used to select the tool schemas. This avoids the expensive model
+            // classifier (which cost ~8s in the trace) while still recognizing
+            // note edits, searches, lookups, and document retrieval.
+            let intent_is_tool: Option<bool> = match interaction_mode {
+                "operation" => Some(true),
+                _ => Some(crate::agent::tool_intent(&question, edit_thread)),
+            };
             let final_messages = crate::sidecar::run_chat(
                 self,
                 &config,
@@ -1860,14 +1880,7 @@ impl AppState {
                 tools,
                 &request_id,
                 &nid,
-                // Let the sidecar's model-based CHAT/TOOL classifier decide
-                // whether tools apply. This avoids brittle keyword routing for
-                // short chat messages and ambiguous phrasing.
-                use_model_tool_gate,
-                match interaction_mode {
-                    "operation" => Some(true),
-                    _ => None,
-                },
+                intent_is_tool,
                 interaction_mode == "chat",
             )
             .await?;
@@ -2403,6 +2416,28 @@ impl AppState {
         .await
         .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
 
+        // Publish parsed notes before the secondary index work begins. This makes
+        // the library and first note available while embeddings and LanceDB finish
+        // in the background.
+        let note_count = notes.len();
+        {
+            let mut runtime = self.inner.runtime.write();
+            runtime.notes = notes
+                .iter()
+                .cloned()
+                .map(|note| (note.document.id.clone(), note))
+                .collect();
+            runtime.custom_note_order =
+                normalized_custom_order(&runtime.custom_note_order, &runtime.notes);
+            runtime.index_state = IndexState {
+                is_indexing: true,
+                last_indexed_at: runtime.index_state.last_indexed_at.clone(),
+                note_count,
+                backend: "indexing".to_string(),
+            };
+        }
+        self.handle.emit("index://status", "notes_ready")?;
+
         // Upgrade the hashed placeholder vectors to real embeddings (one batch)
         // when an embed model is configured — semantic note search.
         self.reembed_notes(&mut notes).await;
@@ -2468,14 +2503,30 @@ impl AppState {
         }
 
         let table = rebuild_lancedb(&self.index_dir(), &notes).await?;
-        let note_count = notes.len();
 
         {
             let mut runtime = self.inner.runtime.write();
-            runtime.notes = notes
+            // Notes can be edited, created, or deleted while the expensive vector
+            // work runs. Preserve that live state; the watcher queues a follow-up
+            // reindex to refresh any vectors affected by concurrent edits.
+            let live_notes = runtime.notes.clone();
+            notes.retain(|note| live_notes.contains_key(&note.document.id));
+            for note in &mut notes {
+                if let Some(live) = live_notes.get(&note.document.id) {
+                    if live.document.updated_at != note.document.updated_at {
+                        *note = live.clone();
+                    }
+                }
+            }
+            let mut indexed_notes: HashMap<String, IndexedNote> = notes
                 .into_iter()
                 .map(|note| (note.document.id.clone(), note))
                 .collect();
+            for (id, note) in live_notes {
+                indexed_notes.entry(id).or_insert(note);
+            }
+            let note_count = indexed_notes.len();
+            runtime.notes = indexed_notes;
             runtime.custom_note_order =
                 normalized_custom_order(&runtime.custom_note_order, &runtime.notes);
             runtime.index_state = IndexState {

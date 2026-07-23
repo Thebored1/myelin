@@ -1341,12 +1341,25 @@ pub fn in_edit_thread(recent_user_messages: &[&str]) -> bool {
         .any(|m| note_write_intent(m))
 }
 
+/// Deterministically classify whether a message requests an operation/tool.
+/// This mirrors the routing predicates used by `select_tools_cfg`, allowing the
+/// host to avoid a second model inference for the same decision.
+pub fn tool_intent(message: &str, edit_thread: bool) -> bool {
+    note_write_intent(message)
+        || edit_thread
+        || wants_other_notes(message)
+        || wants_search(message)
+        || wants_documents(message)
+        || wants_fetch(message)
+        || wants_find(message)
+}
+
 /// Per-message tool gating: hand the model ONLY the tools its message warrants,
-/// so the model can't misfire on a tool it was never given. write_note is
+/// so the model can't misfire on one it was never given. write_note is
 /// the primary action (the open note is the workspace); search_notes/read_note
 /// and fetch_web_page are opt-in by intent; small talk gets nothing. When
-/// `edit_thread` is set, write_note stays available even without a fresh verb so
-/// follow-up corrections keep editing the note.
+/// `edit_thread` is set, write_note stays available even without a fresh verb
+/// so follow-up corrections keep editing the note.
 pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Vec<Value> {
     select_tools_cfg(message, has_open_note, edit_thread, true, true)
 }

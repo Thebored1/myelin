@@ -72,7 +72,9 @@
 			if (stored) {
 				try {
 					dashTasks = JSON.parse(stored);
-				} catch { dashTasks = []; }
+				} catch {
+					dashTasks = [];
+				}
 			} else {
 				dashTasks = [];
 			}
@@ -80,7 +82,9 @@
 			if (storedPinned) {
 				try {
 					pinnedNoteIds = JSON.parse(storedPinned);
-				} catch { pinnedNoteIds = []; }
+				} catch {
+					pinnedNoteIds = [];
+				}
 			} else {
 				pinnedNoteIds = [];
 			}
@@ -118,11 +122,10 @@
 
 	let isClusterDialogOpen = $state(false);
 	let selectedCluster = $state<NoteSummary[]>([]);
-	
 
 	function togglePin(id: string) {
 		if (pinnedNoteIds.includes(id)) {
-			pinnedNoteIds = pinnedNoteIds.filter(pid => pid !== id);
+			pinnedNoteIds = pinnedNoteIds.filter((pid) => pid !== id);
 		} else {
 			pinnedNoteIds = [...pinnedNoteIds, id];
 		}
@@ -149,14 +152,10 @@
 
 	let visibleNotes = $derived.by(() => {
 		const base = (
-			query && searchResults
-				? searchResults.results.map((r) => r.note)
-				: (app?.notes ?? [])
+			query && searchResults ? searchResults.results.map((r) => r.note) : (app?.notes ?? [])
 		) as NoteSummary[];
 		return [...base].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 	});
-
-
 
 	// Rail details — always based on the full library, unaffected by the rail search
 	let allNotesSorted = $derived.by(() =>
@@ -225,10 +224,12 @@
 		if (activeTag !== null) base = base.filter((n) => n.tags.includes(activeTag!));
 		// null notebook = "uncategorized" (notes not in any notebook / workspace root).
 		if (activeNotebook === null) base = base.filter((n) => notebookOf(n) === null);
-		else base = base.filter((n) => n.folder === activeNotebook || n.folder.startsWith(activeNotebook + '/'));
+		else
+			base = base.filter(
+				(n) => n.folder === activeNotebook || n.folder.startsWith(activeNotebook + '/')
+			);
 		return [...base].sort(
-			(a, b) =>
-				(pinnedNoteIds.includes(b.id) ? 1 : 0) - (pinnedNoteIds.includes(a.id) ? 1 : 0)
+			(a, b) => (pinnedNoteIds.includes(b.id) ? 1 : 0) - (pinnedNoteIds.includes(a.id) ? 1 : 0)
 		);
 	});
 
@@ -267,7 +268,6 @@
 		return [...counts.entries()].sort((a, b) => b[1] - a[1]);
 	});
 
-
 	function scrollToSection(id: string) {
 		document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	}
@@ -295,7 +295,10 @@
 					const curr = queue.shift()!;
 					cluster.push(curr);
 					graph.get(curr)?.forEach((neighbor) => {
-						if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor); }
+						if (!visited.has(neighbor)) {
+							visited.add(neighbor);
+							queue.push(neighbor);
+						}
 					});
 				}
 				if (cluster.length > 1) {
@@ -309,14 +312,20 @@
 
 	async function refreshApp() {
 		app = await invoke<AppSnapshot>('get_snapshot');
-		provider = await invoke<ProviderStatus>('get_provider_status');
+		appCache.app = app;
+		// Provider inspection may wait on a cold model-server startup. It is useful
+		// status information, but should never delay the library or note shell.
+		provider = app.providerStatus;
+		void invoke<ProviderStatus>('get_provider_status')
+			.then((status) => {
+				provider = status;
+			})
+			.catch(() => {});
 		if (query.trim()) {
 			searchResults = await invoke<SearchResponse>('search_notes', { query });
 		} else {
 			searchResults = null;
 		}
-		appCache.app = app;
-		appCache.provider = provider;
 		void loadNotebooks();
 	}
 
@@ -349,29 +358,44 @@
 	function upsertNoteIntoLibrary(note: NoteDocument) {
 		if (!app) return;
 		const summary: NoteSummary = {
-			id: note.id, title: note.title, tags: note.tags,
+			id: note.id,
+			title: note.title,
+			tags: note.tags,
 			folder: folderFromRelativePath(note.relativePath),
 			excerpt: excerptFromBody(note.body),
 			relativePath: note.relativePath,
-			createdAt: note.createdAt, updatedAt: note.updatedAt, backlinks: note.backlinks
+			createdAt: note.createdAt,
+			updatedAt: note.updatedAt,
+			backlinks: note.backlinks
 		};
 		const existingIndex = app.notes.findIndex((e) => e.id === note.id);
-		if (existingIndex >= 0) { app.notes[existingIndex] = summary; }
-		else { app.notes = [summary, ...app.notes]; }
-		if (!app.customNoteOrder.includes(note.id)) app.customNoteOrder = [...app.customNoteOrder, note.id];
-		if (!app.libraryFacets.folders.includes(summary.folder)) app.libraryFacets.folders = [...app.libraryFacets.folders, summary.folder].sort();
+		if (existingIndex >= 0) {
+			app.notes[existingIndex] = summary;
+		} else {
+			app.notes = [summary, ...app.notes];
+		}
+		if (!app.customNoteOrder.includes(note.id))
+			app.customNoteOrder = [...app.customNoteOrder, note.id];
+		if (!app.libraryFacets.folders.includes(summary.folder))
+			app.libraryFacets.folders = [...app.libraryFacets.folders, summary.folder].sort();
 		const mergedTags = new Set([...app.libraryFacets.tags, ...summary.tags]);
 		app.libraryFacets.tags = [...mergedTags].sort();
 	}
 
 	async function pickWorkspace() {
-		const picked = await open({ directory: true, multiple: false, title: 'Choose your markdown workspace' });
+		const picked = await open({
+			directory: true,
+			multiple: false,
+			title: 'Choose your markdown workspace'
+		});
 		if (typeof picked === 'string') {
 			isBusy = true;
 			try {
 				app = await invoke<AppSnapshot>('set_workspace', { workspacePath: picked });
 				message = 'Workspace connected.';
-			} finally { isBusy = false; }
+			} finally {
+				isBusy = false;
+			}
 		}
 	}
 
@@ -383,15 +407,24 @@
 		try {
 			while (pendingCreateCount > 0) {
 				pendingCreateCount -= 1;
-				const title = extension === 'md' ? 'New note' :
-				              extension === 'tex' ? 'New LaTeX Document' :
-				              extension === 'ipynb' ? 'New Jupyter Notebook' :
-				              extension === 'epub' ? 'New EPUB Book' : 'New note';
+				const title =
+					extension === 'md'
+						? 'New note'
+						: extension === 'tex'
+							? 'New LaTeX Document'
+							: extension === 'ipynb'
+								? 'New Jupyter Notebook'
+								: extension === 'epub'
+									? 'New EPUB Book'
+									: 'New note';
 				const note = await invoke<NoteDocument>('create_note', { title, extension, notebook });
 				upsertNoteIntoLibrary(note);
 			}
 			await refreshApp();
-		} finally { isBusy = false; createLoopRunning = false; }
+		} finally {
+			isBusy = false;
+			createLoopRunning = false;
+		}
 	}
 
 	function newNotebook() {
@@ -473,7 +506,9 @@
 		try {
 			app = await invoke<AppSnapshot>('rebuild_index');
 			message = 'Index rebuilt.';
-		} finally { isBusy = false; }
+		} finally {
+			isBusy = false;
+		}
 	}
 
 	function timeAgo(value: string) {
@@ -497,8 +532,8 @@
 		await goto(resolve(`/notes/${encodeURIComponent(noteId)}`));
 	}
 
-	// First click selects a row and shows its details in the right pane (closing
-	// tasks); clicking the already-selected row opens it.
+	// First click selects a row and shows its details in the dashboard; clicking
+	// the selected row again opens the note.
 	function selectOrOpen(note: NoteSummary) {
 		if (selectedNote?.id === note.id) {
 			void openNote(note.id);
@@ -520,8 +555,13 @@
 		isBusy = true;
 		try {
 			app = await invoke<AppSnapshot>('delete_note', { noteId: noteToDelete });
-		} catch (e) { console.error(e); }
-		finally { isBusy = false; deleteDialog?.close(); noteToDelete = null; }
+		} catch (e) {
+			console.error(e);
+		} finally {
+			isBusy = false;
+			deleteDialog?.close();
+			noteToDelete = null;
+		}
 	}
 
 	function workspaceLabel(path: string) {
@@ -540,59 +580,85 @@
 			app = appCache.app;
 			provider = appCache.provider;
 			appVersion = appCache.appVersion;
+			indexing = app.indexState.isIndexing;
 			ready = true;
 		}
 
 		void (async () => {
+			// Listen before bootstrap: startup indexing emits `notes_ready` as soon as
+			// parsed notes can be opened, long before semantic indexing finishes.
+			[unlistenChanged, unlistenStatus, unlistenTasks] = await Promise.all([
+				listen('index://changed', () => {
+					message = 'Reindexing…';
+				}),
+				listen<string>('index://status', (event) => {
+					if (event.payload === 'started') {
+						message = 'Loading your library…';
+						indexing = true;
+					} else if (event.payload === 'notes_ready') {
+						message = 'Library ready — finishing search index…';
+						indexing = true;
+						void refreshApp();
+					} else if (event.payload === 'completed') {
+						message = '';
+						indexing = false;
+						void refreshApp();
+					}
+				}),
+				listen('tasks://added', () => {
+					const ws = currentWorkspaceForTasks ?? app?.workspacePath;
+					if (!ws) return;
+					try {
+						const stored = localStorage.getItem(`tasks_${ws}`);
+						dashTasks = stored ? JSON.parse(stored) : [];
+					} catch {
+						/* ignore */
+					}
+				})
+			]);
+
 			if (!appVersion) {
-				getVersion().then((v) => { appVersion = v; appCache.appVersion = v; }).catch(() => {});
+				getVersion()
+					.then((v) => {
+						appVersion = v;
+						appCache.appVersion = v;
+					})
+					.catch(() => {});
 			}
 
-			// Cold start: paint the shell immediately from the cheap in-memory snapshot
-			// (workspace + whatever's already indexed) so the window never sits blank.
 			if (!appCache.app) {
 				try {
 					app = await invoke<AppSnapshot>('get_snapshot');
-					provider = await invoke<ProviderStatus>('get_provider_status');
+					provider = app.providerStatus;
+					indexing = app.indexState.isIndexing;
 					appCache.app = app;
 					appCache.provider = provider;
 				} catch (e) {
 					console.error(e);
+				} finally {
+					ready = true;
 				}
-				ready = true;
 			}
 
-			// Heavy one-time init (git, watcher, full reindex) now runs with the UI
-			// already up; the index events refresh the list when it finishes.
 			try {
 				if (!appCache.bootstrapped) {
 					indexing = true;
 					app = await invoke<AppSnapshot>('bootstrap');
+					provider = app.providerStatus;
+					indexing = app.indexState.isIndexing;
 					appCache.bootstrapped = true;
 					appCache.app = app;
-					indexing = false;
 				}
 				await refreshApp();
 			} finally {
 				ready = true;
-				indexing = false;
 			}
-			unlistenChanged = await listen('index://changed', () => { message = 'Reindexing…'; });
-			unlistenStatus = await listen<string>('index://status', (event) => {
-				if (event.payload === 'started') { message = 'Indexing…'; indexing = true; }
-				else if (event.payload === 'completed') { message = ''; indexing = false; void refreshApp(); }
-			});
-			// The quick-capture window adds tasks straight to localStorage; reload them.
-			unlistenTasks = await listen('tasks://added', () => {
-				const ws = currentWorkspaceForTasks ?? app?.workspacePath;
-				if (!ws) return;
-				try {
-					const stored = localStorage.getItem(`tasks_${ws}`);
-					dashTasks = stored ? JSON.parse(stored) : [];
-				} catch { /* ignore */ }
-			});
 		})();
-		return () => { unlistenChanged(); unlistenStatus(); unlistenTasks(); };
+		return () => {
+			unlistenChanged();
+			unlistenStatus();
+			unlistenTasks();
+		};
 	});
 
 	let globalSearchDialog: HTMLDialogElement | undefined = $state();
@@ -603,10 +669,11 @@
 		if (!app?.notes) return [];
 		const q = globalSearchQuery.trim().toLowerCase();
 		if (!q) return app.notes;
-		return app.notes.filter(n => 
-			n.title.toLowerCase().includes(q) || 
-			n.relativePath.toLowerCase().includes(q) || 
-			n.tags.some(t => t.toLowerCase().includes(q))
+		return app.notes.filter(
+			(n) =>
+				n.title.toLowerCase().includes(q) ||
+				n.relativePath.toLowerCase().includes(q) ||
+				n.tags.some((t) => t.toLowerCase().includes(q))
 		);
 	});
 
@@ -654,9 +721,21 @@
 </script>
 
 <svelte:head><title>myelin</title></svelte:head>
-<svelte:window onclick={() => { activeMenuId = null; showAddMenu = false; showNotebookMenu = false; }} />
+<svelte:window
+	onclick={() => {
+		activeMenuId = null;
+		showAddMenu = false;
+		showNotebookMenu = false;
+	}}
+/>
 
-<dialog bind:this={deleteDialog} class="confirm-dialog" onclose={() => { noteToDelete = null; }}>
+<dialog
+	bind:this={deleteDialog}
+	class="confirm-dialog"
+	onclose={() => {
+		noteToDelete = null;
+	}}
+>
 	<div class="dialog-content">
 		<h3>Delete note?</h3>
 		<p>This cannot be undone.</p>
@@ -667,7 +746,13 @@
 	</div>
 </dialog>
 
-<dialog bind:this={notebookDialog} class="confirm-dialog" onclose={() => { newNotebookName = ''; }}>
+<dialog
+	bind:this={notebookDialog}
+	class="confirm-dialog"
+	onclose={() => {
+		newNotebookName = '';
+	}}
+>
 	<div class="dialog-content">
 		<h3>New notebook</h3>
 		<p>Create a notebook — a folder that holds notes of any kind.</p>
@@ -676,28 +761,57 @@
 			bind:value={newNotebookName}
 			use:autofocus
 			placeholder="Notebook name"
-			onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); confirmNewNotebook(); } }}
+			onkeydown={(e) => {
+				if (e.key === 'Enter') {
+					e.preventDefault();
+					confirmNewNotebook();
+				}
+			}}
 		/>
 		<div class="dialog-actions">
 			<button class="btn-ghost" onclick={() => notebookDialog?.close()}>Cancel</button>
-			<button class="btn-primary nb-create-btn" onclick={confirmNewNotebook} disabled={isBusy || !newNotebookName.trim()}>Create</button>
+			<button
+				class="btn-primary nb-create-btn"
+				onclick={confirmNewNotebook}
+				disabled={isBusy || !newNotebookName.trim()}>Create</button
+			>
 		</div>
 	</div>
 </dialog>
 
-<dialog bind:this={globalSearchDialog} class="link-dialog" onkeydown={handleGlobalSearchKeydown} onclose={() => { globalSearchQuery = ''; globalSelectedIndex = 0; }}>
+<dialog
+	bind:this={globalSearchDialog}
+	class="link-dialog"
+	onkeydown={handleGlobalSearchKeydown}
+	onclose={() => {
+		globalSearchQuery = '';
+		globalSelectedIndex = 0;
+	}}
+>
 	<div class="dialog-content">
 		<h3>Link to Note</h3>
-		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">Search and select a note from your library.</p>
-		
-		<input class="link-search-input" bind:value={globalSearchQuery} oninput={() => globalSelectedIndex = 0} use:autofocus placeholder="Search notes..." />
-		
+		<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">
+			Search and select a note from your library.
+		</p>
+
+		<input
+			class="link-search-input"
+			bind:value={globalSearchQuery}
+			oninput={() => (globalSelectedIndex = 0)}
+			use:autofocus
+			placeholder="Search notes..."
+		/>
+
 		<div class="link-results-container">
 			{#if filteredGlobalNotes.length > 0}
 				<ul class="link-results-list">
 					{#each filteredGlobalNotes as res, i (res.id + '_' + i)}
 						<li>
-							<button class="link-result-btn" class:selected={i === globalSelectedIndex} onclick={() => openNoteFromSearch(res)}>
+							<button
+								class="link-result-btn"
+								class:selected={i === globalSelectedIndex}
+								onclick={() => openNoteFromSearch(res)}
+							>
 								<strong>{res.title}</strong>
 								<span class="folder-badge">{folderFromRelativePath(res.relativePath)}</span>
 							</button>
@@ -708,7 +822,7 @@
 				<p class="empty-state">No notes found matching your search.</p>
 			{/if}
 		</div>
-		
+
 		<div class="dialog-actions">
 			<button class="btn-ghost" onclick={() => globalSearchDialog?.close()}>Cancel</button>
 		</div>
@@ -728,14 +842,34 @@
 			>
 				{#if $theme === 'light'}
 					<!-- moon: click to go dark -->
-					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
 					</svg>
 				{:else}
 					<!-- sun: click to go light -->
-					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					>
 						<circle cx="12" cy="12" r="4"></circle>
-						<path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+						<path
+							d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+						></path>
 					</svg>
 				{/if}
 			</button>
@@ -743,7 +877,16 @@
 
 		{#if app?.workspacePath}
 			<button class="rail-search-btn" onclick={() => globalSearchDialog?.showModal()}>
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+				<svg
+					width="14"
+					height="14"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg
+				>
 				Search notes...
 			</button>
 		{/if}
@@ -766,22 +909,61 @@
 						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 						<div
 							class="note-row"
+							role="button"
+							tabindex="0"
 							onclick={() => openNote(note.id)}
-							oncontextmenu={(e) => { e.preventDefault(); activeMenuId = activeMenuId === note.id ? null : note.id; }}
+							oncontextmenu={(e) => {
+								e.preventDefault();
+								activeMenuId = activeMenuId === note.id ? null : note.id;
+							}}
 						>
-							<svg class="row-icon {note.relativePath.toLowerCase().endsWith('.pdf') ? 'pdf-icon' : ''}" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>{#if note.relativePath.toLowerCase().endsWith('.pdf')}<line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="11" y2="17"/>{/if}</svg>
+							<svg
+								class="row-icon {note.relativePath.toLowerCase().endsWith('.pdf')
+									? 'pdf-icon'
+									: ''}"
+								width="14"
+								height="14"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline
+									points="14 2 14 8 20 8"
+								/>{#if note.relativePath.toLowerCase().endsWith('.pdf')}<line
+										x1="9"
+										y1="13"
+										x2="15"
+										y2="13"
+									/><line x1="9" y1="17" x2="11" y2="17" />{/if}</svg
+							>
 							<span class="row-title">{note.title}</span>
 							<div class="row-badge">
 								{getNoteBadge(note)}
 							</div>
 							<span class="row-time">{timeAgo(note.createdAt)}</span>
 							<div class="row-menu-wrap">
-								<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
-									<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+								<button
+									class="row-menu-btn"
+									onclick={(e) => {
+										e.stopPropagation();
+										activeMenuId = activeMenuId === note.id ? null : note.id;
+									}}
+									aria-label="Options"
+								>
+									<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
+										><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle
+											cx="12"
+											cy="19"
+											r="1.5"
+										/></svg
+									>
 								</button>
 								{#if activeMenuId === note.id}
 									<div class="row-dropdown">
-										<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
+										<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}
+											>Delete</button
+										>
 									</div>
 								{/if}
 							</div>
@@ -793,20 +975,93 @@
 					<span>New</span>
 				</div>
 				<div class="ov-group new-actions">
-					<button class="ov-row ov-clickable ov-action" onclick={() => createNote('md')} disabled={isBusy}>
-						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>markdown</span>
+					<button
+						class="ov-row ov-clickable ov-action"
+						onclick={() => createNote('md')}
+						disabled={isBusy}
+					>
+						<span class="ov-key"
+							><svg
+								width="11"
+								height="11"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></svg
+							>markdown</span
+						>
 					</button>
-					<button class="ov-row ov-clickable ov-action" onclick={() => createNote('tex')} disabled={isBusy}>
-						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"/></svg>latex</span>
+					<button
+						class="ov-row ov-clickable ov-action"
+						onclick={() => createNote('tex')}
+						disabled={isBusy}
+					>
+						<span class="ov-key"
+							><svg
+								width="11"
+								height="11"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12" /></svg
+							>latex</span
+						>
 					</button>
-					<button class="ov-row ov-clickable ov-action" onclick={() => createNote('ipynb')} disabled={isBusy}>
-						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>jupyter</span>
+					<button
+						class="ov-row ov-clickable ov-action"
+						onclick={() => createNote('ipynb')}
+						disabled={isBusy}
+					>
+						<span class="ov-key"
+							><svg
+								width="11"
+								height="11"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg
+							>jupyter</span
+						>
 					</button>
 					<button class="ov-row ov-clickable ov-action" onclick={importFile} disabled={isBusy}>
-						<span class="ov-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>upload</span>
+						<span class="ov-key"
+							><svg
+								width="11"
+								height="11"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline
+									points="17 8 12 3 7 8"
+								/><line x1="12" y1="3" x2="12" y2="15" /></svg
+							>upload</span
+						>
 					</button>
 					<button class="new-notebook-btn" onclick={newNotebook} disabled={isBusy}>
-						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+						<svg
+							width="12"
+							height="12"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path
+								d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"
+							/></svg
+						>
 						new notebook
 					</button>
 				</div>
@@ -817,20 +1072,44 @@
 				</div>
 				<div class="ov-group">
 					<!-- notebooks group -->
-					<button class="ov-row ov-group-head" onclick={() => (notebooksExpanded = !notebooksExpanded)}>
+					<button
+						class="ov-row ov-group-head"
+						onclick={() => (notebooksExpanded = !notebooksExpanded)}
+					>
 						<span class="ov-key">
-							<svg class="ov-chevron" class:collapsed={!notebooksExpanded} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+							<svg
+								class="ov-chevron"
+								class:collapsed={!notebooksExpanded}
+								width="11"
+								height="11"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.5"
+								stroke-linecap="round"
+								stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg
+							>
 							notebooks
 						</span>
 						<span class="ov-val">{notebooks.length}</span>
 					</button>
 					{#if notebooksExpanded}
-						<button class="ov-row ov-sub ov-clickable" class:active={activeNotebook === null} onclick={() => (activeNotebook = null)} title="Notes not in a notebook">
+						<button
+							class="ov-row ov-sub ov-clickable"
+							class:active={activeNotebook === null}
+							onclick={() => (activeNotebook = null)}
+							title="Notes not in a notebook"
+						>
 							<span class="ov-key ov-ellipsis">uncategorized</span>
 							<span class="ov-val">{uncategorizedCount}</span>
 						</button>
 						{#each notebooks as nb (nb)}
-							<button class="ov-row ov-sub ov-clickable" class:active={activeNotebook === nb} onclick={() => toggleNotebook(nb)} title={nb}>
+							<button
+								class="ov-row ov-sub ov-clickable"
+								class:active={activeNotebook === nb}
+								onclick={() => toggleNotebook(nb)}
+								title={nb}
+							>
 								<span class="ov-key ov-ellipsis">{nb}</span>
 								<span class="ov-val">{notebookCount(nb)}</span>
 							</button>
@@ -840,7 +1119,18 @@
 					<!-- notes group: editable working docs -->
 					<button class="ov-row ov-group-head" onclick={() => (notesExpanded = !notesExpanded)}>
 						<span class="ov-key">
-							<svg class="ov-chevron" class:collapsed={!notesExpanded} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+							<svg
+								class="ov-chevron"
+								class:collapsed={!notesExpanded}
+								width="11"
+								height="11"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.5"
+								stroke-linecap="round"
+								stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg
+							>
 							notes
 						</span>
 						<span class="ov-val">{typeCounts.md + typeCounts.tex + typeCounts.ipynb}</span>
@@ -848,7 +1138,11 @@
 					{#if notesExpanded}
 						{#each NOTE_SUBTYPES as st}
 							{#if typeCounts[st.type] > 0}
-								<button class="ov-row ov-sub ov-clickable" class:active={activeTypeFilter === st.type} onclick={() => setTypeFilter(activeTypeFilter === st.type ? 'all' : st.type)}>
+								<button
+									class="ov-row ov-sub ov-clickable"
+									class:active={activeTypeFilter === st.type}
+									onclick={() => setTypeFilter(activeTypeFilter === st.type ? 'all' : st.type)}
+								>
 									<span class="ov-key ov-ellipsis">{st.label}</span>
 									<span class="ov-val">{typeCounts[st.type]}</span>
 								</button>
@@ -859,7 +1153,18 @@
 					<!-- documents group: uploaded source material -->
 					<button class="ov-row ov-group-head" onclick={() => (docsExpanded = !docsExpanded)}>
 						<span class="ov-key">
-							<svg class="ov-chevron" class:collapsed={!docsExpanded} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+							<svg
+								class="ov-chevron"
+								class:collapsed={!docsExpanded}
+								width="11"
+								height="11"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.5"
+								stroke-linecap="round"
+								stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg
+							>
 							documents
 						</span>
 						<span class="ov-val">{typeCounts.pdf + typeCounts.epub}</span>
@@ -867,7 +1172,11 @@
 					{#if docsExpanded}
 						{#each DOC_SUBTYPES as st}
 							{#if typeCounts[st.type] > 0}
-								<button class="ov-row ov-sub ov-clickable" class:active={activeTypeFilter === st.type} onclick={() => setTypeFilter(activeTypeFilter === st.type ? 'all' : st.type)}>
+								<button
+									class="ov-row ov-sub ov-clickable"
+									class:active={activeTypeFilter === st.type}
+									onclick={() => setTypeFilter(activeTypeFilter === st.type ? 'all' : st.type)}
+								>
 									<span class="ov-key ov-ellipsis">{st.label}</span>
 									<span class="ov-val">{typeCounts[st.type]}</span>
 								</button>
@@ -875,10 +1184,14 @@
 						{/each}
 					{/if}
 
-					<div class="ov-row"><span class="ov-key">tags</span><span class="ov-val">{tagCounts.length}</span></div>
-					<button class="ov-row ov-clickable" onclick={openClustersDialog} title="View clusters"><span class="ov-key">clusters</span><span class="ov-val">{commonplaces.length}</span></button>
+					<div class="ov-row">
+						<span class="ov-key">tags</span><span class="ov-val">{tagCounts.length}</span>
+					</div>
+					<button class="ov-row ov-clickable" onclick={openClustersDialog} title="View clusters"
+						><span class="ov-key">clusters</span><span class="ov-val">{commonplaces.length}</span
+						></button
+					>
 				</div>
-
 
 				<div class="section-label" style="margin-top: var(--space-4);">
 					<span>Tags</span>
@@ -887,7 +1200,12 @@
 				{#if tagCounts.length > 0}
 					<div class="ov-group">
 						{#each tagCounts.slice(0, 12) as [tag, count] (tag)}
-							<button class="ov-row ov-clickable" class:active={activeTag === tag} onclick={() => toggleTag(tag)} title="Filter by #{tag}">
+							<button
+								class="ov-row ov-clickable"
+								class:active={activeTag === tag}
+								onclick={() => toggleTag(tag)}
+								title="Filter by #{tag}"
+							>
 								<span class="ov-key ov-ellipsis">#{tag}</span>
 								<span class="ov-val">{count}</span>
 							</button>
@@ -901,14 +1219,22 @@
 					<span>System</span>
 				</div>
 				<div class="ov-group">
-					<div class="ov-row"><span class="ov-key">index</span><span class="ov-val">{app?.indexState.backend ?? '—'}</span></div>
+					<div class="ov-row">
+						<span class="ov-key">index</span><span class="ov-val"
+							>{app?.indexState.backend ?? '—'}</span
+						>
+					</div>
 					<div class="ov-row">
 						<span class="ov-key">indexed</span>
-						<span class="ov-val">{app?.indexState.lastIndexedAt ? agoLabel(app.indexState.lastIndexedAt) : '—'}</span>
+						<span class="ov-val"
+							>{app?.indexState.lastIndexedAt ? agoLabel(app.indexState.lastIndexedAt) : '—'}</span
+						>
 					</div>
 					<div class="ov-row">
 						<span class="ov-key">provider</span>
-						<span class="ov-val" class:ov-ok={provider?.healthy}>{provider?.activeProvider || 'none'}</span>
+						<span class="ov-val" class:ov-ok={provider?.healthy}
+							>{provider?.activeProvider || 'none'}</span
+						>
 					</div>
 				</div>
 			{/if}
@@ -919,8 +1245,24 @@
 		{/if}
 
 		<div class="rail-footer">
-			<button class="footer-change-btn" onclick={pickWorkspace} disabled={isBusy} title={app?.workspacePath ?? 'Choose workspace'}>
-				<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+			<button
+				class="footer-change-btn"
+				onclick={pickWorkspace}
+				disabled={isBusy}
+				title={app?.workspacePath ?? 'Choose workspace'}
+			>
+				<svg
+					width="11"
+					height="11"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					><path
+						d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+					/></svg
+				>
 				{#if !ready}
 					&nbsp;
 				{:else if app?.workspacePath}
@@ -930,7 +1272,11 @@
 				{/if}
 			</button>
 			{#if app?.workspacePath}
-				<span class="footer-dot" class:dot-ok={provider?.activeProvider} title={provider?.activeProvider ?? 'No provider'}></span>
+				<span
+					class="footer-dot"
+					class:dot-ok={provider?.activeProvider}
+					title={provider?.activeProvider ?? 'No provider'}
+				></span>
 			{/if}
 		</div>
 	</aside>
@@ -943,53 +1289,132 @@
 			<div class="landing">
 				<p class="eyebrow">Cross-platform local notes</p>
 				<h1>myelin</h1>
-				<p class="landing-copy">A local-first markdown workspace. Connect a folder to get started.</p>
-				<button class="btn-primary" onclick={pickWorkspace} disabled={isBusy}>Choose workspace</button>
+				<p class="landing-copy">
+					A local-first markdown workspace. Connect a folder to get started.
+				</p>
+				<button class="btn-primary" onclick={pickWorkspace} disabled={isBusy}
+					>Choose workspace</button
+				>
 			</div>
 		{:else}
 			<div class="dashboard-container">
 				<!-- Header -->
 				<header class="dashboard-header">
 					<div class="nb-switcher">
-						<button class="nb-switch-btn" onclick={(e) => { e.stopPropagation(); showNotebookMenu = !showNotebookMenu; }}>
+						<button
+							class="nb-switch-btn"
+							onclick={(e) => {
+								e.stopPropagation();
+								showNotebookMenu = !showNotebookMenu;
+							}}
+						>
 							<h2>{activeNotebook ?? 'Uncategorized'}</h2>
-							<svg class="nb-switch-caret" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+							<svg
+								class="nb-switch-caret"
+								width="20"
+								height="20"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.5"
+								stroke-linecap="round"
+								stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg
+							>
 						</button>
 						{#if showNotebookMenu}
 							<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-							<div class="nb-switch-menu" onclick={(e) => e.stopPropagation()}>
-								<button class="nb-switch-item" class:active={activeNotebook === null} onclick={() => { activeNotebook = null; showNotebookMenu = false; }}>
+							<div class="nb-switch-menu" role="presentation" onclick={(e) => e.stopPropagation()}>
+								<button
+									class="nb-switch-item"
+									class:active={activeNotebook === null}
+									onclick={() => {
+										activeNotebook = null;
+										showNotebookMenu = false;
+									}}
+								>
 									<span>Uncategorized</span>
 									<span class="nb-switch-count">{uncategorizedCount}</span>
 								</button>
 								{#each notebooks as nb (nb)}
-									<button class="nb-switch-item" class:active={activeNotebook === nb} onclick={() => { activeNotebook = nb; showNotebookMenu = false; }}>
+									<button
+										class="nb-switch-item"
+										class:active={activeNotebook === nb}
+										onclick={() => {
+											activeNotebook = nb;
+											showNotebookMenu = false;
+										}}
+									>
 										<span class="ov-ellipsis">{nb}</span>
 										<span class="nb-switch-count">{notebookCount(nb)}</span>
 									</button>
 								{/each}
 								<div class="nb-add-divider"></div>
-								<button class="nb-switch-item nb-switch-new" onclick={() => { showNotebookMenu = false; newNotebook(); }}>
-									<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+								<button
+									class="nb-switch-item nb-switch-new"
+									onclick={() => {
+										showNotebookMenu = false;
+										newNotebook();
+									}}
+								>
+									<svg
+										width="13"
+										height="13"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										><line x1="12" y1="5" x2="12" y2="19" /><line
+											x1="5"
+											y1="12"
+											x2="19"
+											y2="12"
+										/></svg
+									>
 									New notebook
 								</button>
 							</div>
 						{/if}
 					</div>
-						{#if indexing}
-							<span class="indexing-pill" title="Indexing your workspace">
-								<svg class="nb-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-								indexing
-							</span>
-						{/if}
+					{#if indexing}
+						<span class="indexing-pill" title="Indexing your workspace">
+							<svg
+								class="nb-spin"
+								width="12"
+								height="12"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2.5"
+								stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg
+							>
+							indexing
+						</span>
+					{/if}
 					<div style="display: flex; gap: var(--space-2); align-items: center;">
 						<button
 							class="header-toggle-btn"
 							class:active={!tasksCollapsed && !selectedNote}
-							onclick={() => { selectedNote = null; tasksCollapsed = !tasksCollapsed; }}
+							onclick={() => {
+								selectedNote = null;
+								tasksCollapsed = !tasksCollapsed;
+							}}
 							title={tasksCollapsed ? 'Show tasks' : 'Hide tasks'}
 						>
-							<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+							<svg
+								width="15"
+								height="15"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								><polyline points="9 11 12 14 22 4" /><path
+									d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
+								/></svg
+							>
 							Tasks
 							{#if dashTasks.filter((t) => !t.done).length > 0}
 								<span class="header-toggle-count">{dashTasks.filter((t) => !t.done).length}</span>
@@ -1003,21 +1428,66 @@
 					<div class="dash-left">
 						<section class="dash-section nb-section">
 							<h3 class="nb-header-tabs-container">
-								<button class="h3-tab" class:active={activeTypeFilter !== 'documents'} onclick={() => setTypeFilter('notes')}>
-									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+								<button
+									class="h3-tab"
+									class:active={activeTypeFilter !== 'documents'}
+									onclick={() => setTypeFilter('notes')}
+								>
+									<svg
+										width="12"
+										height="12"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path
+											d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"
+										/></svg
+									>
 									notes
 								</button>
-								<button class="h3-tab" class:active={activeTypeFilter === 'documents'} onclick={() => setTypeFilter('documents')}>
-									<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+								<button
+									class="h3-tab"
+									class:active={activeTypeFilter === 'documents'}
+									onclick={() => setTypeFilter('documents')}
+								>
+									<svg
+										width="12"
+										height="12"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										><path
+											d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+										/><polyline points="14 2 14 8 20 8" /><line
+											x1="16"
+											y1="13"
+											x2="8"
+											y2="13"
+										/><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" /></svg
+									>
 									documents
 								</button>
 								{#if activeNotebook}
-									<button class="filter-chip" onclick={() => (activeNotebook = null)} title="Clear notebook filter">
+									<button
+										class="filter-chip"
+										onclick={() => (activeNotebook = null)}
+										title="Clear notebook filter"
+									>
 										{activeNotebook}<span class="chip-x">×</span>
 									</button>
 								{/if}
 								{#if activeTag}
-									<button class="filter-chip" onclick={() => (activeTag = null)} title="Clear tag filter">
+									<button
+										class="filter-chip"
+										onclick={() => (activeTag = null)}
+										title="Clear tag filter"
+									>
 										#{activeTag}<span class="chip-x">×</span>
 									</button>
 								{/if}
@@ -1025,30 +1495,80 @@
 							<div class="nb-list">
 								{#each filteredNotebook as note (note.id)}
 									<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-									<div class="nb-row" class:selected={selectedNote?.id === note.id} onclick={() => selectOrOpen(note)} oncontextmenu={(e) => { e.preventDefault(); activeMenuId = activeMenuId === note.id ? null : note.id; }}>
+									<div
+										class="nb-row"
+										class:selected={selectedNote?.id === note.id}
+										onclick={() => selectOrOpen(note)}
+										oncontextmenu={(e) => {
+											e.preventDefault();
+											activeMenuId = activeMenuId === note.id ? null : note.id;
+										}}
+									>
 										{#if pinnedNoteIds.includes(note.id)}
-											<svg class="nb-pin" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+											<svg
+												class="nb-pin"
+												width="11"
+												height="11"
+												viewBox="0 0 24 24"
+												fill="currentColor"
+												stroke="none"
+												><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" /></svg
+											>
 										{/if}
 										<span class="nb-row-title">{note.title}</span>
 										{#if notebookOf(note)}
 											<span class="nb-row-book" title="Notebook: {notebookOf(note)}">
-												<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+												<svg
+													width="10"
+													height="10"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path
+														d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"
+													/></svg
+												>
 												{notebookOf(note)}
 											</span>
 										{/if}
 										<span class="nb-row-date">{fullDateTime(note.createdAt)}</span>
 										<span class="row-badge nb-row-badge">{getNoteBadge(note)}</span>
 										<div class="row-menu-wrap">
-											<button class="row-menu-btn" onclick={(e) => { e.stopPropagation(); activeMenuId = activeMenuId === note.id ? null : note.id; }} aria-label="Options">
-												<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+											<button
+												class="row-menu-btn"
+												onclick={(e) => {
+													e.stopPropagation();
+													activeMenuId = activeMenuId === note.id ? null : note.id;
+												}}
+												aria-label="Options"
+											>
+												<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
+													><circle cx="12" cy="5" r="1.5" /><circle
+														cx="12"
+														cy="12"
+														r="1.5"
+													/><circle cx="12" cy="19" r="1.5" /></svg
+												>
 											</button>
 											{#if activeMenuId === note.id}
 												<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 												<div class="row-dropdown" onclick={(e) => e.stopPropagation()}>
-													<button class="row-delete" onclick={(e) => { e.preventDefault(); togglePin(note.id); }} style="color: var(--text-primary);">
+													<button
+														class="row-delete"
+														onclick={(e) => {
+															e.preventDefault();
+															togglePin(note.id);
+														}}
+														style="color: var(--text-primary);"
+													>
 														{pinnedNoteIds.includes(note.id) ? 'Unpin' : 'Pin'}
 													</button>
-													<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}>Delete</button>
+													<button class="row-delete" onclick={(e) => requestDeleteNote(e, note.id)}
+														>Delete</button
+													>
 												</div>
 											{/if}
 										</div>
@@ -1057,11 +1577,22 @@
 								{#if filteredNotebook.length === 0}
 									{#if indexing}
 										<div class="nb-empty nb-indexing">
-											<svg class="nb-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+											<svg
+												class="nb-spin"
+												width="13"
+												height="13"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="2.5"
+												stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg
+											>
 											Indexing your workspace…
 										</div>
 									{:else}
-										<div class="nb-empty">No {activeTypeFilter === 'all' ? '' : activeTypeFilter + ' '}notes yet.</div>
+										<div class="nb-empty">
+											No {activeTypeFilter === 'all' ? '' : activeTypeFilter + ' '}notes yet.
+										</div>
 									{/if}
 								{/if}
 							</div>
@@ -1074,8 +1605,28 @@
 							<section class="dash-panel">
 								<div class="panel-head">
 									<h3>details</h3>
-									<button class="panel-close" onclick={() => (selectedNote = null)} aria-label="Close details" title="Close">
-										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+									<button
+										class="panel-close"
+										onclick={() => (selectedNote = null)}
+										aria-label="Close details"
+										title="Close"
+									>
+										<svg
+											width="14"
+											height="14"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											><line x1="18" y1="6" x2="6" y2="18" /><line
+												x1="6"
+												y1="6"
+												x2="18"
+												y2="18"
+											/></svg
+										>
 									</button>
 								</div>
 								<div class="detail-body">
@@ -1089,16 +1640,40 @@
 										</div>
 									{/if}
 									<div class="detail-rows">
-										<div class="detail-row"><span class="dr-key">created</span><span class="dr-val">{fullDateTime(selectedNote.createdAt)}</span></div>
-										<div class="detail-row"><span class="dr-key">modified</span><span class="dr-val">{fullDateTime(selectedNote.updatedAt)}</span></div>
-										<div class="detail-row"><span class="dr-key">folder</span><span class="dr-val">{folderLabel(selectedNote)}</span></div>
-										<div class="detail-row"><span class="dr-key">path</span><span class="dr-val" title={selectedNote.relativePath}>{selectedNote.relativePath}</span></div>
-										<div class="detail-row"><span class="dr-key">links</span><span class="dr-val">{selectedNote.backlinks.length}</span></div>
+										<div class="detail-row">
+											<span class="dr-key">created</span><span class="dr-val"
+												>{fullDateTime(selectedNote.createdAt)}</span
+											>
+										</div>
+										<div class="detail-row">
+											<span class="dr-key">modified</span><span class="dr-val"
+												>{fullDateTime(selectedNote.updatedAt)}</span
+											>
+										</div>
+										<div class="detail-row">
+											<span class="dr-key">folder</span><span class="dr-val"
+												>{folderLabel(selectedNote)}</span
+											>
+										</div>
+										<div class="detail-row">
+											<span class="dr-key">path</span><span
+												class="dr-val"
+												title={selectedNote.relativePath}>{selectedNote.relativePath}</span
+											>
+										</div>
+										<div class="detail-row">
+											<span class="dr-key">links</span><span class="dr-val"
+												>{selectedNote.backlinks.length}</span
+											>
+										</div>
 									</div>
 									{#if selectedNote.excerpt}
 										<p class="detail-excerpt">{selectedNote.excerpt}</p>
 									{/if}
-									<button class="btn-primary detail-open" onclick={() => selectedNote && openNote(selectedNote.id)}>Open</button>
+									<button
+										class="btn-primary detail-open"
+										onclick={() => selectedNote && openNote(selectedNote.id)}>Open</button
+									>
 								</div>
 							</section>
 						</div>
@@ -1108,51 +1683,112 @@
 								<div class="panel-head">
 									<h3>tasks</h3>
 									<div class="panel-tabs">
-										<button class:active={activeTaskFilter === 'all'} onclick={() => (activeTaskFilter = 'all')}>all</button>
-										<button class:active={activeTaskFilter === 'active'} onclick={() => (activeTaskFilter = 'active')}>active</button>
-										<button class:active={activeTaskFilter === 'done'} onclick={() => (activeTaskFilter = 'done')}>done</button>
+										<button
+											class:active={activeTaskFilter === 'all'}
+											onclick={() => (activeTaskFilter = 'all')}>all</button
+										>
+										<button
+											class:active={activeTaskFilter === 'active'}
+											onclick={() => (activeTaskFilter = 'active')}>active</button
+										>
+										<button
+											class:active={activeTaskFilter === 'done'}
+											onclick={() => (activeTaskFilter = 'done')}>done</button
+										>
 									</div>
 								</div>
 								<div class="task-list">
 									{#each filteredTasks as task (task.id)}
 										<div class="task-card" class:expanded={expandedTaskId === task.id}>
 											<div class="task-item" class:done={task.done}>
-												<button class="subtask-circle main-task-circle" class:done={task.done} onclick={() => task.done = !task.done} tabindex="-1"></button>
-												<input class="task-text-input" type="text" bind:value={task.text} onfocus={() => expandedTaskId = task.id} />
-												<button class="task-remove" tabindex="-1" onclick={(e) => { e.preventDefault(); removeTask(task.id); }} aria-label="Remove task">&times;</button>
+												<button
+													class="subtask-circle main-task-circle"
+													class:done={task.done}
+													onclick={() => (task.done = !task.done)}
+													tabindex="-1"
+												></button>
+												<input
+													class="task-text-input"
+													type="text"
+													bind:value={task.text}
+													onfocus={() => (expandedTaskId = task.id)}
+												/>
+												<button
+													class="task-remove"
+													tabindex="-1"
+													onclick={(e) => {
+														e.preventDefault();
+														removeTask(task.id);
+													}}
+													aria-label="Remove task">&times;</button
+												>
 											</div>
 											{#if expandedTaskId === task.id}
 												<div class="task-expanded-details redesigned">
 													<div class="field-row notebook-row">
-														<NotebookSelect bind:value={task.notebook} notebooks={notebooks} />
+														<NotebookSelect bind:value={task.notebook} {notebooks} />
 													</div>
 
 													<div class="field-row">
-														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-														<textarea rows="1" use:autoResize placeholder="Add details" bind:value={task.details} class="field-input textarea-new"></textarea>
+														<svg
+															class="field-icon"
+															viewBox="0 0 24 24"
+															stroke="currentColor"
+															stroke-width="2"
+															fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg
+														>
+														<textarea
+															rows="1"
+															use:autoResize
+															placeholder="Add details"
+															bind:value={task.details}
+															class="field-input textarea-new"
+														></textarea>
 													</div>
 
 													<div class="field-row">
-														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-														<input 
-															type="text" 
-															placeholder="Add deadline" 
-															bind:value={task.dueDate} 
-															class="field-input date-time-new" 
-															onfocus={(e) => e.currentTarget.type = 'date'} 
-															onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+														<svg
+															class="field-icon"
+															viewBox="0 0 24 24"
+															stroke="currentColor"
+															stroke-width="2"
+															fill="none"
+															><circle cx="12" cy="12" r="10" /><circle
+																cx="12"
+																cy="12"
+																r="6"
+															/><circle cx="12" cy="12" r="2" /></svg
+														>
+														<input
+															type="text"
+															placeholder="Add deadline"
+															bind:value={task.dueDate}
+															class="field-input date-time-new"
+															onfocus={(e) => (e.currentTarget.type = 'date')}
+															onblur={(e) => {
+																if (!e.currentTarget.value) e.currentTarget.type = 'text';
+															}}
 														/>
 													</div>
 
 													<div class="field-row">
-														<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-														<input 
-															type="text" 
-															placeholder="Add date/time" 
-															bind:value={task.dueTime} 
-															class="field-input date-time-new" 
-															onfocus={(e) => e.currentTarget.type = 'time'} 
-															onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+														<svg
+															class="field-icon"
+															viewBox="0 0 24 24"
+															stroke="currentColor"
+															stroke-width="2"
+															fill="none"
+															><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg
+														>
+														<input
+															type="text"
+															placeholder="Add date/time"
+															bind:value={task.dueTime}
+															class="field-input date-time-new"
+															onfocus={(e) => (e.currentTarget.type = 'time')}
+															onblur={(e) => {
+																if (!e.currentTarget.value) e.currentTarget.type = 'text';
+															}}
 														/>
 													</div>
 
@@ -1160,24 +1796,63 @@
 														{#if task.subtasks}
 															{#each task.subtasks as subtask, i}
 																<div class="subtask-row">
-																	<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
-																	<button class="subtask-circle" class:done={subtask.done} onclick={() => subtask.done = !subtask.done} tabindex="-1"></button>
-																	<input type="text" bind:value={subtask.text} class="field-input subtask-input-new" class:done={subtask.done} />
-																	<button class="subtask-remove" tabindex="-1" onclick={() => task.subtasks!.splice(i, 1)}>&times;</button>
+																	<svg
+																		class="subtask-arrow"
+																		viewBox="0 0 24 24"
+																		stroke="currentColor"
+																		stroke-width="2"
+																		fill="none"
+																		><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path
+																			d="M15 9l3 3-3 3"
+																		/></svg
+																	>
+																	<button
+																		class="subtask-circle"
+																		class:done={subtask.done}
+																		onclick={() => (subtask.done = !subtask.done)}
+																		tabindex="-1"
+																	></button>
+																	<input
+																		type="text"
+																		bind:value={subtask.text}
+																		class="field-input subtask-input-new"
+																		class:done={subtask.done}
+																	/>
+																	<button
+																		class="subtask-remove"
+																		tabindex="-1"
+																		onclick={() => task.subtasks!.splice(i, 1)}>&times;</button
+																	>
 																</div>
 															{/each}
 														{/if}
 														<div class="subtask-row">
-															<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+															<svg
+																class="subtask-arrow"
+																viewBox="0 0 24 24"
+																stroke="currentColor"
+																stroke-width="2"
+																fill="none"
+																><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+															>
 															<div class="subtask-circle empty"></div>
-															<input type="text" placeholder="Enter title" class="field-input subtask-input-new" onkeydown={(e) => {
-																if (e.key === 'Enter' && e.currentTarget.value.trim()) {
-																	e.preventDefault();
-																	task.subtasks = task.subtasks || [];
-																	task.subtasks.push({ id: Date.now(), text: e.currentTarget.value.trim(), done: false });
-																	e.currentTarget.value = '';
-																}
-															}} />
+															<input
+																type="text"
+																placeholder="Enter title"
+																class="field-input subtask-input-new"
+																onkeydown={(e) => {
+																	if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+																		e.preventDefault();
+																		task.subtasks = task.subtasks || [];
+																		task.subtasks.push({
+																			id: Date.now(),
+																			text: e.currentTarget.value.trim(),
+																			done: false
+																		});
+																		e.currentTarget.value = '';
+																	}
+																}}
+															/>
 														</div>
 														<div class="subtask-add-hint">Add subtasks</div>
 													</div>
@@ -1186,12 +1861,25 @@
 										</div>
 									{/each}
 									{#if filteredTasks.length === 0}
-										<div class="nb-empty">No {activeTaskFilter === 'all' ? '' : activeTaskFilter + ' '}tasks.</div>
+										<div class="nb-empty">
+											No {activeTaskFilter === 'all' ? '' : activeTaskFilter + ' '}tasks.
+										</div>
 									{/if}
 								</div>
-								<form class="add-task-form" onsubmit={(e) => { e.preventDefault(); addTask(); }}>
+								<form
+									class="add-task-form"
+									onsubmit={(e) => {
+										e.preventDefault();
+										addTask();
+									}}
+								>
 									<input type="text" placeholder="Add a task..." bind:value={newTaskText} />
-									<button type="submit" class="btn-primary" style="padding: 6px 14px; border-radius: var(--radius-xs); font-size: 0.8rem; font-weight: 500; min-height: unset; line-height: 1;">Add</button>
+									<button
+										type="submit"
+										class="btn-primary"
+										style="padding: 6px 14px; border-radius: var(--radius-xs); font-size: 0.8rem; font-weight: 500; min-height: unset; line-height: 1;"
+										>Add</button
+									>
 								</form>
 							</section>
 						</div>
@@ -1208,7 +1896,9 @@
 		<div class="modal-content" onclick={(e) => e.stopPropagation()}>
 			<header class="modal-header">
 				<h2>Clusters ({commonplaces.length})</h2>
-				<p class="modal-subtitle">Groups of notes connected by links. Select one to view its notes.</p>
+				<p class="modal-subtitle">
+					Groups of notes connected by links. Select one to view its notes.
+				</p>
 			</header>
 			<div class="modal-body">
 				{#if commonplaces.length === 0}
@@ -1216,9 +1906,31 @@
 				{:else}
 					<div class="cluster-list">
 						{#each commonplaces as cluster, i}
-							<button class="cluster-row" onclick={() => { closeClustersList(); openCluster(cluster); }}>
+							<button
+								class="cluster-row"
+								onclick={() => {
+									closeClustersList();
+									openCluster(cluster);
+								}}
+							>
 								<span class="cluster-name">
-									<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M9.5 10.5 6.7 7.3M14.5 10.5l2.8-3.2M10.2 14.2 7.4 17.4"/></svg>
+									<svg
+										width="13"
+										height="13"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										stroke-width="2"
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										><circle cx="12" cy="12" r="3" /><circle cx="5" cy="6" r="2" /><circle
+											cx="19"
+											cy="6"
+											r="2"
+										/><circle cx="6" cy="19" r="2" /><path
+											d="M9.5 10.5 6.7 7.3M14.5 10.5l2.8-3.2M10.2 14.2 7.4 17.4"
+										/></svg
+									>
 									Cluster {i + 1}
 								</span>
 								<span class="cluster-meta">{cluster.length} notes</span>
@@ -1252,7 +1964,13 @@
 					</div>
 					{#each selectedCluster as note}
 						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-						<div class="table-row" onclick={() => { closeClusterDialog(); openNote(note.id); }}>
+						<div
+							class="table-row"
+							onclick={() => {
+								closeClusterDialog();
+								openNote(note.id);
+							}}
+						>
 							<div class="td-col td-primary">{note.title}</div>
 							<div class="td-col">{note.folder || 'root'}</div>
 							<div class="td-col">{new Date(note.createdAt).toLocaleDateString()}</div>
@@ -1336,7 +2054,10 @@
 		border-radius: var(--radius-sm);
 		color: var(--text-secondary);
 		cursor: pointer;
-		transition: color 0.15s, background 0.15s, border-color 0.15s;
+		transition:
+			color 0.15s,
+			background 0.15s,
+			border-color 0.15s;
 	}
 	.theme-toggle-btn:hover {
 		color: var(--accent-100);
@@ -1376,8 +2097,12 @@
 		color: var(--text-primary);
 		outline: none;
 	}
-	.search-input::placeholder { color: var(--neutral-600); }
-	.search-input:focus { border-color: var(--neutral-600); }
+	.search-input::placeholder {
+		color: var(--neutral-600);
+	}
+	.search-input:focus {
+		border-color: var(--neutral-600);
+	}
 
 	.rail-search-btn {
 		display: flex;
@@ -1393,7 +2118,9 @@
 		font-size: 0.85rem;
 		cursor: pointer;
 		flex-shrink: 0;
-		transition: border-color 0.15s, color 0.15s;
+		transition:
+			border-color 0.15s,
+			color 0.15s;
 	}
 	.rail-search-btn:hover {
 		border-color: var(--neutral-600);
@@ -1406,7 +2133,9 @@
 		padding: 0 var(--space-3) var(--space-4);
 		scrollbar-width: none;
 	}
-	.rail-list::-webkit-scrollbar { display: none; }
+	.rail-list::-webkit-scrollbar {
+		display: none;
+	}
 
 	.rail-empty {
 		font-size: 0.8rem;
@@ -1444,7 +2173,9 @@
 		border-radius: var(--radius-xs);
 		color: var(--text-secondary);
 		cursor: pointer;
-		transition: color 0.15s, background 0.15s;
+		transition:
+			color 0.15s,
+			background 0.15s;
 	}
 	.section-add:hover:not(:disabled) {
 		color: var(--accent-100);
@@ -1464,19 +2195,25 @@
 		cursor: pointer;
 		position: relative;
 		border: 1px solid transparent;
-		transition: background 0.1s, border-color 0.1s;
+		transition:
+			background 0.1s,
+			border-color 0.1s;
 	}
 	.note-row:hover {
 		background: var(--hover-overlay);
 		border-color: var(--border-default);
 	}
-	.note-row:hover .row-menu-btn { opacity: 1; }
+	.note-row:hover .row-menu-btn {
+		opacity: 1;
+	}
 
 	.row-icon {
 		flex-shrink: 0;
 		color: var(--neutral-600);
 	}
-	.row-icon.pdf-icon { color: var(--accent-300); }
+	.row-icon.pdf-icon {
+		color: var(--accent-300);
+	}
 
 	.row-title {
 		flex: 1;
@@ -1521,9 +2258,14 @@
 		display: flex;
 		align-items: center;
 		opacity: 0;
-		transition: opacity 0.1s, background 0.1s;
+		transition:
+			opacity 0.1s,
+			background 0.1s;
 	}
-	.row-menu-btn:hover { background: var(--hover-overlay-strong); color: var(--text-primary); }
+	.row-menu-btn:hover {
+		background: var(--hover-overlay-strong);
+		color: var(--text-primary);
+	}
 
 	.row-dropdown {
 		position: absolute;
@@ -1549,7 +2291,9 @@
 		border-radius: var(--radius-xs);
 		cursor: pointer;
 	}
-	.row-delete:hover { background: var(--danger-tint); }
+	.row-delete:hover {
+		background: var(--danger-tint);
+	}
 
 	/* ── Rail details panel ── */
 	.ov-group {
@@ -1573,14 +2317,19 @@
 		color: var(--text-secondary);
 		text-align: left;
 	}
-	.ov-group .ov-row:last-child { border-bottom: none; }
+	.ov-group .ov-row:last-child {
+		border-bottom: none;
+	}
 	.ov-key {
 		display: flex;
 		align-items: center;
 		gap: var(--space-2);
 		min-width: 0;
 	}
-	.ov-key svg { flex-shrink: 0; color: var(--neutral-600); }
+	.ov-key svg {
+		flex-shrink: 0;
+		color: var(--neutral-600);
+	}
 	.ov-ellipsis {
 		white-space: nowrap;
 		overflow: hidden;
@@ -1591,9 +2340,15 @@
 		color: var(--text-primary);
 		font-size: 0.78rem;
 	}
-	.ov-val.ov-ok { color: var(--success); }
-	.ov-clickable { cursor: pointer; }
-	.ov-clickable:hover .ov-key { color: var(--text-primary); }
+	.ov-val.ov-ok {
+		color: var(--success);
+	}
+	.ov-clickable {
+		cursor: pointer;
+	}
+	.ov-clickable:hover .ov-key {
+		color: var(--text-primary);
+	}
 	/* Create / upload action rows in the "New" section */
 	.ov-action {
 		border-bottom: none;
@@ -1626,7 +2381,10 @@
 		font-family: var(--font-mono);
 		font-size: 0.8rem;
 		cursor: pointer;
-		transition: border-color 0.15s, background 0.15s, color 0.15s;
+		transition:
+			border-color 0.15s,
+			background 0.15s,
+			color 0.15s;
 	}
 	.new-notebook-btn svg {
 		color: var(--accent-200);
@@ -1640,9 +2398,16 @@
 		opacity: 0.5;
 		cursor: not-allowed;
 	}
-	.ov-action .ov-key svg { color: var(--accent-200); }
-	.ov-action:hover:not(:disabled) { background: var(--hover-overlay); }
-	.ov-action:disabled { opacity: 0.5; cursor: not-allowed; }
+	.ov-action .ov-key svg {
+		color: var(--accent-200);
+	}
+	.ov-action:hover:not(:disabled) {
+		background: var(--hover-overlay);
+	}
+	.ov-action:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
 	.ov-row.active .ov-key,
 	.ov-row.active .ov-val {
 		color: var(--accent-100);
@@ -1708,14 +2473,20 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		transition: color 0.1s, border-color 0.1s, background 0.1s;
+		transition:
+			color 0.1s,
+			border-color 0.1s,
+			background 0.1s;
 	}
 	.footer-change-btn:hover:not(:disabled) {
 		color: var(--text-primary);
 		border-color: var(--border-default);
 		background: var(--hover-overlay);
 	}
-	.footer-change-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+	.footer-change-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
 	.footer-dot {
 		width: 6px;
 		height: 6px;
@@ -1723,7 +2494,9 @@
 		background: var(--neutral-700);
 		flex-shrink: 0;
 	}
-	.footer-dot.dot-ok { background: var(--success); }
+	.footer-dot.dot-ok {
+		background: var(--success);
+	}
 
 	/* ── Workspace panel ── */
 	.workspace {
@@ -1775,8 +2548,12 @@
 		cursor: pointer;
 		transition: background 0.15s;
 	}
-	.btn-primary:hover:not(:disabled) { background: var(--accent-100); }
-	.btn-primary:disabled { opacity: 0.5; }
+	.btn-primary:hover:not(:disabled) {
+		background: var(--accent-100);
+	}
+	.btn-primary:disabled {
+		opacity: 0.5;
+	}
 
 	.workspace-empty {
 		height: 100%;
@@ -1820,9 +2597,22 @@
 		gap: var(--space-3);
 		font-family: var(--font-mono);
 	}
-	.dialog-content h3 { margin: 0; font-size: 0.95rem; color: var(--text-hero); }
-	.dialog-content p { margin: 0; font-size: 0.75rem; color: var(--text-secondary); }
-	.dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+	.dialog-content h3 {
+		margin: 0;
+		font-size: 0.95rem;
+		color: var(--text-hero);
+	}
+	.dialog-content p {
+		margin: 0;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+	}
+	.dialog-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--space-2);
+		margin-top: var(--space-2);
+	}
 	.nb-name-input {
 		width: 100%;
 		box-sizing: border-box;
@@ -1836,7 +2626,9 @@
 		outline: none;
 		transition: border-color 0.15s;
 	}
-	.nb-name-input:focus { border-color: var(--accent-200); }
+	.nb-name-input:focus {
+		border-color: var(--accent-200);
+	}
 	.nb-create-btn {
 		padding: 6px 14px;
 		font-size: 0.75rem;
@@ -1854,7 +2646,9 @@
 		color: var(--text-secondary);
 		cursor: pointer;
 	}
-	.btn-ghost:hover { color: var(--text-primary); }
+	.btn-ghost:hover {
+		color: var(--text-primary);
+	}
 	.btn-danger {
 		padding: 6px 14px;
 		font-size: 0.75rem;
@@ -1865,15 +2659,23 @@
 		color: var(--danger);
 		cursor: pointer;
 	}
-	.btn-danger:hover:not(:disabled) { background: var(--danger-tint); }
-	.btn-danger:disabled { opacity: 0.4; }
-
-	@keyframes fade-in {
-		from { opacity: 0; transform: translateY(4px); }
-		to { opacity: 1; transform: translateY(0); }
+	.btn-danger:hover:not(:disabled) {
+		background: var(--danger-tint);
+	}
+	.btn-danger:disabled {
+		opacity: 0.4;
 	}
 
-
+	@keyframes fade-in {
+		from {
+			opacity: 0;
+			transform: translateY(4px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
 
 	/* ── Dashboard Styles ── */
 	.dashboard-container {
@@ -2008,9 +2810,13 @@
 		font-family: var(--font-mono);
 		cursor: pointer;
 		border-radius: var(--radius-xs);
-		transition: color 0.15s, background 0.15s;
+		transition:
+			color 0.15s,
+			background 0.15s;
 	}
-	.dash-tab:hover { color: var(--text-primary); }
+	.dash-tab:hover {
+		color: var(--text-primary);
+	}
 	.dash-tab.active {
 		color: var(--text-primary);
 		background: var(--hover-overlay-strong);
@@ -2071,7 +2877,9 @@
 		padding: 0 4px 8px 4px;
 		margin-bottom: -1px;
 		border-bottom: 2px solid transparent;
-		transition: color 0.15s, border-color 0.15s;
+		transition:
+			color 0.15s,
+			border-color 0.15s;
 	}
 	.h3-tab:hover {
 		color: var(--text-primary);
@@ -2181,7 +2989,9 @@
 		animation: nb-spin 0.8s linear infinite;
 	}
 	@keyframes nb-spin {
-		to { transform: rotate(360deg); }
+		to {
+			transform: rotate(360deg);
+		}
 	}
 	.indexing-pill {
 		display: inline-flex;
@@ -2344,7 +3154,10 @@
 		border-radius: var(--radius-sm);
 		color: var(--text-secondary);
 		cursor: pointer;
-		transition: color 0.15s, background 0.15s, border-color 0.15s;
+		transition:
+			color 0.15s,
+			background 0.15s,
+			border-color 0.15s;
 	}
 	.nb-add-btn:hover:not(:disabled) {
 		color: var(--accent-100);
@@ -2488,7 +3301,7 @@
 	.task-remove:hover {
 		color: var(--danger);
 	}
-	
+
 	.task-expanded-details.redesigned {
 		display: flex;
 		flex-direction: column;
@@ -2620,7 +3433,9 @@
 		border-bottom: 1px solid var(--border-default);
 		padding-bottom: 6px;
 	}
-	.dash-section h3 svg { color: var(--neutral-600); }
+	.dash-section h3 svg {
+		color: var(--neutral-600);
+	}
 
 	/* Active sidebar filter shown in the notes header; click to clear. */
 	.filter-chip {
@@ -2644,7 +3459,9 @@
 		line-height: 1;
 		opacity: 0.8;
 	}
-	.filter-chip:hover .chip-x { opacity: 1; }
+	.filter-chip:hover .chip-x {
+		opacity: 1;
+	}
 
 	.add-task-form {
 		margin-top: 0;
@@ -2667,13 +3484,17 @@
 		font-size: 0.8rem;
 		outline: none;
 	}
-	.add-task-form input:focus { border-color: var(--neutral-600); }
-
+	.add-task-form input:focus {
+		border-color: var(--neutral-600);
+	}
 
 	/* ── Clusters Modal ── */
 	.modal-overlay {
 		position: fixed;
-		top: 0; left: 0; right: 0; bottom: 0;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
 		background: var(--scrim);
 		backdrop-filter: blur(2px);
 		display: flex;
@@ -2699,9 +3520,18 @@
 		gap: 6px;
 		padding: 1.5rem 1.5rem 1rem;
 	}
-	.modal-header h2 { margin: 0; font-size: 1.15rem; color: var(--text-primary); font-weight: 700; }
-	.modal-subtitle { margin: 0; font-size: 0.85rem; color: var(--text-secondary); }
-	
+	.modal-header h2 {
+		margin: 0;
+		font-size: 1.15rem;
+		color: var(--text-primary);
+		font-weight: 700;
+	}
+	.modal-subtitle {
+		margin: 0;
+		font-size: 0.85rem;
+		color: var(--text-secondary);
+	}
+
 	.modal-body {
 		padding: 0;
 		overflow-y: auto;
@@ -2728,8 +3558,12 @@
 		font-family: var(--font-mono);
 		transition: background 0.1s;
 	}
-	.cluster-row:last-child { border-bottom: none; }
-	.cluster-row:hover { background: var(--hover-overlay); }
+	.cluster-row:last-child {
+		border-bottom: none;
+	}
+	.cluster-row:hover {
+		background: var(--hover-overlay);
+	}
 	.cluster-name {
 		display: flex;
 		align-items: center;
@@ -2737,7 +3571,10 @@
 		font-size: 0.9rem;
 		color: var(--text-primary);
 	}
-	.cluster-name svg { color: var(--accent-200); flex-shrink: 0; }
+	.cluster-name svg {
+		color: var(--accent-200);
+		flex-shrink: 0;
+	}
 	.cluster-meta {
 		flex-shrink: 0;
 		font-size: 0.8rem;
@@ -2765,7 +3602,9 @@
 		font-size: 0.85rem;
 		cursor: pointer;
 		font-family: var(--font-mono);
-		transition: background 0.15s, border-color 0.15s;
+		transition:
+			background 0.15s,
+			border-color 0.15s;
 	}
 	.btn-cancel:hover {
 		background: var(--hover-overlay);
@@ -2817,9 +3656,14 @@
 		overflow-y: auto;
 		padding-right: 8px;
 	}
-	.pinned-list::-webkit-scrollbar { width: 4px; }
-	.pinned-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 4px; }
-	
+	.pinned-list::-webkit-scrollbar {
+		width: 4px;
+	}
+	.pinned-list::-webkit-scrollbar-thumb {
+		background: var(--border-default);
+		border-radius: 4px;
+	}
+
 	.pinned-item {
 		display: flex;
 		align-items: center;
@@ -2905,7 +3749,9 @@
 		cursor: pointer;
 		width: 400px;
 		box-sizing: border-box;
-		transition: border-color 0.15s, color 0.15s;
+		transition:
+			border-color 0.15s,
+			color 0.15s;
 	}
 	.header-search-btn:hover {
 		border-color: var(--neutral-600);
@@ -2925,7 +3771,10 @@
 		font-family: var(--font-mono);
 		font-size: 0.85rem;
 		cursor: pointer;
-		transition: border-color 0.15s, color 0.15s, background 0.15s;
+		transition:
+			border-color 0.15s,
+			color 0.15s,
+			background 0.15s;
 	}
 	.header-toggle-btn:hover {
 		border-color: var(--neutral-600);
@@ -2975,8 +3824,10 @@
 		margin-bottom: var(--space-4);
 		transition: border-color 0.2s;
 	}
-	.link-search-input:focus { border-color: var(--accent-200); }
-	
+	.link-search-input:focus {
+		border-color: var(--accent-200);
+	}
+
 	.link-results-container {
 		max-height: 300px;
 		overflow-y: auto;
@@ -2985,7 +3836,7 @@
 		background: var(--bg-panel);
 		padding: var(--space-2);
 	}
-	
+
 	.link-results-list {
 		list-style: none;
 		margin: 0;
@@ -2994,7 +3845,7 @@
 		flex-direction: column;
 		gap: 2px;
 	}
-	
+
 	.link-result-btn {
 		width: 100%;
 		display: flex;
@@ -3013,7 +3864,7 @@
 	.link-result-btn.selected {
 		background: var(--accent-tint);
 	}
-	
+
 	.folder-badge {
 		font-size: 0.7rem;
 		color: var(--text-secondary);

@@ -1,6 +1,9 @@
 <script lang="ts">
-	let { notebooks, value = $bindable() } = $props<{ notebooks: string[], value: string | undefined }>();
-	
+	let { notebooks, value = $bindable() } = $props<{
+		notebooks: string[];
+		value: string | undefined;
+	}>();
+
 	let isOpen = $state(false);
 	let forceClose = $state(false);
 	let rootEl: HTMLDivElement | undefined = $state();
@@ -34,8 +37,13 @@
 	});
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_mouse_events_have_key_events -->
+<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_mouse_events_have_key_events a11y_no_noninteractive_element_interactions -->
 <div
+	role="combobox"
+	aria-label="Notebook selector"
+	aria-expanded={isOpen}
+	aria-controls="notebook-select-options"
+	tabindex="0"
 	class="notebook-select-root"
 	class:force-close={forceClose}
 	class:is-open={isOpen}
@@ -43,17 +51,38 @@
 	onfocusout={onFocusOut}
 	onkeydown={onKeydown}
 >
-	<button class="notebook-select-btn" onclick={() => (isOpen = true)} onfocus={() => (isOpen = true)} type="button">
+	<button
+		class="notebook-select-btn"
+		onclick={() => (isOpen = true)}
+		onfocus={() => (isOpen = true)}
+		type="button"
+	>
 		{value || 'Uncategorized'}
-		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+		<svg
+			width="16"
+			height="16"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		>
 			<polyline points="6 9 12 15 18 9"></polyline>
 		</svg>
 	</button>
 
-	<div class="select-dropdown">
-		<button class="select-option" class:selected={!value} onclick={() => selectNb('')} type="button">Uncategorized</button>
+	<div id="notebook-select-options" class="select-dropdown">
+		<button class="select-option" class:selected={!value} onclick={() => selectNb('')} type="button"
+			>Uncategorized</button
+		>
 		{#each notebooks as nb}
-			<button class="select-option" class:selected={value === nb} onclick={() => selectNb(nb)} type="button">{nb}</button>
+			<button
+				class="select-option"
+				class:selected={value === nb}
+				onclick={() => selectNb(nb)}
+				type="button">{nb}</button
+			>
 		{/each}
 	</div>
 </div>
@@ -76,7 +105,9 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		transition: background 0.1s, border-color 0.1s;
+		transition:
+			background 0.1s,
+			border-color 0.1s;
 		outline: none;
 	}
 	.notebook-select-btn:hover,
@@ -117,7 +148,9 @@
 		font-size: 0.95rem;
 		cursor: pointer;
 		border-radius: 4px;
-		transition: background 0.1s, color 0.1s;
+		transition:
+			background 0.1s,
+			color 0.1s;
 	}
 	.select-option:hover {
 		background: var(--hover-overlay, rgba(255, 255, 255, 0.05));

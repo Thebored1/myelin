@@ -29,15 +29,18 @@ The test never changes user notes. `write_note`, `read_note`, and `search_notes`
 Myelin relies heavily on native Rust libraries (like Tectonic) to achieve a zero-dependency runtime.
 
 ### Prerequisites (All Platforms)
-1. **Node.js** (v18+) and **npm**
-2. **Rust** (stable toolchain) via rustup
-3. **Tauri CLI** prerequisites (C++ Build Tools on Windows, Xcode tools on macOS, webkit2gtk on Linux)
+
+1. **Node.js** (v21.7.3+) and **npm** (v10.5.0+). The current dependency lockfile requires these minimum versions.
+2. **Rust** (stable toolchain) and Cargo.
+3. **Tauri native build prerequisites** (C++ Build Tools on Windows, Xcode tools on macOS, WebKitGTK development headers on Linux).
+4. **Protocol Buffers compiler (`protoc`)**. It is required by LanceDB's `lance-encoding` dependency during the Rust build.
 
 ### Platform-Specific Backend Setup
 
 Because the Tectonic LaTeX engine requires several native C/C++ libraries (ICU, HarfBuzz, Fontconfig, FreeType, OpenSSL, libpng, zlib), the compilation process differs by OS to ensure the final application remains self-contained.
 
 #### Windows
+
 To create a fully self-contained `.exe` or `.msi` without requiring users to install dynamic libraries, Myelin relies on `vcpkg` for static linking on Windows.
 
 1. Ensure the `vcpkg` cargo backend is configured. Inside `src-tauri/.cargo/config.toml`, ensure the following environment variables are set:
@@ -54,21 +57,46 @@ To create a fully self-contained `.exe` or `.msi` without requiring users to ins
    cargo install cargo-vcpkg
    cargo vcpkg build
    ```
-   *Note: If some dependencies are not compiled correctly for the static release triplet, you may need to install them manually using the bootstrapped vcpkg executable:*
+   _Note: If some dependencies are not compiled correctly for the static release triplet, you may need to install them manually using the bootstrapped vcpkg executable:_
    ```bash
    target\vcpkg\vcpkg install icu:x64-windows-static-release harfbuzz[graphite2]:x64-windows-static-release freetype:x64-windows-static-release fontconfig:x64-windows-static-release libpng:x64-windows-static-release zlib:x64-windows-static-release openssl:x64-windows-static-release
    ```
 
 #### macOS
+
 macOS comes with many required libraries, but you will need `pkg-config` and `icu4c`.
+
 ```bash
 brew install pkg-config icu4c openssl fontconfig harfbuzz freetype
 ```
 
 #### Linux (Ubuntu/Debian)
-Install the standard `pkg-config` and development headers.
+
+Install Node.js, Rust/Cargo, the Tauri WebKitGTK headers, the Tectonic native libraries, a C/C++ toolchain, and Protocol Buffers:
+
 ```bash
-sudo apt-get install pkg-config libicu-dev libharfbuzz-dev libfontconfig1-dev libfreetype6-dev libssl-dev zlib1g-dev libpng-dev
+sudo apt-get update
+sudo apt-get install -y \
+  nodejs npm cargo rustc build-essential pkg-config protobuf-compiler \
+  libwebkit2gtk-4.1-dev \
+  libicu-dev libharfbuzz-dev libfontconfig1-dev libfreetype6-dev \
+  libssl-dev zlib1g-dev libpng-dev
+```
+
+Ubuntu's packaged npm version may be older than the version required by the lockfile. Check it with `npm --version`, then upgrade if it is below 10.5.0:
+
+```bash
+sudo npm install -g npm@11
+```
+
+Verify the toolchain before building:
+
+```bash
+node --version
+npm --version
+cargo --version
+rustc --version
+protoc --version
 ```
 
 ## Running the App

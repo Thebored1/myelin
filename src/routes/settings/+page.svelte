@@ -182,18 +182,11 @@
     };
     let ohPort = $state<number | null>(null);
     let ohBinPath = $state('');
-    let ohStrict = $state(false);
-    let ohPromptTools = $state(false);
-    let ohNoThink = $state(false);
-    let ohNarrow = $state(false);
-    let ohSlm = $state(false);
-    let ohToolSubset = $state('');
+
     let ohMaxCalls = $state<number | null>(null);
     let ohTotalMax = $state<number | null>(null);
     let ohToolTimeout = $state<number | null>(null);
     let ohBaseUrl = $state('');
-    let ohToolChoice = $state('');
-    let ohTemplateKwargs = $state('');
     let ohSaving = $state(false);
 
     // Web search + embeddings/RAG + model compatibility (Phase 5).
@@ -271,18 +264,11 @@
                 const oh = await invoke<OpenharnSettings>('get_openharn_settings');
                 ohPort = oh.port ?? null;
                 ohBinPath = oh.bin_path ?? '';
-                ohStrict = oh.strict ?? false;
-                ohPromptTools = oh.prompt_tools ?? false;
-                ohNoThink = oh.no_think ?? false;
-                ohNarrow = oh.narrow ?? false;
-                ohSlm = oh.slm ?? false;
-                ohToolSubset = oh.tool_subset ?? '';
                 ohMaxCalls = oh.max_calls ?? null;
                 ohTotalMax = oh.total_max ?? null;
                 ohToolTimeout = oh.tool_timeout_secs ?? null;
                 ohBaseUrl = oh.base_url ?? '';
-                ohToolChoice = oh.tool_choice ?? '';
-                ohTemplateKwargs = oh.template_kwargs ?? '';
+
             } catch (e) {
                 console.error('Failed to load openharn settings:', e);
             }
@@ -508,18 +494,12 @@
                 settings: {
                     port: ohPort || null,
                     bin_path: ohBinPath.trim() || null,
-                    strict: ohStrict,
-                    prompt_tools: ohPromptTools,
-                    no_think: ohNoThink,
-                    narrow: ohNarrow,
-                    slm: ohSlm,
-                    tool_subset: ohToolSubset.trim() || null,
+                    // Tool format and intent are selected per request by the model profile and host policy.
                     max_calls: ohMaxCalls || null,
                     total_max: ohTotalMax || null,
                     tool_timeout_secs: ohToolTimeout || null,
                     base_url: ohBaseUrl.trim() || null,
-                    tool_choice: ohToolChoice.trim() || null,
-                    template_kwargs: ohTemplateKwargs.trim() || null,
+
                 }
             });
             saved = true;
@@ -915,83 +895,8 @@
             </div>
             <p class="compute-hint">Explicit path to the sidecar binary. Blank = bundled / resource-dir lookup.</p>
 
-            <label class="toggle-row">
-                <input type="checkbox" bind:checked={ohStrict} onchange={saveOpenharn} />
-                <span class="toggle-text">
-                    <strong>Strict grammar tool-calling</strong>
-                    <span class="toggle-hint">Constrain tool calls with a GBNF grammar — most reliable for models that emit malformed JSON.</span>
-                </span>
-            </label>
-            <label class="toggle-row">
-                <input type="checkbox" bind:checked={ohPromptTools} onchange={saveOpenharn} />
-                <span class="toggle-text">
-                    <strong>Text-form tool calls (prompt-tools)</strong>
-                    <span class="toggle-hint">Have the model emit tool calls as marked text instead of native function-calling JSON.</span>
-                </span>
-            </label>
-            <label class="toggle-row">
-                <input type="checkbox" bind:checked={ohNoThink} onchange={saveOpenharn} />
-                <span class="toggle-text">
-                    <strong>Strip model reasoning</strong>
-                    <span class="toggle-hint">Remove the model's <code>&lt;think&gt;</code> block from replies (ignored when strict grammar is on).</span>
-                </span>
-            </label>
-            <label class="toggle-row">
-                <input type="checkbox" bind:checked={ohNarrow} onchange={saveOpenharn} />
-                <span class="toggle-text">
-                    <strong>Read-only mode (narrow)</strong>
-                    <span class="toggle-hint">Preset: strict grammar + text-form tool calls, and only non-mutating tools (search / read / web) — the agent can't write or edit your notes.</span>
-                </span>
-            </label>
-            <label class="toggle-row">
-                <input type="checkbox" bind:checked={ohSlm} onchange={saveOpenharn} />
-                <span class="toggle-text">
-                    <strong>Compact observations (SLM)</strong>
-                    <span class="toggle-hint">Tighten tool-result caps so small/weak models don't drown in observation text.</span>
-                </span>
-            </label>
-
-            <div class="model-picker">
-                <input
-                    type="text"
-                    class="path-display"
-                    bind:value={ohToolSubset}
-                    placeholder="Tool subset, e.g. write_note,web_search,search_notes"
-                    onchange={saveOpenharn}
-                />
-            </div>
             <p class="compute-hint">
-                Restrict the agent to a named subset of tools (comma-separated function names). Blank = all tools Myelin offers this turn.
-            </p>
-
-            <div class="model-picker">
-                <input
-                    type="text"
-                    class="path-display"
-                    bind:value={ohToolChoice}
-                    placeholder="Tool choice, e.g. required (native FC mode only)"
-                    onchange={saveOpenharn}
-                />
-            </div>
-            <p class="compute-hint">
-                Force <code>tool_choice</code> in native FC mode: <code>auto</code> (default), <code>required</code>
-                (grammar-force a call in the model's own format — rescues quant-degraded native FC),
-                <code>none</code>, or a specific tool name.
-            </p>
-
-            <div class="model-picker">
-                <input
-                    type="text"
-                    class="path-display"
-                    bind:value={ohTemplateKwargs}
-                    placeholder={"Template kwargs JSON, e.g. {\"enable_thinking\":false}"}
-                    onchange={saveOpenharn}
-                />
-            </div>
-            <p class="compute-hint">
-                Raw JSON forwarded as <code>chat_template_kwargs</code>. Canonical use:
-                <code>{'{'}&quot;enable_thinking&quot;:false{'}'}</code> disables chain-of-thought on thinking models
-                (no-op on templates without the switch). Pairs with <code>tool_choice=required</code>.
+                Tool-calling format, intent detection, and reasoning behavior are selected automatically per request from the active model profile and interaction mode.
             </p>
         </section>
 
