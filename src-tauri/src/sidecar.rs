@@ -493,6 +493,10 @@ pub async fn run_chat(
                                 } else {
                                     emit_debug("done", "turn complete (chat)");
                                 }
+                                // `done` is terminal for this request. Do not
+                                // keep consuming a malformed/late stream that
+                                // could dispatch another tool after completion.
+                                return Ok(final_messages.clone());
                             }
                         }
                         "debug" => {
