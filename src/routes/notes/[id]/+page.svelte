@@ -62,7 +62,12 @@
 	let copiedIdx = $state<number | null>(null);
 
 	// Debug window state for AI performance metrics.
-	let showDebugWindow = $state(false);
+	let showDebugWindow = $state(
+		localStorage.getItem('myelin_debug_window') !== 'false'
+	);
+	$effect(() => {
+		localStorage.setItem('myelin_debug_window', String(showDebugWindow));
+	});
 	type DebugTraceEntry = { time: number; msg: string; kind: string };
 	let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
 	let debugInfo = $state<{
@@ -101,10 +106,14 @@
 	} | null>(null);
 	let selDebounce: ReturnType<typeof setTimeout> | undefined;
 
-	// Prompt-box context-usage ring: estimate fill from the open note + chat
-	// length against the working context window (~32K tokens ≈ 130K chars).
+	// Prompt-box context-usage ring: uses real token count from the server when
+	// available (chat_usage event), otherwise estimates from characters (~32K tokens ≈ 130K chars).
 	const RING_CIRC = 2 * Math.PI * 15.5;
+	const MAX_CONTEXT_TOKENS = 8192;
 	let contextPercent = $derived.by(() => {
+		if (debugInfo?.totalTokens) {
+			return Math.min(100, Math.round((debugInfo.totalTokens / MAX_CONTEXT_TOKENS) * 100));
+		}
 		const noteChars = note?.body?.length ?? 0;
 		const histChars = chatMessages.reduce((s, m) => s + (m.content?.length ?? 0), 0);
 		const used = noteChars + histChars + chatInput.length;
@@ -118,6 +127,7 @@
 	// A chat turn is in flight while the last assistant bubble is still streaming.
 	// Sending is blocked until it finishes, but the textarea stays editable so you
 	// can compose your next prompt while the model is still answering.
+	let activeChatRequestId: string | null = null;
 	let isChatStreaming = $derived(chatMessages.some((m) => m.isStreaming));
 
 	// The notebook (top-level folder) the open note lives in. Anything created or
@@ -1280,23 +1290,40 @@
 		void fetchRelatedNotes();
 	}
 
-	// A live note stream is starting (whole-body replace). Clear the editor so
-	// the new content streams in from scratch, after stashing the old body so we
-	// can restore it if the stream is cancelled.
+	// A live note stream is starting (whole-body replace). Keep the existing note
+	// visible until the first real content arrives; clearing here made fast tool
+	// calls flash an empty editor before the authoritative write landed.
 	function beginNoteStream() {
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		noteAnimationTimer = undefined;
 		noteStreamBackup = vditorInstance ? vditorInstance.getValue() : draftBody;
 		noteStreamBuf = '';
 		noteStreaming = true;
-		if (vditorInstance) vditorInstance.setValue('');
 	}
 
-	// A token (or several) of the note arrived — append and reflect it live.
+	// A token (or several) of the note arrived — replace the old preview with the
+	// growing result only once there is content to show.
 	function appendNoteStream(delta: string) {
 		if (!noteStreaming) beginNoteStream();
 		noteStreamBuf += delta;
-		if (vditorInstance) vditorInstance.setValue(noteStreamBuf);
+		if (vditorInstance) {
+			let preview = noteStreamBuf;
+			if (armedSelection) {
+				const selected = armedSelection.text.trim();
+				let start = -1;
+				if (armedSelection.before) {
+					const bi = noteStreamBackup.indexOf(armedSelection.before);
+					if (bi >= 0) start = bi + armedSelection.before.length;
+				}
+				if (start < 0) start = noteStreamBackup.indexOf(selected);
+				const end = start >= 0 ? noteStreamBackup.indexOf(armedSelection.after, start + selected.length) : -1;
+				if (start >= 0) {
+					const actualEnd = end >= 0 ? end : start + selected.length;
+					preview = noteStreamBackup.slice(0, start) + noteStreamBuf + noteStreamBackup.slice(actualEnd);
+				}
+			}
+			vditorInstance.setValue(preview);
+		}
 	}
 
 	// The stream turned out not to be a whole-body replace (append/edit) — undo
@@ -1312,13 +1339,18 @@
 	function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		noteAnimationTimer = undefined;
+		const wasStreaming = noteStreaming;
+		const streamedContent = noteStreamBuf;
 		noteStreaming = false;
 		const baseContent =
 			mode === 'append' && vditorInstance ? vditorInstance.getValue().trimEnd() + '\n\n' : '';
 		const finalContent = baseContent + newContent;
 		if (note) note = { ...note, body: finalContent };
 		draftBody = finalContent;
-		if (vditorInstance) vditorInstance.setValue(finalContent);
+		// If the live replace already reached the exact authoritative body, avoid
+		// resetting Vditor a second time at commit (which causes a visible dump).
+		const previewIsFinal = mode === 'write' && wasStreaming && streamedContent === newContent;
+		if (vditorInstance && !previewIsFinal) vditorInstance.setValue(finalContent);
 	}
 
 	function initVditor() {
@@ -1708,9 +1740,31 @@
 		}
 	}
 
+	async function stopActiveChat(): Promise<boolean> {
+		if (!activeChatRequestId && !isChatStreaming) return true;
+		try {
+			await invoke('cancel_ai');
+		} catch (error) {
+			console.error('Failed to stop AI:', error);
+			return false;
+		}
+
+		// cancel_ai is cooperative: wait until the backend emits done/error and
+		// clears the active request before retrying or restoring a snapshot.
+		const deadline = Date.now() + 10_000;
+		while ((activeChatRequestId || isChatStreaming) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		if (activeChatRequestId || isChatStreaming) {
+			console.error('AI request did not stop within 10 seconds');
+			return false;
+		}
+		return true;
+	}
+
 	function stopChat() {
-		if (!isChatStreaming) return;
-		void invoke('cancel_ai');
+		if (!isChatStreaming && !activeChatRequestId) return;
+		void stopActiveChat();
 	}
 
 	function toggleDebugWindow() {
@@ -1778,6 +1832,7 @@
 			...chatMessages,
 			{ role: 'assistant', content: '', isStreaming: true, startTime }
 		];
+		activeChatRequestId = requestId;
 		setTimeout(() => scrollChatToBottom(true), 50);
 		try {
 			await invoke('ask_ai_stream', {
@@ -1799,12 +1854,13 @@
 			});
 		} catch (e) {
 			console.error('AI Error:', e);
-			failStreamingChatMessage(extractChatErrorMessage(e));
+			failStreamingChatMessage(requestId, extractChatErrorMessage(e));
 		}
 	}
 
 	async function rewindToSnapshot(snapshot?: NoteSnapshot, fillInput?: string) {
 		if (!snapshot || !note) return;
+		if (!(await stopActiveChat())) return;
 		if (noteAnimationTimer) {
 			clearTimeout(noteAnimationTimer);
 			noteAnimationTimer = undefined;
@@ -1839,6 +1895,10 @@
 				annotations: note.annotations
 			});
 			await invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+			// The backend conversation includes tool calls/results that are not
+			// represented in the UI history. Clear it after a rewind so the next
+			// retry rebuilds from the newly persisted authoritative history.
+			await invoke('clear_ai_conversation', { noteId: note.id });
 		} catch (err) {
 			console.error('Failed to rewind:', err);
 		} finally {
@@ -1874,13 +1934,23 @@
 		);
 	}
 
-	function finishStreamingChatMessage(tools: { name: string; details: string }[] = []) {
+	async function finishStreamingChatMessage(
+		requestId: string,
+		tools: { name: string; details: string }[] = []
+	) {
+		// Tauri events are global. Ignore a late completion from an older request;
+		// otherwise it can close the current bubble while its sidecar stream is
+		// still running and allow another request to race with it.
+		if (activeChatRequestId !== requestId) return;
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming)
 				return { ...m, isStreaming: false, endTime: Date.now(), debugTrace: pendingDebugTrace };
 			return m;
 		});
-		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+		// Keep the request marked active until persistence completes. Rewind/retry
+		// waits on this flag; otherwise its newer history can race an older save.
+		if (note) await invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+		activeChatRequestId = null;
 		if (wroteToCurrentNote(tools)) {
 			// note_written already set the editor authoritatively — sync metadata
 			// from the backend but don't overwrite the editor content.
@@ -1903,9 +1973,14 @@
 	}
 
 	function failStreamingChatMessage(
+		requestId: string,
 		errorMsg: string,
 		tools: { name: string; details: string }[] = []
 	) {
+		// Tauri events are global; do not let an older request fail the current
+		// assistant bubble.
+		if (activeChatRequestId !== requestId) return;
+		activeChatRequestId = null;
 		// If a live note stream was interrupted, the note was never saved —
 		// restore the pre-stream content rather than leaving a partial draft.
 		cancelNoteStream();
@@ -2518,6 +2593,7 @@
 		).then((fn) => (unlistenApproval = fn));
 
 		listen<{ delta: string; requestId: string }>('ai://chat_chunk', (event) => {
+			if (activeChatRequestId !== event.payload.requestId) return;
 			chatMessages = chatMessages.map((m) => {
 				if (m.isStreaming) return { ...m, content: m.content + event.payload.delta };
 				return m;
@@ -2540,7 +2616,7 @@
 		listen<{ requestId: string; tools?: { name: string; details: string }[] }>(
 			'ai://chat_done',
 			(event) => {
-				finishStreamingChatMessage(event.payload.tools || []);
+				void finishStreamingChatMessage(event.payload.requestId, event.payload.tools || []);
 				if (showDebugWindow && debugInfo) {
 					debugInfo = {
 						...debugInfo,
@@ -2557,6 +2633,7 @@
 			completionTokens: number;
 			totalTokens: number;
 		}>('ai://chat_usage', (event) => {
+			if (activeChatRequestId !== event.payload.requestId) return;
 			if (showDebugWindow && debugInfo) {
 				debugInfo = {
 					...debugInfo,
@@ -2570,7 +2647,11 @@
 		listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>(
 			'ai://chat_error',
 			(event) => {
-				failStreamingChatMessage(event.payload.message, event.payload.tools || []);
+				failStreamingChatMessage(
+					event.payload.requestId,
+					event.payload.message,
+					event.payload.tools || []
+				);
 				if (showDebugWindow && debugInfo) {
 					debugInfo = {
 						...debugInfo,
@@ -2586,6 +2667,7 @@
 		// Debug event: model behavior, tool calls, grammar config, etc.
 		let unlistenDebug: UnlistenFn | undefined;
 		listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
+			if (activeChatRequestId !== event.payload.requestId) return;
 			const entry: DebugTraceEntry = {
 				time: Date.now(),
 				msg: `[${event.payload.kind}] ${event.payload.msg}`,
@@ -2597,6 +2679,10 @@
 			if (showDebugWindow && debugInfo) {
 				debugInfo = {
 					...debugInfo,
+					firstChunk:
+						event.payload.kind === 'gen' && debugInfo.firstChunk === null
+							? entry.time
+							: debugInfo.firstChunk,
 					trace: [...debugInfo.trace, entry]
 				};
 			}
@@ -3429,7 +3515,9 @@
 										>
 										<div
 											class="context-ring"
-											title={`~${contextPercent}% of the context window used`}
+											title={debugInfo?.totalTokens
+												? `~${contextPercent}% of ~${MAX_CONTEXT_TOKENS} context — ${debugInfo.totalTokens} tokens used`
+												: `~${contextPercent}% of estimated context window used`}
 										>
 											<svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
 												<circle class="ring-track" cx="18" cy="18" r="15.5"></circle>

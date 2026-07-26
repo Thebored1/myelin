@@ -47,13 +47,14 @@ const WEB_FETCH_LIMIT: usize = 6_000;
 /// still passed separately via `tool_specs` on every request.
 pub const MYELIN_PREAMBLE: &str = concat!(
     "You are the assistant inside Myelin, a local notes app, powered by an open model running locally on the user's own machine. If asked what or who you are, identify yourself as Myelin's built-in AI assistant — do not claim to be proprietary or commercial software. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n",
-    "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), call the write_note tool with the full result in `content`. The ONLY way to change the note is that tool call: never describe the edit, print the new note text, or type \"write_note\" or \"content:\" in your chat reply. When the user says \"write this\", \"put that in the note\", or similar, and a preceding assistant message contains the requested draft, copy that exact draft into `content` — do not compose a substitute or a different version. Preserve its Markdown exactly, including headings, blank lines, lists, bold text, and line breaks.\n",
-    "- Write real Markdown: a heading line starts with \"# \" (a hash then a space), \"## \" for a sub-heading; bullets start with \"- \". \"**bold**\" is NOT a heading.\n",
+    "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), pick the matching Edit tool from those listed below. Use write_note to replace the whole note; append_note to add to the end; prepend_note to add to the beginning; insert_after_line to add after a specific line; replace_in_note to change specific text; delete_in_note to remove a part. The ONLY way to change the note is a tool call: never describe the edit, print new note text, or type tool names in your chat reply. When the user says \"write this\", \"put that in the note\", or similar, and a preceding assistant message contains the requested draft, copy that exact draft into `content` — do not compose a substitute or a different version. Preserve its Markdown exactly, including headings, blank lines, lists, bold text, and line breaks.\n",
+    "- Write real Markdown: a heading line starts with \"# \" (a hash then a space), \"## \" for a sub-heading; bullets start with \"- \". \"**bold**\" is NOT a heading. Use ONLY plain newline characters (the enter/return key) to separate lines of poetry or paragraphs — never use `<br>` HTML tags, em spaces, asterisks, or any other formatting as line-break separators. Do not include `<`, `<<`, `<>`, or similar markup artifacts — these break the note display.\n",
     "- When editing, reproduce every line that should stay and change only what was asked. Never return an empty or much-shorter note unless the user explicitly asked to clear or shorten it.\n",
     "- When the user asks you to write what you found, researched, learned, or understood, put the ACTUAL information into the note as a finished, self-contained note — the real facts, perspectives, and details (use what you found in the conversation plus what you reliably know about the topic). NEVER write a question, an offer to do more (e.g. \"Would you like me to fetch the full text?\"), or a promise to act later (e.g. \"I will now fetch...\") as the note's content — the note holds finished information, not conversation. If you lack some detail, still write the best complete note you can from what you know rather than asking or deferring.\n",
     "- The currently open note is the default target for every request, including reading, explaining, finding, and editing. Its full text is already in this prompt: answer questions about it directly and never use search_notes or read_note for it. Use search_notes or read_note only when the user explicitly asks about another note, their other notes, or the workspace; use fetch_web_page only when the user explicitly gives or asks to visit a URL/web address. For greetings or general questions, just reply briefly — do not read, search, or fetch.\n",
     "- ROUTING: In this notes app, every instruction, command, or action request is work to perform, never chat. Unless it explicitly names another target, perform it on the open note with the appropriate tool. Note operations include creating, writing, drafting, generating, adding, appending, inserting, replacing, updating, editing, revising, rewriting, correcting, improving, expanding, shortening, summarizing, translating, organizing, restructuring, moving, merging, splitting, titling, renaming, making lists, formatting, converting Markdown, cleaning up, removing, deleting, clearing, restoring, reading, finding, counting, searching, fetching, browsing, looking up, and researching. For example, \"write this on the note\", \"add a poem\", \"put that in the note\", \"summarize this\", \"make this a list\", \"change the title\", and \"remove this paragraph\" all require a tool call. Only a request for a direct answer, explanation, capability description, greeting, thanks, small talk, opinion, or general knowledge is chat; answer it directly and never modify, read, search, or fetch notes unless it explicitly asks you to do so.\n\n",
-    "Worked examples show only the editing style — the resulting note text you must pass as write_note's `content` (always via the tool call, never printed in chat):\n\n",
+    "Worked examples show only the editing style — the resulting note text you must pass as the Edit tool's `content` parameter (always via the tool call, never printed in chat):\n\n",
+
     "Example 1\n",
     "NOTE:\n**Cars**\nThey have engines.\n",
     "USER: make the title a heading\n",
@@ -91,15 +92,70 @@ pub fn tool_specs() -> Vec<Value> {
         ),
         spec(
             "write_note",
-            "Edit the note currently OPEN in the editor — this tool only ever changes that one open note and NEVER creates a separate new note. It handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the open note. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder.",
+            "Replace the ENTIRE body of the note currently OPEN in the editor with `content`. Empty string clears the note. Use ONLY when the user asks to write, create, draft, generate, rewrite, or replace the whole note. DO NOT use this for additions, insertions, or targeted edits — use append_note, prepend_note, replace_in_note, insert_after_line, or delete_in_note instead. Never put a placeholder like [insert poem here] in content; write the real final Markdown.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "content": { "type": "string", "description": "The text payload. For replace/append it is the note body or the new text; for edit it is the replacement (empty string deletes the matched text). Never a placeholder like [insert poem here]." },
-                    "mode": { "type": "string", "enum": ["replace", "append", "edit"], "description": "How to apply content: replace (default, whole body) | append (add to end) | edit (swap the `find` snippet)." },
-                    "find": { "type": "string", "description": "Required only when mode is \"edit\": the exact existing text in the note to replace or delete." }
+                    "content": { "type": "string", "description": "The full new note body. Empty string clears the note. Never a placeholder — write the real content." }
                 },
                 "required": ["content"]
+            }),
+        ),
+        spec(
+            "append_note",
+            "Add a new paragraph or block of text to the END of the note currently OPEN. `content` must contain ONLY the NEW text to add — never reproduce or quote any existing lines from the note. Use this when the user asks to add, append, extend, continue, or elaborate.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "Only the new text to append. Never include any existing note content." }
+                },
+                "required": ["content"]
+            }),
+        ),
+        spec(
+            "prepend_note",
+            "Add a new paragraph or block of text to the BEGINNING of the note currently OPEN. `content` must contain ONLY the NEW text to add — never reproduce or quote any existing lines.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "Only the new text to prepend. Never include any existing note content." }
+                },
+                "required": ["content"]
+            }),
+        ),
+        spec(
+            "replace_in_note",
+            "Replace a specific piece of existing text in the note with new text. Finds the exact `find` text and replaces it with `replace`. Empty `replace` deletes the matched text. Use this for surgical edits like fixing a word, swapping a phrase, or removing a specific sentence. DO NOT use this for whole-note operations.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "find": { "type": "string", "description": "The exact existing text in the note to find and replace." },
+                    "replace": { "type": "string", "description": "The new text to put in its place. Empty string deletes the matched text." }
+                },
+                "required": ["find", "replace"]
+            }),
+        ),
+        spec(
+            "insert_after_line",
+            "Insert a new block of text in the note AFTER a line containing `marker`. The marker should be a unique heading, phrase, or sentence already in the note. The new content is added on a new line right after the matching line. Use this when the user asks to insert, add between sections, or place text after a specific part.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "marker": { "type": "string", "description": "Text in an existing line to insert after. Should be unique enough to identify the location." },
+                    "content": { "type": "string", "description": "The new text to insert after the matching line." }
+                },
+                "required": ["marker", "content"]
+            }),
+        ),
+        spec(
+            "delete_in_note",
+            "Delete specific text from the note. The `target` is the exact text to remove — it can be a heading, line, sentence, or phrase. The matching text is removed from the note. Use this when the user asks to delete, remove, erase, or drop a specific part of the note. Do NOT use this for whole-note clearing.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "The exact text in the note to delete." }
+                },
+                "required": ["target"]
             }),
         ),
         spec(
@@ -168,6 +224,35 @@ pub fn tool_specs() -> Vec<Value> {
             edit_notebook_params(),
         ),
     ]
+}
+
+/// Keep the model-facing tool contract small. The host still retains the full
+/// descriptions for routing and execution, but llama-server only needs each
+/// function name and its argument schema to emit a valid call.
+pub fn compact_tool_specs(specs: Vec<Value>) -> Vec<Value> {
+    let mut compacted: Vec<Value> = specs
+        .into_iter()
+        .filter_map(|spec| {
+            let function = spec.get("function")?;
+            let name = function.get("name")?.clone();
+            let parameters = function.get("parameters")?.clone();
+            Some(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "parameters": parameters
+                }
+            }))
+        })
+        .collect();
+    // Tool selection is semantic; its order must not vary with heuristic paths.
+    // A fixed order gives llama-server's prompt cache a stable schema prefix.
+    compacted.sort_by(|a, b| {
+        a["function"]["name"]
+            .as_str()
+            .cmp(&b["function"]["name"].as_str())
+    });
+    compacted
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -271,15 +356,12 @@ pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)
 
 /// If the user armed a selection, build a plan that replaces ONLY that span with
 /// the model's `content`, keeping the rest of the note byte-identical. Returns
-/// None (caller falls through to normal planning) when there's no usable span,
-/// the content is empty (deletion is handled separately), or the model
+/// None (caller falls through to normal planning) when there's no usable span
+/// or the model
 /// regenerated the surrounding note (its content already contains the text just
 /// before/after the selection → it did a full rewrite, which we honor instead).
 pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> Option<WritePlan> {
     let content = strip_prompt_markers(content);
-    if content.trim().is_empty() {
-        return None;
-    }
     let (start, end) = locate_selection(body, sel)?;
     let regenerated_whole = (!sel.after.trim().is_empty() && content.contains(sel.after.trim()))
         || (!sel.before.trim().is_empty() && content.contains(sel.before.trim()));
@@ -294,6 +376,35 @@ pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> O
         new_body,
         op: WriteOp::EditSnippet,
     })
+}
+
+/// Validate an insertion marker against the armed selection and insert only
+/// immediately after the selected line.
+pub fn selection_insert_after_plan(
+    body: &str,
+    marker: &str,
+    content: &str,
+    sel: &SelectionArg,
+) -> Result<WritePlan, String> {
+    let (start, end) = locate_selection(body, sel)
+        .ok_or_else(|| "The armed selection is no longer present in the note.".to_string())?;
+    let marker = marker.trim();
+    let selected = &body[start..end];
+    if marker.is_empty()
+        || (marker != selected
+            && !selected.contains(marker)
+            && !marker.contains(selected)
+            && !sel.text.trim().contains(marker))
+    {
+        return Err("Rejected insertion marker: it does not match the armed selection.".to_string());
+    }
+    let line_end = body[end..]
+        .find('\n')
+        .map(|i| end + i + 1)
+        .unwrap_or(body.len());
+    let content = clean_note_content(&strip_prompt_markers(content));
+    let new_body = format!("{}{}\n\n{}", &body[..line_end], content, &body[line_end..]);
+    Ok(WritePlan { new_body, op: WriteOp::Append })
 }
 
 /// How the editor should apply a write (drives the streaming UI and chip label).
@@ -319,6 +430,99 @@ pub struct WritePlan {
 ///     AND a leftover `find` — honouring find there garbles the note)
 ///   - otherwise a non-empty `find` -> targeted snippet edit/delete
 ///   - otherwise (e.g. mode:"edit" with no find, or unspecified) -> replace
+/// Remove a model-regenerated copy of the current note from an append payload.
+/// Weak models often send the complete note followed by the requested addition
+/// despite declaring `mode:"append"`; appending that verbatim duplicates user
+/// content. Tool-call wrapper remnants are never valid note text either.
+fn normalize_append_content(current_body: &str, content: &str) -> String {
+    let mut payload = content.trim().to_string();
+    for marker in ["</content>,", "</content>", "</tool_call>"] {
+        if let Some(stripped) = payload.trim_end().strip_suffix(marker) {
+            payload = stripped.trim_end().to_string();
+        }
+    }
+
+    let current = current_body.trim();
+    if !current.is_empty() {
+        if let Some(rest) = payload.strip_prefix(current) {
+            payload = rest.trim_start_matches(['\r', '\n', ' ', '\t']).to_string();
+        } else if let Some(pos) = payload.find(current) {
+            // Only strip an echoed note near the start; a later quoted copy may
+            // be intentional context in the new paragraph.
+            if pos <= 64 {
+                payload = payload[pos + current.len()..]
+                    .trim_start_matches(['\r', '\n', ' ', '\t'])
+                    .to_string();
+            }
+        }
+    }
+    payload.trim().to_string()
+}
+
+/// Strip HTML line-break tags and model-invented markup artifacts from model-
+/// generated note content. Many small models output `<br>` for line breaks or
+/// `<<`/`<>` as formatting markers — these are never valid note text.
+pub fn clean_note_content(content: &str) -> String {
+    let mut s = content.to_string();
+    // A few prompt/tool parsers leave an escaped newline literal behind.
+    s = s
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    // Replace <br> (and case/spacing variants) with real newlines.
+    if let Ok(br) = regex::Regex::new(r"(?i)<br\s*/?>") {
+        s = br.replace_all(&s, "\n").into_owned();
+    }
+    // Some small models use an em-space as a visual line separator.
+    s = s.replace(' ', "\n");
+    // Strip trailing <<, <>, >, < markers that some models use as stanza
+    // connectors — they appear at line-ends or between phrases.
+    if let Ok(re) = regex::Regex::new(r"<{1,2}\s*>*\s*|\s*<{1,2}\s*") {
+        // Only strip standalone bracket runs (not inside **bold** or normal text).
+        // A standlone <, <<, <>, >> preceded by a word boundary or punctuation.
+        if let Ok(standalone) = regex::Regex::new(r"(?:\b|,|;|!|\?|—)\s*<{1,2}\s*>?(?:\s*<{1,2}\s*>?)*") {
+            s = standalone.replace_all(&s, "\n").into_owned();
+        }
+        // Also strip leading/trailing bare bracket runs that survive.
+        s = re.replace_all(&s, "").into_owned();
+    }
+    // A malformed Markdown pattern seen in tool arguments is:
+    // `**line one** *line two.* *line three.*`. When it repeats across a
+    // single-line payload, the asterisks are acting as line separators rather
+    // than Markdown. Convert only that repeated pattern; ordinary emphasis
+    // remains untouched.
+    if !s.contains('\n') {
+        if let Ok(separator) = regex::Regex::new(r"\s+\*+") {
+            let parts: Vec<&str> = separator.split(&s).collect();
+            let starred_tails = parts
+                .iter()
+                .skip(1)
+                .filter(|part| part.trim_end().ends_with('*'))
+                .count();
+            if parts.len() >= 4 && starred_tails + 1 >= parts.len() - 1 {
+                let mut lines = Vec::with_capacity(parts.len());
+                for (index, part) in parts.iter().enumerate() {
+                    let mut line = part.trim().to_string();
+                    if index > 0 {
+                        line = line.trim_end_matches('*').trim_end().to_string();
+                    }
+                    if !line.is_empty() {
+                        lines.push(line);
+                    }
+                }
+                s = lines.join("\n");
+            }
+        }
+    }
+
+    // Collapse multiple consecutive blank lines into one.
+    if let Ok(blank) = regex::Regex::new(r"\n{3,}") {
+        s = blank.replace_all(&s, "\n\n").into_owned();
+    }
+    s.trim().to_string()
+}
+
 /// `mode` is passed raw ("" when unspecified) so an explicit "replace" can be
 /// told apart from the default. Kept free of `AppState`/Tauri for unit tests.
 pub fn plan_write(
@@ -364,10 +568,11 @@ pub fn plan_write(
             None => Err("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string()),
         }
     } else if is_append {
+        let content = normalize_append_content(current_body, content);
         let body = if current_body.trim().is_empty() {
-            content.trim().to_string()
+            content
         } else {
-            format!("{}\n\n{}", current_body.trim_end(), content.trim_start())
+            format!("{}\n\n{}", current_body.trim_end(), content)
         };
         Ok(WritePlan {
             new_body: body,
@@ -437,6 +642,43 @@ fn is_negated(message: &str, keywords: &[&str]) -> bool {
 }
 
 /// Heuristic: does this user message ask to CREATE or MODIFY the open note (as
+/// Whether this request asks to add new text rather than replace the body. Used
+/// to offer an append-only tool contract so the model never needs to regenerate
+/// the existing note just to add a paragraph.
+pub fn append_request_intent(message: &str) -> bool {
+    let text = message.trim().to_ascii_lowercase();
+    text.starts_with("add ")
+        || text.contains("append")
+        || text.contains("add below")
+        || text.contains("add to")
+        || text.contains("insert")
+        || placement_request_intent(message)
+}
+
+pub fn placement_request_intent(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    ["below it", "under it", "after it", "beneath it", "below this", "under this", "after this", "beneath this"]
+        .iter()
+        .any(|phrase| text.contains(phrase))
+}
+
+/// Whether an operation needs the existing open-note body in its prompt.
+/// Fresh creation, append, and retrieval requests can omit it; edits that must
+/// preserve surrounding text need the authoritative current body.
+pub fn requires_existing_note_context(message: &str, has_selection: bool) -> bool {
+    if has_selection || append_request_intent(message) || !note_write_intent(message) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    [
+        "edit", "rewrite", "revis", "format", "shorten", "expand", "reorder", "remove",
+        "delete", "replace", "clean", "fix", "change", "update", "summari", "condens",
+        "turn this", "keep the rest",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 /// opposed to just chatting / asking a question)? Used by `select_tools` to
 /// decide whether to offer `write_note` this turn. In Myelin the chat is a
 /// note-assistant sidebar, so virtually every edit verb refers to the open note.
@@ -1419,6 +1661,11 @@ pub fn select_tools_cfg(
         ];
         if has_open_note && (note_write_intent(message) || edit_thread) {
             names.push("write_note");
+            names.push("append_note");
+            names.push("prepend_note");
+            names.push("replace_in_note");
+            names.push("insert_after_line");
+            names.push("delete_in_note");
         }
         if deterministic && has_open_note && wants_find(message) {
             names.push("find_in_note");
@@ -1437,6 +1684,11 @@ pub fn select_tools_cfg(
         && (note_write_intent(message) || edit_thread || detect_format_op(message).is_some())
     {
         names.push("write_note");
+        names.push("append_note");
+        names.push("prepend_note");
+        names.push("replace_in_note");
+        names.push("insert_after_line");
+        names.push("delete_in_note");
     }
     if wants_other_notes(message) {
         names.push("search_notes");
@@ -1511,15 +1763,8 @@ impl Tool for ReadNoteTool {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct WriteNoteArgs {
-    /// The text payload. For replace/append it is the note body or new text; for
-    /// edit it is the replacement (empty string deletes the matched text).
+    /// The full new note body. Empty string clears the note.
     content: String,
-    /// "replace" (default, whole body) | "append" (add to end) | "edit" (swap `find`).
-    #[serde(default)]
-    mode: Option<String>,
-    /// Required only when `mode` is "edit": the exact existing text to replace.
-    #[serde(default)]
-    find: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1538,14 +1783,12 @@ impl Tool for WriteNoteTool {
         ToolDefinition {
             name: "write_note".to_string(),
             description:
-                "Edit the note currently OPEN in the editor — this tool only ever changes that one open note and NEVER creates a separate new note. It handles ANY request to write, create, draft, generate, rewrite, edit, format, reformat, restructure, clean up, fix, improve, change, add to, or delete from the open note. `mode` selects the operation: \"replace\" (default) sets the ENTIRE note body to `content` (empty string clears it); \"append\" adds `content` to the end (send only the new text); \"edit\" replaces the exact `find` text with `content` (empty `content` deletes the match). Always put the real final Markdown in `content`, never a placeholder."
+                "Replace the ENTIRE body of the note currently OPEN in the editor with `content`. Empty string clears the note. Use ONLY for whole-note overwrites."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "content": { "type": "string", "description": "The text payload. For replace/append it is the note body or the new text; for edit it is the replacement (empty string deletes the matched text). Never a placeholder like [insert poem here]." },
-                    "mode": { "type": "string", "enum": ["replace", "append", "edit"], "description": "How to apply content: replace (default, whole body) | append (add to end) | edit (swap the `find` snippet)." },
-                    "find": { "type": "string", "description": "Required only when mode is \"edit\": the exact existing text in the note to replace or delete." }
+                    "content": { "type": "string", "description": "The full new note body. Empty string clears the note. Never a placeholder — write the real content." }
                 },
                 "required": ["content"]
             }),
@@ -1553,14 +1796,8 @@ impl Tool for WriteNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Pass mode raw ("" when unspecified) so the planner can tell an explicit
-        // "replace" from the default.
-        let mode = args.mode.as_deref().unwrap_or("").to_string();
-        let content = args.content;
-        let find = args.find.clone().unwrap_or_default();
+        let content = clean_note_content(&strip_prompt_markers(&args.content));
 
-        // Resolve the open note up front — needed for the tool chip, approval
-        // dialog title, and the actual save. Writes always target the open note.
         let existing = match self.state.resolve_chat_target_note("") {
             Some(n) => n,
             None => {
@@ -1568,96 +1805,46 @@ impl Tool for WriteNoteTool {
             }
         };
 
-        // Selection-scoped edit takes precedence: if the user armed an editor
-        // selection, the model's `content` rewrites JUST that span. Splice it into
-        // the located range and keep the rest of the note byte-identical (unless
-        // the model regenerated the surrounding note — then it's a full rewrite,
-        // handled by normal planning below).
-        let scoped = self
-            .state
-            .current_selection()
-            .and_then(|sel| selection_scoped_plan(&existing.body, &content, &sel));
+        if !content.trim().is_empty()
+            && !content.chars().any(char::is_alphanumeric)
+            && !wants_clear(&self.state.latest_chat_question())
+        {
+            return Ok(
+                "Refused: content contained only punctuation, not the requested text. Retry with the complete meaningful Markdown.".to_string(),
+            );
+        }
 
-        let (plan, content_empty) = if let Some(p) = scoped {
-            // A selection rewrite always supplies replacement content.
-            (p, false)
-        } else {
-            // Surgical deletion (always on — a model-agnostic correctness win, not
-            // a crutch: a full-rewrite-to-delete risks drift/truncation at ANY
-            // model size). Models reliably identify WHAT to remove (the `find`
-            // text) but unreliably fill `content` with the whole regenerated note —
-            // which plan_write then turns into a full-body replace (the "it rewrote
-            // my entire note" complaint). On a pure-removal request where the
-            // model's `find` matches the note, trust `find` and delete it from the
-            // REAL body: an empty `content` makes plan_write do a faithful, surgical
-            // snippet delete — nothing else changes.
-            let surgical = !find.trim().is_empty()
-                && find_tolerant(&existing.body, &find).is_some()
-                && wants_partial_removal(&self.state.latest_chat_question());
-            let eff_mode = if surgical { "edit" } else { mode.as_str() };
-            let eff_content = if surgical { "" } else { content.as_str() };
-
-            // Decide the new body (and how the UI should apply it) using the pure,
-            // unit-tested planner. A refusal comes back as Err and is relayed to the
-            // model verbatim so it can correct itself.
-            let content_empty = eff_content.trim().is_empty();
-            match plan_write(&existing.body, eff_content, eff_mode, &find) {
-                Ok(p) => (p, content_empty),
-                Err(msg) => return Ok(msg),
-            }
+        // Selection-scoped edit: if user armed a selection, splice content into
+        // the selected span instead of replacing the whole body.
+        let armed_selection = self.state.current_selection();
+        let scoped = match armed_selection.as_ref() {
+            Some(sel) => Some(selection_scoped_plan(&existing.body, &content, sel).ok_or_else(|| ToolError {
+                message: "The armed selection could not be located or the model returned a full-note rewrite; no changes were made.".to_string(),
+            })?),
+            None => None,
         };
 
-        // Destructive-write guard. A model asked to "remove all headings"
-        // once replaced the whole essay with an EMPTY body, wiping the note. If a
-        // replace would empty a non-empty note and the user did not actually ask
-        // to clear it, refuse and tell the model to preserve the content — never
-        // silently erase the user's work.
+        let new_body = if let Some(ref p) = scoped {
+            p.new_body.clone()
+        } else {
+            content.clone()
+        };
+
         if self.state.deterministic_tools_enabled()
-            && plan.op == WriteOp::Replace
-            && plan.new_body.trim().is_empty()
+            && new_body.trim().is_empty()
             && !existing.body.trim().is_empty()
             && !wants_clear(&self.state.latest_chat_question())
         {
             return Ok(
                 "Refused: that would erase the entire note, which the request did not ask for. \
                  Keep ALL existing content and call write_note again with only the requested change \
-                 applied. For example, to remove headings, delete just the heading lines (or their \
-                 leading # markers) and keep every other line of the note unchanged."
-                    .to_string(),
+                 applied.".to_string(),
             );
         }
 
-        let (emit_content, emit_mode, display_name) = match plan.op {
-            WriteOp::Append => (content.clone(), "append", "Append Note"),
-            WriteOp::EditSnippet => (
-                plan.new_body.clone(),
-                "write",
-                if content_empty {
-                    "Delete Text"
-                } else {
-                    "Replace Text"
-                },
-            ),
-            WriteOp::Replace => (
-                plan.new_body.clone(),
-                "write",
-                if content_empty {
-                    "Clear Note"
-                } else {
-                    "Write Note"
-                },
-            ),
-        };
-        let new_body = plan.new_body;
-
-        let preview = if plan.op == WriteOp::EditSnippet {
-            format!("Find:\n{}\n\nReplace with:\n{}", find, content)
-        } else {
-            content.clone()
-        };
-
+        let display_name = if scoped.is_some() { "Replace Text" } else if new_body.trim().is_empty() { "Clear Note" } else { "Write Note" };
         if let Err(msg) =
-            check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+            check_tool_approval(&self.state, display_name, &existing.title, &content).await
         {
             return Ok(msg);
         }
@@ -1665,7 +1852,100 @@ impl Tool for WriteNoteTool {
             .record_chat_tool(display_name, existing.title.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
-            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, preview), "mutatesNote": true }),
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, content), "mutatesNote": true }),
+        );
+
+        self.state
+            .save_note(
+                existing.id.clone(),
+                existing.title,
+                existing.tags,
+                new_body.clone(),
+                existing.source_pdf,
+                Some(existing.annotations),
+            )
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+        let _ = self.state.handle.emit(
+            "ai://note_written",
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
+        );
+        Ok(format!(
+            "Note successfully updated with ID: {}",
+            existing.id
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AppendNoteArgs {
+    /// Only the new text to append. Never include any existing note content.
+    content: String,
+}
+
+#[derive(Clone)]
+pub struct AppendNoteTool {
+    pub state: AppState,
+}
+
+impl Tool for AppendNoteTool {
+    const NAME: &'static str = "append_note";
+
+    type Error = ToolError;
+    type Args = AppendNoteArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "append_note".to_string(),
+            description:
+                "Add a new paragraph or block of text to the END of the note currently OPEN."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "Only the new text to append. Never include any existing note content." }
+                },
+                "required": ["content"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => {
+                return Ok("No note is currently open to append to.".to_string());
+            }
+        };
+
+        // Safety guard: strip echoed existing note content if the model
+        // disregards the tool description.
+        let content = clean_note_content(&normalize_append_content(&existing.body, &args.content));
+
+        if content.trim().is_empty() {
+            return Ok("Nothing to append — content was empty after normalization.".to_string());
+        }
+
+        let new_body = if existing.body.trim().is_empty() {
+            content.clone()
+        } else {
+            format!("{}\n\n{content}", existing.body.trim_end())
+        };
+
+        let display_name = "Append Note";
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &content).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, content), "mutatesNote": true }),
         );
 
         self.state
@@ -1683,12 +1963,411 @@ impl Tool for WriteNoteTool {
             })?;
         let _ = self.state.handle.emit(
             "ai://note_written",
-            serde_json::json!({ "noteId": existing.id, "content": emit_content, "mode": emit_mode }),
+            serde_json::json!({ "noteId": existing.id, "content": content, "mode": "append" }),
         );
         Ok(format!(
             "Note successfully updated with ID: {}",
             existing.id
         ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PrependNoteArgs {
+    /// Only the new text to prepend. Never include any existing note content.
+    content: String,
+}
+
+#[derive(Clone)]
+pub struct PrependNoteTool {
+    pub state: AppState,
+}
+
+impl Tool for PrependNoteTool {
+    const NAME: &'static str = "prepend_note";
+
+    type Error = ToolError;
+    type Args = PrependNoteArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "prepend_note".to_string(),
+            description:
+                "Add a new paragraph or block of text to the BEGINNING of the note currently OPEN."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "Only the new text to prepend. Never include any existing note content." }
+                },
+                "required": ["content"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => {
+                return Ok("No note is currently open to prepend to.".to_string());
+            }
+        };
+
+        let content = clean_note_content(&strip_prompt_markers(&args.content));
+        if content.trim().is_empty() {
+            return Ok("Nothing to prepend — content was empty.".to_string());
+        }
+
+        let new_body = if existing.body.trim().is_empty() {
+            content.clone()
+        } else {
+            format!("{content}\n\n{}", existing.body.trim_start())
+        };
+
+        let display_name = "Prepend Note";
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &content).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, content), "mutatesNote": true }),
+        );
+
+        self.state
+            .save_note(
+                existing.id.clone(),
+                existing.title,
+                existing.tags,
+                new_body,
+                existing.source_pdf,
+                Some(existing.annotations),
+            )
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+        let _ = self.state.handle.emit(
+            "ai://note_written",
+            serde_json::json!({ "noteId": existing.id, "content": content, "mode": "write" }),
+        );
+        Ok(format!(
+            "Note successfully updated with ID: {}",
+            existing.id
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReplaceInNoteArgs {
+    /// The exact existing text in the note to find and replace.
+    find: String,
+    /// The new text to put in its place. Empty string deletes the matched text.
+    replace: String,
+}
+
+#[derive(Clone)]
+pub struct ReplaceInNoteTool {
+    pub state: AppState,
+}
+
+impl Tool for ReplaceInNoteTool {
+    const NAME: &'static str = "replace_in_note";
+
+    type Error = ToolError;
+    type Args = ReplaceInNoteArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "replace_in_note".to_string(),
+            description:
+                "Replace a specific piece of existing text in the note with new text."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "find": { "type": "string", "description": "The exact existing text in the note to find and replace." },
+                    "replace": { "type": "string", "description": "The new text to put in its place. Empty string deletes the matched text." }
+                },
+                "required": ["find", "replace"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => {
+                return Ok("No note is currently open to edit.".to_string());
+            }
+        };
+
+        let replacement = clean_note_content(&strip_prompt_markers(&args.replace));
+
+        match find_tolerant(&existing.body, &args.find) {
+            Some((start, end)) => {
+                let new_body = format!("{}{}{}", &existing.body[..start], replacement, &existing.body[end..]);
+
+                let display_name = if replacement.trim().is_empty() { "Delete Text" } else { "Replace Text" };
+                let preview = format!("Find:\n{}\n\nReplace with:\n{replacement}", args.find);
+                if let Err(msg) =
+                    check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+                {
+                    return Ok(msg);
+                }
+                self.state
+                    .record_chat_tool(display_name, existing.title.clone());
+                let _ = self.state.handle.emit(
+                    "ai://chat_tool",
+                    serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
+                );
+
+                self.state
+                    .save_note(
+                        existing.id.clone(),
+                        existing.title,
+                        existing.tags,
+                        new_body,
+                        existing.source_pdf,
+                        Some(existing.annotations),
+                    )
+                    .await
+                    .map_err(|e| ToolError {
+                        message: e.to_string(),
+                    })?;
+                let _ = self.state.handle.emit(
+                    "ai://note_written",
+                    serde_json::json!({ "noteId": existing.id, "content": replacement, "mode": "write" }),
+                );
+                Ok(format!(
+                    "Note successfully updated with ID: {}",
+                    existing.id
+                ))
+            }
+            None => Err(ToolError {
+                message: format!("Could not find '{}' in the note.", args.find),
+            }),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct InsertAfterLineArgs {
+    /// Text in an existing line to insert after.
+    marker: String,
+    /// The new text to insert after the matching line.
+    content: String,
+}
+
+#[derive(Clone)]
+pub struct InsertAfterLineTool {
+    pub state: AppState,
+}
+
+impl Tool for InsertAfterLineTool {
+    const NAME: &'static str = "insert_after_line";
+
+    type Error = ToolError;
+    type Args = InsertAfterLineArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "insert_after_line".to_string(),
+            description:
+                "Insert a new block of text in the note AFTER a line containing `marker`."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "marker": { "type": "string", "description": "Text in an existing line to insert after." },
+                    "content": { "type": "string", "description": "The new text to insert after the matching line." }
+                },
+                "required": ["marker", "content"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => {
+                return Ok("No note is currently open to edit.".to_string());
+            }
+        };
+
+        let content = clean_note_content(&strip_prompt_markers(&args.content));
+        let body = &existing.body;
+
+        // An armed selection is authoritative: placement may not target an
+        // unrelated model-supplied marker.
+        if let Some(sel) = self.state.current_selection() {
+            let plan = selection_insert_after_plan(body, &args.marker, &content, &sel)
+                .map_err(|message| ToolError { message })?;
+            let display_name = "Insert After";
+            let preview = format!("Insert after '{}':\n\n{content}", args.marker);
+            if let Err(msg) = check_tool_approval(&self.state, display_name, &existing.title, &preview).await {
+                return Ok(msg);
+            }
+            self.state.record_chat_tool(display_name, existing.title.clone());
+            let _ = self.state.handle.emit("ai://chat_tool", serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }));
+            self.state.save_note(existing.id.clone(), existing.title, existing.tags, plan.new_body.clone(), existing.source_pdf, Some(existing.annotations)).await.map_err(|e| ToolError { message: e.to_string() })?;
+            let _ = self.state.handle.emit("ai://note_written", serde_json::json!({ "noteId": existing.id, "content": plan.new_body, "mode": "write" }));
+            return Ok(format!("Note successfully updated with ID: {}", existing.id));
+        }
+
+        // Find the marker text in the note body.
+        let pos = body.find(&args.marker).ok_or_else(|| ToolError {
+            message: format!("Could not find '{}' in the note.", args.marker),
+        })?;
+
+        // Find the end of the line containing the marker.
+        let line_end = body[pos..]
+            .find('\n')
+            .map(|i| pos + i + 1)
+            .unwrap_or(body.len());
+
+        let new_body = format!("{}{}\n\n{}", &body[..line_end], content, &body[line_end..]);
+
+        let display_name = "Insert After";
+        let preview = format!("Insert after '{}':\n\n{content}", args.marker);
+        if let Err(msg) =
+            check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+        {
+            return Ok(msg);
+        }
+        self.state
+            .record_chat_tool(display_name, existing.title.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
+        );
+
+        self.state
+            .save_note(
+                existing.id.clone(),
+                existing.title,
+                existing.tags,
+                new_body.clone(),
+                existing.source_pdf,
+                Some(existing.annotations),
+            )
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+        let _ = self.state.handle.emit(
+            "ai://note_written",
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
+        );
+        Ok(format!(
+            "Note successfully updated with ID: {}",
+            existing.id
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DeleteInNoteArgs {
+    /// The exact text in the note to delete.
+    target: String,
+}
+
+#[derive(Clone)]
+pub struct DeleteInNoteTool {
+    pub state: AppState,
+}
+
+impl Tool for DeleteInNoteTool {
+    const NAME: &'static str = "delete_in_note";
+
+    type Error = ToolError;
+    type Args = DeleteInNoteArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "delete_in_note".to_string(),
+            description:
+                "Delete specific text from the note. The `target` is the exact text to remove."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "The exact text in the note to delete." }
+                },
+                "required": ["target"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let existing = match self.state.resolve_chat_target_note("") {
+            Some(n) => n,
+            None => {
+                return Ok("No note is currently open to edit.".to_string());
+            }
+        };
+
+        match find_tolerant(&existing.body, &args.target) {
+            Some((start, end)) => {
+                let new_body = format!("{}{}", &existing.body[..start], &existing.body[end..]);
+
+                if self.state.deterministic_tools_enabled()
+                    && new_body.trim().is_empty()
+                    && !existing.body.trim().is_empty()
+                    && !wants_clear(&self.state.latest_chat_question())
+                {
+                    return Ok(
+                        "Refused: that would erase the entire note. Use write_note with empty content if you intend to clear it.".to_string(),
+                    );
+                }
+
+                let display_name = "Delete Text";
+                let preview = format!("Delete:\n{}", args.target);
+                if let Err(msg) =
+                    check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+                {
+                    return Ok(msg);
+                }
+                self.state
+                    .record_chat_tool(display_name, existing.title.clone());
+                let _ = self.state.handle.emit(
+                    "ai://chat_tool",
+                    serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
+                );
+
+                self.state
+                    .save_note(
+                        existing.id.clone(),
+                        existing.title,
+                        existing.tags,
+                        new_body.clone(),
+                        existing.source_pdf,
+                        Some(existing.annotations),
+                    )
+                    .await
+                    .map_err(|e| ToolError {
+                        message: e.to_string(),
+                    })?;
+                let _ = self.state.handle.emit(
+                    "ai://note_written",
+                    serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
+                );
+                Ok(format!(
+                    "Note successfully updated with ID: {}",
+                    existing.id
+                ))
+            }
+            None => Err(ToolError {
+                message: format!("Could not find '{}' in the note.", args.target),
+            }),
+        }
     }
 }
 
@@ -2210,6 +2889,21 @@ pub fn build_myelin_agent(
         .tool(WriteNoteTool {
             state: state.clone(),
         })
+        .tool(AppendNoteTool {
+            state: state.clone(),
+        })
+        .tool(PrependNoteTool {
+            state: state.clone(),
+        })
+        .tool(ReplaceInNoteTool {
+            state: state.clone(),
+        })
+        .tool(InsertAfterLineTool {
+            state: state.clone(),
+        })
+        .tool(DeleteInNoteTool {
+            state: state.clone(),
+        })
         .tool(FetchWebPageTool {
             state: state.clone(),
         })
@@ -2286,6 +2980,29 @@ mod tests {
     use super::*;
 
     const NOTE: &str = "Cars are fast. They have engines. People drive them daily.";
+
+    #[test]
+    fn clean_note_content_converts_repeated_asterisk_line_separators() {
+        let malformed = "**Beneath the sky, the river flows,** *Where stones whisper secrets, soft and low.* *The wind holds still, the world is calm,** *A mirrored path where shadows call.* *In twilight's hush, the stars align,** *A quiet night, a sacred sign.*";
+        assert_eq!(
+            clean_note_content(malformed),
+            "**Beneath the sky, the river flows,**\nWhere stones whisper secrets, soft and low.\nThe wind holds still, the world is calm,\nA mirrored path where shadows call.\nIn twilight's hush, the stars align,\nA quiet night, a sacred sign."
+        );
+    }
+
+    #[test]
+    fn clean_note_content_preserves_ordinary_markdown_emphasis() {
+        let ordinary = "This is *italic* and **bold**.";
+        assert_eq!(clean_note_content(ordinary), ordinary);
+    }
+
+    #[test]
+    fn clean_note_content_normalizes_break_variants() {
+        assert_eq!(
+            clean_note_content("First<br>Second Third\\nFourth"),
+            "First\nSecond\nThird\nFourth"
+        );
+    }
 
     // The exact bug from the live probe: the model labels a whole-note rewrite as
     // mode "edit" and sends NO `find`. That must be treated as a replace.
@@ -2590,6 +3307,18 @@ mod tests {
     }
 
     #[test]
+    fn selection_scoped_plan_can_delete_only_the_selected_span() {
+        let body = "Keep this.\n\nRemove this.\n\nKeep that.";
+        let sel = SelectionArg {
+            text: "Remove this.".into(),
+            before: "Keep this.\n\n".into(),
+            after: "\n\nKeep that.".into(),
+        };
+        let plan = selection_scoped_plan(body, "", &sel).unwrap();
+        assert_eq!(plan.new_body, "Keep this.\n\n\n\nKeep that.");
+    }
+
+    #[test]
     fn selection_scoped_plan_defers_when_model_regenerated_whole_note() {
         let body = "Intro line.\n\nOld paragraph here.\n\nClosing line.";
         let sel = SelectionArg {
@@ -2643,6 +3372,17 @@ mod tests {
         assert_eq!(plan.op, WriteOp::Append);
         assert!(plan.new_body.starts_with(NOTE));
         assert!(plan.new_body.ends_with("A new line."));
+    }
+
+    #[test]
+    fn append_strips_echoed_note_and_tool_wrapper() {
+        let payload = format!("{NOTE}\n\nMeaning: A reflection on motion.</content>,");
+        let plan = plan_write(NOTE, &payload, "append", "").unwrap();
+        assert_eq!(plan.op, WriteOp::Append);
+        assert_eq!(
+            plan.new_body,
+            format!("{NOTE}\n\nMeaning: A reflection on motion.")
+        );
     }
 
     #[test]
@@ -2701,10 +3441,19 @@ mod tests {
         // small talk → no tools
         assert!(select_tools("gg", true, false).is_empty());
         assert!(select_tools("thanks!", true, false).is_empty());
-        // write intent → write_note only
+        // write intent → all note-mutation tools
         let w = select_tools("expand this to 500 words", true, false);
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0]["function"]["name"], "write_note");
+        assert!(w.len() >= 6, "expected at least 6 note tools, got {}", w.len());
+        let has = |v: &[Value], name: &str| {
+            v.iter()
+                .any(|t| t["function"]["name"].as_str() == Some(name))
+        };
+        assert!(has(&w, "write_note"));
+        assert!(has(&w, "append_note"));
+        assert!(has(&w, "prepend_note"));
+        assert!(has(&w, "replace_in_note"));
+        assert!(has(&w, "insert_after_line"));
+        assert!(has(&w, "delete_in_note"));
         // pure question → no tools (model answers in chat)
         assert!(select_tools("what is the capital of france?", true, false).is_empty());
         // other-notes intent → search + read
@@ -2884,6 +3633,16 @@ mod tests {
         ] {
             assert!(note_write_intent(msg), "expected write intent: {msg}");
         }
+    }
+
+    #[test]
+    fn existing_note_context_is_selective_and_selection_wins() {
+        assert!(!requires_existing_note_context("write a poem about rain", false));
+        assert!(!requires_existing_note_context("append a conclusion", false));
+        assert!(!requires_existing_note_context("search the web and write the results", false));
+        assert!(requires_existing_note_context("rewrite the note more formally", false));
+        assert!(requires_existing_note_context("format the current note", false));
+        assert!(!requires_existing_note_context("rewrite this paragraph", true));
     }
 
     #[test]

@@ -174,17 +174,17 @@ pub struct ResolvedLlamaConfig {
     /// unknown → the capability probe decides (and caches) at first use.
     #[serde(default)]
     pub supports_tools: Option<bool>,
-    /// Model cannot do native tool-calling reliably; needs prompt-tools + strict
-    /// grammar (e.g. LFM2 at low quants). True → forces prompt_tools + strict
-    /// on the sidecar, overriding user settings for this model.
+    /// Compatibility hint for models that may benefit from prompt-tools + strict
+    /// grammar (e.g. LFM2 at low quants). Informational only; user settings
+    /// choose the actual strategy.
     #[serde(default)]
     pub prefers_prompt_tools: Option<bool>,
-    /// Force tool_choice in native FC mode ("auto", "required", "none", or a
-    /// tool name). From metadata or model profile; overridable by user settings.
+    /// Optional profile suggestion for `tool_choice` in native FC mode. The
+    /// sidecar uses the explicit Openharn setting instead of applying this silently.
     #[serde(default)]
     pub tool_choice: Option<String>,
-    /// Raw JSON for chat_template_kwargs, e.g. {"enable_thinking":false}.
-    /// Forwarded directly to llama-server. From model profile; overridable.
+    /// Optional profile suggestion for chat-template kwargs. The sidecar uses
+    /// explicit Openharn settings instead of applying this silently.
     #[serde(default)]
     pub template_kwargs: Option<String>,
     /// Deterministic correctness tools (format_note / find_in_note / write

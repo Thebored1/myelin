@@ -124,3 +124,37 @@ SSE stream and forwarded through the sidecar SSE server → main app → Tauri e
 
 - `.gitignore`: Added sidecar target directory (`src-tauri/openharn-myelin/target`)
 - Various auto-formatting changes from `cargo fmt`
+
+### 9. Selective operation context
+
+Operation prompts now omit the existing note body for create, append, prepend,
+insert, search, and fetch requests. Full note context remains for rewrites,
+formatting, deletion, and other operations that must preserve surrounding text.
+An armed editor selection is authoritative: only the selected text is sent to
+the model, mutation schemas are limited to `write_note`, and Rust applies the
+existing anchor-checked selection splice before saving.
+
+The model-prompt debug event also reports prompt character count and an
+approximate token count, making prompt-evaluation regressions visible even when
+the request is cancelled before llama-server emits final usage.
+
+### 9. Prompt-latency measurement and CPU profile
+
+The sidecar emits `request_serialized`, `response_headers`, and
+`first_model_delta` timing events, plus token usage. This splits the observed
+prompt-to-first-delta interval into serialization/HTTP wait and model work.
+Tool-call deltas count as a first model delta too. Compacted tool schemas are
+alphabetically ordered, and live history is trimmed only at complete turns, so
+unchanged notes retain a stable cache prefix; note edits intentionally rebuild
+the system message and invalidate that prefix.
+
+Run the CPU sweep with:
+
+```sh
+LLAMA_SERVER=/path/to/llama-server MODEL=/path/to/model.gguf ./scripts/benchmark-cpu-profile.sh
+```
+
+It compares automatic threading versus six physical-core threads, ubatch
+256/512/1024, flash attention on/off, and f16/q8_0 KV. Choose the fastest safe
+configuration by prompt-to-first-delta for the same request, not generation
+tok/s alone. The runtime ladder still falls back when a build rejects a flag.

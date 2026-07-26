@@ -241,6 +241,9 @@ pub async fn run_chat(
     //   None        → let the sidecar's per-request policy decide
     intent_is_tool: Option<bool>,
     chat_mode: bool,
+    // Operation mode is tool-only: the editor and tool indicators communicate
+    // progress/results, while model prose must not become a chat reply.
+    suppress_chat_output: bool,
 ) -> Result<Vec<Value>> {
     let base = ensure_sidecar(state).await?;
 
@@ -254,28 +257,36 @@ pub async fn run_chat(
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| format!("{}/v1", config.base_url()));
 
-    // The model profile's `prefers_prompt_tools` flag is a HINT, not a mandate.
-    // Per the openharn paper (Table 1), forcing prompt-tools on ALL requests
-    // scores 29.5% — worse than native FC at 47.5% for single-call requests.
-    // The per-request policy in agent.rs::run_loop now decides per-request:
-    //   plan_len <= 1  → native FC (model's best mode for one-shot calls)
-    //   plan_len > 1   → prompt-tools + strict grammar (multi-call recovery)
-    //   plan_len == 0  → abstain immediately (NO_TOOL)
-    // So we no longer force prompt-tools globally. The profile hint is passed
-    // through as `prefers_prompt_tools` for the policy to consult if needed.
-    let prefers_prompt_tools = config.prefers_prompt_tools.unwrap_or(false);
+    // Tool format is user-controlled. Auto leaves the Openharn per-request
+    // policy in charge; Native always uses the model's native function-call
+    // format; Prompt tools uses text-form calls. Model profiles never force a
+    // format because a setting that helps one model can hurt another.
+    let tool_mode = match oh.tool_mode.trim().to_ascii_lowercase().as_str() {
+        "native" => "native",
+        "prompt" | "prompt_tools" => "prompt",
+        _ => "auto",
+    };
+    let explicit_prompt = tool_mode == "prompt";
+    // Auto is authoritative: ignore legacy manual booleans that may have been
+    // persisted by older builds. Openharn decides native vs prompt-tools per
+    // request and enables prompt-tools only as a recovery path when needed.
+    // Operation mode starts in the strict prompt-tool format. Unlike Auto, it
+    // must produce an actionable tool call on the first model request; starting
+    // in native auto mode allows some model/template combinations to emit prose
+    // and triggers an unnecessary second request.
+    let use_prompt_tools = explicit_prompt || suppress_chat_output;
+    let use_strict = suppress_chat_output || (explicit_prompt && oh.strict);
+    // Operation is an explicit user instruction to act, not a routing hint.
+    // In native function-calling mode `call_only` becomes `tool_choice: required`
+    // below; in prompt-tool mode it selects the call-only grammar.
+    let call_only = suppress_chat_output
+        || (explicit_prompt && oh.call_only && intent_is_tool == Some(true));
 
     let mut options = json!({
-        // Explicit tool intent uses the model's reliable structured prompt
-        // format. Chat intent stays prose-only; Auto keeps the profile policy.
-        "strict": intent_is_tool == Some(true),
-        "prompt_tools": intent_is_tool == Some(true),
-        // Pass the model-profile hint through so the per-request policy in
-        // agent.rs can force prompt-tools + strict for single-call requests
-        // when the model's native FC is unreliable at low quants (e.g. LFM2
-        // at Q2_K_XL). The user's explicit settings still win via oh.strict /
-        // oh.prompt_tools above.
-        "prefers_prompt_tools": prefers_prompt_tools,
+        "strict": use_strict,
+        "prompt_tools": use_prompt_tools,
+        "prefers_prompt_tools": false,
+        "call_only": call_only,
         // Model-based intent classification is skipped when the host provides
         // a deterministic intent_is_tool below. When intent_is_tool is None,
         // the sidecar defaults to friendly_results=false and enters the tool
@@ -285,10 +296,8 @@ pub async fn run_chat(
         // but it must not run the model classifier: intent_is_tool below is
         // authoritative and already computed by Myelin.
         "friendly_results": intent_is_tool.is_some(),
-        // In prompt-tools mode this selects the call-only grammar, preventing
-        // an explicit Operation request from being answered as prose.
-        "call_only": intent_is_tool == Some(true),
-        "no_think": false,
+
+        "no_think": oh.no_think,
         "narrow": false,
         "slm": false,
         "chat_mode": chat_mode,
@@ -307,7 +316,7 @@ pub async fn run_chat(
         1
     } else {
         oh.max_calls
-            .unwrap_or(if prefers_prompt_tools { 3 } else { 1 })
+            .unwrap_or(if tool_mode == "prompt" { 3 } else { 1 })
     });
     if let Some(tm) = oh.total_max {
         options["total_max"] = json!(tm);
@@ -315,16 +324,16 @@ pub async fn run_chat(
     if let Some(tt) = oh.tool_timeout_secs {
         options["tool_timeout_secs"] = json!(tt);
     }
-
-    // Model-profile defaults (from bundled model-profiles.json), overridable
-    // by the user's explicit OpenharnSettings. The config provides per-model
-    // baked-in values; the user's oh.* settings win when non-empty.
-    let tool_choice = config.tool_choice.as_ref().map(|v| v.trim().to_string());
-    if let Some(tc) = tool_choice {
-        options["tool_choice"] = json!(tc);
+    if let Some(gt) = oh.generation_timeout_secs {
+        options["generation_timeout_secs"] = json!(gt);
     }
-    let template_kwargs = config.template_kwargs.clone();
-    if let Some(kw) = template_kwargs {
+
+    // These are explicit user settings. Do not inherit tool_choice or template
+    // kwargs from a model profile; those options can be harmful on larger models.
+    if let Some(tc) = oh.tool_choice.as_ref().filter(|v| !v.trim().is_empty()) {
+        options["tool_choice"] = json!(tc.trim());
+    }
+    if let Some(kw) = oh.template_kwargs.as_ref().filter(|v| !v.trim().is_empty()) {
         options["template_kwargs"] = json!(kw);
     }
 
@@ -358,6 +367,7 @@ pub async fn run_chat(
     let mut event_name: Option<String> = None;
     let mut event_data: Option<String> = None;
     let mut emitted_text = false;
+    let mut emitted_generation_start = false;
     let mut last_tool: Option<String> = None;
     let mut final_messages: Vec<Value> = Vec::new();
     let handle = &state.handle;
@@ -377,10 +387,11 @@ pub async fn run_chat(
     emit_debug(
         "config",
         &format!(
-            "options: strict={}, prompt_tools={}, prefers_prompt_tools={}, intent_is_tool={}, max_calls={}",
+            "options: mode={}, strict={}, prompt_tools={}, call_only={}, intent_is_tool={}, max_calls={}",
+            tool_mode,
             options["strict"],
             options["prompt_tools"],
-            options["prefers_prompt_tools"],
+            options["call_only"],
             options
                 .get("intent_is_tool")
                 .map_or("null".to_string(), |v| v.to_string()),
@@ -398,7 +409,21 @@ pub async fn run_chat(
         emit_debug("tools", &format!("offered: {}", tool_names.join(", ")));
     }
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        // Poll the HTTP stream so cancel_ai is observed even when llama-server
+        // has not produced another SSE chunk (for example while a stale tool
+        // callback is holding the sidecar open).
+        let chunk = match tokio::time::timeout(Duration::from_millis(250), stream.next()).await {
+            Ok(chunk) => chunk,
+            Err(_) => {
+                if state.ai_cancel_requested() {
+                    emit_debug("cancel", "generation stopped by user");
+                    break;
+                }
+                continue;
+            }
+        };
+        let Some(chunk) = chunk else { break };
         if state.ai_cancel_requested() {
             emit_debug("cancel", "generation stopped by user");
             break;
@@ -423,15 +448,25 @@ pub async fn run_chat(
                                 if let Some(delta) = v["delta"].as_str() {
                                     if !delta.is_empty() {
                                         emitted_text = true;
-                                        let _ = handle.emit(
-                                            "ai://chat_chunk",
-                                            json!({ "requestId": request_id, "delta": delta }),
-                                        );
+                                        if !emitted_generation_start {
+                                            emitted_generation_start = true;
+                                            emit_debug("gen", "first model delta received");
+                                        }
+                                        if !suppress_chat_output {
+                                            let _ = handle.emit(
+                                                "ai://chat_chunk",
+                                                json!({ "requestId": request_id, "delta": delta }),
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
                         "note_start" => {
+                            if !emitted_generation_start {
+                                emitted_generation_start = true;
+                                emit_debug("gen", "first model note delta received");
+                            }
                             let _ =
                                 handle.emit("ai://note_stream_start", json!({ "noteId": note_id }));
                         }
@@ -543,13 +578,20 @@ pub async fn run_chat(
         }
     }
 
-    // Mirror the in-process loop's no-empty-bubble confirmation: if the model
-    // produced no visible text and the final action was a note mutation, surface
-    // a short confirmation instead of a silent turn.
-    if !emitted_text
+    // Keep operation turns tool-only. In other modes, retain the concise
+    // confirmation when a note mutation completed without model prose.
+    if !suppress_chat_output
+        && !emitted_text
         && matches!(
             last_tool.as_deref(),
-            Some("write_note") | Some("format_note") | Some("edit_notebook")
+            Some("write_note")
+                | Some("append_note")
+                | Some("prepend_note")
+                | Some("replace_in_note")
+                | Some("insert_after_line")
+                | Some("delete_in_note")
+                | Some("format_note")
+                | Some("edit_notebook")
         )
     {
         let _ = handle.emit(

@@ -229,32 +229,79 @@ fn tool_prompt(schemas: &Value) -> String {
          <tool_call>[{\"name\": \"<tool>\", \"arguments\": { ... }}]\n\
          Call a tool whenever the user wants to change, create, add to, or remove content from the note — never put that content in a plain-text reply. Reply in plain text ONLY for genuine conversation (greetings, questions, clarifications, refusals); never for note content. Available tools:\n",
     );
+
+    // Build a name→schema lookup from the (already gated) tool array.
     if let Some(arr) = schemas.as_array() {
-        for t in arr {
-            let f = &t["function"];
-            let name = f["name"].as_str().unwrap_or("");
-            let desc = f["description"].as_str().unwrap_or("");
-            let required: Vec<&str> = f["parameters"]["required"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
-            let params = f["parameters"]["properties"]
-                .as_object()
-                .map(|o| {
-                    o.keys()
-                        .map(|k| {
-                            if required.contains(&k.as_str()) {
-                                k.clone()
-                            } else {
-                                format!("[{k}]")
-                            }
+        let tool_map: std::collections::HashMap<&str, &Value> = arr
+            .iter()
+            .filter_map(|t| Some((t["function"]["name"].as_str()?, t)))
+            .collect();
+
+        // Sections in display order: each has a header and a list of tool names.
+        // If none of a section's tools are in the filtered set, the section
+        // is skipped entirely.
+        let sections: [(&str, &[&str]); 6] = [
+            (
+                "--- Read & Search ---",
+                &["search_notes", "read_note", "search_documents", "find_in_note"],
+            ),
+            (
+                "--- Web Fetch ---",
+                &["fetch_web_page", "web_search"],
+            ),
+            (
+                "--- Edit: Add Content ---",
+                &["write_note", "append_note", "prepend_note", "insert_after_line"],
+            ),
+            (
+                "--- Edit: Change or Remove ---",
+                &["replace_in_note", "delete_in_note"],
+            ),
+            (
+                "--- Formatting ---",
+                &["format_note"],
+            ),
+            (
+                "--- Notebooks ---",
+                &["edit_notebook"],
+            ),
+        ];
+
+        for (header, tool_names) in sections {
+            let mut lines: Vec<String> = Vec::new();
+            for name in tool_names {
+                if let Some(t) = tool_map.get(name) {
+                    let f = &t["function"];
+                    let desc = f["description"].as_str().unwrap_or("");
+                    let required: Vec<&str> = f["parameters"]["required"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                        .unwrap_or_default();
+                    let params = f["parameters"]["properties"]
+                        .as_object()
+                        .map(|o| {
+                            o.keys()
+                                .map(|k| {
+                                    if required.contains(&k.as_str()) {
+                                        k.clone()
+                                    } else {
+                                        format!("[{k}]")
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let short = desc.split(['.', '\n']).next().unwrap_or(desc);
-            s.push_str(&format!("- {name}({params}): {short}\n"));
+                        .unwrap_or_default();
+                    let short = desc.split(['.', '\n']).next().unwrap_or(desc);
+                    lines.push(format!("- {name}({params}): {short}"));
+                }
+            }
+            if !lines.is_empty() {
+                s.push_str(&format!("\n  {header}\n"));
+                for line in &lines {
+                    s.push_str(&format!("    {line}\n"));
+                }
+            }
         }
     }
     s
@@ -455,10 +502,9 @@ pub fn partial_field(raw: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Best-effort decode of the `content` string value from partial JSON like
-/// `{"content":"hello wo`. Conservatively stops before any incomplete escape so
-/// we never emit a half-decoded character; the next fragment completes it.
-pub fn extract_partial_content(raw: &str) -> Option<String> {
+/// Decode the `content` string value and report whether its closing quote has
+/// arrived. This preserves Markdown escapes such as `\\n` as real newlines.
+fn extract_content_value(raw: &str) -> Option<(String, bool)> {
     let pat = "\"content\"";
     let kpos = raw.find(pat)?;
     let after = raw[kpos + pat.len()..].trim_start();
@@ -468,9 +514,9 @@ pub fn extract_partial_content(raw: &str) -> Option<String> {
     let mut chars = body.chars();
     while let Some(c) = chars.next() {
         match c {
-            '"' => break,
+            '"' => return Some((out, true)),
             '\\' => match chars.next() {
-                None => break,
+                None => return Some((out, false)),
                 Some(e) => match e {
                     'n' => out.push('\n'),
                     't' => out.push('\t'),
@@ -485,7 +531,7 @@ pub fn extract_partial_content(raw: &str) -> Option<String> {
                         for _ in 0..4 {
                             match chars.next() {
                                 Some(h) => hex.push(h),
-                                None => return Some(out),
+                                None => return Some((out, false)),
                             }
                         }
                         if let Ok(cp) = u32::from_str_radix(&hex, 16) {
@@ -500,8 +546,17 @@ pub fn extract_partial_content(raw: &str) -> Option<String> {
             _ => out.push(c),
         }
     }
-    Some(out)
+    Some((out, false))
 }
+
+/// Best-effort decode of the `content` string value from partial JSON like
+/// `{"content":"hello wo`. Conservatively stops before any incomplete escape so
+/// we never emit a half-decoded character; the next fragment completes it.
+pub fn extract_partial_content(raw: &str) -> Option<String> {
+    extract_content_value(raw).map(|(content, _)| content)
+}
+
+
 
 /// The harness-as-crutch decomposer. A weak quantized model cannot split a
 /// multi-operation request into N tool calls on its own (the dominant BFCL

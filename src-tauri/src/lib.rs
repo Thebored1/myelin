@@ -466,6 +466,13 @@ async fn save_chat_history(
         .map_err(|error| error.to_string())
 }
 
+/// Drop the in-memory model conversation for a note. The next AI turn rebuilds
+/// its context from the authoritative persisted chat history.
+#[tauri::command]
+fn clear_ai_conversation(state: State<'_, AppState>, note_id: String) {
+    state.clear_conversation(&note_id);
+}
+
 #[tauri::command]
 async fn get_note_history(
     state: State<'_, AppState>,
@@ -613,8 +620,24 @@ pub fn run() {
                     }
                 };
                 rt.block_on(async move {
-                    if let Err(e) = warmup_state.warm_llama_server().await {
-                        log::warn!("startup warm-up failed: {e}");
+                    // Startup can race model/config initialization. Retry instead
+                    // of silently abandoning the warm-up after one failed probe.
+                    for attempt in 1..=5 {
+                        match warmup_state.warm_llama_server().await {
+                            Ok(()) => {
+                                log::info!("startup warm-up ready (attempt {attempt})");
+                                return;
+                            }
+                            Err(error) if attempt < 5 => {
+                                log::warn!(
+                                    "startup warm-up attempt {attempt}/5 failed: {error}; retrying"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                            Err(error) => {
+                                log::warn!("startup warm-up failed after 5 attempts: {error}");
+                            }
+                        }
                     }
                 });
             });
@@ -708,6 +731,7 @@ pub fn run() {
             ask_ai_stream,
             cancel_ai,
             save_chat_history,
+            clear_ai_conversation,
             get_note_history,
             get_note_version,
             import_pdf_file,

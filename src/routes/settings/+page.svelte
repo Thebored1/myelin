@@ -167,9 +167,13 @@
     type OpenharnSettings = {
         port: number | null;
         bin_path: string | null;
+        tool_mode: 'auto' | 'native' | 'prompt';
         strict: boolean;
         prompt_tools: boolean;
+        call_only: boolean;
         no_think: boolean;
+        tool_choice: string | null;
+        template_kwargs: string | null;
         narrow: boolean;
         slm: boolean;
         max_calls: number | null;
@@ -177,11 +181,16 @@
         tool_timeout_secs: number | null;
         tool_subset: string | null;
         base_url: string | null;
-        tool_choice: string | null;
-        template_kwargs: string | null;
     };
     let ohPort = $state<number | null>(null);
     let ohBinPath = $state('');
+    let ohToolMode = $state<'auto' | 'native' | 'prompt'>('auto');
+    let ohStrict = $state(false);
+    let ohPromptTools = $state(false);
+    let ohCallOnly = $state(false);
+    let ohNoThink = $state(false);
+    let ohToolChoice = $state('');
+    let ohTemplateKwargs = $state('');
 
     let ohMaxCalls = $state<number | null>(null);
     let ohTotalMax = $state<number | null>(null);
@@ -264,6 +273,15 @@
                 const oh = await invoke<OpenharnSettings>('get_openharn_settings');
                 ohPort = oh.port ?? null;
                 ohBinPath = oh.bin_path ?? '';
+                ohToolMode = oh.tool_mode === 'native' || oh.tool_mode === 'prompt' ? oh.tool_mode : 'auto';
+                // Manual grammar toggles only apply in explicit Prompt tools mode.
+                // Do not display stale legacy values as active in Auto/Native.
+                ohStrict = ohToolMode === 'prompt' ? (oh.strict ?? false) : false;
+                ohPromptTools = false;
+                ohCallOnly = ohToolMode === 'prompt' ? (oh.call_only ?? false) : false;
+                ohNoThink = oh.no_think ?? false;
+                ohToolChoice = oh.tool_choice ?? '';
+                ohTemplateKwargs = oh.template_kwargs ?? '';
                 ohMaxCalls = oh.max_calls ?? null;
                 ohTotalMax = oh.total_max ?? null;
                 ohToolTimeout = oh.tool_timeout_secs ?? null;
@@ -487,6 +505,15 @@
         }
     }
 
+    function changeToolMode() {
+        if (ohToolMode !== 'prompt') {
+            ohStrict = false;
+            ohCallOnly = false;
+            ohPromptTools = false;
+        }
+        void saveOpenharn();
+    }
+
     async function saveOpenharn() {
         ohSaving = true;
         try {
@@ -494,7 +521,13 @@
                 settings: {
                     port: ohPort || null,
                     bin_path: ohBinPath.trim() || null,
-                    // Tool format and intent are selected per request by the model profile and host policy.
+                    tool_mode: ohToolMode,
+                    strict: ohStrict,
+                    prompt_tools: ohPromptTools,
+                    call_only: ohCallOnly,
+                    no_think: ohNoThink,
+                    tool_choice: ohToolChoice.trim() || null,
+                    template_kwargs: ohTemplateKwargs.trim() || null,
                     max_calls: ohMaxCalls || null,
                     total_max: ohTotalMax || null,
                     tool_timeout_secs: ohToolTimeout || null,
@@ -851,6 +884,58 @@
                 and calls back into Myelin for the real note / search / web tools. These settings tune
                 that sidecar. Leave a field blank to use the built-in default.
             </p>
+
+            <div class="input-group full-width">
+                <label for="oh_tool_mode">Tool-calling strategy</label>
+                <select id="oh_tool_mode" bind:value={ohToolMode} onchange={changeToolMode}>
+                    <option value="auto">Auto — choose per request</option>
+                    <option value="native">Native — use the model's function calls</option>
+                    <option value="prompt">Prompt tools — text-form calls with grammar options</option>
+                </select>
+                <p class="compute-hint">
+                    Auto uses native calls for simple requests and prompt tools only when Openharn's per-request policy needs them. Native is usually best for larger models. Prompt tools can help smaller or unreliable models, but may reduce quality on larger models.
+                </p>
+            </div>
+
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohStrict} onchange={saveOpenharn} disabled={ohToolMode !== 'prompt'} />
+                <span class="toggle-text">
+                    <strong>Strict tool grammar</strong>
+                    <span class="toggle-hint">Restricts text-form tool calls to valid structured syntax. More reliable, but less flexible and slower.</span>
+                </span>
+            </label>
+
+
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohCallOnly} onchange={saveOpenharn} disabled={ohToolMode !== 'prompt'} />
+                <span class="toggle-text">
+                    <strong>Call-only tool requests</strong>
+                    <span class="toggle-hint">Prevents prose when a request is classified as an operation. Useful for weak models; can be too restrictive for larger models.</span>
+                </span>
+            </label>
+
+            <label class="toggle-row">
+                <input type="checkbox" bind:checked={ohNoThink} onchange={saveOpenharn} />
+                <span class="toggle-text">
+                    <strong>Disable model reasoning</strong>
+                    <span class="toggle-hint">Adds a request hint to skip hidden thinking tokens. This can make responses faster, but some models may become less accurate.</span>
+                </span>
+            </label>
+
+            <div class="advanced-grid">
+                <div class="input-group">
+                    <label for="oh_tool_choice">Native tool choice</label>
+                    <select id="oh_tool_choice" bind:value={ohToolChoice} onchange={saveOpenharn}>
+                        <option value="">Auto</option>
+                        <option value="required">Required — force a native tool call</option>
+                        <option value="none">None — disable native tool calls</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label for="oh_template_kwargs">Chat-template options (JSON)</label>
+                    <input type="text" id="oh_template_kwargs" bind:value={ohTemplateKwargs} onchange={saveOpenharn} placeholder="JSON, e.g. enable_thinking false" />
+                </div>
+            </div>
 
             <div class="advanced-grid">
                 <div class="input-group">

@@ -30,7 +30,10 @@ use uuid::Uuid;
 // configured (semantic search), else a same-width lexical hashed fallback.
 const EMBEDDING_DIM: i32 = 768;
 const INDEX_DIR_NAME: &str = "index";
-const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 4;
+// Fast-chat profile: retain only the latest user/assistant pair when rebuilding
+// context after restart. Live tool turns are also capped below.
+const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 2;
+const MAX_LIVE_CONVERSATION_CHARS: usize = 8_000;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
 // Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
@@ -393,10 +396,16 @@ pub(crate) struct InnerState {
     // would corrupt it if they built the format at the same time.
     tectonic_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
+    /// Prompt-cache warm-up currently occupying the single llama-server slot.
+    /// Requests wait for it instead of queuing behind it invisibly.
+    cache_warmup: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
     /// The openharn-myelin agent sidecar: a long-lived `openharn-myelin` process
     /// that runs the agent loop and calls back to Myelin for tool execution.
     pub(crate) sidecar: AsyncMutex<Option<ManagedSidecar>>,
+    /// Chat tools read shared per-turn context (open note, selection, question),
+    /// so concurrent requests would overwrite or clear each other's target.
+    chat_lock: AsyncMutex<()>,
     /// Live mirror of the persisted openharn sidecar settings, refreshed on save.
     openharn_settings: Mutex<OpenharnSettings>,
     llama_client: Client,
@@ -467,8 +476,16 @@ pub struct OpenharnSettings {
     /// model's `<think>` block; `narrow` is the read-only preset (strict +
     /// prompt-tools + only non-mutating tools); `slm` tightens tool-result caps
     /// for weak models; the rest bound the tool-call budget.
+    /// Tool-call strategy: "auto" (Openharn chooses per request), "native",
+    /// or "prompt" (text-form calls). This is user-controlled; model profiles
+    /// must not silently override it.
+    #[serde(default = "default_tool_mode")]
+    pub tool_mode: String,
+    /// Use the strict grammar when prompt-tools are selected.
     pub strict: bool,
     pub prompt_tools: bool,
+    /// Force a tool call in prompt-tools mode instead of allowing prose.
+    pub call_only: bool,
     pub no_think: bool,
     pub narrow: bool,
     pub slm: bool,
@@ -481,6 +498,8 @@ pub struct OpenharnSettings {
     pub max_calls: Option<usize>,
     pub total_max: Option<usize>,
     pub tool_timeout_secs: Option<u64>,
+    /// Maximum seconds allowed for one llama-server generation.
+    pub generation_timeout_secs: Option<u64>,
     /// Restrict the agent to a named subset of tools (comma-separated function
     /// names, e.g. "write_note,web_search"). Blank = all tools Myelin offers.
     pub tool_subset: Option<String>,
@@ -501,6 +520,10 @@ pub struct OpenharnSettings {
     /// switch). Pairs with tool_choice=required to prevent think-budget deaths.
     #[serde(default)]
     pub template_kwargs: Option<String>,
+}
+
+fn default_tool_mode() -> String {
+    "auto".to_string()
 }
 
 impl OpenharnSettings {
@@ -567,8 +590,10 @@ impl AppState {
                 index_lock: AsyncMutex::new(()),
                 tectonic_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
+                cache_warmup: AsyncMutex::new(None),
                 embed_server: AsyncMutex::new(None),
                 sidecar: AsyncMutex::new(None),
+                chat_lock: AsyncMutex::new(()),
                 openharn_settings: Mutex::new(openharn_settings),
                 llama_client: Client::builder()
                     .timeout(std::time::Duration::from_secs(120))
@@ -1627,6 +1652,22 @@ impl AppState {
         doc_type: Option<String>,
         interaction_mode: Option<String>,
     ) -> Result<()> {
+        // The active note/question/selection live in shared AppState because the
+        // tools are invoked asynchronously. If an older turn still owns the
+        // guard, cancel it and let this new request take over instead of showing
+        // a zero-second "another request is running" error to the user.
+        let _chat_guard = match self.inner.chat_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.request_ai_cancel();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    self.inner.chat_lock.lock(),
+                )
+                .await
+                .map_err(|_| anyhow!("The previous AI request did not stop within 10 seconds."))?
+            }
+        };
         let interaction_mode = match interaction_mode.as_deref() {
             None | Some("auto") => "auto",
             Some("chat") => "chat",
@@ -1647,8 +1688,23 @@ impl AppState {
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
 
+            // Relative placement has no deterministic anchor unless the editor
+            // supplied an armed selection. Refuse before model/tool execution so
+            // a weak model cannot silently append to the wrong location.
+            if crate::agent::placement_request_intent(&question) && selection.is_none() {
+                let message = "Where should I place it? Select the anchor text in the note, or provide an exact heading, line, or marker.";
+                let _ = self.handle.emit("ai://chat_chunk", serde_json::json!({
+                    "requestId": request_id, "delta": message
+                }));
+                return Ok(());
+            }
+
             let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
-            self.set_deterministic_tools_runtime(config.deterministic_tools);
+            // Fast-chat profile: let the model choose ordinary tools instead of
+            // routing through deterministic format/find assists. Rust still
+            // executes the selected tools and enforces write safety.
+            let deterministic_tools = false;
+            self.set_deterministic_tools_runtime(deterministic_tools);
             self.set_tool_gating_runtime(config.tool_gating);
             self.ensure_llama_server(&config).await?;
 
@@ -1674,6 +1730,13 @@ impl AppState {
             // "reference only — do NOT copy" framing (plus a 400-char cap) meant it
             // could neither see nor feel allowed to modify existing content, so it
             // could only write fresh, never edit/format/shorten/delete.
+            let append_only = crate::agent::append_request_intent(&question);
+            let placement = crate::agent::placement_request_intent(&question);
+            let has_selection = selection.is_some();
+            // A fresh write/create does not need the old body. Existing-content
+            // operations do: omitting it would make a rewrite or format request
+            // unsafe. An armed selection is authoritative and is handled below.
+            let needs_existing_body = crate::agent::requires_existing_note_context(&question, has_selection);
             let mut context = format!("The note currently open is titled \"{}\".", note.title);
             // For a notebook, present readable CELLS (not the raw JSON body) so the
             // model edits via edit_notebook instead of trying to rewrite JSON.
@@ -1683,7 +1746,21 @@ impl AppState {
                 None
             };
             if let Some(cells) = &notebook_cells {
-                context.push_str(&format!("\n\n{cells}"));
+                if !has_selection || needs_existing_body {
+                    context.push_str(&format!("\n\n{cells}"));
+                } else {
+                    context.push_str(
+                        " The full notebook body is intentionally omitted because the user selected an exact edit region below.",
+                    );
+                }
+            } else if has_selection {
+                context.push_str(
+                    " The full note body is intentionally omitted because the user selected an exact edit region below.",
+                );
+            } else if !needs_existing_body {
+                context.push_str(
+                    " The existing note body is intentionally omitted because this operation does not require reproducing it. Use the appropriate append/create/search tool without inventing unchanged note content.",
+                );
             } else if note_body_excerpt.trim().is_empty() {
                 context.push_str(" It is currently empty.");
             } else {
@@ -1691,6 +1768,13 @@ impl AppState {
                     "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---",
                     note_body_excerpt
                 ));
+            }
+            if append_only && !has_selection {
+                context.push_str(
+                    "\n\nAPPEND-ONLY TURN: The current note (if shown) is reference material only. \
+                     Add ONLY the new requested text; never reproduce, quote, or regenerate any \
+                     existing line. Call append_note with only the new paragraph in content."
+                );
             }
             // The open document isn't always Markdown — tell the model so it edits
             // in the right language instead of defaulting to Markdown headings/lists.
@@ -1709,9 +1793,12 @@ impl AppState {
             // model still needs to see the selected text to rewrite it well.
             if let Some(sel) = &selection {
                 context.push_str(&format!(
-                    "\n\nThe user has SELECTED the following part of the note, and their request applies to the SELECTION ONLY — rewrite/edit just this text and leave the rest of the note unchanged:\n\"\"\"\n{}\n\"\"\"\n\nUse write_note for this selection. For a rewrite or update, send ONLY the replacement for the selection as `content`; do not send the whole note. For a removal, call write_note with `mode` set to `edit`, an exact `find` value copied from the current note (including Markdown markers when they are part of what should be removed), and an empty `content`. Do not send an unchanged whole-note replacement.",
+                    "\n\nThe user has SELECTED the following part of the note. This request applies to the SELECTION ONLY — leave every character outside it unchanged:\n\"\"\"\n{}\n\"\"\"\n\nUse write_note for this selection and send ONLY replacement content. For removal, send an empty `content`. Do not reproduce the whole note or call a mutation tool that targets text outside this selection.",
                     sel.text
                 ));
+                if placement {
+                    context.push_str(" For a below/after/under/beneath request, use insert_after_line with marker set to the selected text and insert immediately after its line.");
+                }
             }
             // The note context is embedded in the system message so that
             // llama-server's prompt cache (cache_prompt) sees a matching prefix
@@ -1750,7 +1837,7 @@ impl AppState {
                     // An explicit Operation-mode choice must not be narrowed by
                     // the optional heuristic gate; the user already chose work.
                     config.tool_gating && interaction_mode != "operation",
-                    config.deterministic_tools,
+                    deterministic_tools,
                 )
             } else {
                 Vec::new()
@@ -1773,6 +1860,45 @@ impl AppState {
                         )
                     )
                 });
+            }
+
+            // Append requests get a dedicated append_note tool. No need to
+            // narrow write_note — it's an overwrite-only tool now, and
+            // append_note is available to handle additions correctly.
+            // Remove write_note from the tool list on append requests so the
+            // model doesn't accidentally overwrite the entire note.
+            if append_only && !has_selection {
+                tools.retain(|tool| {
+                    tool["function"]["name"].as_str() != Some("write_note")
+                        && tool["function"]["name"].as_str() != Some("prepend_note")
+                        && tool["function"]["name"].as_str() != Some("replace_in_note")
+                        && tool["function"]["name"].as_str() != Some("insert_after_line")
+                        && tool["function"]["name"].as_str() != Some("delete_in_note")
+                });
+            }
+
+            // A selection is a hard scope boundary. Keep read/search tools that
+            // the request explicitly needs, but expose only write_note for
+            // mutations because its Rust implementation applies the selection
+            // splice and anchor checks before saving.
+            if has_selection {
+                tools.retain(|tool| {
+                    matches!(
+                        tool["function"]["name"].as_str(),
+                        Some(
+                            "write_note"
+                                | "insert_after_line"
+                                | "search_notes"
+                                | "read_note"
+                                | "search_documents"
+                                | "fetch_web_page"
+                                | "web_search"
+                        )
+                    )
+                });
+            }
+            if has_selection && placement {
+                tools.retain(|tool| tool["function"]["name"].as_str() == Some("insert_after_line"));
             }
 
             // A notebook is edited cell-by-cell via edit_notebook, never with the
@@ -1800,6 +1926,12 @@ impl AppState {
                     }
                 }
             }
+
+            // Keep the request prompt small: the model receives only tool names
+            // and JSON argument schemas. The host owns the verbose descriptions
+            // and deterministic routing, so sending them to llama-server adds
+            // prompt tokens without changing execution.
+            tools = crate::agent::compact_tool_specs(tools);
 
             // Stream directly against llama-server (not through rig) so the note
             // content can be surfaced token-by-token as it is generated. See
@@ -1845,21 +1977,22 @@ impl AppState {
                 .collect();
             log::info!(
                 "[ask_ai_stream] mode={} tools_offered={} gating={} deterministic={} edit_thread={} supports_tools={}",
-                interaction_mode, tool_names.join(","), config.tool_gating && interaction_mode != "operation", config.deterministic_tools, edit_thread, config.supports_tools.unwrap_or(false)
+                interaction_mode, tool_names.join(","), config.tool_gating && interaction_mode != "operation", deterministic_tools, edit_thread, config.supports_tools.unwrap_or(false)
             );
+            let tool_mode = self.openharn_settings().tool_mode;
             let _ = self.handle.emit(
                 "ai://debug_event",
                 serde_json::json!({
                     "kind": "config",
                     "msg": format!(
-                        "mode={}, tools: {}, gate={}, determ={}, edit={}, tools_supported={}, prompt_tools={}",
+                        "mode={}, tools: {}, gate={}, determ={}, edit={}, tools_supported={}, tool_mode={}",
                         interaction_mode,
                         tool_names.join(", "),
                         config.tool_gating && interaction_mode != "operation",
-                        config.deterministic_tools,
+                        deterministic_tools,
                         edit_thread,
                         config.supports_tools.unwrap_or(false),
-                        config.prefers_prompt_tools.unwrap_or(false),
+                        tool_mode,
                     ),
                     "requestId": request_id,
                 }),
@@ -1882,6 +2015,7 @@ impl AppState {
                 &nid,
                 intent_is_tool,
                 interaction_mode == "chat",
+                interaction_mode == "operation",
             )
             .await?;
 
@@ -1892,7 +2026,7 @@ impl AppState {
             if final_messages.len() > sent_len {
                 convo.extend(final_messages[sent_len..].iter().cloned());
             }
-            let convo = trim_conversation(convo, 24_000);
+            let convo = trim_conversation(convo, MAX_LIVE_CONVERSATION_CHARS);
             self.save_conversation(&nid, convo);
 
             Ok(())
@@ -1901,6 +2035,10 @@ impl AppState {
 
         self.clear_latest_chat_question();
         self.clear_current_note_id();
+        // Release the per-turn guard before notifying the UI. Retry/undo waits
+        // for chat_done, so keeping the guard through this emit creates a small
+        // but real race with the replacement request.
+        drop(_chat_guard);
 
         match result {
             Ok(()) => {
@@ -2642,6 +2780,10 @@ impl AppState {
     /// Called when the open note is closed — nothing to infer for. The next note
     /// open warms it again. Idempotent.
     pub async fn stop_llama_server(&self) {
+        if let Some(warmup) = self.inner.cache_warmup.lock().await.take() {
+            warmup.abort();
+            let _ = warmup.await;
+        }
         let mut guard = self.inner.llama_server.lock().await;
         if let Some(mut server) = guard.take() {
             llama_server::stop_server(&mut server).await;
@@ -2837,12 +2979,24 @@ impl AppState {
     }
 
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
+        let _ = self.handle.emit("ai://debug_event", serde_json::json!({
+            "kind": "startup", "msg": "Starting model / checking llama-server readiness"
+        }));
         let mut guard = self.inner.llama_server.lock().await;
 
         if let Some(server) = guard.as_mut() {
             if server.config.matches_runtime(config)
                 && llama_server::health_check(&self.inner.llama_client, &server.config).await
             {
+                // Startup/note-open warm-up uses the same single server slot as
+                // chat. Wait for it to finish so the first user request is not
+                // silently queued behind a tens-of-seconds prompt evaluation.
+                if let Some(warmup) = self.inner.cache_warmup.lock().await.take() {
+                    let _ = self.handle.emit("ai://debug_event", serde_json::json!({
+                        "kind": "warmup", "msg": "Waiting for prompt-cache warm-up"
+                    }));
+                    let _ = warmup.await;
+                }
                 return Ok(());
             }
 
@@ -2862,6 +3016,10 @@ impl AppState {
                 );
             }
 
+            if let Some(warmup) = self.inner.cache_warmup.lock().await.take() {
+                warmup.abort();
+                let _ = warmup.await;
+            }
             llama_server::stop_server(server).await;
             *guard = None;
         }
@@ -2893,38 +3051,48 @@ impl AppState {
         *guard = Some(server);
         drop(guard);
 
-        // Pre-warm the prompt cache: the system preamble + tool schemas are a
-        // large (~1.1k token) constant prefix. Processing it once now means the
-        // user's first real message reuses the cached prefix instead of paying
-        // the full prompt-eval cost (tens of seconds on CPU).
-        self.spawn_cache_warmup(config);
+        // Start the cache warm-up, but keep its handle. A request arriving while
+        // this runs must await it because llama-server is configured with one
+        // active slot. The response body is drained so the request really
+        // completes and the server can retain its KV prefix.
+        let warmup = self.spawn_cache_warmup(config);
+        *self.inner.cache_warmup.lock().await = Some(warmup);
         Ok(())
     }
 
-    /// Fire a throwaway completion that mirrors the live agent's system + tools
-    /// prefix so llama-server caches it in the (single) slot. Fire-and-forget.
-    fn spawn_cache_warmup(&self, config: &llama_server::ResolvedLlamaConfig) {
+    /// Fire a throwaway completion that primes the stable preamble/tool prefix.
+    /// The handle is tracked by ensure_llama_server so user requests never queue
+    /// behind this work without an explanation.
+    fn spawn_cache_warmup(
+        &self,
+        config: &llama_server::ResolvedLlamaConfig,
+    ) -> tokio::task::JoinHandle<()> {
         let client = self.inner.llama_client.clone();
         let url = format!("{}/v1/chat/completions", config.base_url());
         let model = config.model_name();
         tokio::spawn(async move {
+            log::info!("llama prompt-cache warm-up starting");
             let body = serde_json::json!({
                 "model": model,
                 "messages": [
                     { "role": "system", "content": crate::agent::MYELIN_PREAMBLE },
                     { "role": "user", "content": "ping" }
                 ],
-                "tools": crate::agent::tool_specs(),
+                "tools": crate::agent::compact_tool_specs(crate::agent::tool_specs()),
                 "max_tokens": 1,
                 "temperature": 0.0,
                 "cache_prompt": true
             });
             match client.post(&url).json(&body).send().await {
-                Ok(_) => log::info!("llama prompt-cache warm-up complete"),
+                Ok(response) => match response.bytes().await {
+                    Ok(_) => log::info!("llama prompt-cache warm-up complete"),
+                    Err(error) => log::warn!("llama prompt-cache warm-up body failed: {error}"),
+                },
                 Err(error) => log::warn!("llama prompt-cache warm-up failed: {error}"),
             }
-        });
-    }
+                })
+            }
+
 }
 
 fn load_settings(app_data_dir: &Path) -> Result<PersistedSettings> {

@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 const HISTORY_BUDGET: usize = 16_000;
@@ -43,6 +43,9 @@ pub struct Options {
     /// Seconds to wait for a tool result from the host before failing the call.
     #[serde(default = "default_tool_timeout")]
     pub tool_timeout_secs: u64,
+    /// Maximum duration of one upstream llama-server generation.
+    #[serde(default = "default_generation_timeout")]
+    pub generation_timeout_secs: u64,
     /// Read-only navigation preset (OPENHARN_NARROW): strict + prompt-tools +
     /// restrict to read/search tools only. Forces a safe, non-mutating agent.
     #[serde(default)]
@@ -113,6 +116,31 @@ fn default_total_max() -> usize {
 fn default_tool_timeout() -> u64 {
     300
 }
+fn default_generation_timeout() -> u64 {
+    120
+}
+
+/// A successful mutating tool call is terminal for this request. Small models
+/// often treat the tool result as a prompt to rewrite the same note again; that
+/// is both unnecessary and dangerous because the host clears the open-note
+/// context as soon as the request completes.
+fn is_terminal_mutation(name: &str, result: &str) -> bool {
+    if !matches!(
+        name,
+        "write_note"
+            | "append_note"
+            | "prepend_note"
+            | "replace_in_note"
+            | "insert_after_line"
+            | "delete_in_note"
+            | "format_note"
+            | "edit_notebook"
+    ) {
+        return false;
+    }
+    let result = result.trim_start().to_ascii_lowercase();
+    result.contains("successfully updated") || result.starts_with("notebook cell updated")
+}
 
 /// Emit the exact message array sent to the model. This deliberately excludes
 /// transport credentials; it is a local diagnostic requested by the user and is
@@ -120,10 +148,12 @@ fn default_tool_timeout() -> u64 {
 async fn emit_model_prompt(tx: &mpsc::Sender<Out>, stage: &str, body: &Value) {
     let messages = body.get("messages").cloned().unwrap_or(Value::Null);
     let rendered = serde_json::to_string_pretty(&messages).unwrap_or_else(|_| messages.to_string());
+    let chars = rendered.chars().count();
+    let approx_tokens = (chars + 3) / 4;
     let _ = tx
         .send(Out::Debug {
             kind: "model_prompt".into(),
-            message: format!("{stage}\n{rendered}"),
+            message: format!("{stage}\nprompt_chars={chars} approx_tokens={approx_tokens}\n{rendered}"),
         })
         .await;
 }
@@ -148,6 +178,7 @@ impl Default for Options {
             max_calls: default_max_calls(),
             total_max: default_total_max(),
             tool_timeout_secs: default_tool_timeout(),
+            generation_timeout_secs: default_generation_timeout(),
             narrow: false,
             tool_subset: Vec::new(),
             slm: false,
@@ -225,6 +256,24 @@ const INTENT_ROUTING_RULES: &str = "Classify the latest user message by calling 
 /// completion, preserving the main conversation's KV-cache prefix in the single
 /// llama-server slot. The virtual call is consumed locally and never reaches the
 /// host or user-visible tool list.
+/// Whole-note replacement can safely preview from an empty buffer. Append and
+/// insertion requests cannot: until the model finishes declaring their mode, a
+/// replacement preview would temporarily hide the existing note.
+fn request_allows_replace_preview(user_text: &str) -> bool {
+    let text = user_text.to_ascii_lowercase();
+    !text.starts_with("add ")
+        && ![
+            "append",
+            " below",
+            "add below",
+            "add to",
+            "insert",
+            "add a section",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase))
+}
+
 async fn detect_intent_in_session(
     client: &reqwest::Client,
     url: &str,
@@ -290,7 +339,7 @@ async fn detect_intent_in_session(
     }
     let (content, mut calls) = match request.send().await {
         Ok(response) if response.status().is_success() => {
-            match stream_upstream(response, tx, false, true).await {
+            match stream_upstream(response, tx, false, true, false).await {
                 Ok(result) => result,
                 Err(_) => (String::new(), Vec::new()),
             }
@@ -359,7 +408,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         if narrow {
             arr.retain(|t| {
                 let name = t["function"]["name"].as_str().unwrap_or("");
-                !matches!(name, "write_note" | "format_note" | "edit_notebook")
+                !matches!(name, "write_note" | "append_note" | "prepend_note" | "replace_in_note" | "insert_after_line" | "delete_in_note" | "format_note" | "edit_notebook")
             });
         }
         // Explicit named subset (OPENHARN_TOOLS): keep only listed tools.
@@ -408,6 +457,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     // arguments that llama-server rejects with "could not decode tool: unexpected
     // end of JSON input". In that case, force prompt-tools + strict for ALL
     // tool-bearing requests, not just multi-call ones.
+    let preview_whole_note = request_allows_replace_preview(user_text);
     let mut strict =
         opts.strict || narrow || plan_len > 1 || (opts.prefers_prompt_tools && plan_len <= 1);
     let mut prompt_tools = strict || opts.prompt_tools;
@@ -424,10 +474,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let mut total_calls = 0usize;
     let mut no_tools = !has_tools;
     let mut last_tool: Option<String> = None;
-    // A call-only prompt-tools request can still hit its token cap before a weak
-    // model closes a long string argument. Retry it once through the model's
-    // native tool template before giving up.
-    let mut forced_native_retry = false;
+
 
     // Model-based TOOL/CHAT classification (friendly_results mode).
     // Classify the latest user turn before entering the tool loop.
@@ -483,7 +530,17 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             }
         }
         emit_model_prompt(&tx, "CHAT request messages:", &body).await;
-        let resp = match client.post(&url).json(&body).send().await {
+        let serialized_at = Instant::now();
+        let _ = serde_json::to_vec(&body);
+        let _ = tx.send(Out::Debug { kind: "request_serialized".into(), message: format!("elapsed_ms={}", serialized_at.elapsed().as_millis()) }).await;
+        let dispatched_at = Instant::now();
+        let resp = match client
+            .post(&url)
+            .timeout(Duration::from_secs(opts.generation_timeout_secs))
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 let _ = tx
@@ -492,6 +549,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 return;
             }
         };
+        let _ = tx.send(Out::Debug { kind: "response_headers".into(), message: format!("elapsed_ms={} status={}", dispatched_at.elapsed().as_millis(), resp.status()) }).await;
         if !resp.status().is_success() {
             let status = resp.status();
             let txt = resp.text().await.unwrap_or_default();
@@ -500,7 +558,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 .await;
             return;
         }
-        let (content, _) = match stream_upstream(resp, &tx, no_think, false).await {
+        let (content, _) = match stream_upstream(resp, &tx, no_think, false, false).await {
             Ok(v) => v,
             Err(e) => {
                 let _ = tx.send(Out::Error(e)).await;
@@ -563,18 +621,26 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             // strict-grammar idea without the format transplant: the model keeps
             // its native (multi-call-capable) call syntax but physically cannot
             // emit a malformed one. Rescues quant-degraded native FC.
-            let choice: Value = match &opts.tool_choice {
-                Some(c) if c == "required" || c == "none" || c == "auto" => {
-                    json!(c)
+            //
+            // When call_only is active (host says this MUST be a tool call),
+            // always force "required" so the model cannot write chat prose
+            // (e.g. after a strict-grammar retry where prompt_tools was turned
+            // off because the model failed to produce valid JSON under GBNF).
+            let choice: Value = if call_only {
+                json!("required")
+            } else {
+                match &opts.tool_choice {
+                    Some(c) if c == "required" || c == "none" || c == "auto" => {
+                        json!(c)
+                    }
+                    Some(name) => {
+                        json!({
+                            "type": "function",
+                            "function": { "name": name }
+                        })
+                    }
+                    None => json!("auto"),
                 }
-                Some(name) => {
-                    // Specific tool name: {'type':'function','function':{'name':tool}}
-                    json!({
-                        "type": "function",
-                        "function": { "name": name }
-                    })
-                }
-                None => json!("auto"),
             };
             body["tool_choice"] = choice;
         }
@@ -591,6 +657,9 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         // Show the exact system/history/user prompt after prompt-tools flattening
         // and before sending it to the model.
         emit_model_prompt(&tx, "AGENT request messages:", &body).await;
+        let serialized_at = Instant::now();
+        let _ = serde_json::to_vec(&body);
+        let _ = tx.send(Out::Debug { kind: "request_serialized".into(), message: format!("elapsed_ms={}", serialized_at.elapsed().as_millis()) }).await;
 
         // POST to llama-server, retrying with backoff. The host app starts the
         // server just before calling us, so the first attempt can land while it's
@@ -598,15 +667,22 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         let resp = {
             let mut attempt = 0u32;
             const MAX_ATTEMPTS: u32 = 6;
+            let dispatched_at = Instant::now();
             loop {
-                let mut rq = client.post(&url).json(&body);
+                let mut rq = client
+                    .post(&url)
+                    .timeout(Duration::from_secs(opts.generation_timeout_secs))
+                    .json(&body);
                 if let Some(k) = &req.api_key {
                     if !k.is_empty() {
                         rq = rq.bearer_auth(k);
                     }
                 }
                 match rq.send().await {
-                    Ok(r) => break Some(r),
+                    Ok(r) => {
+                        let _ = tx.send(Out::Debug { kind: "response_headers".into(), message: format!("elapsed_ms={} status={}", dispatched_at.elapsed().as_millis(), r.status()) }).await;
+                        break Some(r)
+                    },
                     Err(e) => {
                         attempt += 1;
                         if attempt >= MAX_ATTEMPTS {
@@ -653,9 +729,12 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             return;
         }
 
-        let suppress_text_call = call_only && friendly && intent_is_tool;
+        // Any prompt-tools TOOL request carries the note body as ordinary
+        // content. Suppress that JSON from the chat bubble and expose its real
+        // content deltas to the note preview instead.
+        let suppress_text_call = prompt_tools && friendly && intent_is_tool;
         let (mut content, mut tool_calls) =
-            match stream_upstream(resp, &tx, no_think, suppress_text_call).await {
+            match stream_upstream(resp, &tx, no_think, suppress_text_call, preview_whole_note).await {
                 Ok(v) => v,
                 Err(e) => {
                     // Tool decoding error in the stream: llama-server emitted an
@@ -683,15 +762,16 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             }
         }
 
-        // A failed call-only text generation is not a valid chat response. It
-        // may have filled a long string argument until the token cap without
-        // closing JSON. Retry once using the model's native function-call mode.
-        if call_only && !forced_native_retry && tool_calls.is_empty() {
-            forced_native_retry = true;
-            prompt_tools = false;
-            strict = false;
-            no_think = false;
-            continue;
+        // Never turn an explicit operation into a hidden chat completion. The
+        // host suppresses chat output for this mode, so a no-tool completion
+        // would otherwise look like a successful operation that did nothing.
+        if call_only && tool_calls.is_empty() {
+            let _ = tx
+                .send(Out::Error(
+                    "Operation did not produce a tool call; no changes were made.".to_string(),
+                ))
+                .await;
+            return;
         }
 
         // Native-empty fallback: retry only when native FC returns genuinely
@@ -722,18 +802,28 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 }
             }
             emit_model_prompt(&tx, "PROMPT-TOOLS fallback request messages:", &fb_body).await;
+            let serialized_at = Instant::now();
+            let _ = serde_json::to_vec(&fb_body);
+            let _ = tx.send(Out::Debug { kind: "request_serialized".into(), message: format!("elapsed_ms={}", serialized_at.elapsed().as_millis()) }).await;
             let fb_resp = {
                 let mut attempt = 0u32;
                 const MAX_ATTEMPTS: u32 = 6;
+                let dispatched_at = Instant::now();
                 loop {
-                    let mut rq = client.post(&url).json(&fb_body);
+                    let mut rq = client
+                        .post(&url)
+                        .timeout(Duration::from_secs(opts.generation_timeout_secs))
+                        .json(&fb_body);
                     if let Some(k) = &req.api_key {
                         if !k.is_empty() {
                             rq = rq.bearer_auth(k);
                         }
                     }
                     match rq.send().await {
-                        Ok(r) => break Some(r),
+                        Ok(r) => {
+                            let _ = tx.send(Out::Debug { kind: "response_headers".into(), message: format!("elapsed_ms={} status={}", dispatched_at.elapsed().as_millis(), r.status()) }).await;
+                            break Some(r)
+                        },
                         Err(_e) => {
                             attempt += 1;
                             if attempt >= MAX_ATTEMPTS {
@@ -747,7 +837,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             if let Some(fb_resp) = fb_resp {
                 if fb_resp.status().is_success() {
                     let (fb_content, fb_calls) =
-                        match stream_upstream(fb_resp, &tx, false, true).await {
+                        match stream_upstream(fb_resp, &tx, false, true, preview_whole_note).await {
                             Ok(v) => v,
                             Err(_) => (String::new(), Vec::new()),
                         };
@@ -831,10 +921,10 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             } else {
                 harness::TOOL_RESULT_CAP
             };
-            // A successful write is an authoritative completed side effect. Do
-            // not ask a weak model for a follow-up prose turn: it can hallucinate
+            // A successful mutation is an authoritative completed side effect.
+            // Do not ask a weak model for a follow-up turn: it can hallucinate
             // or repeat the whole note instead of acknowledging completion.
-            if name == "write_note" && result.starts_with("Note successfully updated") {
+            if is_terminal_mutation(&name, &result) {
                 write_completed = true;
             }
             let capped = harness::cap_result_with(result.clone(), cap);
@@ -851,6 +941,12 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 "tool_call_id": id,
                 "content": capped,
             }));
+
+            // max_calls is normally one, but stop even if a malformed model
+            // response contained additional calls after a successful mutation.
+            if write_completed {
+                break;
+            }
         }
         total_calls += tool_calls.len();
 
@@ -957,14 +1053,19 @@ async fn dispatch_tool(
     }
 }
 
-/// Read the upstream SSE stream: forward assistant text as `ChatChunk`, stream a
-/// live `write_note` body as `NoteStart`/`NoteDelta`/`NoteCancel`, and assemble
-/// the (chunked) tool-call deltas. Mirrors Myelin's stream_chat SSE parser.
+
+
+/// Read the upstream SSE stream: forward assistant text as `ChatChunk`, stream
+/// native function-call `write_note` arguments or prompt-tools content as
+/// `NoteStart`/`NoteDelta` when they arrive incrementally, and assemble the
+/// tool-call deltas. No text is fabricated if the upstream server batches SSE
+/// chunks.
 async fn stream_upstream(
     resp: reqwest::Response,
     tx: &mpsc::Sender<Out>,
     no_think: bool,
     suppress_text_call: bool,
+    stream_note_preview: bool,
 ) -> Result<(String, Vec<Value>), String> {
     let mut content = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -979,6 +1080,8 @@ async fn stream_upstream(
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    let stream_started = Instant::now();
+    let mut first_delta = false;
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| format!("stream error: {e}"))?;
@@ -1034,25 +1137,40 @@ async fn stream_upstream(
 
             if let Some(t) = delta["content"].as_str() {
                 if !t.is_empty() {
+                    if !first_delta {
+                        first_delta = true;
+                        let _ = tx.send(Out::Debug {
+                            kind: "first_model_delta".into(),
+                            message: format!("elapsed_ms={}", stream_started.elapsed().as_millis()),
+                        }).await;
+                    }
                     content.push_str(t);
                     if !suppress_prose && !suppress_text_call {
                         let _ = tx.send(Out::ChatChunk(t.to_string())).await;
                     }
 
                     // Prompt-tools calls arrive as ordinary content rather than
-                    // OpenAI `tool_calls` deltas. For a forced write we know the
-                    // call is destined for write_note, so extract its incomplete
-                    // JSON string and stream the note body into the editor now;
-                    // the parsed call still performs the authoritative save later.
-                    if suppress_text_call && content.contains("write_note") && !note_cancelled {
-                        let mode = harness::partial_field(&content, "mode");
-                        let find = harness::partial_field(&content, "find");
-                        let m = mode.as_deref().unwrap_or("");
-                        let is_append = m == "append";
-                        let explicit_replace = m == "replace";
-                        let has_find = find.map(|f| !f.trim().is_empty()).unwrap_or(false);
-                        let snippet = has_find && !explicit_replace && !is_append;
-                        let is_replace = !is_append && !snippet;
+                    // OpenAI `tool_calls` deltas. Extract the decoded content
+                    // string from each upstream delta and stream only that real
+                    // generated text into the editor. If the server batches its
+                    // SSE output, the UI can only display that batch when it
+                    // arrives; it must not invent text ahead of the model.
+                    if stream_note_preview && suppress_text_call && content.contains("write_note") && !note_cancelled {
+                        // Do not classify a partial `find` field as an edit:
+                        // weak models can emit transient/incomplete fields while
+                        // the replacement body is still streaming. Only an
+                        // explicit append or a fully valid JSON object can cancel
+                        // the replace preview.
+                        let partial_mode = harness::partial_field(&content, "mode");
+                        let parsed = serde_json::from_str::<Value>(&content).ok();
+                        let is_append = partial_mode.as_deref() == Some("append");
+                        let complete_find = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("find"))
+                            .and_then(Value::as_str)
+                            .map(|f| !f.trim().is_empty())
+                            .unwrap_or(false);
+                        let is_replace = !is_append && !complete_find;
                         if !is_replace {
                             if note_streaming {
                                 let _ = tx.send(Out::NoteCancel).await;
@@ -1060,21 +1178,31 @@ async fn stream_upstream(
                             }
                             note_cancelled = true;
                         } else if let Some(c) = harness::extract_partial_content(&content) {
-                            if !note_streaming {
+                            if !c.is_empty() && !note_streaming {
                                 let _ = tx.send(Out::NoteStart).await;
                                 note_streaming = true;
                             }
                             if c.len() > note_emitted.len() && c.starts_with(&note_emitted) {
                                 let new_part = c[note_emitted.len()..].to_string();
-                                let _ = tx.send(Out::NoteDelta(new_part)).await;
+                                if !new_part.is_empty() {
+                                    let _ = tx.send(Out::NoteDelta(new_part)).await;
+                                }
                                 note_emitted = c;
                             }
                         }
                     }
+
                 }
             }
 
             if let Some(tcs) = delta["tool_calls"].as_array() {
+                if !first_delta && !tcs.is_empty() {
+                    first_delta = true;
+                    let _ = tx.send(Out::Debug {
+                        kind: "first_model_delta".into(),
+                        message: format!("elapsed_ms={}", stream_started.elapsed().as_millis()),
+                    }).await;
+                }
                 for tc in tcs {
                     let idx = tc["index"].as_u64().unwrap_or(0) as usize;
                     while tool_calls.len() <= idx {
@@ -1089,7 +1217,7 @@ async fn stream_upstream(
                     if let Some(name) = tc["function"]["name"].as_str() {
                         if !name.is_empty() {
                             slot["function"]["name"] = json!(name);
-                            if matches!(name, "write_note" | "format_note" | "edit_notebook") {
+                            if matches!(name, "write_note" | "append_note" | "prepend_note" | "replace_in_note" | "insert_after_line" | "delete_in_note" | "format_note" | "edit_notebook") {
                                 suppress_prose = true;
                             }
                         }
@@ -1108,15 +1236,20 @@ async fn stream_upstream(
                         .as_str()
                         .unwrap_or("")
                         .to_string();
-                    if slot_name == "write_note" && !note_cancelled {
-                        let mode = harness::partial_field(&slot_args, "mode");
-                        let find = harness::partial_field(&slot_args, "find");
-                        let m = mode.as_deref().unwrap_or("");
-                        let is_append = m == "append";
-                        let explicit_replace = m == "replace";
-                        let has_find = find.map(|f| !f.trim().is_empty()).unwrap_or(false);
-                        let snippet = has_find && !explicit_replace && !is_append;
-                        let is_replace = !is_append && !snippet;
+                    if stream_note_preview && slot_name == "write_note" && !note_cancelled {
+                        // Keep streaming until an explicit append or a complete
+                        // JSON object confirms a targeted edit. Partial `find`
+                        // fields are not reliable enough to cancel the preview.
+                        let partial_mode = harness::partial_field(&slot_args, "mode");
+                        let parsed = serde_json::from_str::<Value>(&slot_args).ok();
+                        let is_append = partial_mode.as_deref() == Some("append");
+                        let complete_find = parsed
+                            .as_ref()
+                            .and_then(|v| v.get("find"))
+                            .and_then(Value::as_str)
+                            .map(|f| !f.trim().is_empty())
+                            .unwrap_or(false);
+                        let is_replace = !is_append && !complete_find;
                         if !is_replace {
                             if note_streaming {
                                 let _ = tx.send(Out::NoteCancel).await;
@@ -1154,4 +1287,54 @@ fn finish(
         content
     };
     Ok((content, tool_calls))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_terminal_mutation;
+
+    #[test]
+    fn successful_note_write_is_terminal() {
+        assert!(is_terminal_mutation(
+            "write_note",
+            "Note successfully updated with ID: 90dc6"
+        ));
+    }
+
+    #[test]
+    fn failed_or_readonly_tool_result_is_not_terminal() {
+        assert!(!is_terminal_mutation(
+            "write_note",
+            "No note is currently open to write to."
+        ));
+        assert!(!is_terminal_mutation("read_note", "Note successfully updated"));
+    }
+
+    #[test]
+    fn other_successful_mutations_are_terminal() {
+        assert!(is_terminal_mutation("format_note", " Note successfully updated."));
+        assert!(is_terminal_mutation("edit_notebook", "Notebook cell updated."));
+        assert!(is_terminal_mutation(
+            "append_note",
+            "Note successfully updated with ID: 42"
+        ));
+        assert!(is_terminal_mutation(
+            "prepend_note",
+            "Note successfully updated"
+        ));
+        assert!(is_terminal_mutation(
+            "replace_in_note",
+            "Note successfully updated with ID: 1"
+        ));
+        assert!(is_terminal_mutation(
+            "insert_after_line",
+            "Note successfully updated with ID: 1"
+        ));
+        assert!(is_terminal_mutation(
+            "delete_in_note",
+            "Note successfully updated with ID: 1"
+        ));
+    }
+
+
 }

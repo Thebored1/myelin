@@ -31,8 +31,9 @@ pub struct ModelProfile {
     /// Whether the model reliably does tool-calling. None → derive/probe.
     #[serde(default)]
     pub supports_tools: Option<bool>,
-    /// Model cannot do native tool-calling reliably; needs prompt-tools + strict grammar
-    /// (e.g. LFM2 at low quants). Overrides user settings when true.
+    /// Compatibility hint for models that may benefit from prompt-tools + strict
+    /// grammar (e.g. LFM2 at low quants). Informational only; never overrides
+    /// the user's Openharn tool strategy settings.
     #[serde(default)]
     pub prefers_prompt_tools: Option<bool>,
     #[serde(default)]

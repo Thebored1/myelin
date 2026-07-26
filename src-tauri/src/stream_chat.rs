@@ -11,8 +11,10 @@
 //! gating, and `note_written` save logic stay in one place.
 
 use crate::agent::{
-    EditNotebookArgs, EditNotebookTool, FetchWebPageArgs, FetchWebPageTool, FindInNoteArgs,
-    FindInNoteTool, FormatNoteArgs, FormatNoteTool, ReadNoteArgs, ReadNoteTool,
+    AppendNoteArgs, AppendNoteTool, DeleteInNoteArgs, DeleteInNoteTool, EditNotebookArgs,
+    EditNotebookTool, FetchWebPageArgs, FetchWebPageTool, FindInNoteArgs, FindInNoteTool,
+    FormatNoteArgs, FormatNoteTool, InsertAfterLineArgs, InsertAfterLineTool, PrependNoteArgs,
+    PrependNoteTool, ReadNoteArgs, ReadNoteTool, ReplaceInNoteArgs, ReplaceInNoteTool,
     SearchDocumentsArgs, SearchDocumentsTool, SearchNotesArgs, SearchNotesTool, WebSearchArgs,
     WebSearchTool, WriteNoteArgs, WriteNoteTool,
 };
@@ -394,6 +396,41 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
                     Err(e2) => format!("Invalid write_note arguments: {e} (coerced: {e2})"),
                 }
             }
+        },
+        "append_note" => match serde_json::from_value::<AppendNoteArgs>(v.clone()) {
+            Ok(a) => AppendNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Err(e) => match serde_json::from_value::<AppendNoteArgs>(coerce_args(v)) {
+                Ok(a) => AppendNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Err(e2) => format!("Invalid append_note arguments: {e} (coerced: {e2})"),
+            },
+        },
+        "prepend_note" => match serde_json::from_value::<PrependNoteArgs>(v.clone()) {
+            Ok(a) => PrependNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Err(e) => match serde_json::from_value::<PrependNoteArgs>(coerce_args(v)) {
+                Ok(a) => PrependNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Err(e2) => format!("Invalid prepend_note arguments: {e} (coerced: {e2})"),
+            },
+        },
+        "replace_in_note" => match serde_json::from_value::<ReplaceInNoteArgs>(v.clone()) {
+            Ok(a) => ReplaceInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Err(e) => match serde_json::from_value::<ReplaceInNoteArgs>(coerce_args(v)) {
+                Ok(a) => ReplaceInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Err(e2) => format!("Invalid replace_in_note arguments: {e} (coerced: {e2})"),
+            },
+        },
+        "insert_after_line" => match serde_json::from_value::<InsertAfterLineArgs>(v.clone()) {
+            Ok(a) => InsertAfterLineTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Err(e) => match serde_json::from_value::<InsertAfterLineArgs>(coerce_args(v)) {
+                Ok(a) => InsertAfterLineTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Err(e2) => format!("Invalid insert_after_line arguments: {e} (coerced: {e2})"),
+            },
+        },
+        "delete_in_note" => match serde_json::from_value::<DeleteInNoteArgs>(v.clone()) {
+            Ok(a) => DeleteInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Err(e) => match serde_json::from_value::<DeleteInNoteArgs>(coerce_args(v)) {
+                Ok(a) => DeleteInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Err(e2) => format!("Invalid delete_in_note arguments: {e} (coerced: {e2})"),
+            },
         },
         "read_note" => match serde_json::from_value::<ReadNoteArgs>(v.clone()) {
             Ok(a) => ReadNoteTool {
