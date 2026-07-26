@@ -1377,21 +1377,6 @@
 							</div>
 						{/if}
 					</div>
-					{#if indexing}
-						<span class="indexing-pill" title="Indexing your workspace">
-							<svg
-								class="nb-spin"
-								width="12"
-								height="12"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2.5"
-								stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg
-							>
-							indexing
-						</span>
-					{/if}
 					<div style="display: flex; gap: var(--space-2); align-items: center;">
 						<button
 							class="header-toggle-btn"
@@ -2992,19 +2977,6 @@
 		to {
 			transform: rotate(360deg);
 		}
-	}
-	.indexing-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		font-family: var(--font-mono);
-		font-size: 0.72rem;
-		color: var(--accent-100);
-		background: var(--accent-tint);
-		border: 1px solid var(--accent-300);
-		border-radius: 999px;
-		padding: 2px 10px;
-		white-space: nowrap;
 	}
 	/* ── Right panel (tasks) ── */
 	.dash-panel {

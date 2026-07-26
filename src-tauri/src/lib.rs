@@ -620,23 +620,10 @@ pub fn run() {
                     }
                 };
                 rt.block_on(async move {
-                    // Startup can race model/config initialization. Retry instead
-                    // of silently abandoning the warm-up after one failed probe.
-                    for attempt in 1..=5 {
-                        match warmup_state.warm_llama_server().await {
-                            Ok(()) => {
-                                log::info!("startup warm-up ready (attempt {attempt})");
-                                return;
-                            }
-                            Err(error) if attempt < 5 => {
-                                log::warn!(
-                                    "startup warm-up attempt {attempt}/5 failed: {error}; retrying"
-                                );
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            }
-                            Err(error) => {
-                                log::warn!("startup warm-up failed after 5 attempts: {error}");
-                            }
+                    match warmup_state.warm_llama_server().await {
+                        Ok(()) => log::info!("startup warm-up ready"),
+                        Err(error) => {
+                            log::warn!("startup warm-up failed; first chat will retry: {error}")
                         }
                     }
                 });

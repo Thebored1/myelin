@@ -13,10 +13,9 @@ use std::time::Duration;
 const CONFIG_FILE_NAME: &str = "llama-server.json";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 39281;
-/// Model loading can take longer than the first health-check window on slower
-/// systems. Keep a generous deadline so a live server is not killed and
-/// relaunched through the adaptive fallback ladder.
-const STARTUP_TIMEOUT_SECS: u64 = 120;
+/// Allow a normal slow model load, but do not let one broken launch plan stall
+/// all adaptive candidates for minutes.
+const STARTUP_TIMEOUT_SECS: u64 = 75;
 const STARTUP_DELAY_MS: u64 = 500;
 /// How many lines of llama-server stderr we retain to detect the active backend.
 const STDERR_CAPTURE_LINES: usize = 200;
@@ -1319,6 +1318,13 @@ pub async fn start_server(
     let mut last_error: Option<String> = None;
     for candidate in &config.candidates {
         for plan in launch_plans(config, candidate, gguf.as_ref()) {
+            log::info!(
+                "starting llama-server {} ({}) ngl={} ctx={}",
+                candidate.executable_path.display(),
+                candidate.backend.label(),
+                plan.ngl,
+                plan.ctx
+            );
             match try_start_candidate(
                 client,
                 config,
@@ -1557,6 +1563,10 @@ async fn try_start_candidate(
             break;
         }
 
+        if has_fatal_startup_error(&captured.lock().unwrap()) {
+            break;
+        }
+
         if startup_started.elapsed() >= Duration::from_secs(STARTUP_TIMEOUT_SECS) {
             break;
         }
@@ -1587,6 +1597,25 @@ async fn try_start_candidate(
         "started but never became healthy within {}s. {tail}",
         STARTUP_TIMEOUT_SECS
     )
+}
+
+/// Fatal initialization messages mean retrying the same plan cannot help. Keep
+/// this deliberately narrow: ordinary warnings and model-loading progress must
+/// not cause a healthy slow launch to be abandoned.
+fn has_fatal_startup_error(lines: &[String]) -> bool {
+    lines.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("unknown argument")
+            || lower.contains("unrecognized option")
+            || lower.contains("invalid argument")
+            || lower.contains("cannot load model")
+            || lower.contains("failed to load model")
+            || lower.contains("ggml_assert")
+            || lower.contains("out of memory")
+            || lower.contains("cuda error")
+            || lower.contains("vulkan error")
+            || lower.contains("metal error")
+    })
 }
 
 /// Inspect llama.cpp startup log lines to determine which backend actually
@@ -2193,7 +2222,7 @@ fn find_on_path(binary_name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_ngl, has_tensor_override};
+    use super::{fit_ngl, has_fatal_startup_error, has_tensor_override};
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
@@ -2271,5 +2300,15 @@ mod tests {
         assert!(has_tensor_override(&["-ot=.*ffn.*=CPU".into()]));
         assert!(has_tensor_override(&["--override-tensor=.*ffn.*=CPU".into()]));
         assert!(!has_tensor_override(&["--threads".into(), "4".into()]));
+    }
+
+    #[test]
+    fn detects_fatal_startup_errors_but_not_progress_lines() {
+        assert!(has_fatal_startup_error(&["error: unknown argument --bad".into()]));
+        assert!(has_fatal_startup_error(&["CUDA error: out of memory".into()]));
+        assert!(!has_fatal_startup_error(&[
+            "llama_model_loader: loading tensors".into(),
+            "warning: using CPU fallback".into(),
+        ]));
     }
 }
