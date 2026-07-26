@@ -13,10 +13,14 @@ use std::time::Duration;
 const CONFIG_FILE_NAME: &str = "llama-server.json";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 39281;
-const STARTUP_ATTEMPTS: usize = 60;
+/// Model loading can take longer than the first health-check window on slower
+/// systems. Keep a generous deadline so a live server is not killed and
+/// relaunched through the adaptive fallback ladder.
+const STARTUP_TIMEOUT_SECS: u64 = 120;
 const STARTUP_DELAY_MS: u64 = 500;
 /// How many lines of llama-server stderr we retain to detect the active backend.
 const STDERR_CAPTURE_LINES: usize = 200;
+const GPU_MOE_TENSOR_OVERRIDE: &str = ".*ffn_.*_exps.*=CPU";
 
 /// A compute backend for llama.cpp. The desktop strategy is CUDA-tiered:
 /// detect an NVIDIA GPU and prefer CUDA, otherwise fall back to a portable
@@ -61,6 +65,25 @@ impl GpuBackend {
             GpuBackend::Cuda | GpuBackend::Vulkan | GpuBackend::Metal
         )
     }
+}
+
+/// Whether the explicit performance GPU preference should keep MoE experts in
+/// CPU RAM for this backend attempt. CPU fallbacks and the explicit Vulkan/Auto
+/// preferences intentionally do not enable this policy.
+fn gpu_moe_policy_active(config: &ResolvedLlamaConfig, candidate: &BackendCandidate) -> bool {
+    config.backend_preference == "gpu" && candidate.backend.is_gpu()
+}
+
+/// User-supplied tensor placement always takes precedence over the automatic
+/// MoE policy. Accept both `--override-tensor VALUE` and `--override-tensor=VALUE`
+/// (and the short `-ot` spelling).
+fn has_tensor_override(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "-ot"
+            || arg == "--override-tensor"
+            || arg.starts_with("-ot=")
+            || arg.starts_with("--override-tensor=")
+    })
 }
 
 /// One launchable llama-server binary plus the backend it provides.
@@ -1436,6 +1459,22 @@ async fn try_start_candidate(
         .arg("--reasoning")
         .arg(if config.thinking { "on" } else { "off" });
 
+    if gpu_moe_policy_active(config, candidate) {
+        if has_tensor_override(&config.extra_args) {
+            log::info!(
+                "GPU MoE policy: user tensor override supplied; automatic expert CPU placement skipped"
+            );
+        } else {
+            log::info!(
+                "GPU MoE policy active for {}: keeping MoE expert tensors in CPU RAM",
+                candidate.backend.label()
+            );
+            command
+                .arg("--override-tensor")
+                .arg(GPU_MOE_TENSOR_OVERRIDE);
+        }
+    }
+
     command.args(&config.extra_args);
     // Self-heal: ensure the backend dir has its .so soname symlinks (covers
     // manually-installed or older downloads that dropped them).
@@ -1481,7 +1520,8 @@ async fn try_start_candidate(
         })
     });
 
-    for _ in 0..STARTUP_ATTEMPTS {
+    let startup_started = std::time::Instant::now();
+    loop {
         if health_check(client, config).await {
             let log_lines = captured.lock().unwrap().clone();
             // Trust the launch: a GPU candidate that came up healthy with ngl>0
@@ -1517,6 +1557,10 @@ async fn try_start_candidate(
             break;
         }
 
+        if startup_started.elapsed() >= Duration::from_secs(STARTUP_TIMEOUT_SECS) {
+            break;
+        }
+
         thread::sleep(Duration::from_millis(STARTUP_DELAY_MS));
     }
 
@@ -1534,7 +1578,15 @@ async fn try_start_candidate(
         .rev()
         .collect::<Vec<_>>()
         .join(" | ");
-    bail!("started but never became healthy. {tail}")
+    log::warn!(
+        "llama-server {} did not become healthy after {:.1}s",
+        candidate.executable_path.display(),
+        startup_started.elapsed().as_secs_f32()
+    );
+    bail!(
+        "started but never became healthy within {}s. {tail}",
+        STARTUP_TIMEOUT_SECS
+    )
 }
 
 /// Inspect llama.cpp startup log lines to determine which backend actually
@@ -2141,7 +2193,7 @@ fn find_on_path(binary_name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::fit_ngl;
+    use super::{fit_ngl, has_tensor_override};
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
@@ -2208,5 +2260,16 @@ mod tests {
     fn fit_ngl_unknown_geometry_requests_all() {
         assert_eq!(fit_ngl(GIB, 0, 40), 999);
         assert_eq!(fit_ngl(GIB, 1024, 0), 999);
+    }
+
+    #[test]
+    fn detects_user_tensor_override_spellings() {
+        assert!(has_tensor_override(&[
+            "--override-tensor".into(),
+            ".*attn.*=GPU".into()
+        ]));
+        assert!(has_tensor_override(&["-ot=.*ffn.*=CPU".into()]));
+        assert!(has_tensor_override(&["--override-tensor=.*ffn.*=CPU".into()]));
+        assert!(!has_tensor_override(&["--threads".into(), "4".into()]));
     }
 }

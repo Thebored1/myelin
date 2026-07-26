@@ -41,6 +41,16 @@ chat starts the server normally.
 
 **Files:**
 - `src-tauri/src/lib.rs` — added `tauri::async_runtime::spawn` with warm-up in setup
+
+The model server is started in the background and shared across notes and chat
+threads for the lifetime of the app process. This does not share conversation
+context: every request sends its own note-scoped system prompt and conversation,
+while `cache_prompt` reuses matching token prefixes from the first real request.
+The server remains single-slot so requests are serialized and cannot mix
+note/tool state. The `ai://llama_warmup` `ready` event means the server is
+healthy; no synthetic completion is issued or awaited before the first chat.
+The in-memory model and KV cache are released when the app exits and are loaded
+again next run.
 - Fixed: used `tauri::async_runtime::spawn` instead of `tokio::spawn` (the setup
   callback runs outside a tokio context, causing a panic)
 

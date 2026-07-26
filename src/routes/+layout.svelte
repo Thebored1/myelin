@@ -2,6 +2,8 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { onMount } from 'svelte';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
+	import { invoke } from '@tauri-apps/api/core';
+	import { listen } from '@tauri-apps/api/event';
 	import { sidebarOpen, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
 	import '$lib/theme';
 	import { goto } from '$app/navigation';
@@ -15,6 +17,7 @@
 	let wasSmallScreen = $state(false);
 	let isWindowMaximized = $state(false);
 	let isWindowFullscreen = $state(false);
+	let aiStatus = $state<'loading' | 'ready' | 'unavailable'>('loading');
 
 	$effect(() => {
 		const isSmallScreen = windowWidth < 1200;
@@ -28,6 +31,22 @@
 
 	onMount(() => {
 		let unlistenResize: (() => void) | undefined;
+		let unlistenAiWarmup: (() => void) | undefined;
+		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+			void listen<{ status: 'started' | 'ready' | 'failed'; message?: string }>(
+				'ai://llama_warmup',
+				(event) => {
+					aiStatus = event.payload.status === 'ready' ? 'ready' : 'loading';
+					if (event.payload.status === 'failed') aiStatus = 'unavailable';
+				}
+			).then((unlisten) => {
+				unlistenAiWarmup = unlisten;
+			});
+			void invoke<any>('get_provider_status').then((status) => {
+				if (!status?.config && !status?.resolved) aiStatus = 'unavailable';
+				else if (status?.healthy) aiStatus = 'ready';
+			});
+		}
 		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
 			appWindow = getCurrentWindow();
 			const syncWindowState = async () => {
@@ -106,6 +125,7 @@
 				window.removeEventListener('contextmenu', handleGlobalContextMenu);
 				window.removeEventListener('click', handleGlobalDialogClick);
 				unlistenResize?.();
+				unlistenAiWarmup?.();
 			}
 		}
 	});
@@ -187,6 +207,17 @@
 			{/if}
 		</div>
 		<div class="titlebar-controls">
+			<div
+				class="ai-status"
+				class:ready={aiStatus === 'ready'}
+				class:unavailable={aiStatus === 'unavailable'}
+				role="status"
+				aria-label={aiStatus === 'ready' ? 'AI ready' : aiStatus === 'unavailable' ? 'AI unavailable' : 'AI loading'}
+				title={aiStatus === 'ready' ? 'AI ready' : aiStatus === 'unavailable' ? 'AI unavailable' : 'AI model is loading'}
+			>
+				<span class="ai-status-dot"></span>
+				{#if aiStatus === 'loading'}<span>AI loading</span>{/if}
+			</div>
 			{#if $page.url.pathname.startsWith('/notes/')}
 			<button class="control-btn sidebar-toggle" onclick={() => $noteSidebarOpen = !$noteSidebarOpen} aria-label="Toggle note sidebar" title="Toggle note sidebar">
 				<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
@@ -593,6 +624,54 @@
 		font-weight: 500;
 		color: var(--text-secondary);
 		letter-spacing: 0.05em;
+	}
+
+	.ai-status {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		justify-content: center;
+		min-width: 46px;
+		font-size: 0.65rem;
+		font-family: var(--font-mono);
+		color: #d99b43;
+		letter-spacing: 0.02em;
+		white-space: nowrap;
+	}
+
+	.ai-status.ready {
+		color: var(--success);
+	}
+
+	.ai-status.unavailable {
+		color: var(--text-secondary);
+	}
+
+	.ai-status.ready,
+	.ai-status.unavailable {
+		min-width: 28px;
+	}
+
+	.ai-status-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: currentColor;
+		box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 16%, transparent);
+	}
+
+	.ai-status:not(.ready):not(.unavailable) .ai-status-dot {
+		animation: ai-status-pulse 1.2s ease-in-out infinite;
+	}
+
+	@keyframes ai-status-pulse {
+		0%,
+		100% {
+			opacity: 0.45;
+		}
+		50% {
+			opacity: 1;
+		}
 	}
 
 	.titlebar-controls {

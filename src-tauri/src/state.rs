@@ -396,9 +396,6 @@ pub(crate) struct InnerState {
     // would corrupt it if they built the format at the same time.
     tectonic_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
-    /// Prompt-cache warm-up currently occupying the single llama-server slot.
-    /// Requests wait for it instead of queuing behind it invisibly.
-    cache_warmup: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
     /// The openharn-myelin agent sidecar: a long-lived `openharn-myelin` process
     /// that runs the agent loop and calls back to Myelin for tool execution.
@@ -590,7 +587,6 @@ impl AppState {
                 index_lock: AsyncMutex::new(()),
                 tectonic_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
-                cache_warmup: AsyncMutex::new(None),
                 embed_server: AsyncMutex::new(None),
                 sidecar: AsyncMutex::new(None),
                 chat_lock: AsyncMutex::new(()),
@@ -2781,10 +2777,6 @@ impl AppState {
     /// Called when the open note is closed — nothing to infer for. The next note
     /// open warms it again. Idempotent.
     pub async fn stop_llama_server(&self) {
-        if let Some(warmup) = self.inner.cache_warmup.lock().await.take() {
-            warmup.abort();
-            let _ = warmup.await;
-        }
         let mut guard = self.inner.llama_server.lock().await;
         if let Some(mut server) = guard.take() {
             llama_server::stop_server(&mut server).await;
@@ -2989,15 +2981,6 @@ impl AppState {
             if server.config.matches_runtime(config)
                 && llama_server::health_check(&self.inner.llama_client, &server.config).await
             {
-                // Startup/note-open warm-up uses the same single server slot as
-                // chat. Wait for it to finish so the first user request is not
-                // silently queued behind a tens-of-seconds prompt evaluation.
-                if let Some(warmup) = self.inner.cache_warmup.lock().await.take() {
-                    let _ = self.handle.emit("ai://debug_event", serde_json::json!({
-                        "kind": "warmup", "msg": "Waiting for prompt-cache warm-up"
-                    }));
-                    let _ = warmup.await;
-                }
                 return Ok(());
             }
 
@@ -3017,10 +3000,6 @@ impl AppState {
                 );
             }
 
-            if let Some(warmup) = self.inner.cache_warmup.lock().await.take() {
-                warmup.abort();
-                let _ = warmup.await;
-            }
             llama_server::stop_server(server).await;
             *guard = None;
         }
@@ -3051,48 +3030,15 @@ impl AppState {
 
         *guard = Some(server);
         drop(guard);
-
-        // Start the cache warm-up, but keep its handle. A request arriving while
-        // this runs must await it because llama-server is configured with one
-        // active slot. The response body is drained so the request really
-        // completes and the server can retain its KV prefix.
-        let warmup = self.spawn_cache_warmup(config);
-        *self.inner.cache_warmup.lock().await = Some(warmup);
+        // The server is ready for the first real request. That request carries
+        // the actual note-scoped prefix and can populate llama.cpp's prompt
+        // cache without making the user wait behind a synthetic completion.
+        let _ = self.handle.emit(
+            "ai://llama_warmup",
+            serde_json::json!({ "status": "ready" }),
+        );
         Ok(())
     }
-
-    /// Fire a throwaway completion that primes the stable preamble/tool prefix.
-    /// The handle is tracked by ensure_llama_server so user requests never queue
-    /// behind this work without an explanation.
-    fn spawn_cache_warmup(
-        &self,
-        config: &llama_server::ResolvedLlamaConfig,
-    ) -> tokio::task::JoinHandle<()> {
-        let client = self.inner.llama_client.clone();
-        let url = format!("{}/v1/chat/completions", config.base_url());
-        let model = config.model_name();
-        tokio::spawn(async move {
-            log::info!("llama prompt-cache warm-up starting");
-            let body = serde_json::json!({
-                "model": model,
-                "messages": [
-                    { "role": "system", "content": crate::agent::MYELIN_PREAMBLE },
-                    { "role": "user", "content": "ping" }
-                ],
-                "tools": crate::agent::compact_tool_specs(crate::agent::tool_specs()),
-                "max_tokens": 1,
-                "temperature": 0.0,
-                "cache_prompt": true
-            });
-            match client.post(&url).json(&body).send().await {
-                Ok(response) => match response.bytes().await {
-                    Ok(_) => log::info!("llama prompt-cache warm-up complete"),
-                    Err(error) => log::warn!("llama prompt-cache warm-up body failed: {error}"),
-                },
-                Err(error) => log::warn!("llama prompt-cache warm-up failed: {error}"),
-            }
-                })
-            }
 
 }
 
@@ -4044,7 +3990,8 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{hashed_embedding, slugify, split_frontmatter, tokenize};
+    use super::{chat_history_to_messages, hashed_embedding, slugify, split_frontmatter, tokenize};
+    use crate::models::ChatMessage;
 
     #[test]
     fn slugify_avoids_reserved_names() {
@@ -4067,5 +4014,37 @@ mod tests {
             hashed_embedding("alpha beta")
         );
         assert_eq!(tokenize("Alpha, beta!").len(), 2);
+    }
+
+    #[test]
+    fn restored_chat_history_contains_only_text_turns() {
+        let history = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "note A question".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "note A answer".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "should not be restored".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "failed turn".into(),
+                error: Some(true),
+                ..Default::default()
+            },
+        ];
+
+        let messages = chat_history_to_messages(&history);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"], "note A question");
+        assert_eq!(messages[1]["content"], "note A answer");
     }
 }
