@@ -2016,6 +2016,7 @@ impl AppState {
                 intent_is_tool,
                 interaction_mode == "chat",
                 interaction_mode == "operation",
+                selection.is_some(),
             )
             .await?;
 

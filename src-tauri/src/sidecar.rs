@@ -244,6 +244,7 @@ pub async fn run_chat(
     // Operation mode is tool-only: the editor and tool indicators communicate
     // progress/results, while model prose must not become a chat reply.
     suppress_chat_output: bool,
+    selection_scoped: bool,
 ) -> Result<Vec<Value>> {
     let base = ensure_sidecar(state).await?;
 
@@ -297,10 +298,14 @@ pub async fn run_chat(
         // authoritative and already computed by Myelin.
         "friendly_results": intent_is_tool.is_some(),
 
-        "no_think": oh.no_think,
+        // Ordinary chat should never surface model reasoning as visible
+        // `<think>` blocks. Operation mode may retain the user's configured
+        // reasoning setting because it can help tool selection/edit quality.
+        "no_think": oh.no_think || chat_mode,
         "narrow": false,
         "slm": false,
         "chat_mode": chat_mode,
+        "selection_scoped": selection_scoped,
     });
     // Host-computed deterministic intent overrides model-based classification.
     // The sidecar uses this value directly and skips the separate model

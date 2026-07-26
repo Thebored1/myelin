@@ -21,6 +21,7 @@
 	import 'mathlive/fonts.css';
 
 	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
+	import { hideThinkingContent } from '$lib/chatContent';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 
@@ -73,6 +74,8 @@
 	let debugInfo = $state<{
 		requestStart: number | null;
 		firstChunk: number | null;
+		generationStart: number | null;
+		generationEnd: number | null;
 		done: number | null;
 		promptTokens: number;
 		completionTokens: number;
@@ -1179,6 +1182,8 @@
 		try {
 			note = await invoke<NoteDocument>('load_note', { noteId });
 			const loadedNote = note;
+			// Keep the persisted transcript untouched; reasoning is removed only from
+			// the assistant's presentation below.
 			chatMessages = loadedNote.chatHistory || [];
 			noteHistory = [];
 			versionPreviewContent = null;
@@ -1777,6 +1782,8 @@
 				debugInfo = {
 					requestStart: saved[0].time,
 					firstChunk: null,
+					generationStart: null,
+					generationEnd: null,
 					done: null,
 					promptTokens: 0,
 					completionTokens: 0,
@@ -1809,6 +1816,8 @@
 			debugInfo = {
 				requestStart: startTime,
 				firstChunk: null,
+				generationStart: null,
+				generationEnd: null,
 				done: null,
 				promptTokens: 0,
 				completionTokens: 0,
@@ -1942,6 +1951,9 @@
 		// otherwise it can close the current bubble while its sidecar stream is
 		// still running and allow another request to race with it.
 		if (activeChatRequestId !== requestId) return;
+		// A cancelled request can still arrive as chat_done. Revert any speculative
+		// editor preview unless note_written already committed the authoritative body.
+		cancelNoteStream();
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming)
 				return { ...m, isStreaming: false, endTime: Date.now(), debugTrace: pendingDebugTrace };
@@ -2641,6 +2653,7 @@
 					completionTokens: event.payload.completionTokens,
 					totalTokens: event.payload.totalTokens
 				};
+				debugInfo.generationEnd = Date.now();
 			}
 		}).then((fn) => (unlistenUsage = fn));
 
@@ -2677,8 +2690,11 @@
 			// the completed assistant turn and persisted in chat history.
 			pendingDebugTrace = [...pendingDebugTrace, entry];
 			if (showDebugWindow && debugInfo) {
+				const isModelStart =
+					event.payload.kind === 'gen' || event.payload.kind === 'first_model_delta';
 				debugInfo = {
 					...debugInfo,
+					generationStart: isModelStart ? entry.time : debugInfo.generationStart,
 					firstChunk:
 						event.payload.kind === 'gen' && debugInfo.firstChunk === null
 							? entry.time
@@ -3175,8 +3191,9 @@
 								{#if chatMessages.length === 0}
 									<p class="empty-state">Ask me anything about this note or your library!</p>
 								{:else}
-									{#each chatMessages as msg, i}
-										{#if msg.role === 'user' || msg.content || (msg.tools && msg.tools.length > 0) || (msg.isApprovalRequest && msg.approvalStatus !== 'approved') || msg.isStreaming || msg.error}
+					{#each chatMessages as msg, i}
+						{@const visibleContent = msg.role === 'assistant' ? hideThinkingContent(msg.content) : msg.content}
+						{#if msg.role === 'user' || visibleContent || (msg.tools && msg.tools.length > 0) || (msg.isApprovalRequest && msg.approvalStatus !== 'approved') || msg.isStreaming || msg.error}
 											<div
 												class="chat-message {msg.role}"
 												class:tool-only={!msg.content &&
@@ -3190,9 +3207,9 @@
 															{/each}
 														</div>
 													{/if}
-													{#if msg.error}
-														<span class="chat-error-text">
-															{msg.content || 'Failed to generate response.'}
+										{#if msg.error}
+											<span class="chat-error-text">
+												{visibleContent || 'Failed to generate response.'}
 														</span>
 													{:else if msg.isApprovalRequest && msg.approvalStatus !== 'approved'}
 														<ChatToolIndicator
@@ -3204,14 +3221,12 @@
 																details: msg.approvalDetails || ''
 															}}
 														/>
-													{:else if msg.role === 'assistant' && msg.content}
-														<div class="selectable-content">
-															{@html DOMPurify.sanitize(marked.parse(msg.content) as string, {
-																ADD_TAGS: ['think']
-															})}
-														</div>
-													{:else if msg.content}
-														<span class="selectable-content">{msg.content}</span>
+										{:else if msg.role === 'assistant' && visibleContent}
+											<div class="selectable-content">
+												{@html DOMPurify.sanitize(marked.parse(visibleContent) as string)}
+											</div>
+										{:else if visibleContent}
+											<span class="selectable-content">{visibleContent}</span>
 													{/if}
 													{#if msg.isStreaming && msg.startTime}
 														{#if !msg.content}
@@ -3242,11 +3257,11 @@
 														>
 													</div>
 												{/if}
-												{#if msg.role === 'assistant' && msg.content && !msg.isStreaming}
+								{#if msg.role === 'assistant' && visibleContent && !msg.isStreaming}
 													<div class="chat-msg-actions assistant">
 														<button
 															class="rewind-btn copy-btn"
-															onclick={() => copyMessage(i, msg.content)}
+																	onclick={() => copyMessage(i, visibleContent)}
 															title="Copy response"
 															aria-label="Copy response"
 														>
@@ -3347,11 +3362,11 @@
 												<span class="debug-label">Completion tokens:</span>
 												<span class="debug-value">{debugInfo.completionTokens || '—'}</span>
 											</div>
-											<div class="debug-row">
-												<span class="debug-label">Tokens/s (gen):</span>
-												<span class="debug-value">
-													{#if debugInfo.done && debugInfo.firstChunk}
-														{@const genSec = (debugInfo.done - debugInfo.firstChunk) / 1000}
+							<div class="debug-row">
+								<span class="debug-label">Tokens/s (model):</span>
+								<span class="debug-value">
+									{#if debugInfo.generationStart && debugInfo.generationEnd}
+										{@const genSec = (debugInfo.generationEnd - debugInfo.generationStart) / 1000}
 														{@const fromServer = debugInfo.completionTokens > 0}
 														{@const tokCount = fromServer
 															? debugInfo.completionTokens
@@ -3425,7 +3440,7 @@
 												type="button"
 												class:active={aiInteractionMode === 'auto'}
 												onclick={() => setAiInteractionMode('auto')}
-												title="Auto: let the model choose chat or an operation">Auto</button
+								title="Auto: let the model choose chat or a write">Auto</button
 											>
 											<button
 												type="button"
@@ -3438,8 +3453,8 @@
 												type="button"
 												class:active={aiInteractionMode === 'operation'}
 												onclick={() => setAiInteractionMode('operation')}
-												title="Operation: perform the request on the open note using tools"
-												>Operation</button
+								title="Write: perform the request on the open note using tools"
+								>Write</button
 											>
 										</div>
 										<button
@@ -4095,29 +4110,6 @@
 		line-height: 1.5;
 		color: var(--text-primary);
 		font-size: 0.9rem;
-	}
-
-	:global(.chat-bubble think) {
-		display: block;
-		padding: 12px 14px;
-		margin: 8px 0;
-		border-left: 3px solid var(--accent-200);
-		color: var(--text-secondary);
-		font-style: italic;
-		background: var(--bg-code);
-		border-radius: 4px;
-		font-size: 0.9em;
-	}
-	:global(.chat-bubble think::before) {
-		content: '💭 Thinking Process';
-		display: block;
-		font-weight: 600;
-		font-style: normal;
-		margin-bottom: 6px;
-		color: var(--text-primary);
-		font-size: 0.85rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
 	}
 
 	.editor-shell {

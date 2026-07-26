@@ -98,6 +98,10 @@ pub struct Options {
     /// planning pass.
     #[serde(default)]
     pub chat_mode: bool,
+    /// True when the host has an armed editor selection. Selection-scoped edits
+    /// must not be shown as speculative whole-note previews.
+    #[serde(default)]
+    pub selection_scoped: bool,
     /// Model-profile hint: the model's native FC is unreliable at low quants
     /// and benefits from prompt-tools + strict grammar even for single-call
     /// requests (e.g. LFM2 at Q2_K_XL). When true, the per-request policy
@@ -140,6 +144,20 @@ fn is_terminal_mutation(name: &str, result: &str) -> bool {
     }
     let result = result.trim_start().to_ascii_lowercase();
     result.contains("successfully updated") || result.starts_with("notebook cell updated")
+}
+
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_note"
+            | "append_note"
+            | "prepend_note"
+            | "replace_in_note"
+            | "insert_after_line"
+            | "delete_in_note"
+            | "format_note"
+            | "edit_notebook"
+    )
 }
 
 /// Emit the exact message array sent to the model. This deliberately excludes
@@ -188,6 +206,7 @@ impl Default for Options {
             call_only: false,
             intent_is_tool: None,
             chat_mode: false,
+            selection_scoped: false,
             prefers_prompt_tools: false,
         }
     }
@@ -734,7 +753,15 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         // content deltas to the note preview instead.
         let suppress_text_call = prompt_tools && friendly && intent_is_tool;
         let (mut content, mut tool_calls) =
-            match stream_upstream(resp, &tx, no_think, suppress_text_call, preview_whole_note).await {
+            match stream_upstream(
+                resp,
+                &tx,
+                no_think,
+                suppress_text_call,
+                preview_whole_note && !opts.selection_scoped,
+            )
+            .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     // Tool decoding error in the stream: llama-server emitted an
@@ -837,7 +864,15 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             if let Some(fb_resp) = fb_resp {
                 if fb_resp.status().is_success() {
                     let (fb_content, fb_calls) =
-                        match stream_upstream(fb_resp, &tx, false, true, preview_whole_note).await {
+                        match stream_upstream(
+                            fb_resp,
+                            &tx,
+                            false,
+                            true,
+                            preview_whole_note && !opts.selection_scoped,
+                        )
+                        .await
+                        {
                             Ok(v) => v,
                             Err(_) => (String::new(), Vec::new()),
                         };
@@ -941,6 +976,14 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 "tool_call_id": id,
                 "content": capped,
             }));
+
+            // Operation mode must not retry a failed mutation. The failed call
+            // may have been based on a stale selection, and another generation
+            // can stream an invalid rewrite into the editor.
+            if opts.call_only && is_mutating_tool(&name) && !write_completed {
+                let _ = tx.send(Out::Error(result)).await;
+                return;
+            }
 
             // max_calls is normally one, but stop even if a malformed model
             // response contained additional calls after a successful mutation.
@@ -1291,7 +1334,7 @@ fn finish(
 
 #[cfg(test)]
 mod tests {
-    use super::is_terminal_mutation;
+    use super::{is_mutating_tool, is_terminal_mutation};
 
     #[test]
     fn successful_note_write_is_terminal() {
@@ -1308,6 +1351,13 @@ mod tests {
             "No note is currently open to write to."
         ));
         assert!(!is_terminal_mutation("read_note", "Note successfully updated"));
+    }
+
+    #[test]
+    fn mutating_tools_are_identified_for_operation_abort() {
+        assert!(is_mutating_tool("write_note"));
+        assert!(is_mutating_tool("replace_in_note"));
+        assert!(!is_mutating_tool("search_notes"));
     }
 
     #[test]
