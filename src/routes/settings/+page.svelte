@@ -692,7 +692,7 @@
                         </div>
                     {/if}
                     <p class="compute-hint">
-                        CPU and Vulkan ship with the app. Download CUDA for the fastest speed on NVIDIA GPUs.
+                        CPU and Vulkan ship with the app where supported. On macOS, download Metal for Apple GPU acceleration; on Windows, download CUDA for NVIDIA GPUs.
                     </p>
                 </div>
             {/if}

@@ -545,8 +545,7 @@ fn backend_binary(
 }
 
 /// Release asset file names to download for a backend on the current OS.
-/// Empty when the backend isn't downloadable here (e.g. CUDA on Linux, or any
-/// GPU backend on macOS where Metal ships in the default build).
+/// Empty when the backend isn't downloadable here (e.g. CUDA on Linux).
 pub fn assets_for_backend(backend: &str) -> Vec<String> {
     let tag = LLAMA_RELEASE_TAG;
     if cfg!(target_os = "windows") {
@@ -567,6 +566,16 @@ pub fn assets_for_backend(backend: &str) -> Vec<String> {
             // No prebuilt CUDA tarball for Linux in this release; use Vulkan.
             _ => vec![],
         }
+    } else if cfg!(target_os = "macos") {
+        match backend {
+            "metal" if cfg!(target_arch = "aarch64") => {
+                vec![format!("llama-{tag}-bin-macos-arm64.tar.gz")]
+            }
+            "metal" if cfg!(target_arch = "x86_64") => {
+                vec![format!("llama-{tag}-bin-macos-x64.tar.gz")]
+            }
+            _ => vec![],
+        }
     } else {
         vec![]
     }
@@ -574,7 +583,7 @@ pub fn assets_for_backend(backend: &str) -> Vec<String> {
 
 /// Backends that can be downloaded on demand for this OS.
 pub fn downloadable_backends() -> Vec<String> {
-    ["cuda", "vulkan", "cpu"]
+    ["cuda", "vulkan", "metal", "cpu"]
         .iter()
         .filter(|b| !assets_for_backend(b).is_empty())
         .map(|b| b.to_string())

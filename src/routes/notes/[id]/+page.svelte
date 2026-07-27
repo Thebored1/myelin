@@ -1993,6 +1993,11 @@
 		// Tauri events are global; do not let an older request fail the current
 		// assistant bubble.
 		if (activeChatRequestId !== requestId) return;
+		if (showDebugWindow && debugInfo) {
+			const finishedAt = Date.now();
+			debugInfo = { ...debugInfo, done: finishedAt, generationEnd: debugInfo.generationStart ? finishedAt : debugInfo.generationEnd,
+				trace: [...debugInfo.trace, { time: finishedAt, msg: `Error: ${errorMsg}`, kind: 'error' }] };
+		}
 		activeChatRequestId = null;
 		// If a live note stream was interrupted, the note was never saved —
 		// restore the pre-stream content rather than leaving a partial draft.
@@ -2671,7 +2676,7 @@
 			'ai://chat_done',
 			(event) => {
 				void finishStreamingChatMessage(event.payload.requestId, event.payload.tools || []);
-				if (showDebugWindow && debugInfo) {
+				if (activeChatRequestId === event.payload.requestId && showDebugWindow && debugInfo) {
 					debugInfo = {
 						...debugInfo,
 						done: Date.now(),
@@ -3173,30 +3178,6 @@
 								placeholder="comma,separated,tags"
 								onblur={fetchRelatedNotes}
 							/>
-						</div>
-
-						<div class="sidebar-section">
-							<h3>AI Actions</h3>
-				<div class="ai-actions">
-								<button class="secondary" onclick={runExtract} disabled={isBusy || !note}
-									>✨ Extract from paste</button
-								>
-								<button class="secondary" onclick={runSummarise} disabled={isBusy || !note}
-									>✨ Summarise</button
-								>
-					<button class="secondary" onclick={runAskAI} disabled={isBusy || !note}
-						>✨ Ask AI about this note</button
-					>
-				</div>
-				{#if summaryProgress}
-					<div class="summary-progress" aria-live="polite">
-						<span>{summaryProgress.message}</span>
-						{#if summaryProgress.total > 0}
-							<span>{summaryProgress.completed}/{summaryProgress.total}</span>
-						{/if}
-						<button class="secondary" onclick={() => invoke('cancel_ai')}>Cancel</button>
-					</div>
-				{/if}
 						</div>
 
 						<div class="sidebar-section">
@@ -4778,29 +4759,6 @@
 	}
 	.tag-input:focus {
 		border-color: var(--accent-200);
-	}
-
-	.ai-actions {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-2);
-	}
-
-	.ai-actions button {
-		text-align: left;
-		background: var(--bg-page);
-		border: 1px solid var(--border-default);
-		color: var(--text-primary);
-		padding: 0.625rem 0.75rem;
-		border-radius: var(--radius-xs);
-		cursor: pointer;
-		font-size: 0.875rem;
-		font-family: var(--font-sans);
-		transition: border-color var(--duration-fast);
-	}
-	.ai-actions button:hover:not(:disabled) {
-		border-color: var(--accent-200);
-		color: var(--accent-100);
 	}
 
 	.empty-state {
