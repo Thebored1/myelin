@@ -41,6 +41,7 @@
 	let draftTags = $state('');
 	let isBusy = $state(false);
 	let message = $state('');
+	let summaryProgress = $state<{ phase: string; completed: number; total: number; message: string } | null>(null);
 	// First LaTeX compile fetches Tectonic's ~50 MB bundle; show real progress.
 	let latexDownloadMsg = $state<string | null>(null);
 	// .tex live-preview state.
@@ -2355,19 +2356,50 @@
 		}
 	}
 
-	let aiModal = $state<{ title: string; body: string } | null>(null);
+	let aiModal = $state<{ title: string; body: string; sourceNoteId?: string } | null>(null);
 
 	async function runSummarise() {
 		if (!note) return;
 		isBusy = true;
+		summaryProgress = { phase: 'starting', completed: 0, total: 0, message: 'Preparing source…' };
 		try {
-			message = 'Summarising note...';
-			const res = await invoke<string>('summarise_note', { noteId: note.id });
-			aiModal = { title: 'AI summary', body: res };
+			message = 'Summarising source…';
+			const res = await invoke<string>('summarise_large_note', { noteId: note.id });
+			aiModal = { title: 'AI summary', body: res, sourceNoteId: note.id };
 			message = 'Summary complete.';
+		} catch (e) {
+			message = `Summary failed: ${String(e)}`;
 		} finally {
+			summaryProgress = null;
 			isBusy = false;
 		}
+	}
+
+	async function saveSummaryAsNewNote() {
+		if (!aiModal || !note) return;
+		const created = await invoke<NoteDocument>('create_note', {
+			title: `${note.title} — Summary`,
+			sourcePdf: null,
+			extension: 'md',
+			notebook: openNoteNotebook()
+		});
+		await invoke('save_note', {
+			noteId: created.id,
+			title: created.title,
+			tags: ['summary'],
+			body: aiModal.body,
+			sourcePdf: null,
+			annotations: []
+		});
+		message = 'Summary saved as a new note.';
+		aiModal = null;
+	}
+
+	function appendSummaryToCurrentNote() {
+		if (!aiModal || !note) return;
+		appendToNoteBody(`\n\n## AI Summary\n\n${aiModal.body}\n`);
+		aiModal = null;
+		message = 'Summary appended to the note.';
 	}
 
 	async function runAskAI() {
@@ -2462,6 +2494,7 @@
 		let unlistenNoteDelta: UnlistenFn;
 		let unlistenNoteStreamCancel: UnlistenFn;
 		let unlistenLatex: UnlistenFn;
+		let unlistenSummaryProgress: UnlistenFn;
 
 		$showSidebarToggle = true;
 		// The note sidebar's open/closed state is remembered across sessions via the
@@ -2516,6 +2549,15 @@
 				};
 			}
 		}).then((fn) => (unlistenNoteStreamStart = fn));
+
+		listen<{ noteId: string; phase: string; completed: number; total: number; message: string }>(
+			'ai://summary_progress',
+			(event) => {
+				if (!note || note.id !== event.payload.noteId) return;
+				summaryProgress = event.payload;
+				message = event.payload.message;
+			}
+		).then((fn) => (unlistenSummaryProgress = fn));
 
 		listen<{ noteId: string; delta: string }>('ai://note_delta', (event) => {
 			if (!note || note.id !== event.payload.noteId) return;
@@ -2744,6 +2786,7 @@
 			if (unlistenNoteDelta) unlistenNoteDelta();
 			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
 			if (unlistenLatex) unlistenLatex();
+			if (unlistenSummaryProgress) unlistenSummaryProgress();
 		};
 	});
 
@@ -3134,17 +3177,26 @@
 
 						<div class="sidebar-section">
 							<h3>AI Actions</h3>
-							<div class="ai-actions">
+				<div class="ai-actions">
 								<button class="secondary" onclick={runExtract} disabled={isBusy || !note}
 									>✨ Extract from paste</button
 								>
 								<button class="secondary" onclick={runSummarise} disabled={isBusy || !note}
 									>✨ Summarise</button
 								>
-								<button class="secondary" onclick={runAskAI} disabled={isBusy || !note}
-									>✨ Ask AI about this note</button
-								>
-							</div>
+					<button class="secondary" onclick={runAskAI} disabled={isBusy || !note}
+						>✨ Ask AI about this note</button
+					>
+				</div>
+				{#if summaryProgress}
+					<div class="summary-progress" aria-live="polite">
+						<span>{summaryProgress.message}</span>
+						{#if summaryProgress.total > 0}
+							<span>{summaryProgress.completed}/{summaryProgress.total}</span>
+						{/if}
+						<button class="secondary" onclick={() => invoke('cancel_ai')}>Cancel</button>
+					</div>
+				{/if}
 						</div>
 
 						<div class="sidebar-section">
@@ -4069,6 +4121,8 @@
 			<h3 class="ai-modal-title">{aiModal.title}</h3>
 			<div class="ai-modal-body">{aiModal.body}</div>
 			<div class="dialog-actions">
+				<button class="secondary" onclick={saveSummaryAsNewNote}>Save as new note</button>
+				<button class="secondary" onclick={appendSummaryToCurrentNote}>Append to note</button>
 				<button class="secondary" onclick={() => (aiModal = null)}>Close</button>
 			</div>
 		</div>
@@ -4110,6 +4164,17 @@
 		line-height: 1.5;
 		color: var(--text-primary);
 		font-size: 0.9rem;
+	}
+	.summary-progress {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		margin-top: var(--space-2);
+		font-size: 0.8rem;
+		color: var(--text-secondary);
+	}
+	.summary-progress span:first-child {
+		flex: 1;
 	}
 
 	.editor-shell {

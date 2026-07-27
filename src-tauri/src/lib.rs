@@ -415,6 +415,17 @@ async fn summarise_note(state: State<'_, AppState>, note_id: String) -> Result<S
 }
 
 #[tauri::command]
+async fn summarise_large_note(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> Result<String, String> {
+    state
+        .summarise_large_note(note_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn ask_ai(
     state: State<'_, AppState>,
     note_id: String,
@@ -714,6 +725,7 @@ pub fn run() {
             extract_from_paste,
             read_pdf_binary,
             summarise_note,
+            summarise_large_note,
             ask_ai,
             ask_ai_stream,
             cancel_ai,

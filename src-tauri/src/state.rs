@@ -34,6 +34,9 @@ const INDEX_DIR_NAME: &str = "index";
 // context after restart. Live tool turns are also capped below.
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 2;
 const MAX_LIVE_CONVERSATION_CHARS: usize = 8_000;
+const LARGE_SUMMARY_CHUNK_WORDS: usize = 2_400;
+const LARGE_SUMMARY_OVERLAP_WORDS: usize = 120;
+const SUMMARY_REDUCTION_WORDS: usize = 5_000;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
 // Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
@@ -1614,6 +1617,132 @@ impl AppState {
             &prompt,
         )
         .await
+    }
+
+    /// Summarise a note of arbitrary size without putting the whole source in a
+    /// single model context. Each source chunk is summarised independently, then
+    /// those summaries are recursively reduced until one final summary remains.
+    pub async fn summarise_large_note(&self, note_id: String) -> Result<String> {
+        let note = self.load_note(note_id.clone()).await?;
+        if note.body.trim().is_empty() {
+            return Ok("The note is empty.".to_string());
+        }
+
+        self.inner
+            .cancel_ai
+            .store(false, std::sync::atomic::Ordering::Release);
+        let chunks = crate::embeddings::chunk_text(
+            &note.body,
+            LARGE_SUMMARY_CHUNK_WORDS,
+            LARGE_SUMMARY_OVERLAP_WORDS,
+        );
+        let total = chunks.len();
+        self.emit_summary_progress(&note_id, "chunking", 0, total, "Preparing source");
+
+        let mut summaries = Vec::with_capacity(total);
+        for (index, chunk) in chunks.iter().enumerate() {
+            self.ensure_summary_not_cancelled()?;
+            let prompt = format!(
+                "Summarise this source section faithfully and densely. Preserve important facts, decisions, numbers, names, and conclusions. Do not invent information. Keep the section label in your response.\n\nSource: {}\nSection {}/{}\n\n{}",
+                note.title,
+                index + 1,
+                total,
+                chunk.text
+            );
+            let summary = self
+                .run_llama_prompt(
+                    "You are the first stage of a hierarchical document summarizer. Produce a factual section summary that another model can combine later. Keep it under 600 words.",
+                    &prompt,
+                )
+                .await?;
+            summaries.push(format!("[Section {}/{}]\n{}", index + 1, total, summary.trim()));
+            self.emit_summary_progress(
+                &note_id,
+                "summarizing",
+                index + 1,
+                total,
+                &format!("Summarized section {}/{}", index + 1, total),
+            );
+        }
+
+        let original_total = total;
+        while summaries.len() > 1 {
+            self.ensure_summary_not_cancelled()?;
+            let mut reduced = Vec::new();
+            let mut cursor = 0;
+            while cursor < summaries.len() {
+                self.ensure_summary_not_cancelled()?;
+                let mut group = Vec::new();
+                let mut words = 0;
+                while cursor < summaries.len() {
+                    let next_words = summaries[cursor].split_whitespace().count();
+                    if !group.is_empty() && words + next_words > SUMMARY_REDUCTION_WORDS {
+                        break;
+                    }
+                    words += next_words;
+                    group.push(summaries[cursor].as_str());
+                    cursor += 1;
+                }
+                let prompt = format!(
+                    "Combine the following section summaries into one faithful summary. Preserve all major facts and conclusions, remove repetition, and retain useful section/source labels. Do not mention the summarization process.\n\nDocument: {}\n\n{}",
+                    note.title,
+                    group.join("\n\n")
+                );
+                let summary = self
+                    .run_llama_prompt(
+                        "You are a higher-level document summarizer. Synthesize the supplied summaries without adding facts that are not present. Keep the result under 900 words.",
+                        &prompt,
+                    )
+                    .await?;
+                reduced.push(summary.trim().to_string());
+                self.emit_summary_progress(
+                    &note_id,
+                    "combining",
+                    reduced.len(),
+                    summaries.len(),
+                    "Combining section summaries",
+                );
+            }
+            summaries = reduced;
+        }
+
+        self.ensure_summary_not_cancelled()?;
+        self.emit_summary_progress(
+            &note_id,
+            "complete",
+            original_total,
+            original_total,
+            "Summary complete",
+        );
+        Ok(summaries.pop().unwrap_or_default())
+    }
+
+    fn ensure_summary_not_cancelled(&self) -> Result<()> {
+        if self.ai_cancel_requested() {
+            Err(anyhow!("Summary cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn emit_summary_progress(
+        &self,
+        note_id: &str,
+        phase: &str,
+        completed: usize,
+        total: usize,
+        message: &str,
+    ) {
+        let _ = self.handle.emit(
+            "ai://summary_progress",
+            serde_json::json!({
+                "noteId": note_id,
+                "phase": phase,
+                "completed": completed,
+                "total": total,
+                "message": message,
+            }),
+        );
     }
 
     pub async fn ask_ai(&self, note_id: String, question: String) -> Result<String> {
