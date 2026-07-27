@@ -14,8 +14,27 @@ mod wayland_shortcut;
 mod web_search;
 
 use models::{AppSnapshot, NoteDocument, ProviderStatus, SearchResponse};
-use state::AppState;
+use state::{AppState, BackgroundSettings};
 use tauri::{Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+
+#[tauri::command]
+fn get_background_settings(state: State<'_, AppState>) -> BackgroundSettings { state.background_settings() }
+
+#[tauri::command]
+fn set_start_with_system(app: tauri::AppHandle, state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    if enabled { app.autolaunch().enable() } else { app.autolaunch().disable() }.map_err(|e| e.to_string())?;
+    state.set_background_settings(BackgroundSettings { start_with_system: enabled }).map_err(|e| e.to_string())
+}
+
+fn quit_app(app: &tauri::AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let _ = app.global_shortcut().unregister_all();
+    app.state::<AppState>().shutdown_servers_sync();
+    app.exit(0);
+}
 
 #[tauri::command]
 async fn bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
@@ -609,6 +628,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let app_state = AppState::new(app.handle().clone())?;
+            let background_launch = std::env::args().any(|arg| arg == "--background");
 
             // Warm the llama-server in the background so the first chat doesn't
             // pay the cold-start cost of loading the model into memory. Clone
@@ -641,7 +661,22 @@ pub fn run() {
             });
 
             app.manage(app_state);
+            app.handle().plugin(tauri_plugin_autostart::Builder::new().args(["--background"]).build())?;
             app.handle().plugin(tauri_plugin_dialog::init())?;
+
+            let show = MenuItem::with_id(app, "show", "Show Myelin", true, None::<&str>)?;
+            let quick = MenuItem::with_id(app, "quick", "Quick Capture", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quick, &quit])?;
+            TrayIconBuilder::new().menu(&menu).tooltip("Myelin")
+                .icon(app.default_window_icon().cloned().ok_or("missing app icon")?)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => { if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); } }
+                    "quick" => toggle_quick_window(app),
+                    "quit" => quit_app(app),
+                    _ => {}
+                }).build(app)?;
+            if background_launch { if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); } }
 
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -748,19 +783,14 @@ pub fn run() {
             set_tool_gating,
             resolve_tool_approval,
             get_openharn_settings,
-            set_openharn_settings
+            set_openharn_settings,
+            get_background_settings,
+            set_start_with_system
         ])
         .on_window_event(|window, event| {
-            // Closing the main window quits the whole app (not just the window —
-            // the hidden quick-capture window would otherwise keep the process
-            // alive) and kills the spawned llama/embed servers so nothing is left
-            // running in the background.
-            if window.label() == "main" {
-                if let tauri::WindowEvent::CloseRequested { .. } = event {
-                    let app = window.app_handle();
-                    app.state::<AppState>().shutdown_servers_sync();
-                    app.exit(0);
-                }
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) && (window.label() == "main" || window.label() == "quick") {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); }
+                let _ = window.hide();
             }
         })
         .run(tauri::generate_context!())

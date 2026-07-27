@@ -17,7 +17,7 @@
 	let wasSmallScreen = $state(false);
 	let isWindowMaximized = $state(false);
 	let isWindowFullscreen = $state(false);
-	let aiStatus = $state<'loading' | 'ready' | 'unavailable'>('loading');
+	let aiStatus = $state<'loading' | 'ready' | 'unavailable' | 'unconfigured'>('loading');
 
 	$effect(() => {
 		const isSmallScreen = windowWidth < 1200;
@@ -32,7 +32,18 @@
 	onMount(() => {
 		let unlistenResize: (() => void) | undefined;
 		let unlistenAiWarmup: (() => void) | undefined;
+		let aiStatusPoll: ReturnType<typeof setInterval> | undefined;
 		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+			const syncAiStatus = async () => {
+				try {
+					const status = await invoke<any>('get_provider_status');
+					if (!status?.config?.modelPath) aiStatus = 'unconfigured';
+					else if (!status?.resolved) aiStatus = 'unavailable';
+					else if (status?.healthy) aiStatus = 'ready';
+				} catch {
+					// Keep the warmup event as the source of truth when status is transiently unavailable.
+				}
+			};
 			void listen<{ status: 'started' | 'ready' | 'failed'; message?: string }>(
 				'ai://llama_warmup',
 				(event) => {
@@ -41,11 +52,14 @@
 				}
 			).then((unlisten) => {
 				unlistenAiWarmup = unlisten;
+				// Reconcile after listener registration; the one-shot ready event may
+				// have fired before this layout finished mounting.
+				void syncAiStatus();
 			});
-			void invoke<any>('get_provider_status').then((status) => {
-				if (!status?.config && !status?.resolved) aiStatus = 'unavailable';
-				else if (status?.healthy) aiStatus = 'ready';
-			});
+			void syncAiStatus();
+			// Keep the badge self-healing if the warmup event is missed or the server
+			// restarts while the app is open.
+			aiStatusPoll = setInterval(() => void syncAiStatus(), 2000);
 		}
 		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
 			appWindow = getCurrentWindow();
@@ -126,6 +140,7 @@
 				window.removeEventListener('click', handleGlobalDialogClick);
 				unlistenResize?.();
 				unlistenAiWarmup?.();
+				if (aiStatusPoll) clearInterval(aiStatusPoll);
 			}
 		}
 	});
@@ -210,13 +225,15 @@
 			<div
 				class="ai-status"
 				class:ready={aiStatus === 'ready'}
-				class:unavailable={aiStatus === 'unavailable'}
+				class:unavailable={aiStatus === 'unavailable' || aiStatus === 'unconfigured'}
 				role="status"
-				aria-label={aiStatus === 'ready' ? 'AI ready' : aiStatus === 'unavailable' ? 'AI unavailable' : 'AI loading'}
-				title={aiStatus === 'ready' ? 'AI ready' : aiStatus === 'unavailable' ? 'AI unavailable' : 'AI model is loading'}
+				aria-label={aiStatus === 'ready' ? 'AI ready' : aiStatus === 'unconfigured' ? 'No AI model selected' : aiStatus === 'unavailable' ? 'AI unavailable' : 'AI loading'}
+				title={aiStatus === 'ready' ? 'AI ready' : aiStatus === 'unconfigured' ? 'Select an AI model in Settings' : aiStatus === 'unavailable' ? 'AI model could not be loaded' : 'AI model is loading'}
 			>
 				<span class="ai-status-dot"></span>
-				{#if aiStatus === 'loading'}<span>AI loading</span>{/if}
+				{#if aiStatus === 'loading'}<span>AI loading</span>
+				{:else if aiStatus === 'unconfigured'}<span>No model selected</span>
+				{:else if aiStatus === 'unavailable'}<span>AI unavailable</span>{/if}
 			</div>
 			{#if $page.url.pathname.startsWith('/notes/')}
 			<button class="control-btn sidebar-toggle" onclick={() => $noteSidebarOpen = !$noteSidebarOpen} aria-label="Toggle note sidebar" title="Toggle note sidebar">

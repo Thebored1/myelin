@@ -47,6 +47,8 @@
     let quickShortcut = $state('Ctrl+Space');
     let quickRecording = $state(false);
     let quickShortcutError = $state('');
+    let startWithSystem = $state(false);
+    let backgroundError = $state('');
     const prettyShortcut = (s: string) =>
         s
             .replace(/\bKey([A-Z])\b/g, '$1')
@@ -269,6 +271,7 @@
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
             quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
+            startWithSystem = (await invoke<{ startWithSystem: boolean }>('get_background_settings')).startWithSystem;
             try {
                 const oh = await invoke<OpenharnSettings>('get_openharn_settings');
                 ohPort = oh.port ?? null;
@@ -1029,6 +1032,20 @@
                 </div>
                 <button class="browse-btn" onclick={startRecording} disabled={quickRecording}>
                     {quickRecording ? 'Recording…' : 'Change'}
+                </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>Background</h2>
+            <div class="feature-toggle" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; gap: 1rem;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1rem;">Start Myelin with the system</h3>
+                    <p class="description" style="margin-top: 4px;">Starts hidden in the tray with the shortcut and model ready.</p>
+                    {#if backgroundError}<p class="description" style="color: var(--danger, #e5534b);">{backgroundError}</p>{/if}
+                </div>
+                <button class="browse-btn" onclick={async () => { const next = !startWithSystem; try { await invoke('set_start_with_system', { enabled: next }); startWithSystem = next; backgroundError = ''; } catch (e) { backgroundError = String(e); } }}>
+                    {startWithSystem ? 'Enabled' : 'Disabled'}
                 </button>
             </div>
         </section>

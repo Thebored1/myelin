@@ -408,6 +408,7 @@ pub(crate) struct InnerState {
     chat_lock: AsyncMutex<()>,
     /// Live mirror of the persisted openharn sidecar settings, refreshed on save.
     openharn_settings: Mutex<OpenharnSettings>,
+    background_settings: Mutex<BackgroundSettings>,
     llama_client: Client,
     chat_tools: Mutex<Vec<ChatTool>>,
     latest_chat_question: Mutex<Option<String>>,
@@ -457,7 +458,14 @@ struct PersistedSettings {
     custom_note_order: Vec<String>,
     #[serde(default, skip_serializing_if = "OpenharnSettings::is_default")]
     openharn: OpenharnSettings,
+    #[serde(default, skip_serializing_if = "BackgroundSettings::is_default")]
+    pub background: BackgroundSettings,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackgroundSettings { pub start_with_system: bool }
+impl BackgroundSettings { fn is_default(&self) -> bool { !self.start_with_system } }
 
 /// Configuration for the openharn-myelin agent sidecar. Persisted in
 /// settings.json and surfaced in the Settings UI. Every field is optional /
@@ -570,6 +578,7 @@ impl AppState {
         let settings = load_settings(&app_data_dir)?;
         let workspace_path = settings.workspace_path.map(PathBuf::from);
         let openharn_settings = settings.openharn.clone();
+        let background_settings = settings.background.clone();
 
         Ok(Self {
             handle,
@@ -594,6 +603,7 @@ impl AppState {
                 sidecar: AsyncMutex::new(None),
                 chat_lock: AsyncMutex::new(()),
                 openharn_settings: Mutex::new(openharn_settings),
+                background_settings: Mutex::new(background_settings),
                 llama_client: Client::builder()
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
@@ -2622,6 +2632,17 @@ impl AppState {
                 let _ = server.child.kill();
             }
         }
+        if let Ok(mut guard) = self.inner.sidecar.try_lock() { *guard = None; }
+    }
+
+    pub fn background_settings(&self) -> BackgroundSettings { self.inner.background_settings.lock().clone() }
+
+    pub fn set_background_settings(&self, settings: BackgroundSettings) -> Result<()> {
+        let mut persisted = load_settings(&self.inner.app_data_dir)?;
+        persisted.background = settings.clone();
+        save_settings(&self.inner.app_data_dir, &persisted)?;
+        *self.inner.background_settings.lock() = settings;
+        Ok(())
     }
 
     fn require_workspace(&self) -> Result<PathBuf> {
