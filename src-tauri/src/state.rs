@@ -2065,15 +2065,13 @@ impl AppState {
         let result: Result<()> = async {
             let note = self.load_note(note_id).await?;
 
-            // Relative placement has no deterministic anchor unless the editor
-            // supplied an armed selection. Refuse before model/tool execution so
-            // a weak model cannot silently append to the wrong location.
-            if crate::agent::placement_request_intent(&question) && selection.is_none() {
-                let message = "Where should I place it? Select the anchor text in the note, or provide an exact heading, line, or marker.";
-                let _ = self.handle.emit("ai://chat_chunk", serde_json::json!({
-                    "requestId": request_id, "delta": message
-                }));
-                return Ok(());
+            // Write mode is always spatially explicit. Refuse before model
+            // initialization, prompt caching, or tool execution if a caller
+            // bypasses the frontend's deterministic target gate.
+            if matches!(interaction_mode, "operation" | "edit") && selection.is_none() {
+                return Err(anyhow!(
+                    "Place the cursor where you want to write, or select text to rewrite. Then send again."
+                ));
             }
 
             // A synthetic note-prefix request must never sit ahead of a real
@@ -2149,12 +2147,48 @@ impl AppState {
                      document's preamble and \\begin{document}/\\end{document} structure.",
                 );
             }
-            // If the user armed an editor selection, show the model EXACTLY what is
-            // selected and scope the request to it. The deterministic write path
-            // (selection_scoped_plan) enforces "selection only" regardless, but the
-            // model still needs to see the selected text to rewrite it well.
+            // If the user selected editor text, show the model exactly what is
+            // selected. The editor action scopes writes to it; ordinary chat uses
+            // it as focused question context without turning the question into an edit.
             if let Some(sel) = &selection {
-                if sel.cursor {
+                if interaction_mode == "chat" {
+                    if !sel.cursor {
+                        let cell_context = sel
+                            .cell_index
+                            .map(|index| format!(" in notebook cell {index}"))
+                            .unwrap_or_default();
+                        turn_instructions.push_str(&format!(
+                            "\n\nThe user selected this excerpt{cell_context} in the open note. \
+                             Use it as the primary context for the latest question:\n\"\"\"\n{}\n\"\"\"",
+                            sel.text
+                        ));
+                    }
+                } else if doc_type == "ipynb" {
+                    let cell_index = sel
+                        .cell_index
+                        .ok_or_else(|| anyhow!("The notebook target is missing its cell index."))?;
+                    if sel.cursor {
+                        turn_instructions.push_str(&format!(
+                            "\n\nThe editor supplied an exact CURSOR target inside notebook cell {cell_index}. \
+                             For text insertion, call edit_notebook with operation \"edit\", index {cell_index}, \
+                             and ONLY the new text to insert as content. Do not reproduce the existing cell."
+                        ));
+                    } else {
+                        turn_instructions.push_str(&format!(
+                            "\n\nThe user SELECTED this exact source span inside notebook cell {cell_index}:\n\
+                             \"\"\"\n{}\n\"\"\"\n\
+                             For a text edit, call edit_notebook with operation \"edit\", index {cell_index}, \
+                             and ONLY the replacement fragment as content. Empty content removes the selection. \
+                             Do not reproduce the rest of the cell.",
+                            sel.text
+                        ));
+                    }
+                    turn_instructions.push_str(&format!(
+                        " Cell deletion must target index {cell_index}. A new cell may be inserted only at index \
+                         {cell_index} or {}.",
+                        cell_index + 1
+                    ));
+                } else if sel.cursor {
                     turn_instructions.push_str(
                         "\n\nThe editor supplied an exact CURSOR target. Generate only the new text to insert there and call write_note with that text as content. Never reproduce existing note text.",
                     );
@@ -4042,7 +4076,9 @@ fn authorize_tool_policy(
         return Err("edit_notebook is only available for notebook documents.".to_string());
     }
     if has_selection {
-        let allowed = if placement_edit {
+        let allowed = if is_notebook {
+            name == "edit_notebook"
+        } else if placement_edit {
             name == "insert_after_line"
         } else {
             name == "write_note"
@@ -5112,6 +5148,8 @@ mod tests {
         assert!(authorize_tool_policy("insert_after_line", false, false, true, true, false, false, true).is_ok());
         assert!(authorize_tool_policy("write_note", false, false, false, false, true, false, true).is_err());
         assert!(authorize_tool_policy("edit_notebook", false, false, false, false, true, false, true).is_ok());
+        assert!(authorize_tool_policy("edit_notebook", false, false, false, true, true, false, true).is_ok());
+        assert!(authorize_tool_policy("write_note", false, false, false, true, true, false, true).is_err());
         assert!(authorize_tool_policy("read_note", false, false, false, false, false, false, false).is_err());
         let blocked = authorize_tool_policy("write_note", false, false, false, false, false, true, true)
             .unwrap_err();

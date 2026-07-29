@@ -164,6 +164,37 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
         }
     }
 
+    // Liquid LFM native text fallback. Parse the quoted content with the same
+    // escape-aware decoder used by live preview rather than the generic regex,
+    // which cannot safely handle parentheses inside generated Markdown.
+    if s.contains("<|tool_call_start|>")
+        && schemas.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|tool| tool["function"]["name"].as_str() == Some("write_note"))
+        })
+    {
+        if let Some((generated, true, quote_end)) = extract_lfm_content_value_with_end(s) {
+            let tail = &s[quote_end..];
+            let call_closed = tail.contains(')');
+            let native_frame_closed = !s.contains("<|tool_call_start|>")
+                || tail.contains("<|tool_call_end|>");
+            if call_closed
+                && native_frame_closed
+                && !note_content_has_protocol_residue(&generated)
+            {
+                return Some(vec![json!({
+                    "id": "call_lfm_text_0",
+                    "type": "function",
+                    "function": {
+                        "name": "write_note",
+                        "arguments": json!({ "content": generated }).to_string()
+                    }
+                })]);
+            }
+        }
+    }
+
     // Fallback: `name({"k":"v"})` or `name(positional)`.
     fn tool_param(name: &str, schemas: &Value) -> Option<&'static str> {
         // Myelin-specific mapping for positional args
@@ -308,6 +339,7 @@ fn tool_prompt(schemas: &Value) -> String {
     let mut s = String::from(
         "You do NOT have a tool API. To call a tool, reply with ONLY this line and nothing else:\n\
          <tool_call>[{\"name\": \"<tool>\", \"arguments\": { ... }}]\n\
+         Follow that JSON format exactly. Do not switch to native `tool_name(arg=...)` syntax. A generated note belongs only inside the JSON `content` string; never place tool names, call wrappers, or closing protocol markers inside `content`.\n\
          Call a tool whenever the user wants to change, create, add to, or remove content from the note — never put that content in a plain-text reply. Reply in plain text ONLY for genuine conversation (greetings, questions, clarifications, refusals); never for note content. Available tools:\n",
     );
 
@@ -585,34 +617,32 @@ pub fn partial_field(raw: &str, key: &str) -> Option<String> {
 
 /// Decode the `content` string value and report whether its closing quote has
 /// arrived. This preserves Markdown escapes such as `\\n` as real newlines.
-fn extract_content_value(raw: &str) -> Option<(String, bool)> {
-    let pat = "\"content\"";
-    let kpos = raw.find(pat)?;
-    let after = raw[kpos + pat.len()..].trim_start();
-    let after = after.strip_prefix(':')?.trim_start();
-    let body = after.strip_prefix('"')?;
+fn decode_partial_quoted(body: &str, quote: char) -> (String, bool, usize) {
     let mut out = String::new();
-    let mut chars = body.chars();
-    while let Some(c) = chars.next() {
+    let mut chars = body.char_indices();
+    while let Some((index, c)) = chars.next() {
+        if c == quote {
+            return (out, true, index + c.len_utf8());
+        }
         match c {
-            '"' => return Some((out, true)),
             '\\' => match chars.next() {
-                None => return Some((out, false)),
-                Some(e) => match e {
+                None => return (out, false, body.len()),
+                Some((_, e)) => match e {
                     'n' => out.push('\n'),
                     't' => out.push('\t'),
                     'r' => out.push('\r'),
                     'b' => out.push('\u{0008}'),
                     'f' => out.push('\u{000C}'),
                     '"' => out.push('"'),
+                    '\'' => out.push('\''),
                     '\\' => out.push('\\'),
                     '/' => out.push('/'),
                     'u' => {
                         let mut hex = String::new();
                         for _ in 0..4 {
                             match chars.next() {
-                                Some(h) => hex.push(h),
-                                None => return Some((out, false)),
+                                Some((_, h)) => hex.push(h),
+                                None => return (out, false, body.len()),
                             }
                         }
                         if let Ok(cp) = u32::from_str_radix(&hex, 16) {
@@ -627,14 +657,79 @@ fn extract_content_value(raw: &str) -> Option<(String, bool)> {
             _ => out.push(c),
         }
     }
-    Some((out, false))
+    (out, false, body.len())
+}
+
+fn extract_json_content_value(raw: &str) -> Option<(String, bool)> {
+    let pat = "\"content\"";
+    let kpos = raw.find(pat)?;
+    let after = raw[kpos + pat.len()..].trim_start();
+    let after = after.strip_prefix(':')?.trim_start();
+    let body = after.strip_prefix('"')?;
+    let (content, closed, _) = decode_partial_quoted(body, '"');
+    Some((content, closed))
+}
+
+/// Decode Liquid LFM's native Pythonic argument syntax:
+/// `write_note(content="generated text so far`.
+fn extract_lfm_content_value_with_end(raw: &str) -> Option<(String, bool, usize)> {
+    let call_at = raw.find("write_note(")?;
+    let call_start = call_at + "write_note(".len();
+    let call = &raw[call_start..];
+    let content_at = call.find("content")?;
+    let key_end = call_start + content_at + "content".len();
+    let untrimmed = &raw[key_end..];
+    let after = untrimmed.trim_start();
+    let equals_offset = untrimmed.len() - after.len();
+    let after = after.strip_prefix('=')?;
+    let after_untrimmed = after;
+    let after = after.trim_start();
+    let value_ws = after_untrimmed.len() - after.len();
+    let quote = after.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let body_start = key_end + equals_offset + 1 + value_ws + quote.len_utf8();
+    let body = &raw[body_start..];
+    let (content, closed, consumed) = decode_partial_quoted(body, quote);
+    Some((content, closed, body_start + consumed))
+}
+
+fn extract_lfm_content_value(raw: &str) -> Option<(String, bool)> {
+    extract_lfm_content_value_with_end(raw).map(|(content, closed, _)| (content, closed))
 }
 
 /// Best-effort decode of the `content` string value from partial JSON like
 /// `{"content":"hello wo`. Conservatively stops before any incomplete escape so
 /// we never emit a half-decoded character; the next fragment completes it.
 pub fn extract_partial_content(raw: &str) -> Option<String> {
-    extract_content_value(raw).map(|(content, _)| content)
+    extract_json_content_value(raw)
+        .or_else(|| extract_lfm_content_value(raw))
+        .map(|(content, _)| content)
+}
+
+/// Protocol/template residue is never valid generated note content. Reject the
+/// call instead of trimming and saving an approximation: the speculative
+/// editor preview can then be restored from its authoritative snapshot.
+pub fn note_content_has_protocol_residue(content: &str) -> bool {
+    let tail: String = content
+        .chars()
+        .rev()
+        .take(256)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let tail = tail.to_ascii_lowercase();
+    [
+        "<|tool_call",
+        "<|tool_call_end|>",
+        "<tool_call",
+        "</tool_call",
+        "/content>}",
+        "</content>",
+        "> write_note(content=",
+        "] write_note(content=",
+    ]
+    .iter()
+    .any(|marker| tail.contains(marker))
 }
 
 
@@ -775,6 +870,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_chat_template_closing_tool_wrapper() {
+        let c = r#"<tool_call>[{"arguments":{"content":"A short essay."},"name":"write_note"}]</tool_call>"#;
+        let calls = parse_text_tool_calls(c, &schemas()).expect("should parse");
+        assert_eq!(calls[0]["function"]["name"], "write_note");
+        let args = calls[0]["function"]["arguments"].as_str().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(args).unwrap()["content"],
+            "A short essay."
+        );
+    }
+
+    #[test]
+    fn extracts_partial_lfm_native_content() {
+        assert_eq!(
+            extract_partial_content(
+                r##"<|tool_call_start|>[write_note(content="# Sea\nThe sea is va"##
+            )
+            .as_deref(),
+            Some("# Sea\nThe sea is va")
+        );
+        assert_eq!(
+            extract_partial_content(r#"write_note(content='hello wo"#).as_deref(),
+            Some("hello wo")
+        );
+    }
+
+    #[test]
+    fn detects_generated_tool_protocol_residue() {
+        assert!(note_content_has_protocol_residue(
+            "# Essay\nUseful prose.\n/content>}   > write_note(content="
+        ));
+        assert!(note_content_has_protocol_residue(
+            "# Essay\nUseful prose.</tool_call>"
+        ));
+        assert!(!note_content_has_protocol_residue(
+            "# Rust\nUse `write_note(content)` as an ordinary API example."
+        ));
+    }
+
+    #[test]
     fn ignores_prose_and_unknown_tools() {
         assert!(parse_text_tool_calls("The note now has three sections.", &schemas()).is_none());
         assert!(parse_text_tool_calls("", &schemas()).is_none());
@@ -803,6 +938,21 @@ mod tests {
             serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args["content"], "Sea, sky, and shore");
         assert_eq!(args["mode"], "replace");
+    }
+
+    #[test]
+    fn parses_framed_lfm_content_with_markdown_parentheses() {
+        let calls = parse_text_tool_calls(
+            r##"<|tool_call_start|>[write_note(content="# Links\nUse [Rust](https://rust-lang.org).")]<|tool_call_end|>"##,
+            &schemas(),
+        )
+        .expect("parse framed LFM call");
+        let args: Value =
+            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            args["content"],
+            "# Links\nUse [Rust](https://rust-lang.org)."
+        );
     }
 
     #[test]

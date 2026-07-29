@@ -372,6 +372,20 @@ fn scripted_call(scenario: &str) -> String {
             call("write_note", json!({ "content": "Hi", "mode": "edit", "find": "Hello world" }))
         }
         "write_note_clear" => call("write_note", json!({ "content": "" })),
+        "write_note_incomplete" => {
+            "<tool_call>[{\"name\":\"write_note\",\"arguments\":{\"content\":\"This replacement arrives in several streamed chunks"
+                .to_string()
+        }
+        "write_note_protocol_residue" => call(
+            "write_note",
+            json!({
+                "content": "# Essay\nUseful prose.\n/content>}   > write_note(content="
+            }),
+        ),
+        "write_note_lfm_native" => {
+            r##"<|tool_call_start|>[write_note(content="# Native\nStreams (with Markdown links).")]<|tool_call_end|>"##
+                .to_string()
+        }
         "format_remove_headings" => call("format_note", json!({ "operation": "remove_headings" })),
         "format_uppercase" => call("format_note", json!({ "operation": "uppercase" })),
         "format_strip_markdown" => call("format_note", json!({ "operation": "strip_markdown" })),
@@ -502,6 +516,10 @@ async fn run_chat(
             // The sidecar must not require lexical overlap for an operation.
             "friendly_results": true,
             "intent_is_tool": true,
+            "call_only": matches!(
+                scenario,
+                "write_note_incomplete" | "write_note_protocol_residue"
+            ),
         }
     });
     let resp = client
@@ -692,6 +710,84 @@ async fn every_tool_round_trips_and_edits_md() {
     assert!(o.done, "write_note replace completed");
     assert!(o.new_messages >= 2, "done includes assistant/tool-result delta");
     assert_eq!(note().trim(), "# Title\nHello world", "write_note replace body");
+
+    // --- incomplete strict write_note: preview streams, but nothing executes ---
+    std::fs::write(&ctx.note_path, "Original remains authoritative").unwrap();
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-incomplete",
+        "write_note_incomplete",
+        &ctx,
+    )
+    .await;
+    assert!(
+        o.note_deltas > 1,
+        "incomplete write_note should expose multiple real upstream deltas"
+    );
+    assert!(o.tool.is_none(), "incomplete write_note must not execute a tool");
+    assert!(
+        o.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Generation ended before write_note completed"),
+        "incomplete write_note should report an unfinished generation: {:?}",
+        o.error
+    );
+    assert_eq!(
+        note().trim(),
+        "Original remains authoritative",
+        "incomplete preview must not persist"
+    );
+
+    // --- protocol residue: preview streams, but a complete contaminated call
+    // is rejected before tool dispatch and cannot be saved ---
+    std::fs::write(&ctx.note_path, "Original remains authoritative").unwrap();
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-protocol-residue",
+        "write_note_protocol_residue",
+        &ctx,
+    )
+    .await;
+    assert!(o.note_deltas > 1, "contaminated content should have previewed");
+    assert!(o.tool.is_none(), "contaminated write_note must not execute");
+    assert!(
+        o.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("mixed tool protocol text"),
+        "contaminated call should report protocol residue: {:?}",
+        o.error
+    );
+    assert_eq!(
+        note().trim(),
+        "Original remains authoritative",
+        "contaminated preview must not persist"
+    );
+
+    // --- framed LFM text call: native content streams and parses without
+    // leaking its wrapper into the saved body ---
+    std::fs::write(&ctx.note_path, "").unwrap();
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-lfm-native",
+        "write_note_lfm_native",
+        &ctx,
+    )
+    .await;
+    assert!(o.note_deltas > 1, "LFM text content should stream incrementally");
+    assert_eq!(o.tool.as_deref(), Some("write_note"));
+    assert_eq!(
+        note().trim(),
+        "# Native\nStreams (with Markdown links).",
+        "native wrapper must not enter note content"
+    );
 
     // --- write_note: append ---
     std::fs::write(&ctx.note_path, "Base").unwrap();

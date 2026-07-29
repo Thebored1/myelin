@@ -1281,6 +1281,15 @@
 		</div>
 	</aside>
 
+	{#if $sidebarOpen}
+		<button
+			type="button"
+			class="rail-dismiss"
+			onclick={() => ($sidebarOpen = false)}
+			aria-label="Close sidebar"
+		></button>
+	{/if}
+
 	<!-- ── Right: workspace panel ─────────────────────────── -->
 	<main class="workspace">
 		{#if !ready}
@@ -1997,6 +2006,10 @@
 		transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
+	.rail-dismiss {
+		display: none;
+	}
+
 	@media (max-width: 1200px) {
 		.shell {
 			grid-template-columns: 1fr !important;
@@ -2011,6 +2024,16 @@
 			z-index: 100;
 			transform: translateX(0);
 			box-shadow: 4px 0 24px var(--shadow-color-strong);
+		}
+		.rail-dismiss {
+			display: block;
+			position: absolute;
+			inset: 0;
+			z-index: 99;
+			padding: 0;
+			border: 0;
+			background: transparent;
+			cursor: default;
 		}
 		.shell.rail-collapsed .rail {
 			transform: translateX(-100%);

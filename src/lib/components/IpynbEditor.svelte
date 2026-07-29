@@ -5,8 +5,15 @@
 	interface Props {
 		value: string;
 		onInput: (val: string) => void;
+		onAiTargetChange?: (target: {
+			text: string;
+			before: string;
+			after: string;
+			cursor: boolean;
+			cellIndex: number;
+		}) => void;
 	}
-	let { value, onInput }: Props = $props();
+	let { value, onInput, onAiTargetChange }: Props = $props();
 
 	type Cell = {
 		cell_type: 'markdown' | 'code';
@@ -24,6 +31,9 @@
 
 	let notebook: Notebook = $state({ cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 });
 	let parseError = $state<string | null>(null);
+	let rootEl: HTMLDivElement;
+	let activeCellIndex = 0;
+	let activeSelection: [number, number] = [0, 0];
 
 	$effect(() => {
 		try {
@@ -41,8 +51,40 @@
 
 	function updateCell(index: number, newSource: string) {
 		if (parseError) return;
-		notebook.cells[index].source = newSource.split('\n').map((line, i, arr) => line + (i < arr.length - 1 ? '\n' : ''));
+		notebook.cells[index].source = newSource
+			.split('\n')
+			.map((line, i, arr) => line + (i < arr.length - 1 ? '\n' : ''));
 		onInput(JSON.stringify(notebook, null, 2));
+	}
+
+	function emitAiTarget(index: number, textarea: HTMLTextAreaElement) {
+		activeCellIndex = index;
+		activeSelection = [textarea.selectionStart ?? 0, textarea.selectionEnd ?? 0];
+		if (!onAiTargetChange) return;
+		const source = textarea.value;
+		const from = textarea.selectionStart ?? 0;
+		const to = textarea.selectionEnd ?? from;
+		const N = 80;
+		onAiTargetChange({
+			text: source.slice(from, to),
+			before: source.slice(Math.max(0, from - N), from),
+			after: source.slice(to, Math.min(source.length, to + N)),
+			cursor: from === to,
+			cellIndex: index
+		});
+	}
+
+	export function focusEditor() {
+		const textareas = rootEl?.querySelectorAll<HTMLTextAreaElement>('.cell-input');
+		const textarea = textareas?.[activeCellIndex] ?? textareas?.[0];
+		if (!textarea) return;
+		textarea.focus();
+		const max = textarea.value.length;
+		textarea.setSelectionRange(
+			Math.min(activeSelection[0], max),
+			Math.min(activeSelection[1], max)
+		);
+		emitAiTarget(activeCellIndex, textarea);
 	}
 
 	let pyodideInstance: any = null;
@@ -50,8 +92,9 @@
 
 	async function getPyodide() {
 		if (pyodideInstance) return pyodideInstance;
-		if (pyodideLoading) return new Promise(resolve => setTimeout(async () => resolve(await getPyodide()), 500));
-		
+		if (pyodideLoading)
+			return new Promise((resolve) => setTimeout(async () => resolve(await getPyodide()), 500));
+
 		pyodideLoading = true;
 		try {
 			pyodideInstance = await loadPyodide({
@@ -66,7 +109,7 @@
 	async function executeCell(index: number) {
 		const cell = notebook.cells[index];
 		if (cell.cell_type !== 'code') return;
-		
+
 		const canExecute = localStorage.getItem('myelin_jupyter_exec') === 'true';
 		if (!canExecute) {
 			alert('Jupyter code execution is disabled. Enable it in Settings to run code blocks.');
@@ -76,15 +119,15 @@
 		const code = cell.source.join('');
 		try {
 			const pyodide = await getPyodide();
-			
+
 			let stdoutLines: string[] = [];
 			let stderrLines: string[] = [];
-			
+
 			pyodide.setStdout({ batched: (msg: string) => stdoutLines.push(msg + '\n') });
 			pyodide.setStderr({ batched: (msg: string) => stderrLines.push(msg + '\n') });
-			
+
 			await pyodide.runPythonAsync(code);
-			
+
 			const outputs = [];
 			if (stdoutLines.length > 0) {
 				outputs.push({ output_type: 'stream', name: 'stdout', text: stdoutLines });
@@ -92,16 +135,18 @@
 			if (stderrLines.length > 0) {
 				outputs.push({ output_type: 'stream', name: 'stderr', text: stderrLines });
 			}
-			
+
 			cell.outputs = outputs;
 			cell.execution_count = (cell.execution_count || 0) + 1;
 			onInput(JSON.stringify(notebook, null, 2));
 		} catch (e) {
-			cell.outputs = [{
-				output_type: 'stream',
-				name: 'stderr',
-				text: [String(e)]
-			}];
+			cell.outputs = [
+				{
+					output_type: 'stream',
+					name: 'stderr',
+					text: [String(e)]
+				}
+			];
 			onInput(JSON.stringify(notebook, null, 2));
 		}
 	}
@@ -116,7 +161,7 @@
 	}
 </script>
 
-<div class="ipynb-editor">
+<div class="ipynb-editor" bind:this={rootEl}>
 	{#if parseError}
 		<div class="error">{parseError}</div>
 	{:else}
@@ -124,7 +169,11 @@
 			{#each notebook.cells as cell, i}
 				<div class="cell {cell.cell_type}">
 					<div class="cell-header">
-						<span>{cell.cell_type === 'code' ? `In [${cell.execution_count || ' '}]` : 'Markdown'}</span>
+						<span
+							>{cell.cell_type === 'code'
+								? `In [${cell.execution_count || ' '}]`
+								: 'Markdown'}</span
+						>
 						{#if cell.cell_type === 'code'}
 							<button class="run-btn" onclick={() => executeCell(i)}>▶ Run</button>
 						{/if}
@@ -132,7 +181,15 @@
 					<textarea
 						class="cell-input"
 						value={cell.source.join('')}
-						oninput={(e) => updateCell(i, (e.target as HTMLTextAreaElement).value)}
+						oninput={(e) => {
+							const textarea = e.target as HTMLTextAreaElement;
+							updateCell(i, textarea.value);
+							emitAiTarget(i, textarea);
+						}}
+						onfocus={(e) => emitAiTarget(i, e.currentTarget)}
+						onselect={(e) => emitAiTarget(i, e.currentTarget)}
+						onkeyup={(e) => emitAiTarget(i, e.currentTarget)}
+						onmouseup={(e) => emitAiTarget(i, e.currentTarget)}
 						rows={Math.max(2, cell.source.length)}
 					></textarea>
 					{#if cell.cell_type === 'code' && cell.outputs && cell.outputs.length > 0}

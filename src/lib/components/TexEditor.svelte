@@ -1,9 +1,21 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection } from '@codemirror/view';
+	import {
+		EditorView,
+		keymap,
+		lineNumbers,
+		highlightActiveLine,
+		highlightActiveLineGutter,
+		drawSelection
+	} from '@codemirror/view';
 	import { EditorState, Compartment } from '@codemirror/state';
 	import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-	import { StreamLanguage, syntaxHighlighting, defaultHighlightStyle, bracketMatching } from '@codemirror/language';
+	import {
+		StreamLanguage,
+		syntaxHighlighting,
+		defaultHighlightStyle,
+		bracketMatching
+	} from '@codemirror/language';
 	import { stex } from '@codemirror/legacy-modes/mode/stex';
 	import { lintGutter, setDiagnostics, type Diagnostic as CmDiagnostic } from '@codemirror/lint';
 	import { theme } from '$lib/theme';
@@ -17,6 +29,12 @@
 	interface Props {
 		value: string;
 		onInput: (val: string) => void;
+		onAiTargetChange?: (target: {
+			text: string;
+			before: string;
+			after: string;
+			cursor: boolean;
+		}) => void;
 		diagnostics?: TexDiagnostic[];
 		// Compile controls, rendered into the same toolbar as the format buttons.
 		onCompile?: () => void;
@@ -28,6 +46,7 @@
 	let {
 		value,
 		onInput,
+		onAiTargetChange,
 		diagnostics = [],
 		onCompile,
 		autoCompile = false,
@@ -40,6 +59,19 @@
 	let view: EditorView | undefined;
 	const themeCompartment = new Compartment();
 
+	function emitAiTarget(editor: EditorView) {
+		if (!onAiTargetChange || !editor.hasFocus) return;
+		const { from, to } = editor.state.selection.main;
+		const source = editor.state.doc.toString();
+		const N = 80;
+		onAiTargetChange({
+			text: source.slice(from, to),
+			before: source.slice(Math.max(0, from - N), from),
+			after: source.slice(to, Math.min(source.length, to + N)),
+			cursor: from === to
+		});
+	}
+
 	// One theme that defers all colors to the app's CSS vars, so it tracks the
 	// light/dark toggle for free; we only flip CodeMirror's internal `dark` flag
 	// (affects default selection styling) via the compartment.
@@ -47,8 +79,14 @@
 		'&': { height: '100%', backgroundColor: 'var(--bg-page)', color: 'var(--text-primary)' },
 		'.cm-content': { fontFamily: 'var(--font-mono)', fontSize: '0.9rem', padding: '1rem 0' },
 		'.cm-scroller': { overflow: 'auto', lineHeight: '1.5' },
-		'.cm-gutters': { backgroundColor: 'var(--bg-panel)', color: 'var(--text-secondary)', border: 'none' },
-		'.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--accent-200, #6ea8fe) 9%, transparent)' },
+		'.cm-gutters': {
+			backgroundColor: 'var(--bg-panel)',
+			color: 'var(--text-secondary)',
+			border: 'none'
+		},
+		'.cm-activeLine': {
+			backgroundColor: 'color-mix(in srgb, var(--accent-200, #6ea8fe) 9%, transparent)'
+		},
 		'.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text-primary)' },
 		'.cm-cursor': { borderLeftColor: 'var(--text-primary)' },
 		'&.cm-focused': { outline: 'none' },
@@ -85,6 +123,10 @@
 		view.focus();
 	}
 
+	export function focusEditor() {
+		view?.focus();
+	}
+
 	onMount(() => {
 		view = new EditorView({
 			parent: host,
@@ -104,6 +146,7 @@
 					themeCompartment.of(makeThemeExt($theme === 'light')),
 					EditorView.updateListener.of((u) => {
 						if (u.docChanged) onInput(u.state.doc.toString());
+						if (u.selectionSet || u.focusChanged || u.docChanged) emitAiTarget(u.view);
 					})
 				]
 			})
@@ -139,11 +182,32 @@
 <div style="width: 100%; height: 100%; min-width: 0; display: flex; flex-direction: column;">
 	<div class="tex-toolbar">
 		<div class="tex-tools">
-			<button class="tex-btn" style="font-weight: bold;" onclick={() => insertText('\\textbf{', '}')} title="Bold">B</button>
-			<button class="tex-btn" style="font-style: italic;" onclick={() => insertText('\\textit{', '}')} title="Italic">I</button>
-			<button class="tex-btn" onclick={() => insertText('\\section{', '}')} title="Section">§</button>
-			<button class="tex-btn" style="font-family: serif;" onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')} title="Equation">∑</button>
-			<button class="tex-btn" onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')} title="Itemize">•=</button>
+			<button
+				class="tex-btn"
+				style="font-weight: bold;"
+				onclick={() => insertText('\\textbf{', '}')}
+				title="Bold">B</button
+			>
+			<button
+				class="tex-btn"
+				style="font-style: italic;"
+				onclick={() => insertText('\\textit{', '}')}
+				title="Italic">I</button
+			>
+			<button class="tex-btn" onclick={() => insertText('\\section{', '}')} title="Section"
+				>§</button
+			>
+			<button
+				class="tex-btn"
+				style="font-family: serif;"
+				onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')}
+				title="Equation">∑</button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')}
+				title="Itemize">•=</button
+			>
 		</div>
 		{#if onCompile}
 			<div class="tex-compile">
@@ -152,8 +216,8 @@
 					class="tex-auto"
 					class:on={autoCompile}
 					title="Recompile automatically a couple of seconds after you stop typing"
-					onclick={onToggleAuto}
-				>Auto: {autoCompile ? 'on' : 'off'}</button>
+					onclick={onToggleAuto}>Auto: {autoCompile ? 'on' : 'off'}</button
+				>
 				<button class="primary" disabled={busy} onclick={onCompile}>Compile to PDF</button>
 			</div>
 		{/if}

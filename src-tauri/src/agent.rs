@@ -353,10 +353,13 @@ pub struct SelectionArg {
     pub before: String,
     #[serde(default)]
     pub after: String,
-    /// A zero-length target captured from a right-click caret. In this mode
+    /// A zero-length target captured from the editor caret. In this mode
     /// `before`/`after` locate an insertion boundary rather than selected text.
     #[serde(default)]
     pub cursor: bool,
+    /// For Jupyter notebooks, the 0-based cell containing this source target.
+    #[serde(default)]
+    pub cell_index: Option<usize>,
 }
 
 /// Locate the byte range in `body` an armed selection refers to. Picks the
@@ -408,6 +411,19 @@ pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)
 pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> Option<WritePlan> {
     let content = strip_prompt_markers(content);
     if sel.cursor {
+        // Markdown frontmatter parsing may represent a visually empty editor as
+        // one or more newlines while the frontend's cursor target has no anchors.
+        // Every boundary would otherwise match and be rejected as ambiguous,
+        // even though an empty note has only one meaningful insertion location.
+        if body.trim().is_empty()
+            && sel.before.trim().is_empty()
+            && sel.after.trim().is_empty()
+        {
+            return Some(WritePlan {
+                new_body: content,
+                op: WriteOp::EditSnippet,
+            });
+        }
         let positions = (0..=body.len()).filter(|position| {
             body.is_char_boundary(*position)
                 && (sel.before.is_empty() || body[..*position].ends_with(&sel.before))
@@ -528,6 +544,32 @@ fn normalize_append_content(current_body: &str, content: &str) -> String {
         }
     }
     payload.trim().to_string()
+}
+
+/// Reject leaked model/tool framing instead of silently cleaning and saving a
+/// guessed note body. This is a final host-side guard for both the sidecar and
+/// the legacy in-process streaming path.
+fn note_content_has_protocol_residue(content: &str) -> bool {
+    let tail: String = content
+        .chars()
+        .rev()
+        .take(256)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let tail = tail.to_ascii_lowercase();
+    [
+        "<|tool_call",
+        "<tool_call",
+        "</tool_call",
+        "/content>}",
+        "</content>",
+        "> write_note(content=",
+        "] write_note(content=",
+    ]
+    .iter()
+    .any(|marker| tail.contains(marker))
 }
 
 /// Strip HTML line-break tags and model-invented markup artifacts from model-
@@ -1946,6 +1988,12 @@ impl Tool for WriteNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if note_content_has_protocol_residue(&args.content) {
+            return Err(ToolError {
+                message: "Generation mixed tool protocol text into the note. Live preview reverted; no changes were saved."
+                    .to_string(),
+            });
+        }
         let content = clean_note_content(&strip_prompt_markers(&args.content));
 
         let existing = match self.state.resolve_chat_target_note("") {
@@ -1968,9 +2016,25 @@ impl Tool for WriteNoteTool {
         // the selected span instead of replacing the whole body.
         let armed_selection = self.state.current_selection();
         let scoped = match armed_selection.as_ref() {
-            Some(sel) => Some(selection_scoped_plan(&existing.body, &content, sel).ok_or_else(|| ToolError {
-                message: "The armed selection could not be located or the model returned a full-note rewrite; no changes were made.".to_string(),
-            })?),
+            Some(sel) => {
+                let plan = selection_scoped_plan(&existing.body, &content, sel).ok_or_else(|| {
+                    log::warn!(
+                        "write_note target mismatch: cursor={} body_bytes={} body_trim_bytes={} text_bytes={} before_bytes={} before_trim_bytes={} after_bytes={} after_trim_bytes={}",
+                        sel.cursor,
+                        existing.body.len(),
+                        existing.body.trim().len(),
+                        sel.text.len(),
+                        sel.before.len(),
+                        sel.before.trim().len(),
+                        sel.after.len(),
+                        sel.after.trim().len(),
+                    );
+                    ToolError {
+                        message: "The armed selection could not be located or the model returned a full-note rewrite; no changes were made.".to_string(),
+                    }
+                })?;
+                Some(plan)
+            }
             None => None,
         };
 
@@ -2671,7 +2735,25 @@ impl Tool for EditNotebookTool {
             cell_type: args.cell_type.as_deref().unwrap_or("code"),
             content: args.content.as_deref().unwrap_or(""),
         };
-        let new_body = match crate::notebook::apply(&existing.body, &op) {
+        let armed_target = self.state.current_selection();
+        let new_body_result = if let Some(selection) =
+            armed_target.as_ref().filter(|selection| selection.cell_index.is_some())
+        {
+            crate::notebook::apply_targeted(
+                &existing.body,
+                &op,
+                &crate::notebook::CellTarget {
+                    index: selection.cell_index.unwrap_or_default(),
+                    text: &selection.text,
+                    before: &selection.before,
+                    after: &selection.after,
+                    cursor: selection.cursor,
+                },
+            )
+        } else {
+            crate::notebook::apply(&existing.body, &op)
+        };
+        let new_body = match new_body_result {
             Ok(b) => b,
             Err(msg) => return Ok(msg),
         };
@@ -3163,6 +3245,16 @@ mod tests {
     }
 
     #[test]
+    fn generated_note_protocol_residue_is_rejected_without_false_positive() {
+        assert!(note_content_has_protocol_residue(
+            "# Essay\nUseful prose.\n/content>} > write_note(content="
+        ));
+        assert!(!note_content_has_protocol_residue(
+            "# API\nCall `write_note(content)` in this example."
+        ));
+    }
+
+    #[test]
     fn clean_note_content_normalizes_break_variants() {
         assert_eq!(
             clean_note_content("First<br>Second Third\\nFourth"),
@@ -3464,6 +3556,7 @@ mod tests {
             before: "loyal.\n\n".into(),
             after: "".into(),
             cursor: false,
+            cell_index: None,
         };
         let (s, e) = locate_selection(body, &sel).unwrap();
         assert_eq!(s, body.rfind("Cats are nice.").unwrap());
@@ -3480,6 +3573,7 @@ mod tests {
             before: "Intro\n\n**".into(),
             after: "**\n\n## More".into(),
             cursor: false,
+            cell_index: None,
         };
         let (s, e) = locate_selection(body, &sel).unwrap();
         assert_eq!(&body[s..e], "Food is essential and good.");
@@ -3500,6 +3594,7 @@ mod tests {
             before: "Intro line.\n\n".into(),
             after: "\n\nClosing line.".into(),
             cursor: false,
+            cell_index: None,
         };
         let plan = selection_scoped_plan(body, "New paragraph.", &sel).unwrap();
         assert_eq!(plan.op, WriteOp::EditSnippet);
@@ -3517,6 +3612,7 @@ mod tests {
             before: "Keep this.\n\n".into(),
             after: "\n\nKeep that.".into(),
             cursor: false,
+            cell_index: None,
         };
         let plan = selection_scoped_plan(body, "", &sel).unwrap();
         assert_eq!(plan.new_body, "Keep this.\n\n\n\nKeep that.");
@@ -3530,6 +3626,7 @@ mod tests {
             before: "Alpha ".into(),
             after: "beta.".into(),
             cursor: true,
+            cell_index: None,
         };
         let plan = selection_scoped_plan(body, "bright", &sel).unwrap();
         assert_eq!(plan.new_body, "Alpha bright beta.");
@@ -3542,8 +3639,22 @@ mod tests {
             before: String::new(),
             after: String::new(),
             cursor: true,
+            cell_index: None,
         };
         assert!(selection_scoped_plan("abc", "x", &sel).is_none());
+    }
+
+    #[test]
+    fn cursor_scoped_plan_inserts_into_newline_normalized_empty_note() {
+        let sel = SelectionArg {
+            text: String::new(),
+            before: "\n".to_string(),
+            after: String::new(),
+            cursor: true,
+            cell_index: None,
+        };
+        let plan = selection_scoped_plan("\n", "A useful essay.", &sel).unwrap();
+        assert_eq!(plan.new_body, "A useful essay.");
     }
 
     #[test]
@@ -3554,6 +3665,7 @@ mod tests {
             before: "Intro line.\n\n".into(),
             after: "\n\nClosing line.".into(),
             cursor: false,
+            cell_index: None,
         };
         // Model returned the WHOLE note (contains the after-anchor text) → fall
         // through to normal planning (None) instead of splicing the whole note in.

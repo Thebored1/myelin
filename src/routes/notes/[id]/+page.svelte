@@ -15,14 +15,20 @@
 	} from '$lib/types';
 	import { onMount, onDestroy, tick } from 'svelte';
 	import { noteOpened, noteClosed } from '$lib/llamaWarm';
-	import { showSidebarToggle, noteSidebarOpen } from '$lib/stores';
+	import { chatSidebarShortcut, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
+	import { shortcutMatches } from '$lib/keyboardShortcut';
 	import { theme } from '$lib/theme';
 	import type Vditor from 'vditor';
 	import 'mathlive/fonts.css';
 
 	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 	import { hideThinkingContent } from '$lib/chatContent';
-	import { composeNoteStreamPreview } from '$lib/noteStreamPreview';
+	import { composeNoteStreamPreviewWithStatus } from '$lib/noteStreamPreview';
+	import {
+		canApplyReconciledNote,
+		editorNeedsAuthoritativeBody,
+		hasNoteMutation
+	} from '$lib/noteMutation';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 
@@ -34,7 +40,12 @@
 	let draftTags = $state('');
 	let isBusy = $state(false);
 	let message = $state('');
-	let summaryProgress = $state<{ phase: string; completed: number; total: number; message: string } | null>(null);
+	let summaryProgress = $state<{
+		phase: string;
+		completed: number;
+		total: number;
+		message: string;
+	} | null>(null);
 	// First LaTeX compile fetches Tectonic's ~50 MB bundle; show real progress.
 	let latexDownloadMsg = $state<string | null>(null);
 	// .tex live-preview state.
@@ -55,17 +66,59 @@
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
 	let copiedIdx = $state<number | null>(null);
+	let chatPersistTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function persistableChatHistory(messages: ChatMessage[]): ChatMessage[] {
+		return messages
+			.filter(
+				(message) =>
+					message.role === 'user' ||
+					!!message.content.trim() ||
+					!!message.tools?.length ||
+					message.error === true
+			)
+			.map(({ statusText: _statusText, ...message }) => ({
+				...message,
+				isStreaming: false
+			}));
+	}
+
+	async function persistChatHistory(noteId = note?.id, messages = chatMessages) {
+		if (!noteId) return;
+		try {
+			const persisted = persistableChatHistory(messages);
+			await invoke('save_chat_history', { noteId, chatHistory: persisted });
+			if (note?.id === noteId) note = { ...note, chatHistory: persisted };
+		} catch (error) {
+			console.error('Failed to persist chat history:', error);
+		}
+	}
+
+	function checkpointChatHistory(delay = 250) {
+		if (chatPersistTimer) clearTimeout(chatPersistTimer);
+		chatPersistTimer = setTimeout(() => {
+			chatPersistTimer = undefined;
+			void persistChatHistory();
+		}, delay);
+	}
 
 	// Debug window state for AI performance metrics.
-	let showDebugWindow = $state(
-		localStorage.getItem('myelin_debug_window') !== 'false'
-	);
+	let showDebugWindow = $state(localStorage.getItem('myelin_debug_window') !== 'false');
 	$effect(() => {
 		localStorage.setItem('myelin_debug_window', String(showDebugWindow));
 	});
 	type DebugTraceEntry = { time: number; msg: string; kind: string };
 	let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
 	let activeAiComposerMode: 'chat' | 'editor' | null = null;
+	let activeChatNoteId: string | null = null;
+	type AiInteractionMode = 'chat' | 'operation';
+	let aiInteractionMode = $state<AiInteractionMode>('chat');
+
+	function setAiInteractionMode(mode: AiInteractionMode) {
+		aiInteractionMode = mode;
+		if (mode === 'chat') writeTargetNotice = false;
+		localStorage.setItem('myelin_ai_interaction_mode', mode);
+	}
 
 	function setStreamingStatus(statusText: string | undefined) {
 		chatMessages = chatMessages.map((message) =>
@@ -126,23 +179,21 @@
 		text: string;
 		before: string;
 		after: string;
+		cursor: boolean;
+		cellIndex?: number;
 		chars: number;
 		words: number;
 	} | null>(null);
 	let selDebounce: ReturnType<typeof setTimeout> | undefined;
-	type AiEditAction = 'replace' | 'rewrite' | 'delete' | 'write';
-	type AiEditTarget = { text: string; before: string; after: string; cursor: boolean };
-	let aiEditMenu = $state<{
-		x: number;
-		y: number;
-		target: AiEditTarget;
-		hasSelection: boolean;
-	} | null>(null);
-	let aiEditAction = $state<AiEditAction>('write');
-	let aiEditInstruction = $state('');
-	let aiEditBusy = $state(false);
-	let aiEditError = $state('');
+	type AiEditTarget = {
+		text: string;
+		before: string;
+		after: string;
+		cursor: boolean;
+		cellIndex?: number;
+	};
 	let activeAiEditTarget: AiEditTarget | null = null;
+	let writeTargetNotice = $state(false);
 
 	// Prompt-box context-usage ring: uses real token count from the server when
 	// available (chat_usage event), otherwise estimates from characters (~32K tokens ≈ 130K chars).
@@ -202,9 +253,9 @@
 	let vditorInstance: Vditor | null = null;
 	let VditorConstructor = $state<any>(null);
 	let vditorLoading = false;
-		// Keep the note render separate from the editor/tool bundle. The bundle is
-		// requested only after the note has had a chance to paint.
-		let toolsReady = $state(false);
+	// Keep the note render separate from the editor/tool bundle. The bundle is
+	// requested only after the note has had a chance to paint.
+	let toolsReady = $state(false);
 	let fullscreenShortcut = $state('Esc');
 	let noteAnimationTimer: ReturnType<typeof setTimeout> | undefined;
 	// Live note streaming (real token-by-token writes from the backend).
@@ -212,6 +263,7 @@
 	let noteStreamBuf = '';
 	let noteStreamBackup = '';
 	let savedEditorRange: Range | null = null;
+	let shortcutEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
 
 	let isSourceMaterial = $state(false);
@@ -224,6 +276,8 @@
 	let HtmlViewerComponent = $state<any>(null);
 	let TexEditorComponent = $state<any>(null);
 	let IpynbEditorComponent = $state<any>(null);
+	let texEditorInstance: { focusEditor?: () => void } | undefined = $state();
+	let ipynbEditorInstance: { focusEditor?: () => void } | undefined = $state();
 	let activeSourceId = $state<string | null>(null);
 	let activeSourceBytes = $state<Uint8Array | null>(null);
 	let scratchpadSavedId = $state<string | null>(null);
@@ -258,7 +312,7 @@
 			const resizerWidth = 10;
 			const minSourceWidth = 320;
 			const maxEditorRatio = ((rect.width - NOTE_MIN_WIDTH - resizerWidth) / rect.width) * 100;
-			const minSourceRatio = ((minSourceWidth) / rect.width) * 100;
+			const minSourceRatio = (minSourceWidth / rect.width) * 100;
 			if (maxEditorRatio >= minSourceRatio) {
 				splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxEditorRatio));
 			}
@@ -306,6 +360,68 @@
 		setTimeout(() => {
 			focusEditor();
 		}, 0);
+	}
+
+	function captureShortcutEditorTarget() {
+		if (workingDocType !== 'md' || !vditorContainer) return;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		const selection = window.getSelection();
+		if (!editorEl || !selection || selection.rangeCount === 0) return;
+		const range = selection.getRangeAt(0);
+		if (!editorEl.contains(range.commonAncestorContainer)) return;
+		shortcutEditorRange = range.cloneRange();
+		// Capture synchronously, before focusing the textarea changes the browser
+		// selection, so write operations retain their cursor/selection target.
+		captureEditorSelection();
+	}
+
+	function restoreShortcutEditorFocus() {
+		if (workingDocType === 'tex') {
+			texEditorInstance?.focusEditor?.();
+			return;
+		}
+		if (workingDocType === 'ipynb') {
+			ipynbEditorInstance?.focusEditor?.();
+			return;
+		}
+		focusEditor();
+		const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+		const selection = window.getSelection();
+		if (
+			editorEl &&
+			selection &&
+			shortcutEditorRange &&
+			editorEl.contains(shortcutEditorRange.commonAncestorContainer)
+		) {
+			selection.removeAllRanges();
+			selection.addRange(shortcutEditorRange);
+		}
+		shortcutEditorRange = null;
+	}
+
+	async function handleChatSidebarShortcut(event: KeyboardEvent) {
+		if (
+			event.repeat ||
+			!shortcutMatches(event, $chatSidebarShortcut) ||
+			!note ||
+			event.defaultPrevented
+		)
+			return;
+		event.preventDefault();
+		event.stopPropagation();
+
+		if ($noteSidebarOpen && document.activeElement === chatTextareaEl) {
+			$noteSidebarOpen = false;
+			await tick();
+			restoreShortcutEditorFocus();
+			return;
+		}
+
+		captureShortcutEditorTarget();
+		activeSidebarTab = 'chat';
+		$noteSidebarOpen = true;
+		await tick();
+		chatTextareaEl?.focus();
 	}
 
 	let userScrolledUp = false;
@@ -427,62 +543,49 @@
 		};
 	}
 
-	// Paint the armed selection with the CSS Custom Highlight API so it stays
-	// visible even when focus leaves the editor (e.g. while typing in the prompt).
-	// It's independent of the browser's native selection, which collapses on blur.
-	const HIGHLIGHT_SUPPORTED =
-		typeof CSS !== 'undefined' &&
-		!!(CSS as any).highlights &&
-		typeof (window as any).Highlight !== 'undefined';
+	function computeSourceCursor(): AiEditTarget | null {
+		if (!vditorInstance || !vditorContainer) return null;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		const sel = window.getSelection();
+		if (!editorEl || !sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+		const range = sel.getRangeAt(0);
+		if (!editorEl.contains(range.startContainer)) return null;
 
-	function setArmedHighlight(range: Range | null) {
-		if (!HIGHLIGHT_SUPPORTED) return;
-		const reg = (CSS as any).highlights as Map<string, unknown>;
-		if (range) reg.set('ai-armed', new (window as any).Highlight(range));
-		else reg.delete('ai-armed');
+		let renderedOffset = textOffsetOf(editorEl, range.startContainer, range.startOffset);
+		if (renderedOffset == null) {
+			try {
+				const prefix = document.createRange();
+				prefix.selectNodeContents(editorEl);
+				prefix.setEnd(range.startContainer, range.startOffset);
+				renderedOffset = prefix.toString().length;
+			} catch {
+				return null;
+			}
+		}
+		const source = vditorInstance.getValue();
+		if (!source.trim()) {
+			return { text: '', before: '', after: '', cursor: true };
+		}
+		const position = Math.min(renderedOffset, source.length);
+		const N = 80;
+		return {
+			text: '',
+			before: source.slice(Math.max(0, position - N), position),
+			after: source.slice(position, Math.min(source.length, position + N)),
+			cursor: true
+		};
 	}
 
 	function clearArmedSelection() {
 		armedSelection = null;
-		setArmedHighlight(null);
 	}
 
-	// Build a DOM Range from rendered-text offsets (inverse of textOffsetOf) so we
-	// can re-highlight a span the user can no longer natively select.
-	function rangeFromRenderedOffsets(
-		editorEl: HTMLElement,
-		startOff: number,
-		endOff: number
-	): Range | null {
-		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
-		let acc = 0;
-		let startNode: Node | null = null;
-		let startNodeOff = 0;
-		let endNode: Node | null = null;
-		let endNodeOff = 0;
-		let node: Node | null;
-		while ((node = walker.nextNode())) {
-			const len = node.textContent?.length ?? 0;
-			if (startNode === null && startOff <= acc + len) {
-				startNode = node;
-				startNodeOff = startOff - acc;
-			}
-			if (endOff <= acc + len) {
-				endNode = node;
-				endNodeOff = endOff - acc;
-				break;
-			}
-			acc += len;
-		}
-		if (!startNode || !endNode) return null;
-		try {
-			const range = document.createRange();
-			range.setStart(startNode, Math.max(0, startNodeOff));
-			range.setEnd(endNode, Math.max(0, endNodeOff));
-			return range;
-		} catch {
-			return null;
-		}
+	// Keep the captured selection only while the user moves into the prompt.
+	// Any other click clears it; a new editor drag captures a fresh selection.
+	function onDocMouseDown(e: MouseEvent) {
+		const target = e.target as HTMLElement | null;
+		if (target?.closest('.prompt-box')) return;
+		if (armedSelection) clearArmedSelection();
 	}
 
 	function captureEditorSelection() {
@@ -490,24 +593,48 @@
 		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		if (!editorEl) return;
 		const sel = window.getSelection();
-		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+		if (!sel || sel.rangeCount === 0) return;
 		const range = sel.getRangeAt(0);
 		if (!editorEl.contains(range.commonAncestorContainer)) return;
+		if (sel.isCollapsed) {
+			const computed = computeSourceCursor();
+			if (computed) {
+				armedSelection = { ...computed, chars: 0, words: 0 };
+				writeTargetNotice = false;
+			}
+			return;
+		}
 		const computed = computeSourceSelection();
 		if (computed) {
 			const words = computed.text.trim().split(/\s+/).filter(Boolean).length;
-			armedSelection = { ...computed, chars: computed.text.length, words };
-			setArmedHighlight(range.cloneRange());
+			armedSelection = {
+				...computed,
+				cursor: false,
+				chars: computed.text.length,
+				words
+			};
+			writeTargetNotice = false;
 		}
 	}
 
-	// After the AI edits the armed selection, re-select the MODIFIED text: it now
-	// sits between the unchanged context anchors, so re-locate it, re-arm, and
-	// re-highlight (best-effort for the visual range on formatted content).
+	function captureExternalTarget(target: AiEditTarget | null) {
+		if (!target) {
+			clearArmedSelection();
+			return;
+		}
+		const words = target.text.trim().split(/\s+/).filter(Boolean).length;
+		armedSelection = {
+			...target,
+			chars: target.text.length,
+			words
+		};
+		writeTargetNotice = false;
+	}
+
+	// After the AI edits the armed selection, update its source anchors so an
+	// immediate follow-up can target the replacement without extra decoration.
 	function reselectAfterEdit() {
-		if (!armedSelection || !vditorInstance || !vditorContainer) return;
-		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
-		if (!editorEl) return;
+		if (!armedSelection || !vditorInstance) return;
 		const source = vditorInstance.getValue();
 		const before = armedSelection.before;
 		const after = armedSelection.after;
@@ -529,109 +656,16 @@
 			text: newText,
 			before: source.slice(Math.max(0, s - 40), s),
 			after: source.slice(e, Math.min(source.length, e + 40)),
+			cursor: false,
 			chars: newText.length,
 			words
-		};
-		setArmedHighlight(rangeFromRenderedOffsets(editorEl, s, e));
-	}
-
-	function cursorTargetAtPoint(e: MouseEvent): AiEditTarget | null {
-		if (!vditorInstance || !vditorContainer) return null;
-		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
-		if (!editorEl) return null;
-		const doc = document as Document & {
-			caretRangeFromPoint?: (x: number, y: number) => Range | null;
-			caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
-		};
-		let node: Node | null = null;
-		let offset = 0;
-		const range = doc.caretRangeFromPoint?.(e.clientX, e.clientY);
-		if (range) {
-			node = range.startContainer;
-			offset = range.startOffset;
-		} else {
-			const position = doc.caretPositionFromPoint?.(e.clientX, e.clientY);
-			if (position) {
-				node = position.offsetNode;
-				offset = position.offset;
-			}
-		}
-		if (!node || !editorEl.contains(node)) return null;
-		const renderedOffset = textOffsetOf(editorEl, node, offset);
-		if (renderedOffset == null) return null;
-		const source = vditorInstance.getValue();
-		const position = Math.min(renderedOffset, source.length);
-		return {
-			text: '',
-			before: source.slice(Math.max(0, position - 80), position),
-			after: source.slice(position, Math.min(source.length, position + 80)),
-			cursor: true
 		};
 	}
 
 	function armedEditTarget(): AiEditTarget | null {
-		return armedSelection ? { ...armedSelection, cursor: false } : null;
-	}
-
-	function openAiEditMenu(e: MouseEvent) {
-		// Always suppress the browser menu inside the Markdown editor. Selection
-		// mapping can fail for formatted IR nodes, but that must not let the native
-		// menu race and replace Myelin's popover.
-		e.preventDefault();
-		e.stopPropagation();
-		if (workingDocType !== 'md' || isChatStreaming || aiEditBusy) return;
-		const mapped = computeSourceSelection(false);
-		const armed = mapped ? null : armedEditTarget();
-		const textFallback = mapped || armed ? null : computeSourceSelection(true);
-		const target: AiEditTarget | null = mapped
-			? { ...mapped, cursor: false }
-			: armed ?? (textFallback ? { ...textFallback, cursor: false } : cursorTargetAtPoint(e));
-		if (!target) return;
-		if (mapped || textFallback) captureEditorSelection();
-		aiEditAction = target.cursor ? 'write' : 'rewrite';
-		aiEditInstruction = '';
-		aiEditError = '';
-		aiEditMenu = {
-			x: Math.min(e.clientX, window.innerWidth - 340),
-			y: Math.min(e.clientY, window.innerHeight - 250),
-			target,
-			hasSelection: !target.cursor
-		};
-	}
-
-	function closeAiEditMenu() {
-		if (aiEditBusy) return;
-		aiEditMenu = null;
-		aiEditError = '';
-		clearArmedSelection();
-	}
-
-	async function submitAiEdit() {
-		if (!note || !aiEditMenu || aiEditBusy) return;
-		if (aiEditAction !== 'delete' && !aiEditInstruction.trim()) return;
-		aiEditBusy = true;
-		aiEditError = '';
-		const requestId = `edit-${Date.now()}`;
-		activeAiEditTarget = { ...aiEditMenu.target };
-		beginAiRequest(requestId, 'editor', 'Preparing selected edit…');
-		try {
-			await invoke('ask_ai_edit', {
-				noteId: note.id,
-				instruction: aiEditInstruction.trim(),
-				action: aiEditAction,
-				requestId,
-				target: aiEditMenu.target
-			});
-			aiEditMenu = null;
-			// A deleted span cannot be reselected. Rewrites keep their anchors so
-			// note_written can select the replacement for an immediate follow-up.
-			if (aiEditAction === 'delete') clearArmedSelection();
-		} catch (error) {
-			aiEditError = extractChatErrorMessage(error);
-			failStreamingChatMessage(requestId, aiEditError);
-		} finally {
-			aiEditBusy = false;
-		}
+		if (!armedSelection) return null;
+		const { chars: _chars, words: _words, ...target } = armedSelection;
+		return target;
 	}
 
 	function onSelectionChange() {
@@ -1306,6 +1340,15 @@
 	async function loadCurrentNote(noteId: string) {
 		isLoadingNote = true;
 		toolsReady = false;
+		clearArmedSelection();
+		writeTargetNotice = false;
+		if (chatPersistTimer) {
+			clearTimeout(chatPersistTimer);
+			chatPersistTimer = undefined;
+		}
+		if (note && note.id !== noteId && chatMessages.length) {
+			await persistChatHistory(note.id, chatMessages);
+		}
 		destroyEditorInstance();
 		activeSourceBytes = null;
 		activeSourceId = null;
@@ -1442,17 +1485,18 @@
 
 	// A token (or several) of the note arrived — replace the old preview with the
 	// growing result only once there is content to show.
-	function appendNoteStream(delta: string) {
+	function appendNoteStream(delta: string): boolean {
 		if (!noteStreaming) beginNoteStream();
 		noteStreamBuf += delta;
+		const result = composeNoteStreamPreviewWithStatus(
+			noteStreamBackup,
+			noteStreamBuf,
+			activeAiEditTarget
+		);
 		if (vditorInstance) {
-			const preview = composeNoteStreamPreview(
-				noteStreamBackup,
-				noteStreamBuf,
-				activeAiEditTarget
-			);
-			vditorInstance.setValue(preview);
+			vditorInstance.setValue(result.preview);
 		}
+		return result.applied;
 	}
 
 	// The stream turned out not to be a whole-body replace (append/edit) — undo
@@ -1468,18 +1512,18 @@
 	function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		noteAnimationTimer = undefined;
-		const wasStreaming = noteStreaming;
-		const streamedContent = noteStreamBuf;
 		noteStreaming = false;
 		const baseContent =
 			mode === 'append' && vditorInstance ? vditorInstance.getValue().trimEnd() + '\n\n' : '';
 		const finalContent = baseContent + newContent;
 		if (note) note = { ...note, body: finalContent };
 		draftBody = finalContent;
-		// If the live replace already reached the exact authoritative body, avoid
-		// resetting Vditor a second time at commit (which causes a visible dump).
-		const previewIsFinal = mode === 'write' && wasStreaming && streamedContent === newContent;
-		if (vditorInstance && !previewIsFinal) vditorInstance.setValue(finalContent);
+		// Avoid a second visible reset only when the editor itself already contains
+		// the authoritative result. The streamed buffer may be stale or may cover
+		// only a cursor/selection target.
+		if (vditorInstance && editorNeedsAuthoritativeBody(vditorInstance.getValue(), finalContent)) {
+			vditorInstance.setValue(finalContent);
+		}
 	}
 
 	function initVditor() {
@@ -1951,12 +1995,17 @@
 		];
 		activeAiComposerMode = composerMode;
 		activeChatRequestId = requestId;
+		activeChatNoteId = note?.id ?? null;
 		setTimeout(() => scrollChatToBottom(true), 50);
 		return startTime;
 	}
 
 	async function sendChatMessage() {
 		if (!note || !chatInput.trim() || isChatStreaming) return;
+		if (aiInteractionMode === 'operation' && !armedEditTarget()) {
+			writeTargetNotice = true;
+			return;
+		}
 		const userText = chatInput.trim();
 		chatInput = '';
 		if (chatTextareaEl) chatTextareaEl.style.height = 'auto';
@@ -1965,7 +2014,23 @@
 
 	async function sendChatText(userText: string) {
 		if (!note) return;
+		const editorTarget = armedEditTarget();
+		if (aiInteractionMode === 'operation' && !editorTarget) {
+			writeTargetNotice = true;
+			if (!chatInput.trim()) chatInput = userText;
+			await tick();
+			if (chatTextareaEl) {
+				chatTextareaEl.style.height = 'auto';
+				chatTextareaEl.style.height = `${Math.min(chatTextareaEl.scrollHeight + 2, 150)}px`;
+				chatTextareaEl.focus();
+			}
+			return;
+		}
 		const requestId = Date.now().toString();
+		const composerMode = aiInteractionMode === 'operation' ? 'editor' : 'chat';
+		const selection =
+			composerMode === 'editor' ? editorTarget : editorTarget?.cursor ? null : editorTarget;
+		activeAiEditTarget = composerMode === 'editor' ? selection : null;
 		const snapshot: NoteSnapshot = {
 			noteBody: draftBody,
 			draftTitle: draftTitle,
@@ -1976,7 +2041,12 @@
 			...chatMessages,
 			{ role: 'user', content: userText, snapshotId: requestId, snapshot }
 		];
-		beginAiRequest(requestId, 'chat', 'Reading the note… warming the model…');
+		beginAiRequest(
+			requestId,
+			composerMode,
+			composerMode === 'editor' ? 'Preparing note edit…' : 'Reading the note… warming the model…'
+		);
+		checkpointChatHistory(0);
 		try {
 			await invoke('ask_ai_stream', {
 				noteId: note.id,
@@ -1984,8 +2054,8 @@
 				requestId,
 				// Working-doc type so the model edits as LaTeX / notebook, not Markdown.
 				docType: workingDocType,
-				selection: null,
-				interactionMode: 'chat'
+				selection,
+				interactionMode: aiInteractionMode
 			});
 		} catch (e) {
 			console.error('AI Error:', e);
@@ -2059,14 +2129,26 @@
 		return merged;
 	}
 
-	function wroteToCurrentNote(tools: { name: string; details: string }[] = []) {
-		if (!note) return false;
-		const currentTitle = note.title.trim().toLowerCase();
-		return tools.some(
-			(tool) =>
-				(tool.name === 'Write Note' || tool.name === 'Append Note') &&
-				tool.details.trim().toLowerCase() === currentTitle
-		);
+	async function reconcileRequestNote(expectedNoteId: string) {
+		if (!canApplyReconciledNote(expectedNoteId, note?.id)) return;
+		const refreshed = await invoke<NoteDocument>('load_note', { noteId: expectedNoteId });
+		// Loading is asynchronous. Re-check after it completes so navigation during
+		// the request cannot let a late completion overwrite the newly opened note.
+		if (!canApplyReconciledNote(expectedNoteId, note?.id)) return;
+		note = { ...refreshed, chatHistory: chatMessages };
+		if (!isSourceMaterial) {
+			draftTitle = refreshed.title;
+			draftBody = refreshed.body;
+			draftTags = refreshed.tags.join(', ');
+			if (
+				workingDocType === 'md' &&
+				vditorInstance &&
+				editorNeedsAuthoritativeBody(vditorInstance.getValue(), refreshed.body)
+			) {
+				vditorInstance.setValue(refreshed.body);
+			}
+		}
+		void fetchRelatedNotes();
 	}
 
 	async function finishStreamingChatMessage(
@@ -2077,6 +2159,7 @@
 		// otherwise it can close the current bubble while its sidecar stream is
 		// still running and allow another request to race with it.
 		if (activeChatRequestId !== requestId) return;
+		const requestNoteId = activeChatNoteId;
 		// A cancelled request can still arrive as chat_done. Revert any speculative
 		// editor preview unless note_written already committed the authoritative body.
 		cancelNoteStream();
@@ -2093,15 +2176,22 @@
 		});
 		// Keep the request marked active until persistence completes. Rewind/retry
 		// waits on this flag; otherwise its newer history can race an older save.
-		if (note) await invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+		if (chatPersistTimer) {
+			clearTimeout(chatPersistTimer);
+			chatPersistTimer = undefined;
+		}
+		if (note) await persistChatHistory(note.id, chatMessages);
+		if (requestNoteId && hasNoteMutation(tools)) {
+			try {
+				await reconcileRequestNote(requestNoteId);
+			} catch (error) {
+				console.error('Failed to reconcile completed note mutation:', error);
+			}
+		}
 		activeChatRequestId = null;
 		activeAiComposerMode = null;
 		activeAiEditTarget = null;
-		if (wroteToCurrentNote(tools)) {
-			// note_written already set the editor authoritatively — sync metadata
-			// from the backend but don't overwrite the editor content.
-			void refreshCurrentNoteFromBackend(true);
-		}
+		activeChatNoteId = null;
 	}
 
 	function extractChatErrorMessage(error: unknown): string {
@@ -2126,12 +2216,21 @@
 		// Tauri events are global; do not let an older request fail the current
 		// assistant bubble.
 		if (activeChatRequestId !== requestId) return;
+		const previewWasReverted = noteStreaming;
+		if (previewWasReverted && !errorMsg.includes('Live preview reverted; no changes were saved.')) {
+			errorMsg += ' Live preview reverted; no changes were saved.';
+		}
 		if (showDebugWindow && debugInfo) {
 			const finishedAt = Date.now();
-			debugInfo = { ...debugInfo, done: finishedAt, generationEnd: debugInfo.generationStart ? finishedAt : debugInfo.generationEnd,
-				trace: [...debugInfo.trace, { time: finishedAt, msg: `Error: ${errorMsg}`, kind: 'error' }] };
+			debugInfo = {
+				...debugInfo,
+				done: finishedAt,
+				generationEnd: debugInfo.generationStart ? finishedAt : debugInfo.generationEnd,
+				trace: [...debugInfo.trace, { time: finishedAt, msg: `Error: ${errorMsg}`, kind: 'error' }]
+			};
 		}
 		activeChatRequestId = null;
+		activeChatNoteId = null;
 		activeAiComposerMode = null;
 		// If a live note stream was interrupted, the note was never saved —
 		// restore the pre-stream content rather than leaving a partial draft.
@@ -2151,7 +2250,11 @@
 			}
 			return m;
 		});
-		if (note) invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+		if (chatPersistTimer) {
+			clearTimeout(chatPersistTimer);
+			chatPersistTimer = undefined;
+		}
+		if (note) void persistChatHistory(note.id, chatMessages);
 	}
 
 	async function resolveApproval(id: string, approved: boolean) {
@@ -2587,8 +2690,14 @@
 			el.classList.remove('force-expand');
 		});
 
-		// Only expand if there's an active text selection (not collapsed)
-		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+		if (!sel || sel.rangeCount === 0) return;
+
+		// Arm cursor and selection targets for Write mode (debounced so the
+		// browser has committed the final drag/caret position).
+		onSelectionChange();
+
+		// Link expansion is only relevant for a non-empty selection.
+		if (sel.isCollapsed) return;
 
 		// Expand links that intersect the current selection
 		const links = vditorContainer.querySelectorAll('[data-type="a"]');
@@ -2597,14 +2706,13 @@
 				link.classList.add('force-expand');
 			}
 		});
-
-		// Arm/refresh the editor selection for the AI (debounced).
-		onSelectionChange();
 	}
 
 	onMount(() => {
 		// Warm llama-server (safety net — the server is already started at app
 		// boot and stays warm for the entire session).
+		const savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
+		aiInteractionMode = savedInteractionMode === 'operation' ? 'operation' : 'chat';
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
@@ -2636,6 +2744,8 @@
 		const handleMediaChange = (_e: MediaQueryListEvent) => {};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
+		document.addEventListener('mousedown', onDocMouseDown, true);
+		window.addEventListener('keydown', handleChatSidebarShortcut, true);
 		let unlistenTool: () => void;
 
 		// Setup AI Streaming listeners
@@ -2658,9 +2768,10 @@
 						]
 					};
 				}
-				// If a selection was armed, re-select the modified span once the
-				// editor has re-rendered, so follow-up edits target the new text.
-				if (armedSelection) setTimeout(reselectAfterEdit, 60);
+				// Cursor anchors are consumed by an insertion. Selected spans are
+				// refreshed so an immediate follow-up can target the replacement.
+				if (armedSelection?.cursor || workingDocType !== 'md') clearArmedSelection();
+				else if (armedSelection) setTimeout(reselectAfterEdit, 60);
 			}
 		).then((fn) => (unlistenNoteWritten = fn));
 
@@ -2699,7 +2810,23 @@
 				activeChatRequestId !== event.payload.requestId
 			)
 				return;
-			appendNoteStream(event.payload.delta);
+			const applied = appendNoteStream(event.payload.delta);
+			if (!applied && showDebugWindow && debugInfo) {
+				debugInfo = {
+					...debugInfo,
+					trace: [
+						...debugInfo.trace,
+						{
+							time: Date.now(),
+							msg: `Note delta rejected: stream target not found (${event.payload.delta.length}c)`,
+							kind: 'note' as const
+						}
+					]
+				};
+			}
+			chatMessages = chatMessages.map((m) =>
+				m.isStreaming ? { ...m, statusText: 'Writing replacement…' } : m
+			);
 		}).then((fn) => (unlistenNoteDelta = fn));
 
 		listen<{ noteId: string; requestId: string }>('ai://note_stream_cancel', (event) => {
@@ -2803,6 +2930,7 @@
 				}
 				return m;
 			});
+			checkpointChatHistory();
 			if (showDebugWindow && debugInfo) {
 				if (debugInfo.firstChunk === null) {
 					debugInfo = {
@@ -2858,15 +2986,6 @@
 					event.payload.message,
 					event.payload.tools || []
 				);
-				if (showDebugWindow && debugInfo) {
-					debugInfo = {
-						...debugInfo,
-						trace: [
-							...debugInfo.trace,
-							{ time: Date.now(), msg: `Error: ${event.payload.message}`, kind: 'error' as const }
-						]
-					};
-				}
 			}
 		).then((fn) => (unlistenError = fn));
 
@@ -2931,6 +3050,8 @@
 		return () => {
 			mql.removeEventListener('change', handleMediaChange);
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
+			document.removeEventListener('mousedown', onDocMouseDown, true);
+			window.removeEventListener('keydown', handleChatSidebarShortcut, true);
 			window.removeEventListener('mousemove', handleGlobalMouseMove);
 			window.removeEventListener('mouseup', stopResizing);
 			window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -2958,12 +3079,15 @@
 	onDestroy(() => {
 		// Note view closing — server stays warm (started at app boot, lives until
 		// app exit). Only the note-editor UI is torn down.
+		if (chatPersistTimer) clearTimeout(chatPersistTimer);
+		if (note && chatMessages.length) void persistChatHistory(note.id, chatMessages);
 		noteClosed();
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
 		if (vditorInstance) vditorInstance.destroy();
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
+			document.removeEventListener('mousedown', onDocMouseDown, true);
 		}
 	});
 
@@ -3184,7 +3308,6 @@
 							class:toolbar-expanded={toolbarExpanded}
 							class:has-pdf-note={!!activeSourceBytes || (!isSourceMaterial && !!note)}
 							onclickcapture={handleVditorClick}
-							oncontextmenucapture={openAiEditMenu}
 							onkeydowncapture={handleVditorKeydownCapture}
 							onkeyupcapture={handleVditorKeyupCapture}
 							onwheelcapture={(e) => {
@@ -3203,6 +3326,7 @@
 						</div>
 					{:else if workingDocType === 'tex' && TexEditorComponent}
 						<TexEditorComponent
+							bind:this={texEditorInstance}
 							value={draftBody}
 							onInput={(val: string) => {
 								draftBody = val;
@@ -3212,6 +3336,7 @@
 							onCompile={() => compileTex({ manual: true })}
 							autoCompile={texAutoCompile}
 							onToggleAuto={() => (texAutoCompile = !texAutoCompile)}
+							onAiTargetChange={captureExternalTarget}
 							busy={isBusy}
 							statusMsg={latexDownloadMsg ?? (texCompiling ? 'Compiling…' : null)}
 						/>
@@ -3219,11 +3344,13 @@
 						<div class="editor-loading">Loading LaTeX editor…</div>
 					{:else if workingDocType === 'ipynb' && IpynbEditorComponent}
 						<IpynbEditorComponent
+							bind:this={ipynbEditorInstance}
 							value={draftBody}
 							onInput={(val: string) => {
 								draftBody = val;
 								triggerAutoSave();
 							}}
+							onAiTargetChange={captureExternalTarget}
 						/>
 					{:else}
 						<div class="editor-loading">Loading notebook editor…</div>
@@ -3384,9 +3511,10 @@
 								{#if chatMessages.length === 0}
 									<p class="empty-state">Ask me anything about this note or your library!</p>
 								{:else}
-					{#each chatMessages as msg, i}
-						{@const visibleContent = msg.role === 'assistant' ? hideThinkingContent(msg.content) : msg.content}
-						{#if msg.role === 'user' || visibleContent || (msg.tools && msg.tools.length > 0) || (msg.isApprovalRequest && msg.approvalStatus !== 'approved') || msg.isStreaming || msg.error}
+									{#each chatMessages as msg, i}
+										{@const visibleContent =
+											msg.role === 'assistant' ? hideThinkingContent(msg.content) : msg.content}
+										{#if msg.role === 'user' || visibleContent || (msg.tools && msg.tools.length > 0) || (msg.isApprovalRequest && msg.approvalStatus !== 'approved') || msg.isStreaming || msg.error}
 											<div
 												class="chat-message {msg.role}"
 												class:tool-only={!msg.content &&
@@ -3400,9 +3528,9 @@
 															{/each}
 														</div>
 													{/if}
-										{#if msg.error}
-											<span class="chat-error-text">
-												{visibleContent || 'Failed to generate response.'}
+													{#if msg.error}
+														<span class="chat-error-text">
+															{visibleContent || 'Failed to generate response.'}
 														</span>
 													{:else if msg.isApprovalRequest && msg.approvalStatus !== 'approved'}
 														<ChatToolIndicator
@@ -3414,12 +3542,12 @@
 																details: msg.approvalDetails || ''
 															}}
 														/>
-										{:else if msg.role === 'assistant' && visibleContent}
-											<div class="selectable-content">
-												{@html DOMPurify.sanitize(marked.parse(visibleContent) as string)}
-											</div>
-										{:else if visibleContent}
-											<span class="selectable-content">{visibleContent}</span>
+													{:else if msg.role === 'assistant' && visibleContent}
+														<div class="selectable-content">
+															{@html DOMPurify.sanitize(marked.parse(visibleContent) as string)}
+														</div>
+													{:else if visibleContent}
+														<span class="selectable-content">{visibleContent}</span>
 													{/if}
 													{#if msg.isStreaming && msg.startTime}
 														{#if !msg.content}
@@ -3455,11 +3583,11 @@
 														>
 													</div>
 												{/if}
-								{#if msg.role === 'assistant' && visibleContent && !msg.isStreaming}
+												{#if msg.role === 'assistant' && visibleContent && !msg.isStreaming}
 													<div class="chat-msg-actions assistant">
 														<button
 															class="rewind-btn copy-btn"
-																	onclick={() => copyMessage(i, visibleContent)}
+															onclick={() => copyMessage(i, visibleContent)}
 															title="Copy response"
 															aria-label="Copy response"
 														>
@@ -3560,11 +3688,12 @@
 												<span class="debug-label">Completion tokens:</span>
 												<span class="debug-value">{debugInfo.completionTokens || '—'}</span>
 											</div>
-							<div class="debug-row">
-								<span class="debug-label">Tokens/s (model):</span>
-								<span class="debug-value">
-									{#if debugInfo.generationStart && debugInfo.generationEnd}
-										{@const genSec = (debugInfo.generationEnd - debugInfo.generationStart) / 1000}
+											<div class="debug-row">
+												<span class="debug-label">Tokens/s (model):</span>
+												<span class="debug-value">
+													{#if debugInfo.generationStart && debugInfo.generationEnd}
+														{@const genSec =
+															(debugInfo.generationEnd - debugInfo.generationStart) / 1000}
 														{@const fromServer = debugInfo.completionTokens > 0}
 														{@const tokCount = fromServer
 															? debugInfo.completionTokens
@@ -3632,7 +3761,27 @@
 										placeholder="Ask AI…"
 										rows="1"
 									></textarea>
+									{#if writeTargetNotice && aiInteractionMode === 'operation'}
+										<div class="write-target-notice" role="status">
+											Place the cursor where you want to write, or select text to rewrite. Then send
+											again.
+										</div>
+									{/if}
 									<div class="prompt-toolbar">
+										<div class="interaction-mode" role="group" aria-label="AI interaction mode">
+											<button
+												type="button"
+												class:active={aiInteractionMode === 'chat'}
+												onclick={() => setAiInteractionMode('chat')}
+												title="Chat: answer questions without modifying the note">Chat</button
+											>
+											<button
+												type="button"
+												class:active={aiInteractionMode === 'operation'}
+												onclick={() => setAiInteractionMode('operation')}
+												title="Write: perform the request on the open note">Write</button
+											>
+										</div>
 										<button
 											type="button"
 											class="mode-pill"
@@ -3671,6 +3820,40 @@
 												/></svg
 											>
 										</button>
+										{#if armedSelection}
+											<button
+												type="button"
+												class="selection-pill"
+												onclick={clearArmedSelection}
+												title={armedSelection.cursor
+													? `Write target: ${armedSelection.cellIndex === undefined ? 'cursor' : `cell ${armedSelection.cellIndex + 1} cursor`}. Click to clear.`
+													: `Use your selection as AI context — ${armedSelection.chars} chars, ${armedSelection.words} word${armedSelection.words === 1 ? '' : 's'}. Click to clear.`}
+												aria-label={armedSelection.cursor
+													? 'Clear cursor target'
+													: `Clear selection (${armedSelection.chars} characters)`}
+											>
+												<svg
+													width="13"
+													height="13"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													><path
+														d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"
+													/></svg
+												>
+												<span>
+													{#if armedSelection.cellIndex !== undefined}
+														Cell {armedSelection.cellIndex + 1} ·
+													{/if}
+													{armedSelection.cursor ? 'Cursor' : `${armedSelection.chars} sel`}
+												</span>
+												<span class="sel-x" aria-hidden="true">✕</span>
+											</button>
+										{/if}
 										<div class="prompt-spacer"></div>
 										<button
 											type="button"
@@ -3779,45 +3962,6 @@
 		{/if}
 	</div>
 </div>
-
-{#if aiEditMenu}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="ai-edit-popover"
-		style={`left:${aiEditMenu.x}px;top:${aiEditMenu.y}px`}
-		onkeydown={(event) => {
-			if (event.key === 'Escape') closeAiEditMenu();
-			if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void submitAiEdit();
-		}}
-	>
-		<div class="ai-edit-actions">
-			{#if aiEditMenu.hasSelection}
-				{#each ['replace', 'rewrite', 'delete'] as action}
-					<button type="button" class:active={aiEditAction === action} onclick={() => (aiEditAction = action as AiEditAction)}
-						>{action[0].toUpperCase() + action.slice(1)}</button>
-				{/each}
-			{:else}
-				<strong>Write here</strong>
-			{/if}
-			<button class="ai-edit-close" type="button" onclick={closeAiEditMenu} aria-label="Close">×</button>
-		</div>
-		{#if aiEditAction !== 'delete'}
-			<textarea
-				bind:value={aiEditInstruction}
-				placeholder={aiEditAction === 'rewrite' ? 'How should this be rewritten?' : aiEditAction === 'replace' ? 'What should replace the selection?' : 'What should be written here?'}
-				rows="3"
-			></textarea>
-		{:else}
-			<p class="ai-edit-warning">Delete exactly the selected text?</p>
-		{/if}
-		{#if aiEditError}<p class="ai-edit-error">{aiEditError}</p>{/if}
-		<div class="ai-edit-footer">
-			<span>{aiEditMenu.hasSelection ? `${aiEditMenu.target.text.length} selected` : 'At cursor'}</span>
-			<button type="button" class:danger={aiEditAction === 'delete'} disabled={aiEditBusy || (aiEditAction !== 'delete' && !aiEditInstruction.trim())} onclick={() => void submitAiEdit()}
-				>{aiEditBusy ? 'Working…' : aiEditAction === 'delete' ? 'Delete' : 'Apply'}</button>
-		</div>
-	</div>
-{/if}
 
 <dialog
 	bind:this={versionPreviewDialog}
@@ -5751,13 +5895,16 @@
 	.chat-input-area textarea::placeholder {
 		color: var(--neutral-500);
 	}
-	/* The armed-selection highlight (CSS Custom Highlight API). Global because the
-	   ::highlight() pseudo applies to document-registered ranges, not scoped DOM. */
-	:global(::highlight(ai-armed)) {
-		background-color: color-mix(in srgb, var(--accent-100) 24%, transparent);
-		border-radius: 2px;
+	.write-target-notice {
+		margin: 2px var(--space-2) 4px;
+		padding: 7px 9px;
+		border: 1px solid color-mix(in srgb, var(--accent-300) 35%, var(--border-default));
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--accent-500) 8%, transparent);
+		color: var(--text-secondary);
+		font-size: 0.72rem;
+		line-height: 1.4;
 	}
-
 	.prompt-toolbar {
 		display: flex;
 		align-items: center;
@@ -5768,77 +5915,37 @@
 		flex: 1;
 	}
 
-	.ai-edit-popover {
-		position: fixed;
-		z-index: 10000;
-		width: 320px;
-		padding: 10px;
+	.interaction-mode {
+		display: inline-flex;
+		height: 28px;
+		padding: 2px;
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-md);
 		background: var(--neutral-950);
-		box-shadow: 0 14px 40px rgb(0 0 0 / 35%);
 	}
-	.ai-edit-actions,
-	.ai-edit-footer {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-	}
-	.ai-edit-actions button {
+	.interaction-mode button {
+		padding: 0 9px;
 		border: 0;
-		border-radius: 5px;
+		border-radius: calc(var(--radius-md) - 2px);
 		background: transparent;
 		color: var(--text-secondary);
-		padding: 5px 8px;
+		font-size: 0.68rem;
+		font-weight: 600;
+		cursor: pointer;
 	}
-	.ai-edit-actions button.active {
-		background: var(--neutral-800);
+	.interaction-mode button:hover {
 		color: var(--text-primary);
 	}
-	.ai-edit-actions .ai-edit-close {
-		margin-left: auto;
-		font-size: 18px;
-	}
-	.ai-edit-popover textarea {
-		box-sizing: border-box;
-		width: 100%;
-		margin: 9px 0;
-		padding: 8px;
-		resize: vertical;
-		border: 1px solid var(--border-default);
-		border-radius: 6px;
-		background: var(--neutral-1000);
-		color: var(--text-primary);
-	}
-	.ai-edit-footer {
-		justify-content: space-between;
-		color: var(--text-secondary);
-		font-size: 0.75rem;
-	}
-	.ai-edit-footer button {
-		padding: 6px 12px;
-		border: 0;
-		border-radius: 6px;
-		background: var(--accent-200);
-		color: var(--neutral-1000);
-	}
-	.ai-edit-footer button.danger {
-		background: var(--danger-solid);
-		color: white;
-	}
-	.ai-edit-warning,
-	.ai-edit-error {
-		margin: 12px 0;
-		font-size: 0.82rem;
-	}
-	.ai-edit-error {
-		color: var(--danger-text);
+	.interaction-mode button.active {
+		background: var(--accent-100);
+		color: var(--bg-base);
 	}
 
 	/* Shared control baseline: same height, calm by default, theme-consistent. */
 	.mode-pill,
 	.prompt-icon-btn,
-	.send-btn {
+	.send-btn,
+	.selection-pill {
 		height: 28px;
 		display: inline-flex;
 		align-items: center;
@@ -5891,6 +5998,35 @@
 	.prompt-icon-btn:hover {
 		background: var(--neutral-900);
 		color: var(--text-primary);
+	}
+	.selection-pill {
+		gap: 6px;
+		padding: 0 5px 0 9px;
+		border-radius: var(--radius-md);
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--accent-100);
+		background: color-mix(in srgb, var(--accent-100) 9%, transparent);
+	}
+	.selection-pill:hover {
+		background: color-mix(in srgb, var(--accent-100) 15%, transparent);
+	}
+	.selection-pill svg {
+		opacity: 0.75;
+	}
+	.selection-pill .sel-x {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		opacity: 0.5;
+		font-size: 0.66rem;
+	}
+	.selection-pill:hover .sel-x {
+		opacity: 0.95;
+		background: color-mix(in srgb, var(--accent-100) 22%, transparent);
 	}
 
 	.debug-btn {

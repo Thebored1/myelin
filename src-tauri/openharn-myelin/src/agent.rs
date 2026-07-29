@@ -421,14 +421,14 @@ async fn detect_intent_in_session(
     if let Some(key) = api_key.filter(|key| !key.is_empty()) {
         request = request.bearer_auth(key);
     }
-    let (content, mut calls) = match request.send().await {
+    let (content, mut calls, _) = match request.send().await {
         Ok(response) if response.status().is_success() => {
-            match stream_upstream(response, tx, false, true, false).await {
+            match stream_upstream(response, tx, false, true, false, &route_schemas).await {
                 Ok(result) => result,
-                Err(_) => (String::new(), Vec::new()),
+                Err(_) => (String::new(), Vec::new(), false),
             }
         }
-        _ => (String::new(), Vec::new()),
+        _ => (String::new(), Vec::new(), false),
     };
     if calls.is_empty() {
         calls = harness::parse_text_tool_calls(&content, &route_schemas).unwrap_or_default();
@@ -678,7 +678,8 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 .await;
             return;
         }
-        let (content, _) = match stream_upstream(resp, &tx, no_think, false, false).await {
+        let (content, _, _) =
+            match stream_upstream(resp, &tx, no_think, false, false, &effective_schemas).await {
             Ok(v) => v,
             Err(e) => {
                 let _ = tx.send(Out::Error(e)).await;
@@ -873,13 +874,14 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         // content. Suppress that JSON from the chat bubble and expose its real
         // content deltas to the note preview instead.
         let suppress_text_call = prompt_tools && friendly && intent_is_tool;
-        let (mut content, mut tool_calls) =
+        let (mut content, mut tool_calls, streamed_incomplete_candidate) =
             match stream_upstream(
                 resp,
                 &tx,
                 no_think,
                 suppress_text_call,
                 stream_note_preview,
+                &effective_schemas,
             )
             .await
             {
@@ -896,6 +898,9 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                         strict = true;
                         no_think = false;
                         continue;
+                    }
+                    if stream_note_preview {
+                        let _ = tx.send(Out::NoteCancel).await;
                     }
                     let _ = tx.send(Out::Error(e)).await;
                     return;
@@ -923,10 +928,16 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 no_think = false;
                 continue;
             }
+            if stream_note_preview {
+                let _ = tx.send(Out::NoteCancel).await;
+            }
+            let message = if streamed_incomplete_candidate {
+                "Generation ended before write_note completed, likely because the context window or output limit was exhausted. Live preview reverted; no changes were saved."
+            } else {
+                "Operation did not produce a tool call; no changes were made."
+            };
             let _ = tx
-                .send(Out::Error(
-                    "Operation did not produce a tool call; no changes were made.".to_string(),
-                ))
+                .send(Out::Error(message.to_string()))
                 .await;
             return;
         }
@@ -994,18 +1005,19 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             };
             if let Some(fb_resp) = fb_resp {
                 if fb_resp.status().is_success() {
-                    let (fb_content, fb_calls) =
+                    let (fb_content, fb_calls, _) =
                         match stream_upstream(
                             fb_resp,
                             &tx,
                             false,
                             true,
                             stream_note_preview,
+                            &effective_schemas,
                         )
                         .await
                         {
                             Ok(v) => v,
-                            Err(_) => (String::new(), Vec::new()),
+                            Err(_) => (String::new(), Vec::new(), false),
                         };
                     if !fb_calls.is_empty() {
                         tool_calls = fb_calls;
@@ -1022,6 +1034,14 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                     }
                 }
             }
+        }
+
+        if let Err(message) = validate_generated_tool_calls(&tool_calls) {
+            if stream_note_preview {
+                let _ = tx.send(Out::NoteCancel).await;
+            }
+            let _ = tx.send(Out::Error(message)).await;
+            return;
         }
 
         // Per-turn grounding: dispatch only the first max_calls.
@@ -1248,7 +1268,8 @@ async fn stream_upstream(
     no_think: bool,
     suppress_text_call: bool,
     stream_note_preview: bool,
-) -> Result<(String, Vec<Value>), String> {
+    schemas: &Value,
+) -> Result<(String, Vec<Value>, bool), String> {
     let mut content = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
 
@@ -1279,7 +1300,7 @@ async fn stream_upstream(
             };
             if data == "[DONE]" {
                 buf.clear();
-                return finish(content, tool_calls, no_think);
+                return finish(content, tool_calls, no_think, note_streaming);
             }
             let chunk_json: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
@@ -1387,6 +1408,33 @@ async fn stream_upstream(
                         }
                     }
 
+                    // Some chat templates append a closing tool wrapper but never
+                    // emit the upstream [DONE] event. Once that wrapper arrives,
+                    // the call is terminal: execute it immediately if it parses,
+                    // otherwise fail now so the speculative note is reverted
+                    // instead of leaving the UI timer running until timeout.
+                    if suppress_text_call
+                        && [
+                            "</tool_call>",
+                            "<|tool_call_end|>",
+                            "<|eot_id|>",
+                            "<|end_of_text|>",
+                        ]
+                            .iter()
+                            .any(|marker| content.contains(marker))
+                    {
+                        if harness::parse_text_tool_calls(&content, schemas).is_some() {
+                            return finish(content, tool_calls, no_think, note_streaming);
+                        }
+                        if note_streaming {
+                            let _ = tx.send(Out::NoteCancel).await;
+                        }
+                        return Err(
+                            "Generation ended with an incomplete write_note call. Live preview reverted; no changes were saved."
+                                .to_string(),
+                        );
+                    }
+
                 }
             }
 
@@ -1467,21 +1515,45 @@ async fn stream_upstream(
             }
         }
     }
-    finish(content, tool_calls, no_think)
+    finish(content, tool_calls, no_think, note_streaming)
 }
 
 fn finish(
     content: String,
     mut tool_calls: Vec<Value>,
     no_think: bool,
-) -> Result<(String, Vec<Value>), String> {
+    note_streaming: bool,
+) -> Result<(String, Vec<Value>, bool), String> {
     tool_calls.retain(|t| !t["function"]["name"].as_str().unwrap_or("").is_empty());
+    validate_generated_tool_calls(&tool_calls)?;
     let content = if no_think {
         harness::strip_think(&content)
     } else {
         content
     };
-    Ok((content, tool_calls))
+    Ok((content, tool_calls, note_streaming))
+}
+
+fn validate_generated_tool_calls(tool_calls: &[Value]) -> Result<(), String> {
+    for call in tool_calls {
+        if call["function"]["name"].as_str() != Some("write_note") {
+            continue;
+        }
+        let arguments = call["function"]["arguments"].as_str().unwrap_or("{}");
+        let content = serde_json::from_str::<Value>(arguments)
+            .ok()
+            .and_then(|value| value["content"].as_str().map(str::to_owned));
+        if content
+            .as_deref()
+            .is_some_and(harness::note_content_has_protocol_residue)
+        {
+            return Err(
+                "Generation mixed tool protocol text into the note. Live preview reverted; no changes were saved."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

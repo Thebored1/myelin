@@ -5,6 +5,11 @@ export type NoteStreamTarget = {
 	cursor: boolean;
 };
 
+export type NoteStreamPreviewResult = {
+	preview: string;
+	applied: boolean;
+};
+
 export function locateNoteStreamTarget(
 	source: string,
 	target: NoteStreamTarget
@@ -28,8 +33,11 @@ export function locateNoteStreamTarget(
 				positions.push(position);
 				from = position + 1;
 			}
-		} else if (!source) {
-			positions.push(0);
+		} else if (!source.trim()) {
+			// Editors commonly serialize a visually empty note as one or more
+			// whitespace characters. Match the backend cursor-write behavior by
+			// replacing that blank span instead of inserting beside it.
+			return [0, source.length];
 		}
 		return positions.length === 1 ? [positions[0], positions[0]] : null;
 	}
@@ -50,13 +58,24 @@ export function locateNoteStreamTarget(
 	return best ? [best.start, best.end] : null;
 }
 
+export function composeNoteStreamPreviewWithStatus(
+	source: string,
+	generated: string,
+	target: NoteStreamTarget | null
+): NoteStreamPreviewResult {
+	if (!target) return { preview: generated, applied: true };
+	const span = locateNoteStreamTarget(source, target);
+	if (!span) return { preview: source, applied: false };
+	return {
+		preview: source.slice(0, span[0]) + generated + source.slice(span[1]),
+		applied: true
+	};
+}
+
 export function composeNoteStreamPreview(
 	source: string,
 	generated: string,
 	target: NoteStreamTarget | null
 ): string {
-	if (!target) return generated;
-	const span = locateNoteStreamTarget(source, target);
-	if (!span) return source;
-	return source.slice(0, span[0]) + generated + source.slice(span[1]);
+	return composeNoteStreamPreviewWithStatus(source, generated, target).preview;
 }

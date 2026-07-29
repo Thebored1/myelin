@@ -26,7 +26,7 @@ use tauri::{Emitter, Manager};
 
 const SIDECAR_NAME: &str = "openharn-myelin";
 const DEFAULT_PORT: u16 = 8091;
-const SIDECAR_PROTOCOL_VERSION: u64 = 2;
+const SIDECAR_PROTOCOL_VERSION: u64 = 3;
 
 /// Reuse loopback connections for health checks and sidecar requests. The
 /// sidecar is long-lived, so constructing a new client for every chat turn
@@ -452,18 +452,30 @@ pub async fn run_chat(
         // needless polling around the first visible model delta.
         if state.ai_cancel_requested() {
             emit_debug("cancel", "generation stopped by user");
+            let _ = handle.emit(
+                "ai://note_stream_cancel",
+                json!({ "noteId": note_id, "requestId": request_id }),
+            );
             break;
         }
         let chunk = tokio::select! {
             chunk = stream.next() => chunk,
             _ = state.wait_for_ai_cancel() => {
                 emit_debug("cancel", "generation stopped by user");
+                let _ = handle.emit(
+                    "ai://note_stream_cancel",
+                    json!({ "noteId": note_id, "requestId": request_id }),
+                );
                 break;
             }
         };
         let Some(chunk) = chunk else { break };
         if state.ai_cancel_requested() {
             emit_debug("cancel", "generation stopped by user");
+            let _ = handle.emit(
+                "ai://note_stream_cancel",
+                json!({ "noteId": note_id, "requestId": request_id }),
+            );
             break;
         }
         let bytes = chunk.map_err(|e| anyhow!("sidecar stream error: {e}"))?;

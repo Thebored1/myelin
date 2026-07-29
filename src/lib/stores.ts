@@ -30,4 +30,5 @@ function persisted<T>(key: string, initial: T) {
 export const sidebarOpen = writable(true);
 // Remembered across sessions (open by default the first time).
 export const noteSidebarOpen = persisted('myelin_note_sidebar_open', true);
+export const chatSidebarShortcut = persisted('myelin_chat_sidebar_shortcut', 'Ctrl+KeyI');
 export const showSidebarToggle = writable(false);

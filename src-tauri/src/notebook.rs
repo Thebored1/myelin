@@ -66,6 +66,144 @@ pub struct NotebookOp<'a> {
     pub content: &'a str,
 }
 
+/// An exact source range inside one notebook cell. Text edits are applied to
+/// this range rather than trusting the model to reproduce the full cell.
+pub struct CellTarget<'a> {
+    pub index: usize,
+    pub text: &'a str,
+    pub before: &'a str,
+    pub after: &'a str,
+    pub cursor: bool,
+}
+
+fn locate_cell_target(source: &str, target: &CellTarget<'_>) -> Option<(usize, usize)> {
+    if target.cursor {
+        let matches: Vec<usize> = (0..=source.len())
+            .filter(|position| {
+                source.is_char_boundary(*position)
+                    && (target.before.is_empty()
+                        || source[..*position].ends_with(target.before))
+                    && (target.after.is_empty() || source[*position..].starts_with(target.after))
+            })
+            .take(2)
+            .collect();
+        return (matches.len() == 1).then(|| (matches[0], matches[0]));
+    }
+
+    if target.text.is_empty() {
+        return None;
+    }
+    let mut matches = Vec::new();
+    let mut from = 0;
+    while let Some(relative) = source[from..].find(target.text) {
+        let start = from + relative;
+        let end = start + target.text.len();
+        let before_ok =
+            target.before.is_empty() || source[..start].ends_with(target.before);
+        let after_ok = target.after.is_empty() || source[end..].starts_with(target.after);
+        if before_ok && after_ok {
+            matches.push((start, end));
+            if matches.len() == 2 {
+                break;
+            }
+        }
+        from = start + 1;
+    }
+    (matches.len() == 1).then(|| matches[0])
+}
+
+fn validate_cell_target(body: &str, target: &CellTarget<'_>) -> Result<(), String> {
+    let parsed: Value = serde_json::from_str(body)
+        .map_err(|e| format!("The notebook isn't valid JSON: {e}"))?;
+    let cells = parsed["cells"]
+        .as_array()
+        .ok_or_else(|| "This notebook has no cells array.".to_string())?;
+    let cell = cells.get(target.index).ok_or_else(|| {
+        format!(
+            "No cell at index {} (the notebook has {}).",
+            target.index,
+            cells.len()
+        )
+    })?;
+    locate_cell_target(&cell_source(cell), target)
+        .map(|_| ())
+        .ok_or_else(|| {
+            "The notebook cursor or selection changed before the edit could be applied.".to_string()
+        })
+}
+
+/// Apply a model-requested notebook operation while constraining it to the
+/// editor-supplied cell and source anchors.
+pub fn apply_targeted(
+    body: &str,
+    op: &NotebookOp<'_>,
+    target: &CellTarget<'_>,
+) -> Result<String, String> {
+    match op.operation {
+        "edit" => {
+            if op.index != target.index {
+                return Err(format!(
+                    "The edit targeted cell {}, but the editor armed cell {}.",
+                    op.index, target.index
+                ));
+            }
+            let parsed: Value = serde_json::from_str(body)
+                .map_err(|e| format!("The notebook isn't valid JSON: {e}"))?;
+            let cells = parsed["cells"]
+                .as_array()
+                .ok_or_else(|| "This notebook has no cells array.".to_string())?;
+            let cell = cells.get(target.index).ok_or_else(|| {
+                format!(
+                    "No cell at index {} (the notebook has {}).",
+                    target.index,
+                    cells.len()
+                )
+            })?;
+            let source = cell_source(cell);
+            let (start, end) = locate_cell_target(&source, target).ok_or_else(|| {
+                "The notebook cursor or selection changed before the edit could be applied."
+                    .to_string()
+            })?;
+            let mut replacement = String::with_capacity(
+                source.len().saturating_sub(end - start) + op.content.len(),
+            );
+            replacement.push_str(&source[..start]);
+            replacement.push_str(op.content);
+            replacement.push_str(&source[end..]);
+            apply(
+                body,
+                &NotebookOp {
+                    operation: "edit",
+                    index: target.index,
+                    cell_type: op.cell_type,
+                    content: &replacement,
+                },
+            )
+        }
+        "delete" => {
+            if op.index != target.index {
+                return Err(format!(
+                    "The delete targeted cell {}, but the editor armed cell {}.",
+                    op.index, target.index
+                ));
+            }
+            validate_cell_target(body, target)?;
+            apply(body, op)
+        }
+        "insert" => {
+            if op.index != target.index && op.index != target.index.saturating_add(1) {
+                return Err(format!(
+                    "A new cell may only be inserted next to armed cell {}.",
+                    target.index
+                ));
+            }
+            validate_cell_target(body, target)?;
+            apply(body, op)
+        }
+        _ => apply(body, op),
+    }
+}
+
 /// Apply a cell op to the notebook JSON, returning the new pretty-printed JSON.
 /// Every untouched cell (and its outputs/metadata) is preserved exactly. Errors
 /// are returned as human messages to relay back to the model.
@@ -183,5 +321,134 @@ mod tests {
     fn bad_index_returns_message_not_panic() {
         assert!(apply(NB, &NotebookOp { operation: "edit", index: 9, cell_type: "", content: "x" }).is_err());
         assert!(apply("not json", &NotebookOp { operation: "edit", index: 0, cell_type: "", content: "x" }).is_err());
+    }
+
+    #[test]
+    fn targeted_cursor_inserts_only_inside_the_armed_cell() {
+        let out = apply_targeted(
+            NB,
+            &NotebookOp {
+                operation: "edit",
+                index: 1,
+                cell_type: "",
+                content: "2 + ",
+            },
+            &CellTarget {
+                index: 1,
+                text: "",
+                before: "print(",
+                after: "1)\n",
+                cursor: true,
+            },
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(cell_source(&value["cells"][1]), "print(2 + 1)\n");
+        assert_eq!(cell_source(&value["cells"][0]), "# Title\nintro");
+    }
+
+    #[test]
+    fn targeted_selection_replaces_only_the_anchored_text() {
+        let out = apply_targeted(
+            NB,
+            &NotebookOp {
+                operation: "edit",
+                index: 0,
+                cell_type: "",
+                content: "Overview",
+            },
+            &CellTarget {
+                index: 0,
+                text: "Title",
+                before: "# ",
+                after: "\nintro",
+                cursor: false,
+            },
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(cell_source(&value["cells"][0]), "# Overview\nintro");
+    }
+
+    #[test]
+    fn targeted_operations_cannot_escape_the_armed_cell() {
+        let target = CellTarget {
+            index: 0,
+            text: "Title",
+            before: "# ",
+            after: "\nintro",
+            cursor: false,
+        };
+        assert!(apply_targeted(
+            NB,
+            &NotebookOp {
+                operation: "edit",
+                index: 1,
+                cell_type: "",
+                content: "Wrong",
+            },
+            &target,
+        )
+        .is_err());
+        assert!(apply_targeted(
+            NB,
+            &NotebookOp {
+                operation: "delete",
+                index: 1,
+                cell_type: "",
+                content: "",
+            },
+            &target,
+        )
+        .is_err());
+        assert!(apply_targeted(
+            NB,
+            &NotebookOp {
+                operation: "insert",
+                index: 2,
+                cell_type: "code",
+                content: "x = 1",
+            },
+            &target,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn targeted_cell_insert_and_delete_stay_next_to_the_armed_cell() {
+        let target = CellTarget {
+            index: 0,
+            text: "",
+            before: "# Title",
+            after: "\nintro",
+            cursor: true,
+        };
+        let inserted = apply_targeted(
+            NB,
+            &NotebookOp {
+                operation: "insert",
+                index: 1,
+                cell_type: "markdown",
+                content: "Adjacent",
+            },
+            &target,
+        )
+        .unwrap();
+        let inserted_value: Value = serde_json::from_str(&inserted).unwrap();
+        assert_eq!(cell_source(&inserted_value["cells"][1]), "Adjacent");
+
+        let deleted = apply_targeted(
+            NB,
+            &NotebookOp {
+                operation: "delete",
+                index: 0,
+                cell_type: "",
+                content: "",
+            },
+            &target,
+        )
+        .unwrap();
+        let deleted_value: Value = serde_json::from_str(&deleted).unwrap();
+        assert_eq!(cell_source(&deleted_value["cells"][0]), "print(1)\n");
     }
 }

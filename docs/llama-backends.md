@@ -95,6 +95,11 @@ failed the required OpenHarn `write_note` call-only grammar case while the pinne
 stock build passed it. The integration therefore remains experimental and is
 not a recommended replacement for stock llama.cpp on LFM2 tool/edit workloads.
 
+For BeeLlama-targeted work, its recurrent-cache behavior and cache-preserving
+execution path are project requirements. Streaming regressions in that path must
+be diagnosed and fixed while retaining Bee compatibility; do not mask them with
+simulated frontend streaming or an automatic stock llama.cpp fallback.
+
 ## Bundling for release
 
 The installer ships CPU + Vulkan so users get GPU acceleration with zero setup.
