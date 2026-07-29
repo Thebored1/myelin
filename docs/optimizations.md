@@ -190,16 +190,16 @@ still override `threads` in Settings because this result is machine-specific.
 
 ### Direct-chat cache check
 
-A repeated tool-free direct-chat request using the production CPU server flags,
-LFM2 template, pinned slot 0, and `cache_prompt` produced:
+A repeated tool-free direct-chat request using streaming, the production
+AiTurnBuilder, an empty note, the LFM2 template, pinned slot 0,
+`--cache-reuse 64`, and `cache_prompt` produced:
 
-| Turn | Prompt tokens | Cached | Newly evaluated | Prompt evaluation | Generation |
-|---|---:|---:|---:|---:|---:|
-| Cold | 160 | 0 | 160 | 1.554 s | 1.491 s |
-| Follow-up | 243 | 223 (91.8%) | 20 | 0.246 s | 0.262 s |
+| Turn | Prompt tokens | Fixed prefix | Cached | Newly evaluated |
+|---|---:|---:|---:|---:|
+| Cold | 116 | 116 | 0 | 116 |
+| Follow-up | 173 | 116 | 157 (90.8%) | 16 |
 
-The follow-up spent about 0.51 seconds in model evaluation and generation,
-well below the previous 22.8-second direct-chat observation. The test used a
-small synthetic note so absolute cold latency is not comparable to a 3,000-token
-note; the significant steady-state result is the 91.8% prefix reuse and only 20
-freshly evaluated tokens.
+The follow-up reused 100% of the prior fixed prompt. The additional cached
+tokens came from the prior generated turn. This empty-note streaming case is
+deliberately shaped like the desktop request that previously reported zero
+reuse; larger unchanged notes should expose an even larger reusable prefix.

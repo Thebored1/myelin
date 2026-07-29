@@ -30,6 +30,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
+pub const PROTOCOL_VERSION: u32 = 2;
+
 /// Registry of tool calls awaiting a result, keyed by `"{request_id}:{call_id}"`.
 pub type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
 
@@ -50,7 +52,11 @@ pub fn router() -> Router {
 }
 
 async fn health() -> impl IntoResponse {
-    Json(json!({ "status": "ok" }))
+    Json(json!({
+        "status": "ok",
+        "protocol_version": PROTOCOL_VERSION,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 #[derive(Deserialize)]

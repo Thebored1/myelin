@@ -22,6 +22,7 @@
 
 	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 	import { hideThinkingContent } from '$lib/chatContent';
+	import { composeNoteStreamPreview } from '$lib/noteStreamPreview';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 
@@ -64,6 +65,7 @@
 	});
 	type DebugTraceEntry = { time: number; msg: string; kind: string };
 	let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
+	let activeAiComposerMode: 'chat' | 'editor' | null = null;
 
 	function setStreamingStatus(statusText: string | undefined) {
 		chatMessages = chatMessages.map((message) =>
@@ -75,11 +77,14 @@
 	function visibleAiStatus(kind: string, detail: string): string | undefined {
 		if (kind === 'model_prompt' || kind === 'request_serialized') return 'Reading the note…';
 		if (kind === 'response_headers' || kind === 'first_model_delta' || kind === 'gen') {
-			return 'Writing a response…';
+			return activeAiComposerMode === 'editor' ? 'Writing replacement…' : 'Writing a response…';
 		}
 		if (kind === 'intent_prompt') return 'Understanding the request…';
 		if (kind === 'tool') {
 			const name = detail.match(/executing\s+([^(]+)/i)?.[1]?.replaceAll('_', ' ');
+			if (activeAiComposerMode === 'editor' && name?.trim() === 'write note') {
+				return 'Applying selected edit…';
+			}
 			return name ? `Using ${name}…` : 'Looking that up…';
 		}
 		if (kind === 'tool_result') return 'Reading the result…';
@@ -137,6 +142,7 @@
 	let aiEditInstruction = $state('');
 	let aiEditBusy = $state(false);
 	let aiEditError = $state('');
+	let activeAiEditTarget: AiEditTarget | null = null;
 
 	// Prompt-box context-usage ring: uses real token count from the server when
 	// available (chat_usage event), otherwise estimates from characters (~32K tokens ≈ 130K chars).
@@ -385,7 +391,9 @@
 	// context. In Vditor IR mode the rendered text ≈ the source for prose, so the
 	// tree-walked offsets usually map straight in; we validate and fall back to a
 	// proximity text-search when formatting markers skew them.
-	function computeSourceSelection(): { text: string; before: string; after: string } | null {
+	function computeSourceSelection(
+		allowTextFallback = true
+	): { text: string; before: string; after: string } | null {
 		if (!vditorInstance || !vditorContainer) return null;
 		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		if (!editorEl) return null;
@@ -405,7 +413,7 @@
 		if (startOff != null && endOff != null && source.slice(startOff, endOff) === selText) {
 			s = startOff;
 			e = endOff;
-		} else {
+		} else if (allowTextFallback) {
 			s = nearestIndexOf(source, selText, startOff ?? 0);
 			if (s >= 0) e = s + selText.length;
 		}
@@ -527,15 +535,6 @@
 		setArmedHighlight(rangeFromRenderedOffsets(editorEl, s, e));
 	}
 
-	// Clear the armed selection on any click OUTSIDE the prompt box (by choice via
-	// the ✕, or accidentally). Clicks inside the prompt box keep it; a fresh drag
-	// in the editor re-arms via selectionchange.
-	function onDocMouseDown(e: MouseEvent) {
-		const target = e.target as HTMLElement | null;
-		if (e.button === 2 || (target && target.closest('.chat-input-area, .ai-edit-popover'))) return;
-		if (armedSelection) clearArmedSelection();
-	}
-
 	function cursorTargetAtPoint(e: MouseEvent): AiEditTarget | null {
 		if (!vditorInstance || !vditorContainer) return null;
 		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
@@ -570,24 +569,33 @@
 		};
 	}
 
+	function armedEditTarget(): AiEditTarget | null {
+		return armedSelection ? { ...armedSelection, cursor: false } : null;
+	}
+
 	function openAiEditMenu(e: MouseEvent) {
-		if (workingDocType !== 'md' || isChatStreaming || aiEditBusy) return;
-		const selected = computeSourceSelection();
-		const target: AiEditTarget | null = selected
-			? { ...selected, cursor: false }
-			: cursorTargetAtPoint(e);
-		if (!target) return;
+		// Always suppress the browser menu inside the Markdown editor. Selection
+		// mapping can fail for formatted IR nodes, but that must not let the native
+		// menu race and replace Myelin's popover.
 		e.preventDefault();
 		e.stopPropagation();
-		if (selected) captureEditorSelection();
-		aiEditAction = selected ? 'rewrite' : 'write';
+		if (workingDocType !== 'md' || isChatStreaming || aiEditBusy) return;
+		const mapped = computeSourceSelection(false);
+		const armed = mapped ? null : armedEditTarget();
+		const textFallback = mapped || armed ? null : computeSourceSelection(true);
+		const target: AiEditTarget | null = mapped
+			? { ...mapped, cursor: false }
+			: armed ?? (textFallback ? { ...textFallback, cursor: false } : cursorTargetAtPoint(e));
+		if (!target) return;
+		if (mapped || textFallback) captureEditorSelection();
+		aiEditAction = target.cursor ? 'write' : 'rewrite';
 		aiEditInstruction = '';
 		aiEditError = '';
 		aiEditMenu = {
 			x: Math.min(e.clientX, window.innerWidth - 340),
 			y: Math.min(e.clientY, window.innerHeight - 250),
 			target,
-			hasSelection: !!selected
+			hasSelection: !target.cursor
 		};
 	}
 
@@ -603,18 +611,24 @@
 		if (aiEditAction !== 'delete' && !aiEditInstruction.trim()) return;
 		aiEditBusy = true;
 		aiEditError = '';
+		const requestId = `edit-${Date.now()}`;
+		activeAiEditTarget = { ...aiEditMenu.target };
+		beginAiRequest(requestId, 'editor', 'Preparing selected edit…');
 		try {
 			await invoke('ask_ai_edit', {
 				noteId: note.id,
 				instruction: aiEditInstruction.trim(),
 				action: aiEditAction,
-				requestId: `edit-${Date.now()}`,
+				requestId,
 				target: aiEditMenu.target
 			});
 			aiEditMenu = null;
-			clearArmedSelection();
+			// A deleted span cannot be reselected. Rewrites keep their anchors so
+			// note_written can select the replacement for an immediate follow-up.
+			if (aiEditAction === 'delete') clearArmedSelection();
 		} catch (error) {
 			aiEditError = extractChatErrorMessage(error);
+			failStreamingChatMessage(requestId, aiEditError);
 		} finally {
 			aiEditBusy = false;
 		}
@@ -1432,21 +1446,11 @@
 		if (!noteStreaming) beginNoteStream();
 		noteStreamBuf += delta;
 		if (vditorInstance) {
-			let preview = noteStreamBuf;
-			if (armedSelection) {
-				const selected = armedSelection.text.trim();
-				let start = -1;
-				if (armedSelection.before) {
-					const bi = noteStreamBackup.indexOf(armedSelection.before);
-					if (bi >= 0) start = bi + armedSelection.before.length;
-				}
-				if (start < 0) start = noteStreamBackup.indexOf(selected);
-				const end = start >= 0 ? noteStreamBackup.indexOf(armedSelection.after, start + selected.length) : -1;
-				if (start >= 0) {
-					const actualEnd = end >= 0 ? end : start + selected.length;
-					preview = noteStreamBackup.slice(0, start) + noteStreamBuf + noteStreamBackup.slice(actualEnd);
-				}
-			}
+			const preview = composeNoteStreamPreview(
+				noteStreamBackup,
+				noteStreamBuf,
+				activeAiEditTarget
+			);
 			vditorInstance.setValue(preview);
 		}
 	}
@@ -1916,6 +1920,41 @@
 		}
 	}
 
+	function beginAiRequest(
+		requestId: string,
+		composerMode: 'chat' | 'editor',
+		statusText: string
+	): number {
+		const startTime = Date.now();
+		pendingDebugTrace = [
+			{ time: startTime, msg: 'Request sent', kind: 'send' },
+			{ time: startTime, msg: `Composer mode: ${composerMode}`, kind: 'config' }
+		];
+		debugInfo = showDebugWindow
+			? {
+					requestStart: startTime,
+					firstChunk: null,
+					generationStart: null,
+					generationEnd: null,
+					done: null,
+					promptTokens: 0,
+					completionTokens: 0,
+					totalTokens: 0,
+					turnCount: 0,
+					replyChars: 0,
+					trace: pendingDebugTrace
+				}
+			: null;
+		chatMessages = [
+			...chatMessages,
+			{ role: 'assistant', content: '', isStreaming: true, startTime, statusText }
+		];
+		activeAiComposerMode = composerMode;
+		activeChatRequestId = requestId;
+		setTimeout(() => scrollChatToBottom(true), 50);
+		return startTime;
+	}
+
 	async function sendChatMessage() {
 		if (!note || !chatInput.trim() || isChatStreaming) return;
 		const userText = chatInput.trim();
@@ -1927,26 +1966,6 @@
 	async function sendChatText(userText: string) {
 		if (!note) return;
 		const requestId = Date.now().toString();
-		const startTime = Date.now();
-		pendingDebugTrace = [
-			{ time: startTime, msg: 'Request sent', kind: 'send' },
-			{ time: startTime, msg: 'Composer mode: chat', kind: 'config' }
-		];
-		if (showDebugWindow) {
-			debugInfo = {
-				requestStart: startTime,
-				firstChunk: null,
-				generationStart: null,
-				generationEnd: null,
-				done: null,
-				promptTokens: 0,
-				completionTokens: 0,
-				totalTokens: 0,
-				turnCount: 0,
-				replyChars: 0,
-				trace: pendingDebugTrace
-			};
-		}
 		const snapshot: NoteSnapshot = {
 			noteBody: draftBody,
 			draftTitle: draftTitle,
@@ -1957,18 +1976,7 @@
 			...chatMessages,
 			{ role: 'user', content: userText, snapshotId: requestId, snapshot }
 		];
-		chatMessages = [
-			...chatMessages,
-			{
-				role: 'assistant',
-				content: '',
-				isStreaming: true,
-				startTime,
-				statusText: 'Reading the note… warming the model…'
-			}
-		];
-		activeChatRequestId = requestId;
-		setTimeout(() => scrollChatToBottom(true), 50);
+		beginAiRequest(requestId, 'chat', 'Reading the note… warming the model…');
 		try {
 			await invoke('ask_ai_stream', {
 				noteId: note.id,
@@ -2087,6 +2095,8 @@
 		// waits on this flag; otherwise its newer history can race an older save.
 		if (note) await invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
 		activeChatRequestId = null;
+		activeAiComposerMode = null;
+		activeAiEditTarget = null;
 		if (wroteToCurrentNote(tools)) {
 			// note_written already set the editor authoritatively — sync metadata
 			// from the backend but don't overwrite the editor content.
@@ -2122,9 +2132,11 @@
 				trace: [...debugInfo.trace, { time: finishedAt, msg: `Error: ${errorMsg}`, kind: 'error' }] };
 		}
 		activeChatRequestId = null;
+		activeAiComposerMode = null;
 		// If a live note stream was interrupted, the note was never saved —
 		// restore the pre-stream content rather than leaving a partial draft.
 		cancelNoteStream();
+		activeAiEditTarget = null;
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming) {
 				return {
@@ -2624,10 +2636,6 @@
 		const handleMediaChange = (_e: MediaQueryListEvent) => {};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', handleGlobalSelectionChange);
-		// Clear the armed selection on clicks outside the prompt box (capture phase
-		// so it runs before the click lands).
-		document.addEventListener('mousedown', onDocMouseDown, true);
-
 		let unlistenTool: () => void;
 
 		// Setup AI Streaming listeners
@@ -2637,7 +2645,7 @@
 				const { noteId, content, mode } = event.payload;
 				if (!note || note.id !== noteId) return;
 				applyNoteWrite(content, mode);
-				if (showDebugWindow && debugInfo) {
+				if (activeChatRequestId && showDebugWindow && debugInfo) {
 					debugInfo = {
 						...debugInfo,
 						trace: [
@@ -2656,8 +2664,13 @@
 			}
 		).then((fn) => (unlistenNoteWritten = fn));
 
-		listen<{ noteId: string }>('ai://note_stream_start', (event) => {
-			if (!note || note.id !== event.payload.noteId) return;
+		listen<{ noteId: string; requestId: string }>('ai://note_stream_start', (event) => {
+			if (
+				!note ||
+				note.id !== event.payload.noteId ||
+				activeChatRequestId !== event.payload.requestId
+			)
+				return;
 			beginNoteStream();
 			if (showDebugWindow && debugInfo) {
 				debugInfo = {
@@ -2679,18 +2692,33 @@
 			}
 		).then((fn) => (unlistenSummaryProgress = fn));
 
-		listen<{ noteId: string; delta: string }>('ai://note_delta', (event) => {
-			if (!note || note.id !== event.payload.noteId) return;
+		listen<{ noteId: string; requestId: string; delta: string }>('ai://note_delta', (event) => {
+			if (
+				!note ||
+				note.id !== event.payload.noteId ||
+				activeChatRequestId !== event.payload.requestId
+			)
+				return;
 			appendNoteStream(event.payload.delta);
 		}).then((fn) => (unlistenNoteDelta = fn));
 
-		listen<{ noteId: string }>('ai://note_stream_cancel', (event) => {
-			if (!note || note.id !== event.payload.noteId) return;
+		listen<{ noteId: string; requestId: string }>('ai://note_stream_cancel', (event) => {
+			if (
+				!note ||
+				note.id !== event.payload.noteId ||
+				activeChatRequestId !== event.payload.requestId
+			)
+				return;
 			cancelNoteStream();
 		}).then((fn) => (unlistenNoteStreamCancel = fn));
 
 		listen<{ tool: string; details: string; mutatesNote?: boolean }>('ai://chat_tool', (event) => {
+			if (!activeChatRequestId) return;
 			let lastStartTime = Date.now();
+			const toolStatus =
+				activeAiComposerMode === 'editor' && event.payload.mutatesNote
+					? 'Applying selected edit…'
+					: `Using ${event.payload.tool.toLowerCase()}…`;
 			if (showDebugWindow && debugInfo) {
 				debugInfo = {
 					...debugInfo,
@@ -2722,7 +2750,7 @@
 					content: '',
 					isStreaming: true,
 					startTime: lastStartTime,
-					statusText: `Using ${event.payload.tool.toLowerCase()}…`
+					statusText: toolStatus
 				}
 			];
 			if (chatMessagesEl) {
@@ -2903,7 +2931,6 @@
 		return () => {
 			mql.removeEventListener('change', handleMediaChange);
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
-			document.removeEventListener('mousedown', onDocMouseDown, true);
 			window.removeEventListener('mousemove', handleGlobalMouseMove);
 			window.removeEventListener('mouseup', stopResizing);
 			window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -2937,7 +2964,6 @@
 		if (vditorInstance) vditorInstance.destroy();
 		if (typeof document !== 'undefined') {
 			document.removeEventListener('selectionchange', handleGlobalSelectionChange);
-			document.removeEventListener('mousedown', onDocMouseDown, true);
 		}
 	});
 
@@ -3158,7 +3184,7 @@
 							class:toolbar-expanded={toolbarExpanded}
 							class:has-pdf-note={!!activeSourceBytes || (!isSourceMaterial && !!note)}
 							onclickcapture={handleVditorClick}
-							oncontextmenu={openAiEditMenu}
+							oncontextmenucapture={openAiEditMenu}
 							onkeydowncapture={handleVditorKeydownCapture}
 							onkeyupcapture={handleVditorKeyupCapture}
 							onwheelcapture={(e) => {

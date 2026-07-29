@@ -1006,7 +1006,7 @@ fn available_ram_bytes() -> u64 {
 /// desktop inference server, use every physical core unless the user supplied
 /// an explicit value; SMT siblings rarely improve prompt evaluation enough to
 /// justify becoming the default.
-fn default_inference_threads() -> u32 {
+pub(crate) fn default_inference_threads() -> u32 {
     use sysinfo::System;
     let mut sys = System::new();
     sys.refresh_cpu_all();
@@ -1014,6 +1014,14 @@ fn default_inference_threads() -> u32 {
         .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
         .unwrap_or(1)
         .max(1) as u32
+}
+
+fn cache_reuse_tokens(engine: &str) -> &'static str {
+    if engine == "beellama" {
+        "64"
+    } else {
+        "256"
+    }
 }
 
 /// What a GPU can hold for model weights, and whether that memory is shared RAM.
@@ -1611,7 +1619,10 @@ async fn try_start_candidate(
             // Reuse stable prompt chunks across successive chat renderings.
             // llama.cpp defaults this to 0 (disabled), even with cache_prompt.
             .arg("--cache-reuse")
-            .arg("256");
+            // BeeLlama's recurrent cache needs chunk reuse, but the minimal
+            // direct-chat system prefix is commonly well below 256 tokens.
+            // Stock llama.cpp keeps the more conservative granularity.
+            .arg(cache_reuse_tokens(&candidate.engine));
     }
 
     // Adaptive offload: keep the KV cache in system RAM so a big context fits on
@@ -2518,8 +2529,8 @@ fn find_on_path(binary_name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bee_asset_sha256, bee_assets_for_backend, fit_ngl, has_fatal_startup_error,
-        has_tensor_override, normalize_engine,
+        bee_asset_sha256, bee_assets_for_backend, cache_reuse_tokens, fit_ngl,
+        has_fatal_startup_error, has_tensor_override, normalize_engine,
     };
 
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -2612,6 +2623,12 @@ mod tests {
         assert!(has_tensor_override(&["-ot=.*ffn.*=CPU".into()]));
         assert!(has_tensor_override(&["--override-tensor=.*ffn.*=CPU".into()]));
         assert!(!has_tensor_override(&["--threads".into(), "4".into()]));
+    }
+
+    #[test]
+    fn bee_uses_shorter_cache_reuse_chunks() {
+        assert_eq!(cache_reuse_tokens("beellama"), "64");
+        assert_eq!(cache_reuse_tokens("llama_cpp"), "256");
     }
 
     #[test]

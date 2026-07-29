@@ -159,6 +159,9 @@ pub struct ProviderStatus {
     pub installed_backends: Vec<String>,
     #[serde(default)]
     pub installed_bee_backends: Vec<String>,
+    /// Physical-core default used when `config.threads` is unset.
+    #[serde(default)]
+    pub recommended_threads: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

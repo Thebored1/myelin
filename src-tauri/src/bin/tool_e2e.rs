@@ -104,16 +104,12 @@ async fn direct_chat_cache(
     base: &str,
     model: &str,
 ) -> (String, bool, String) {
-    let note_body = "Myelin uses a pinned slot to reuse the unchanged system prompt, \
-        note title, note body, and prior conversation. The native acceptance fixture \
-        repeats this stable note paragraph so the fixed prefix is representative of \
-        a real populated note rather than being smaller than the new follow-up turn. "
-        .repeat(12);
-    let context = format!(
-        "The note currently open is titled \"Native cache fixture\".\n\n\
-         Here is the note's CURRENT content.\n--- CURRENT NOTE ---\n{note_body}\n\
-         --- END CURRENT NOTE ---"
-    );
+    // Empty notes exposed the production failure: their fixed prefix was small
+    // enough that a misleading large-fixture test passed while real Chat turns
+    // reported cached=0.
+    let context = "The note currently open is titled \"Native cache fixture\".\n\n\
+        The note's CURRENT content is empty."
+        .to_string();
     let first = AiTurnBuilder::build(AiTurnInput {
         mode: "chat",
         note_title: "Native cache fixture",
@@ -139,31 +135,24 @@ async fn direct_chat_cache(
         json!({
             "model": model,
             "messages": messages,
-            "stream": false,
+            "stream": true,
+            "stream_options": { "include_usage": true },
             "temperature": 0.0,
             "max_tokens": 64,
             "cache_prompt": true,
             "id_slot": 0
         })
     };
-    let first_response = match client
-        .post(format!("{base}/v1/chat/completions"))
-        .json(&request(first.messages.clone()))
-        .send()
-        .await
+    let (answer, first_response) = match stream_chat_response(
+        client,
+        base,
+        request(first.messages.clone()),
+    )
+    .await
     {
-        Ok(response) => match response.json::<Value>().await {
-            Ok(value) => value,
-            Err(error) => {
-                return ("direct-chat/cache".into(), false, error.to_string());
-            }
-        },
+        Ok(value) => value,
         Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
     };
-    let answer = first_response["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
     let conversation = vec![
         first.messages.last().cloned().unwrap_or(Value::Null),
         json!({"role": "assistant", "content": answer}),
@@ -182,16 +171,9 @@ async fn direct_chat_cache(
         supports_tools: true,
         verbose_tool_schemas: false,
     });
-    let second_response = match client
-        .post(format!("{base}/v1/chat/completions"))
-        .json(&request(second.messages))
-        .send()
-        .await
+    let (_, second_response) = match stream_chat_response(client, base, request(second.messages)).await
     {
-        Ok(response) => match response.json::<Value>().await {
-            Ok(value) => value,
-            Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
-        },
+        Ok(value) => value,
         Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
     };
     let prompt = second_response["usage"]["prompt_tokens"]
@@ -203,22 +185,86 @@ async fn direct_chat_cache(
         .or_else(|| second_response["timings"]["cache_n"].as_u64())
         .unwrap_or(0);
     let evaluated = prompt.saturating_sub(cached);
+    let fixed_prefix = first_response["usage"]["prompt_tokens"]
+        .as_u64()
+        .or_else(|| first_response["timings"]["prompt_n"].as_u64())
+        .unwrap_or(0);
     let reuse = if prompt == 0 {
         0.0
     } else {
         cached as f64 / prompt as f64
     };
+    let fixed_reuse = if fixed_prefix == 0 {
+        0.0
+    } else {
+        cached.min(fixed_prefix) as f64 / fixed_prefix as f64
+    };
     let ok = prompt > 0
-        && reuse >= 0.8
+        && cached > 0
+        && fixed_reuse >= 0.8
         && evaluated <= 300.max((prompt as f64 * 0.2).ceil() as u64);
     (
         "direct-chat/cache".into(),
         ok,
         format!(
-            "slot=0 prompt={prompt} cached={cached} evaluated={evaluated} reuse={:.1}%",
-            reuse * 100.0
+            "stream=true slot=0 prompt={prompt} fixed={fixed_prefix} cached={cached} \
+             evaluated={evaluated} total_reuse={:.1}% fixed_reuse={:.1}%",
+            reuse * 100.0,
+            fixed_reuse * 100.0
         ),
     )
+}
+
+/// Exercise the same streamed OpenAI-compatible response shape used by the
+/// desktop sidecar. Cache support that exists only for non-streaming requests
+/// does not improve Myelin's user-visible latency.
+async fn stream_chat_response(
+    client: &reqwest::Client,
+    base: &str,
+    body: Value,
+) -> Result<(String, Value), String> {
+    let response = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut content = String::new();
+    let mut telemetry = Value::Null;
+    while let Some(chunk) = stream.next().await {
+        buffer.extend_from_slice(&chunk.map_err(|error| error.to_string())?);
+        while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=newline).collect();
+            let line = String::from_utf8_lossy(&line);
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data == "[DONE]" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
+                content.push_str(delta);
+            }
+            if value["usage"].is_object() {
+                telemetry = value;
+            } else if value["timings"].is_object() {
+                telemetry = value;
+            }
+        }
+    }
+    if telemetry.is_null() {
+        return Err("stream completed without usage/cache telemetry".into());
+    }
+    Ok((content, telemetry))
 }
 
 async fn run_all(
@@ -892,10 +938,16 @@ async fn one_turn(
 
 fn start_server(bin: &str, model: &str, port: u16) -> std::io::Result<Child> {
     let port_s = port.to_string();
+    let native_engine = std::env::var("MYELIN_NATIVE_AI_ENGINE").ok();
+    let cache_reuse = if native_engine.as_deref() == Some("beellama") {
+        "64"
+    } else {
+        "256"
+    };
     let mut args: Vec<String> = vec![
         "-m".into(), model.into(), "--jinja".into(), "--ctx-size".into(), "4096".into(),
         "--port".into(), port_s, "--no-warmup".into(), "--parallel".into(), "1".into(),
-        "--cache-reuse".into(), "256".into(),
+        "--cache-reuse".into(), cache_reuse.into(),
     ];
     // Optional chat-template override (e.g. the corrected LFM2.5 template that
     // fixes multi-turn tool calling). Set CHAT_TEMPLATE_FILE to A/B test it.

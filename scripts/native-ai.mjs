@@ -69,6 +69,7 @@ for (let i = 0; i < iterations; i += 1) {
 			timeout: 20 * 60_000,
 			env: {
 				...process.env,
+				MYELIN_NATIVE_AI_ENGINE: engine,
 				...(lfmTemplate ? { CHAT_TEMPLATE_FILE: lfmTemplate } : {}),
 			},
 		},

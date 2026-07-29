@@ -26,6 +26,7 @@ use tauri::{Emitter, Manager};
 
 const SIDECAR_NAME: &str = "openharn-myelin";
 const DEFAULT_PORT: u16 = 8091;
+const SIDECAR_PROTOCOL_VERSION: u64 = 2;
 
 /// Reuse loopback connections for health checks and sidecar requests. The
 /// sidecar is long-lived, so constructing a new client for every chat turn
@@ -128,7 +129,7 @@ pub async fn ensure_sidecar(state: &AppState) -> Result<String> {
     let mut guard = state.inner.sidecar.lock().await;
 
     if let Some(sc) = guard.as_ref() {
-        if health_ok(&sc.base).await {
+        if compatible_health(&sc.base).await {
             return Ok(sc.base.clone());
         }
         // Process died — drop the stale handle (kill is best-effort).
@@ -197,7 +198,7 @@ pub async fn ensure_sidecar(state: &AppState) -> Result<String> {
     // /health so we don't depend on stdout capture).
     let mut ready = false;
     for _ in 0..50 {
-        if health_ok(&base).await {
+        if compatible_health(&base).await {
             ready = true;
             break;
         }
@@ -205,7 +206,9 @@ pub async fn ensure_sidecar(state: &AppState) -> Result<String> {
     }
     if !ready {
         return Err(anyhow!(
-            "openharn-myelin sidecar at {base} did not become ready"
+            "openharn-myelin sidecar at {base} is unavailable or incompatible \
+             (required protocol {SIDECAR_PROTOCOL_VERSION}). Rebuild it with \
+             `npm run build:sidecar:debug`."
         ));
     }
 
@@ -213,14 +216,24 @@ pub async fn ensure_sidecar(state: &AppState) -> Result<String> {
     Ok(base)
 }
 
-async fn health_ok(base: &str) -> bool {
-    http_client()
+async fn compatible_health(base: &str) -> bool {
+    let Ok(response) = http_client()
         .get(format!("{base}/health"))
         .timeout(Duration::from_secs(1))
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|health| health["protocol_version"].as_u64())
+        == Some(SIDECAR_PROTOCOL_VERSION)
 }
 
 /// Run a streaming chat turn through the sidecar. Maps the sidecar's SSE events
@@ -357,6 +370,7 @@ pub async fn run_chat(
     } else {
         "direct answer"
     };
+    let submitted_messages = messages.clone();
     let body = json!({
         "request_id": request_id,
         "base_url": llama_base,
@@ -491,22 +505,30 @@ pub async fn run_chat(
                                 emitted_generation_start = true;
                                 emit_debug("gen", "first model note delta received");
                             }
-                            let _ =
-                                handle.emit("ai://note_stream_start", json!({ "noteId": note_id }));
+                            let _ = handle.emit(
+                                "ai://note_stream_start",
+                                json!({ "noteId": note_id, "requestId": request_id }),
+                            );
                         }
                         "note_delta" => {
                             if let Ok(v) = serde_json::from_str::<Value>(&data) {
                                 if let Some(delta) = v["delta"].as_str() {
                                     let _ = handle.emit(
                                         "ai://note_delta",
-                                        json!({ "noteId": note_id, "delta": delta }),
+                                        json!({
+                                            "noteId": note_id,
+                                            "requestId": request_id,
+                                            "delta": delta
+                                        }),
                                     );
                                 }
                             }
                         }
                         "note_cancel" => {
-                            let _ = handle
-                                .emit("ai://note_stream_cancel", json!({ "noteId": note_id }));
+                            let _ = handle.emit(
+                                "ai://note_stream_cancel",
+                                json!({ "noteId": note_id, "requestId": request_id }),
+                            );
                         }
                         "tool" => {
                             let v: Value = match serde_json::from_str(&data) {
@@ -559,10 +581,18 @@ pub async fn run_chat(
                                 // `done` is terminal for this request. Do not
                                 // keep consuming a malformed/late stream that
                                 // could dispatch another tool after completion.
-                                return Ok(if !has_new_messages {
-                                    final_messages.clone()
-                                } else {
+                                return Ok(if has_new_messages {
                                     new_messages.clone()
+                                } else {
+                                    // Protocol v1 returned only the complete
+                                    // conversation. Never append that whole
+                                    // array as a delta: doing so recursively
+                                    // duplicates every prior turn and destroys
+                                    // prompt-prefix cache reuse.
+                                    conversation_delta(
+                                        &submitted_messages,
+                                        &final_messages,
+                                    )?
                                 });
                             }
                         }
@@ -649,4 +679,38 @@ pub async fn run_chat(
     }
 
     Ok(final_messages)
+}
+
+fn conversation_delta(submitted: &[Value], returned: &[Value]) -> Result<Vec<Value>> {
+    if returned.len() < submitted.len() || returned[..submitted.len()] != *submitted {
+        return Err(anyhow!(
+            "sidecar returned neither new_messages nor a compatible conversation suffix"
+        ));
+    }
+    Ok(returned[submitted.len()..].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conversation_delta;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_full_conversation_is_reduced_to_delta() {
+        let submitted = vec![
+            json!({"role": "system", "content": "policy"}),
+            json!({"role": "user", "content": "hello"}),
+        ];
+        let mut returned = submitted.clone();
+        returned.push(json!({"role": "assistant", "content": "hi"}));
+        let delta = conversation_delta(&submitted, &returned).unwrap();
+        assert_eq!(delta, vec![json!({"role": "assistant", "content": "hi"})]);
+    }
+
+    #[test]
+    fn incompatible_full_conversation_is_rejected() {
+        let submitted = vec![json!({"role": "user", "content": "hello"})];
+        let returned = vec![json!({"role": "system", "content": "wrong"})];
+        assert!(conversation_delta(&submitted, &returned).is_err());
+    }
 }

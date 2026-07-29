@@ -761,7 +761,7 @@ impl AppState {
             .conversations
             .lock()
             .get(note_id)
-            .cloned()
+            .map(|messages| canonical_wire_conversation(messages.clone()))
             .unwrap_or_default()
     }
 
@@ -770,7 +770,7 @@ impl AppState {
         self.inner
             .conversations
             .lock()
-            .insert(note_id.to_string(), msgs);
+            .insert(note_id.to_string(), canonical_wire_conversation(msgs));
     }
 
     /// Forget a note's live conversation (e.g. when the user clears chat).
@@ -1843,6 +1843,7 @@ impl AppState {
             gpus: info.gpus,
             installed_backends: info.installed_backends,
             installed_bee_backends: info.installed_bee_backends,
+            recommended_threads: llama_server::default_inference_threads(),
         })
     }
 
@@ -2247,14 +2248,14 @@ impl AppState {
                 verbose_tool_schemas: config.verbose_tool_schemas,
             });
             let intent_is_tool = Some(turn.intent_is_tool);
+            let user_content = turn
+                .messages
+                .last()
+                .and_then(|message| message["content"].as_str())
+                .unwrap_or(&question)
+                .to_string();
             let messages = turn.messages;
             let tools = turn.tools;
-            let user_content = crate::ai_turn::render_user_content(
-                &note.title,
-                mode_instruction,
-                &turn_instructions,
-                &question,
-            );
 
             let tool_names: Vec<String> = tools
                 .iter()
@@ -2301,9 +2302,11 @@ impl AppState {
             )
             .await?;
 
-            // Persist the exact user message sent on the wire. Byte identity is
-            // required for cache_prompt to reuse prior conversation/tool turns.
-            // The UI transcript separately retains the undecorated question.
+            // Retain the canonical system-less turn. Direct Chat sends the raw
+            // question, so the next request reproduces the exact prefix without
+            // paying repeated title/policy wrappers. Tool turns keep their real
+            // assistant calls and results; save_conversation normalizes any
+            // older decorated user messages.
             if !isolated_edit {
                 convo.push(serde_json::json!({ "role": "user", "content": user_content }));
                 convo.extend(final_messages.iter().cloned());
@@ -3926,6 +3929,42 @@ fn chat_history_to_messages(chat_history: &[crate::models::ChatMessage]) -> Vec<
         .collect()
 }
 
+/// The system prompt and generation primers are rebuilt for every request and
+/// must never enter the retained system-less conversation. Keeping them would
+/// change the fixed prefix and recursively inflate subsequent prompts.
+fn canonical_wire_conversation(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            if message["role"].as_str() == Some("user") {
+                if let Some(content) = message["content"].as_str() {
+                    if let Some((_, request)) = content.rsplit_once("\nUSER REQUEST:\n") {
+                        message["content"] = serde_json::Value::String(request.trim().to_string());
+                        if let Some(object) = message.as_object_mut() {
+                            object.remove("metadata");
+                        }
+                    }
+                }
+            }
+            message
+        })
+        .filter(|message| message["role"].as_str() != Some("system"))
+        .filter(|message| {
+            if message["role"].as_str() != Some("assistant") {
+                return true;
+            }
+            let content = message["content"].as_str().unwrap_or("").trim();
+            !matches!(
+                content,
+                "<think></think>"
+                    | "<think></think><think></think>"
+                    | "<think>\n</think>"
+                    | "<think>\n</think><think>\n</think>"
+            )
+        })
+        .collect()
+}
+
 fn assemble_note_context(title: &str, body_excerpt: &str, notebook_cells: Option<&str>) -> String {
     let mut context = format!("The note currently open is titled \"{title}\".");
     if let Some(cells) = notebook_cells {
@@ -4921,6 +4960,7 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
             gpus: info.gpus,
             installed_backends: info.installed_backends,
             installed_bee_backends: info.installed_bee_backends,
+            recommended_threads: llama_server::default_inference_threads(),
         };
     }
 
@@ -4940,6 +4980,7 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
         gpus: llama_server::detect_gpus().0,
         installed_backends: Vec::new(),
         installed_bee_backends: Vec::new(),
+        recommended_threads: llama_server::default_inference_threads(),
     }
 }
 
@@ -4947,7 +4988,8 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
 mod tests {
     use super::{
         assemble_note_context, assemble_user_content, authorize_tool_policy,
-        chat_history_to_messages, hashed_embedding, slugify, split_frontmatter, tokenize,
+        canonical_wire_conversation, chat_history_to_messages, hashed_embedding, slugify,
+        split_frontmatter, tokenize,
     };
     use crate::models::ChatMessage;
 
@@ -5004,6 +5046,28 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["content"], "note A question");
         assert_eq!(messages[1]["content"], "note A answer");
+    }
+
+    #[test]
+    fn canonical_conversation_rejects_system_and_generation_primers() {
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": "duplicate"}),
+            serde_json::json!({
+                "role": "user",
+                "content": "OPEN NOTE TITLE: \"Note\"\n\nINTERNAL TURN POLICY:\npolicy\n\nUSER REQUEST:\nquestion",
+                "metadata": {"interaction_mode": "chat"}
+            }),
+            serde_json::json!({"role": "assistant", "content": "<think></think>"}),
+            serde_json::json!({"role": "assistant", "content": "answer"}),
+            serde_json::json!({"role": "tool", "content": "result"}),
+        ];
+        let canonical = canonical_wire_conversation(messages);
+        assert_eq!(canonical.len(), 3);
+        assert_eq!(canonical[0]["role"], "user");
+        assert_eq!(canonical[0]["content"], "question");
+        assert!(canonical[0].get("metadata").is_none());
+        assert_eq!(canonical[1]["content"], "answer");
+        assert_eq!(canonical[2]["role"], "tool");
     }
 
     #[test]

@@ -59,6 +59,7 @@ impl AiTurnBuilder {
         } else {
             crate::agent::MYELIN_PREAMBLE
         };
+        let direct_chat = input.mode == "chat" && tools.is_empty();
         let mut messages = vec![json!({
             "role": "system",
             "content": format!("{preamble}\n\n{}", input.system_context),
@@ -66,12 +67,16 @@ impl AiTurnBuilder {
         messages.extend(input.conversation.iter().cloned());
         messages.push(json!({
             "role": "user",
-            "content": render_user_content(
-                input.note_title,
-                input.mode_policy,
-                input.turn_instructions,
-                input.question,
-            ),
+            "content": if direct_chat {
+                input.question.to_string()
+            } else {
+                render_user_content(
+                    input.note_title,
+                    input.mode_policy,
+                    input.turn_instructions,
+                    input.question,
+                )
+            },
             "metadata": {
                 "open_note_title": input.note_title,
                 "interaction_mode": input.mode,
@@ -183,6 +188,7 @@ mod tests {
             "Real title"
         );
         assert_eq!(turn.messages[1]["metadata"]["interaction_mode"], "chat");
+        assert_eq!(turn.messages[1]["content"], "What is this note about?");
     }
 
     #[test]
@@ -238,5 +244,33 @@ mod tests {
         assert!(system.starts_with(crate::agent::DIRECT_CHAT_PREAMBLE));
         assert!(!system.contains("Worked examples"));
         assert!(system.len() < 1_000);
+    }
+
+    #[test]
+    fn direct_chat_history_stays_raw_and_policy_appears_once() {
+        let conversation = vec![
+            json!({"role": "user", "content": "first question"}),
+            json!({"role": "assistant", "content": "first answer"}),
+        ];
+        let turn = AiTurnBuilder::build(AiTurnInput {
+            mode: "chat",
+            note_title: "Real title",
+            system_context: "The note currently open is titled \"Real title\".",
+            conversation: &conversation,
+            question: "second question",
+            mode_policy: "CHAT TURN POLICY: answer only.",
+            turn_instructions: "",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: true,
+            verbose_tool_schemas: false,
+        });
+        assert_eq!(turn.messages.len(), 4);
+        assert_eq!(turn.messages[1]["content"], "first question");
+        assert_eq!(turn.messages[3]["content"], "second question");
+        let rendered = serde_json::to_string(&turn.messages).unwrap();
+        assert!(!rendered.contains("INTERNAL TURN POLICY"));
+        assert_eq!(rendered.matches("Real title").count(), 2);
     }
 }

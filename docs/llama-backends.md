@@ -88,11 +88,12 @@ When Bee cannot start, Myelin tries the equivalent stock backend and reports the
 active engine in Settings. KVarN, precision-tail, and speculative-decoding
 controls are intentionally not exposed in this first integration.
 
-Native validation on LFM2-8B Q2 found 93.6% direct-chat prefix reuse with both
-stock and Bee (887 of 948 prompt tokens cached). However, Bee v0.4.1 failed the
-required OpenHarn `write_note` call-only grammar case while the pinned stock
-build passed it. The integration therefore remains experimental and is not a
-recommended replacement for stock llama.cpp on LFM2 tool/edit workloads.
+Native validation on LFM2-8B found Bee's production-shaped streaming path reused
+157 of 173 follow-up prompt tokens (90.8% total reuse, 100% of the prior fixed
+116-token empty-note prefix), evaluating only 16 new tokens. However, Bee v0.4.1
+failed the required OpenHarn `write_note` call-only grammar case while the pinned
+stock build passed it. The integration therefore remains experimental and is
+not a recommended replacement for stock llama.cpp on LFM2 tool/edit workloads.
 
 ## Bundling for release
 

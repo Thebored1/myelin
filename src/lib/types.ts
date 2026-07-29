@@ -130,6 +130,8 @@ export type ProviderStatus = {
 	/** Backend builds installed: subset of "cuda" | "vulkan" | "metal" | "cpu". */
 	installedBackends?: string[];
 	installedBeeBackends?: string[];
+	/** Physical-core default used when CPU Threads is left on Auto. */
+	recommendedThreads?: number;
 };
 
 /** A compute device exposed by a backend, e.g. { id: "Vulkan0", name: "Intel UHD" }. */

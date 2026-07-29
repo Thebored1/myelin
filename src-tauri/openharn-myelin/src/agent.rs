@@ -353,6 +353,10 @@ fn request_allows_replace_preview(user_text: &str) -> bool {
         .any(|phrase| text.contains(phrase))
 }
 
+fn should_stream_note_preview(user_text: &str, selection_scoped: bool) -> bool {
+    selection_scoped || request_allows_replace_preview(user_text)
+}
+
 async fn detect_intent_in_session(
     client: &reqwest::Client,
     url: &str,
@@ -564,7 +568,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     // arguments that llama-server rejects with "could not decode tool: unexpected
     // end of JSON input". In that case, force prompt-tools + strict for ALL
     // tool-bearing requests, not just multi-call ones.
-    let preview_whole_note = request_allows_replace_preview(user_text);
+    let stream_note_preview = should_stream_note_preview(user_text, opts.selection_scoped);
     let mut strict = opts.strict
         || narrow
         || (!opts.native_first
@@ -875,7 +879,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 &tx,
                 no_think,
                 suppress_text_call,
-                preview_whole_note && !opts.selection_scoped,
+                stream_note_preview,
             )
             .await
             {
@@ -996,7 +1000,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                             &tx,
                             false,
                             true,
-                            preview_whole_note && !opts.selection_scoped,
+                            stream_note_preview,
                         )
                         .await
                         {
@@ -1482,7 +1486,10 @@ fn finish(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_mutating_tool, is_terminal_mutation, normalize_lfm_tool_arguments};
+    use super::{
+        is_mutating_tool, is_terminal_mutation, normalize_lfm_tool_arguments,
+        should_stream_note_preview,
+    };
     use serde_json::json;
 
     #[test]
@@ -1566,5 +1573,10 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn selection_scoped_writes_always_enable_safe_preview_streaming() {
+        assert!(should_stream_note_preview("insert text here", true));
+        assert!(should_stream_note_preview("add below the selection", true));
+    }
 
 }

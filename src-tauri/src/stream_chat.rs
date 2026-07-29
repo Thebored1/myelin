@@ -199,7 +199,7 @@ pub async fn run_chat(
                                     if let Some(nid) = &note_id {
                                         let _ = state.handle.emit(
                                             "ai://note_stream_cancel",
-                                            json!({ "noteId": nid }),
+                                            json!({ "noteId": nid, "requestId": request_id }),
                                         );
                                     }
                                     note_streaming = false;
@@ -211,7 +211,10 @@ pub async fn run_chat(
                                 if !note_streaming {
                                     let _ = state
                                         .handle
-                                        .emit("ai://note_stream_start", json!({ "noteId": nid }));
+                                        .emit(
+                                            "ai://note_stream_start",
+                                            json!({ "noteId": nid, "requestId": request_id }),
+                                        );
                                     note_streaming = true;
                                 }
                                 if content.len() > note_emitted.len()
@@ -220,7 +223,11 @@ pub async fn run_chat(
                                     let new_part = content[note_emitted.len()..].to_string();
                                     let _ = state.handle.emit(
                                         "ai://note_delta",
-                                        json!({ "noteId": nid, "delta": new_part }),
+                                        json!({
+                                            "noteId": nid,
+                                            "requestId": request_id,
+                                            "delta": new_part
+                                        }),
                                     );
                                     note_emitted = content;
                                 }

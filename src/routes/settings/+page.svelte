@@ -13,6 +13,7 @@
     let contextSize = $state<number | null>(null);
     let gpuLayers = $state<number | null>(null);
     let threads = $state<number | null>(null);
+    let recommendedThreads = $state<number | null>(null);
     let temperature = $state<number | null>(null);
     let topP = $state<number | null>(null);
     let maxTurns = $state<number | null>(null);
@@ -293,6 +294,7 @@
             // Gating is opt-in and off by default (model-agnostic full toolset).
             toolGating = status.config?.toolGating ?? false;
             promptCache = status.config?.promptCache ?? true;
+            recommendedThreads = status.recommendedThreads ?? null;
             try { llamaCache = await invoke('llama_cache_status'); } catch (e) { console.error(e); }
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
@@ -897,7 +899,14 @@
                 </div>
                 <div class="input-group">
                     <label for="threads">CPU Threads</label>
-                    <input type="number" id="threads" bind:value={threads} oninput={debounceSave} placeholder="Auto" />
+                    <input type="number" id="threads" bind:value={threads} oninput={debounceSave} placeholder={recommendedThreads ? `Auto — ${recommendedThreads} physical cores` : 'Auto'} />
+                    <span class="toggle-hint">
+                        {threads
+                            ? `Explicit override: ${threads} threads`
+                            : recommendedThreads
+                                ? `Auto uses ${recommendedThreads} physical cores`
+                                : 'Auto uses the detected physical cores'}
+                    </span>
                 </div>
                 <div class="input-group">
                     <label for="temp">Temperature</label>
