@@ -21,6 +21,9 @@ use tauri::{Emitter, Manager, State};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 
+const STARTUP_WARMUP_ATTEMPTS: usize = 5;
+const STARTUP_WARMUP_RETRY_DELAY_SECS: u64 = 2;
+
 #[tauri::command]
 fn get_background_settings(state: State<'_, AppState>) -> BackgroundSettings { state.background_settings() }
 
@@ -722,10 +725,26 @@ pub fn run() {
                     }
                 };
                 rt.block_on(async move {
-                    match warmup_state.warm_llama_server().await {
-                        Ok(()) => log::info!("startup warm-up ready"),
-                        Err(error) => {
-                            log::warn!("startup warm-up failed; first chat will retry: {error}")
+                    for attempt in 1..=STARTUP_WARMUP_ATTEMPTS {
+                        match warmup_state.warm_llama_server().await {
+                            Ok(()) => {
+                                log::info!("startup warm-up ready (attempt {attempt})");
+                                return;
+                            }
+                            Err(error) if attempt < STARTUP_WARMUP_ATTEMPTS => {
+                                log::warn!(
+                                    "startup warm-up attempt {attempt}/{STARTUP_WARMUP_ATTEMPTS} failed: {error}; retrying"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    STARTUP_WARMUP_RETRY_DELAY_SECS,
+                                ))
+                                .await;
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "startup warm-up failed after {STARTUP_WARMUP_ATTEMPTS} attempts; first chat will retry: {error}"
+                                );
+                            }
                         }
                     }
                 });
