@@ -105,14 +105,37 @@ Once the dependencies are configured, you can start the development server:
 
 ```bash
 npm install
+npm run build:sidecar
 npm run tauri dev
 ```
+
+### Required Openharn sidecar
+
+Myelin's AI agent and tool-calling features use the `openharn-myelin` Rust
+sidecar. The main window can open without it, but AI requests that use the
+agent/tool layer will fail unless the sidecar binary is available.
+
+Build and install the sidecar into the location Myelin checks automatically:
+
+```bash
+npm run build:sidecar
+```
+
+This places the binary at `src-tauri/resources/bin/openharn-myelin`. Run the
+command before `npm run tauri dev`, and run it again before `npm run tauri build`
+so the binary is included in a packaged release. Alternatively, open Settings
+→ Agent (openharn) and browse to an existing binary, or set
+`OPENHARN_MYELIN_BIN` to its path.
 
 To build for production:
 
 ```bash
+npm run build:sidecar
 npm run tauri build
 ```
+
+For troubleshooting and platform-specific details, see
+[`docs/openharn-sidecar.md`](docs/openharn-sidecar.md).
 
 ## Architecture Overview
 

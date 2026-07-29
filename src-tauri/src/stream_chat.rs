@@ -374,6 +374,10 @@ fn coerce_args(v: Value) -> Value {
 /// (tools return `Ok(message)` even for refusals). Reused by the openharn
 /// sidecar path (`crate::sidecar`), so the real tools stay in Myelin's process.
 pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
+    if let Err(reason) = state.authorize_tool_call(name) {
+        log::warn!("[execute_tool] blocked {name}: {reason}");
+        return format!("Tool call rejected: {reason}");
+    }
     let v: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
     match name {
         "write_note" => match serde_json::from_value::<WriteNoteArgs>(v.clone()) {

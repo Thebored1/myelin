@@ -130,6 +130,9 @@ pub struct ProviderStatus {
     pub active_provider: String,
     pub available_providers: Vec<String>,
     pub healthy: bool,
+    /// True only when the model, agent sidecar, and capability check are ready.
+    #[serde(default)]
+    pub ready: bool,
     pub detail: String,
     pub config: Option<crate::llama_server::WorkspaceLlamaConfig>,
     pub resolved: Option<crate::llama_server::ResolvedLlamaConfig>,
@@ -137,6 +140,11 @@ pub struct ProviderStatus {
     /// preferred backend when no server is running yet.
     #[serde(default)]
     pub active_backend: Option<String>,
+    /// Configured engine and the engine actually serving requests.
+    #[serde(default)]
+    pub configured_engine: String,
+    #[serde(default)]
+    pub active_engine: Option<String>,
     /// Whether an NVIDIA GPU was detected on this machine.
     #[serde(default)]
     pub nvidia_detected: bool,
@@ -149,6 +157,8 @@ pub struct ProviderStatus {
     /// Backend builds installed ("cuda"/"vulkan"/"metal"/"cpu").
     #[serde(default)]
     pub installed_backends: Vec<String>,
+    #[serde(default)]
+    pub installed_bee_backends: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -20,6 +20,7 @@ const STARTUP_DELAY_MS: u64 = 500;
 /// How many lines of llama-server stderr we retain to detect the active backend.
 const STDERR_CAPTURE_LINES: usize = 200;
 const GPU_MOE_TENSOR_OVERRIDE: &str = ".*ffn_.*_exps.*=CPU";
+pub const BEELLAMA_RELEASE_TAG: &str = "v0.4.1";
 
 /// A compute backend for llama.cpp. The desktop strategy is CUDA-tiered:
 /// detect an NVIDIA GPU and prefer CUDA, otherwise fall back to a portable
@@ -90,11 +91,15 @@ fn has_tensor_override(args: &[String]) -> bool {
 pub struct BackendCandidate {
     pub backend: GpuBackend,
     pub executable_path: PathBuf,
+    /// "beellama" for the experimental fork, otherwise "llama_cpp".
+    pub engine: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WorkspaceLlamaConfig {
+    /// Inference engine: "llama_cpp" (default) or experimental "beellama".
+    pub inference_engine: Option<String>,
     pub executable_path: Option<String>,
     pub model_path: Option<String>,
     pub host: Option<String>,
@@ -140,6 +145,8 @@ pub struct WorkspaceLlamaConfig {
     /// tools they shouldn't touch; the heuristics are brittle and can withhold a
     /// valid tool (e.g. block a web search the model would have run). None → off.
     pub tool_gating: Option<bool>,
+    /// Persist llama-server slot snapshots between note opens/restarts.
+    pub prompt_cache: Option<bool>,
     /// Global hotkey that opens the quick-capture window (e.g. "Ctrl+Space").
     /// None → the default ("Ctrl+Space").
     pub quick_capture_shortcut: Option<String>,
@@ -156,6 +163,7 @@ fn default_false() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedLlamaConfig {
+    pub inference_engine: String,
     pub executable_path: PathBuf,
     pub model_path: PathBuf,
     pub host: String,
@@ -201,6 +209,10 @@ pub struct ResolvedLlamaConfig {
     /// choose the actual strategy.
     #[serde(default)]
     pub prefers_prompt_tools: Option<bool>,
+    /// Keep parameter descriptions in model-facing schemas. Off by default;
+    /// enable in a model profile only when a weak model needs the duplication.
+    #[serde(default)]
+    pub verbose_tool_schemas: bool,
     /// Optional profile suggestion for `tool_choice` in native FC mode. The
     /// sidecar uses the explicit Openharn setting instead of applying this silently.
     #[serde(default)]
@@ -217,6 +229,12 @@ pub struct ResolvedLlamaConfig {
     /// Default OFF — the model gets the full toolset every turn (model-agnostic).
     #[serde(default = "default_false")]
     pub tool_gating: bool,
+    /// Persist the single inference slot under app data.
+    #[serde(default = "default_true")]
+    pub prompt_cache: bool,
+    /// App-managed directory passed to llama-server's slot persistence API.
+    #[serde(skip)]
+    pub slot_save_path: PathBuf,
     /// Ordered list of binaries to try (best first). Not serialized to the UI.
     #[serde(skip)]
     pub candidates: Vec<BackendCandidate>,
@@ -236,7 +254,8 @@ impl ResolvedLlamaConfig {
     }
 
     pub fn matches_runtime(&self, other: &Self) -> bool {
-        self.executable_path == other.executable_path
+        self.inference_engine == other.inference_engine
+            && self.executable_path == other.executable_path
             && self.model_path == other.model_path
             && self.host == other.host
             && self.port == other.port
@@ -252,6 +271,26 @@ impl ResolvedLlamaConfig {
             && self.gpu_device == other.gpu_device
             && self.thinking == other.thinking
             && self.auto_offload == other.auto_offload
+            && self.prompt_cache == other.prompt_cache
+    }
+
+    /// A selected experimental/GPU candidate may legitimately fall back to a
+    /// later candidate. Treat that running candidate as stable until settings
+    /// change instead of retrying the failed preferred binary on every turn.
+    pub fn accepts_running(&self, running: &Self) -> bool {
+        let is_candidate = self.candidates.iter().any(|candidate| {
+            candidate.executable_path == running.executable_path
+                && candidate.engine == running.inference_engine
+        });
+        if !is_candidate {
+            return false;
+        }
+        let mut expected = self.clone();
+        expected.executable_path = running.executable_path.clone();
+        expected.inference_engine = running.inference_engine.clone();
+        expected.backend = running.backend.clone();
+        expected.slot_save_path = running.slot_save_path.clone();
+        expected.matches_runtime(running)
     }
 }
 
@@ -260,6 +299,7 @@ pub struct ManagedLlamaServer {
     pub child: Child,
     /// The backend that actually loaded, detected from the server's startup log.
     pub active_backend: GpuBackend,
+    pub active_engine: String,
     /// True when a GPU backend was requested for this launch.
     pub requested_gpu: bool,
     /// True when the model is actually running on a GPU.
@@ -297,6 +337,7 @@ pub struct LlamaProviderInfo {
     pub gpus: Vec<String>,
     /// Backend builds actually installed ("cuda"/"vulkan"/"metal"/"cpu").
     pub installed_backends: Vec<String>,
+    pub installed_bee_backends: Vec<String>,
 }
 
 /// The release of llama.cpp the app targets — must match the bundled builds so
@@ -424,6 +465,14 @@ pub fn installed_backends(
     found
 }
 
+pub fn installed_bee_backends(app_data_dir: &Path) -> Vec<String> {
+    ["cuda", "vulkan", "metal", "cpu"]
+        .iter()
+        .filter(|backend| bee_backend_binary(app_data_dir, backend).is_some())
+        .map(|backend| backend.to_string())
+        .collect()
+}
+
 /// A compute device exposed by a backend, e.g. id "Vulkan0", name
 /// "Intel(R) UHD Graphics".
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -544,6 +593,15 @@ fn backend_binary(
     None
 }
 
+fn bee_backend_binary(app_data_dir: &Path, backend_label: &str) -> Option<PathBuf> {
+    let candidate = app_data_dir
+        .join("bin")
+        .join("bee")
+        .join(backend_label)
+        .join(executable_name());
+    candidate.is_file().then_some(candidate)
+}
+
 /// Release asset file names to download for a backend on the current OS.
 /// Empty when the backend isn't downloadable here (e.g. CUDA on Linux).
 pub fn assets_for_backend(backend: &str) -> Vec<String> {
@@ -588,6 +646,69 @@ pub fn downloadable_backends() -> Vec<String> {
         .filter(|b| !assets_for_backend(b).is_empty())
         .map(|b| b.to_string())
         .collect()
+}
+
+pub fn bee_assets_for_backend(backend: &str) -> Vec<String> {
+    let prefix = format!("beellama-{BEELLAMA_RELEASE_TAG}-");
+    if cfg!(target_os = "windows") {
+        match backend {
+            "cuda" => vec![
+                format!("{prefix}cudart-win-cuda-12.4-x64.zip"),
+                format!("{prefix}bin-win-cuda-12.4-x64.zip"),
+            ],
+            "vulkan" => vec![format!("{prefix}bin-win-vulkan-x64.zip")],
+            "cpu" => vec![format!("{prefix}bin-win-cpu-x64.zip")],
+            _ => vec![],
+        }
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        match backend {
+            "cuda" => vec![format!("{prefix}bin-ubuntu-cuda-12.4-x64.tar.gz")],
+            "vulkan" => vec![format!("{prefix}bin-ubuntu-vulkan-x64.tar.gz")],
+            "cpu" => vec![format!("{prefix}bin-ubuntu-x64.tar.gz")],
+            _ => vec![],
+        }
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        match backend {
+            "cpu" => vec![format!("{prefix}bin-ubuntu-arm64.tar.gz")],
+            _ => vec![],
+        }
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        match backend {
+            "metal" => vec![format!("{prefix}bin-macos-arm64.tar.gz")],
+            _ => vec![],
+        }
+    } else {
+        vec![]
+    }
+}
+
+pub fn downloadable_bee_backends() -> Vec<String> {
+    ["cuda", "vulkan", "metal", "cpu"]
+        .iter()
+        .filter(|backend| !bee_assets_for_backend(backend).is_empty())
+        .map(|backend| backend.to_string())
+        .collect()
+}
+
+pub fn bee_download_url(asset: &str) -> String {
+    format!(
+        "https://github.com/Anbeeld/beellama.cpp/releases/download/{BEELLAMA_RELEASE_TAG}/{asset}"
+    )
+}
+
+pub fn bee_asset_sha256(asset: &str) -> Option<&'static str> {
+    match asset {
+        "beellama-v0.4.1-bin-macos-arm64.tar.gz" => Some("2f33977bc987699a6c46bd08e870a689eaa57a620dfb537907d9c71102d066bb"),
+        "beellama-v0.4.1-bin-ubuntu-arm64.tar.gz" => Some("5bcc101afc4cd73cbe8832bb41bb47ebbae8a1eff52751929c1b0f8b73ef863a"),
+        "beellama-v0.4.1-bin-ubuntu-cuda-12.4-x64.tar.gz" => Some("acae04c79a9b2e48b8ea46ab0da369973b0481813003bc4623cd907d8b61bd8c"),
+        "beellama-v0.4.1-bin-ubuntu-vulkan-x64.tar.gz" => Some("2a33854daca03bcd0fd568789513fd430594861ce4139f44c9ccb5c9a09cbaac"),
+        "beellama-v0.4.1-bin-ubuntu-x64.tar.gz" => Some("19c67b1ac686af1e7e497f530f6b27aa144dd1ae20e3d6a9c4d5582b4d5be115"),
+        "beellama-v0.4.1-bin-win-cpu-x64.zip" => Some("d724f89533810686709528ab5eb7ecd9998c6aab529e68f6570f588e4ce0964b"),
+        "beellama-v0.4.1-bin-win-cuda-12.4-x64.zip" => Some("d1d6fb46f922ff1dd98aa7ba003ceb94b14aed7b6d30e9dbf6831c7ae4714949"),
+        "beellama-v0.4.1-bin-win-vulkan-x64.zip" => Some("c94479b0f2d675b1fd0370dba1b9e477bda41e592eca6cea8d213315078eea9c"),
+        "beellama-v0.4.1-cudart-win-cuda-12.4-x64.zip" => Some("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"),
+        _ => None,
+    }
 }
 
 pub fn download_url(asset: &str) -> String {
@@ -708,6 +829,13 @@ fn normalize_preference(raw: Option<&str>) -> String {
     }
 }
 
+pub fn normalize_engine(raw: Option<&str>) -> String {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        Some("beellama") => "beellama".into(),
+        _ => "llama_cpp".into(),
+    }
+}
+
 /// Backend order for the current OS, hardware, and preference. A specific
 /// preference forces that backend first; CPU is appended as a safety net so the
 /// app never fails to launch — except when the user explicitly forces CPU.
@@ -747,6 +875,7 @@ pub fn inspect_provider(app_data_dir: &Path) -> Result<LlamaProviderInfo> {
     let gpu_available = gpu_available();
     let (gpus, _) = detect_gpus();
     let installed_backends = installed_backends(app_data_dir, &app_config);
+    let installed_bee_backends = installed_bee_backends(app_data_dir);
     match resolve_config(app_data_dir) {
         Ok(config) => Ok(LlamaProviderInfo {
             detail: format!(
@@ -763,6 +892,7 @@ pub fn inspect_provider(app_data_dir: &Path) -> Result<LlamaProviderInfo> {
             gpu_available,
             gpus,
             installed_backends,
+            installed_bee_backends,
         }),
         Err(error) => Ok(LlamaProviderInfo {
             detail: error.to_string(),
@@ -774,6 +904,7 @@ pub fn inspect_provider(app_data_dir: &Path) -> Result<LlamaProviderInfo> {
             gpu_available,
             gpus,
             installed_backends,
+            installed_bee_backends,
         }),
     }
 }
@@ -802,6 +933,7 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
     let profile = crate::model_profiles::resolve(app_data_dir, gguf.as_ref(), model_filename);
 
     Ok(ResolvedLlamaConfig {
+        inference_engine: primary.engine.clone(),
         executable_path: primary.executable_path.clone(),
         model_path,
         host,
@@ -833,12 +965,18 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         },
         supports_tools: profile.supports_tools,
         prefers_prompt_tools: profile.prefers_prompt_tools,
+        verbose_tool_schemas: profile.verbose_tool_schemas,
         tool_choice: profile.tool_choice.clone(),
         template_kwargs: profile.template_kwargs.clone(),
         deterministic_tools: app_config.deterministic_tools.unwrap_or(true),
         // Default OFF: the model gets the full toolset every turn (model-agnostic).
         // Gating is opt-in only for sub-2B models that misfire on tools.
         tool_gating: app_config.tool_gating.unwrap_or(false),
+        prompt_cache: app_config.prompt_cache.unwrap_or(true),
+        slot_save_path: app_data_dir
+            .join("llama-cache")
+            .join("slots")
+            .join(&primary.engine),
         candidates,
     })
 }
@@ -862,6 +1000,20 @@ fn available_ram_bytes() -> u64 {
     let mut sys = System::new();
     sys.refresh_memory();
     sys.available_memory()
+}
+
+/// llama.cpp's fallback thread count is deliberately conservative. For a
+/// desktop inference server, use every physical core unless the user supplied
+/// an explicit value; SMT siblings rarely improve prompt evaluation enough to
+/// justify becoming the default.
+fn default_inference_threads() -> u32 {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_cpu_all();
+    sys.physical_core_count()
+        .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
+        .unwrap_or(1)
+        .max(1) as u32
 }
 
 /// What a GPU can hold for model weights, and whether that memory is shared RAM.
@@ -1052,7 +1204,11 @@ fn integrated_weight_budget(
 /// machine momentarily low on free RAM was collapsing to ~5K tokens, which the
 /// note + tool schemas + any fetched page would then overflow). A 4096 floor
 /// keeps a usable window; the ladder still backs off if the allocation fails.
-fn ram_safe_ctx(requested: u32, gguf: Option<&crate::gguf::GgufInfo>) -> u32 {
+fn ram_safe_ctx(
+    requested: u32,
+    gguf: Option<&crate::gguf::GgufInfo>,
+    quantized_kv: bool,
+) -> u32 {
     let model_max = gguf
         .and_then(|g| g.context_length)
         .map(|c| c.min(u32::MAX as u64) as u32)
@@ -1066,12 +1222,15 @@ fn ram_safe_ctx(requested: u32, gguf: Option<&crate::gguf::GgufInfo>) -> u32 {
     // launch ladder still backs off if a too-optimistic allocation fails.
     match gguf.and_then(|g| g.kv_bytes_per_token()).filter(|&k| k > 0) {
         Some(kv_per_tok) => {
-            // The adaptive path stores KV as q8_0 (~half of f16), so the same RAM
-            // holds ~2x the context — budget against the quantized size so we can
-            // actually reach the 32k target on 8 GB-class machines.
-            let kv_q8 = (kv_per_tok / 2).max(1);
+            // GPU-backed adaptive plans store KV as q8_0 (~half of f16). The
+            // measured CPU profile keeps faster f16 KV, so budget its full size.
+            let budgeted_kv = if quantized_kv {
+                (kv_per_tok / 2).max(1)
+            } else {
+                kv_per_tok
+            };
             let budget = (available_ram_bytes() as f64 * 0.75) as u64;
-            let max_ctx = (budget / kv_q8).clamp(512, u32::MAX as u64) as u32;
+            let max_ctx = (budget / budgeted_kv).clamp(512, u32::MAX as u64) as u32;
             ceil.min(max_ctx).max(4096)
         }
         None => ceil.max(4096),
@@ -1144,7 +1303,7 @@ fn launch_plans(
     }
 
     let target = AUTO_CTX_TARGET.max(config.context_size);
-    let base_ctx = ram_safe_ctx(target, gguf);
+    let base_ctx = ram_safe_ctx(target, gguf, !forced_cpu);
     let n_layers = gguf.and_then(|g| g.n_layers);
     let half_layers = n_layers.map(|n| (n / 2).max(1) as i32).unwrap_or(16);
 
@@ -1209,10 +1368,34 @@ fn launch_plans(
     };
 
     // Quantize the KV cache to q8_0 (near-lossless, ~half of f16) so the 32k
-    // target fits in RAM on all systems — CPU included. Only for transformer KV;
+    // target fits in RAM on GPU-backed systems. Only for transformer KV;
     // recurrent/hybrid archs keep a tiny fixed state (no KV to quantize).
     let cache_type: Option<&'static str> =
         gguf.and_then(|g| g.kv_bytes_per_token()).map(|_| "q8_0");
+
+    // CPU inference has no VRAM buffers to protect. Inheriting the GPU ladder's
+    // small ubatch and forced flash-attention severely throttles prompt
+    // evaluation, while its fallback attempts cannot improve a CPU launch.
+    if forced_cpu {
+        let mut plans = vec![LaunchPlan {
+            ngl: 0,
+            ctx: base_ctx,
+            no_kv_offload: false,
+            flash_attn: false,
+            ubatch: Some(512),
+            // The local CPU sweep found f16 KV ~12–14% faster than q8_0 for
+            // both prompt evaluation and generation.
+            cache_type: None,
+            jinja,
+        }];
+        if jinja {
+            plans.push(LaunchPlan {
+                jinja: false,
+                ..plans[0].clone()
+            });
+        }
+        return plans;
+    }
 
     let mut plans = vec![
         LaunchPlan {
@@ -1278,11 +1461,18 @@ fn launch_plans(
 /// format. Applied via `--chat-template-file` for `lfm2` models. See
 /// https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/discussions/12
 const LFM2_CHAT_TEMPLATE: &str = include_str!("../templates/lfm2.jinja");
+const LFM25_CHAT_TEMPLATE: &str = include_str!("../templates/lfm25.jinja");
 
 /// Write the corrected LFM2 template to a temp file and return its path.
 fn lfm2_template_path() -> std::io::Result<PathBuf> {
     let path = std::env::temp_dir().join("myelin-lfm2-chat-template.jinja");
     std::fs::write(&path, LFM2_CHAT_TEMPLATE)?;
+    Ok(path)
+}
+
+fn lfm25_template_path() -> std::io::Result<PathBuf> {
+    let path = std::env::temp_dir().join("myelin-lfm25-chat-template.jinja");
+    std::fs::write(&path, LFM25_CHAT_TEMPLATE)?;
     Ok(path)
 }
 
@@ -1317,6 +1507,16 @@ pub async fn start_server(
             }
             Err(e) => {
                 log::warn!("failed to write LFM2 chat template: {e}");
+                None
+            }
+        },
+        Some("lfm25") => match lfm25_template_path() {
+            Ok(p) => {
+                log::info!("using corrected LFM2.5 chat template: {}", p.display());
+                Some(p)
+            }
+            Err(e) => {
+                log::warn!("failed to write LFM2.5 chat template: {e}");
                 None
             }
         },
@@ -1373,6 +1573,11 @@ async fn try_start_candidate(
 ) -> Result<ManagedLlamaServer> {
     let gpu_layers = plan.ngl;
     let requested_gpu = gpu_layers > 0;
+    let slot_save_path = config
+        .slot_save_path
+        .parent()
+        .map(|parent| parent.join(&candidate.engine))
+        .unwrap_or_else(|| config.slot_save_path.clone());
 
     let mut command = Command::new(&candidate.executable_path);
     command
@@ -1395,6 +1600,19 @@ async fn try_start_candidate(
         .arg("1")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if config.prompt_cache {
+        fs::create_dir_all(&slot_save_path).with_context(|| {
+            format!("failed to create slot cache {}", slot_save_path.display())
+        })?;
+        command
+            .arg("--slot-save-path")
+            .arg(&slot_save_path)
+            .arg("--slots")
+            // Reuse stable prompt chunks across successive chat renderings.
+            // llama.cpp defaults this to 0 (disabled), even with cache_prompt.
+            .arg("--cache-reuse")
+            .arg("256");
+    }
 
     // Adaptive offload: keep the KV cache in system RAM so a big context fits on
     // any VRAM, and use flash attention + a small ubatch to bound GPU buffers.
@@ -1448,9 +1666,8 @@ async fn try_start_candidate(
         }
     }
 
-    if let Some(threads) = config.threads {
-        command.arg("--threads").arg(threads.to_string());
-    }
+    let threads = config.threads.unwrap_or_else(default_inference_threads);
+    command.arg("--threads").arg(threads.to_string());
 
     if let Some(chat_format) = &config.chat_format {
         command.arg("--chat-template").arg(chat_format);
@@ -1554,11 +1771,14 @@ async fn try_start_candidate(
             let mut running = config.clone();
             running.executable_path = candidate.executable_path.clone();
             running.backend = Some(active_backend.label().to_string());
+            running.inference_engine = candidate.engine.clone();
+            running.slot_save_path = slot_save_path.clone();
 
             return Ok(ManagedLlamaServer {
                 config: running,
                 child,
                 active_backend,
+                active_engine: candidate.engine.clone(),
                 requested_gpu,
                 gpu_offloaded,
                 ctx_size: plan.ctx,
@@ -1683,6 +1903,22 @@ fn detect_active_backend(lines: &[String], requested: GpuBackend) -> GpuBackend 
 }
 
 pub async fn stop_server(server: &mut ManagedLlamaServer) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(server.child.id() as i32, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = server.child.kill();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if matches!(server.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    log::warn!("llama-server did not exit within 2s of graceful termination; killing it");
     let _ = server.child.kill();
     let _ = server.child.wait();
 }
@@ -1880,6 +2116,28 @@ pub fn set_tool_gating(app_data_dir: &Path, enabled: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn set_prompt_cache(app_data_dir: &Path, enabled: bool) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.prompt_cache = Some(enabled);
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+pub fn set_inference_engine(app_data_dir: &Path, engine: String) -> Result<()> {
+    let mut config = load_config(app_data_dir).unwrap_or_default();
+    config.inference_engine = Some(normalize_engine(Some(&engine)));
+    let path = config_path(app_data_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
 pub fn set_executable_path(app_data_dir: &Path, executable_path: String) -> Result<()> {
     let mut config = load_config(app_data_dir).unwrap_or_default();
     config.executable_path = Some(executable_path);
@@ -1978,6 +2236,7 @@ fn resolve_candidates(
         return Ok(vec![BackendCandidate {
             backend: GpuBackend::Custom,
             executable_path: exe,
+            engine: "llama_cpp".into(),
         }]);
     }
 
@@ -1986,12 +2245,14 @@ fn resolve_candidates(
     let push = |candidates: &mut Vec<BackendCandidate>,
                 seen: &mut Vec<PathBuf>,
                 backend: GpuBackend,
-                exe: PathBuf| {
+                exe: PathBuf,
+                engine: &str| {
         if exe.is_file() && !seen.contains(&exe) {
             seen.push(exe.clone());
             candidates.push(BackendCandidate {
                 backend,
                 executable_path: exe,
+                engine: engine.to_string(),
             });
         }
     };
@@ -2003,7 +2264,24 @@ fn resolve_candidates(
         .as_ref()
         .map(|raw| resolve_input_path(app_data_dir, raw));
 
-    // GPU/CPU backend subfolders, per detected hardware, across all roots.
+    // Experimental Bee candidates are isolated under bin/bee and precede stock
+    // only when explicitly selected. Stock remains the automatic fallback.
+    if normalize_engine(workspace_config.inference_engine.as_deref()) == "beellama" {
+        let bee_root = app_data_dir.join("bin").join("bee");
+        for backend in desired_backends(preference) {
+            if let Some(dir) = backend.dir_name() {
+                push(
+                    &mut candidates,
+                    &mut seen,
+                    backend,
+                    bee_root.join(dir).join(executable_name()),
+                    "beellama",
+                );
+            }
+        }
+    }
+
+    // Stock GPU/CPU backend subfolders, per detected hardware, across all roots.
     for backend in desired_backends(preference) {
         if let Some(dir) = backend.dir_name() {
             for root in &roots {
@@ -2012,6 +2290,7 @@ fn resolve_candidates(
                     &mut seen,
                     backend,
                     root.join(dir).join(executable_name()),
+                    "llama_cpp",
                 );
             }
         }
@@ -2022,7 +2301,7 @@ fn resolve_candidates(
     // may itself be a GPU build, so it keeps the configured gpu_layers and the
     // real backend is detected from the startup log.
     if let Some(exe) = configured_exe {
-        push(&mut candidates, &mut seen, GpuBackend::Custom, exe);
+        push(&mut candidates, &mut seen, GpuBackend::Custom, exe, "llama_cpp");
     }
     for root in &roots {
         push(
@@ -2030,10 +2309,17 @@ fn resolve_candidates(
             &mut seen,
             GpuBackend::Custom,
             root.join(executable_name()),
+            "llama_cpp",
         );
     }
     if let Some(path) = find_on_path(executable_name()) {
-        push(&mut candidates, &mut seen, GpuBackend::Custom, path);
+        push(
+            &mut candidates,
+            &mut seen,
+            GpuBackend::Custom,
+            path,
+            "llama_cpp",
+        );
     }
 
     if candidates.is_empty() {
@@ -2231,10 +2517,27 @@ fn find_on_path(binary_name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_ngl, has_fatal_startup_error, has_tensor_override};
+    use super::{
+        bee_asset_sha256, bee_assets_for_backend, fit_ngl, has_fatal_startup_error,
+        has_tensor_override, normalize_engine,
+    };
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn bee_is_opt_in_and_every_platform_asset_has_a_pinned_digest() {
+        assert_eq!(normalize_engine(None), "llama_cpp");
+        assert_eq!(normalize_engine(Some("beellama")), "beellama");
+        for backend in ["cuda", "vulkan", "metal", "cpu"] {
+            for asset in bee_assets_for_backend(backend) {
+                assert!(
+                    bee_asset_sha256(&asset).is_some(),
+                    "missing Bee checksum for {asset}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn picks_discrete_gpu_on_hybrid_keeps_igpu_alone() {

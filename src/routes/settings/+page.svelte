@@ -7,7 +7,7 @@
     import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
     import { theme, toggleTheme } from '$lib/theme';
 
-    type BackendPref = 'auto' | 'gpu' | 'vulkan' | 'cpu';
+    type BackendPref = 'auto' | 'gpu' | 'vulkan' | 'metal' | 'cpu';
 
     let currentModelPath = $state('');
     let contextSize = $state<number | null>(null);
@@ -20,10 +20,17 @@
     let autoOffload = $state(true);
     let deterministicTools = $state(true);
     let toolGating = $state(false);
+    let promptCache = $state(true);
+    let llamaCache = $state<{ enabled: boolean; sizeBytes: number } | null>(null);
     let extraArgs = $state<string[]>([]);
     let activeWorkspacePath = $state('');
     let indexState = $state<IndexState | null>(null);
     let activeProvider = $state('');
+    let inferenceEngine = $state<'llama_cpp' | 'beellama'>('llama_cpp');
+    let activeEngine = $state<'llama_cpp' | 'beellama' | null>(null);
+    let installedBeeBackends = $state<string[]>([]);
+    let downloadableBeeBackends = $state<string[]>([]);
+    let beeDownloadActive = $state(false);
     let backendPreference = $state<BackendPref>('auto');
     let downloadableBackends = $state<string[]>([]);
     let download = $state<{ backend: string; phase: string; percent: number; message: string } | null>(null);
@@ -92,6 +99,17 @@
 
     const hasGpuBuild = () => installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
     const backendLabel = (b: string) => (b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU');
+    const recommendedBeeBackend = $derived(
+        backendPreference === 'cpu'
+            ? 'cpu'
+            : downloadableBeeBackends.includes('metal')
+              ? 'metal'
+              : nvidiaDetected && downloadableBeeBackends.includes('cuda')
+                ? 'cuda'
+                : downloadableBeeBackends.includes('vulkan')
+                  ? 'vulkan'
+                  : 'cpu'
+    );
 
     // A "GPU" (performance) choice is only distinct from "Vulkan" when there's a
     // discrete GPU: an NVIDIA card (CUDA), or more than one GPU (a real iGPU +
@@ -110,7 +128,7 @@
         if (!gpuAvailable) {
             return { level: 'warn', message: `No GPU detected${gpus.length ? ` (${gpus.join(', ')})` : ''} — running on CPU.` };
         }
-        const need = backendPreference === 'vulkan' ? 'vulkan' : nvidiaDetected ? 'cuda' : 'vulkan';
+        const need = backendPreference === 'vulkan' ? 'vulkan' : backendPreference === 'metal' ? 'metal' : nvidiaDetected ? 'cuda' : 'vulkan';
         if (!installedBackends.includes(need)) {
             return {
                 level: 'warn',
@@ -128,6 +146,8 @@
                 ? 'cpu'
                 : backendPreference === 'vulkan'
                 ? (installed('vulkan') ? 'vulkan' : 'cpu')
+                : backendPreference === 'metal'
+                ? (installed('metal') ? 'metal' : 'cpu')
                 : nvidiaDetected && installed('cuda') ? 'cuda'
                 : installed('vulkan') ? 'vulkan'
                 : installed('metal') ? 'metal'
@@ -232,10 +252,13 @@
         const status = await invoke<ProviderStatus>('get_provider_status');
         activeProvider = status.activeProvider || '';
         activeBackend = status.activeBackend ?? status.resolved?.backend ?? null;
+        inferenceEngine = status.configuredEngine === 'beellama' ? 'beellama' : 'llama_cpp';
+        activeEngine = status.activeEngine ?? status.resolved?.inferenceEngine ?? null;
         nvidiaDetected = status.nvidiaDetected ?? false;
         gpuAvailable = status.gpuAvailable ?? true;
         gpus = status.gpus ?? [];
         installedBackends = status.installedBackends ?? [];
+        installedBeeBackends = status.installedBeeBackends ?? [];
         providerHealthy = status.healthy ?? true;
         providerDetail = status.detail ?? '';
         return status;
@@ -255,11 +278,12 @@
             await refreshSnapshot();
             const status = await loadProviderStatus();
             downloadableBackends = await invoke<string[]>('downloadable_backends');
+            downloadableBeeBackends = await invoke<string[]>('downloadable_bee_backends');
             // Auto = let the app pick; GPU = dedicated/fastest; Vulkan = integrated;
             // CPU = most reliable. Anything unrecognised (or unset) means Auto.
             const sp = status.config?.backendPreference;
             backendPreference =
-                sp === 'cpu' ? 'cpu' : sp === 'vulkan' ? 'vulkan' : sp === 'gpu' ? 'gpu' : 'auto';
+                sp === 'cpu' ? 'cpu' : sp === 'vulkan' ? 'vulkan' : sp === 'metal' ? 'metal' : sp === 'gpu' ? 'gpu' : 'auto';
             // No dedicated GPU → the explicit "GPU" choice is meaningless; fall to
             // Vulkan. (Auto needs no fixup — it adapts on its own.)
             if (!hasDedicatedGpu && backendPreference === 'gpu') backendPreference = 'vulkan';
@@ -268,6 +292,8 @@
             deterministicTools = status.config?.deterministicTools ?? true;
             // Gating is opt-in and off by default (model-agnostic full toolset).
             toolGating = status.config?.toolGating ?? false;
+            promptCache = status.config?.promptCache ?? true;
+            try { llamaCache = await invoke('llama_cache_status'); } catch (e) { console.error(e); }
             searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
             embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
             quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
@@ -340,10 +366,11 @@
             );
 
             // Live-update the backend badge when a server actually starts.
-            await listen<{ backend: string; gpuOffloaded: boolean; fellBackToCpu: boolean }>(
+            await listen<{ backend: string; engine: 'llama_cpp' | 'beellama'; gpuOffloaded: boolean; fellBackToCpu: boolean }>(
                 'ai://llama_backend',
                 (event) => {
                     activeBackend = event.payload.backend;
+                    activeEngine = event.payload.engine;
                     backendFellBack = event.payload.fellBackToCpu;
                 }
             );
@@ -354,11 +381,13 @@
                 async (event) => {
                     download = event.payload;
                     if (event.payload.phase === 'done') {
+                        beeDownloadActive = false;
                         await loadProviderStatus();
                         setTimeout(() => {
                             if (download?.phase === 'done') download = null;
                         }, 4000);
                     }
+                    if (event.payload.phase === 'error') beeDownloadActive = false;
                 }
             );
 
@@ -391,6 +420,27 @@
         } catch (e) {
             console.error('Backend download failed:', e);
         }
+    }
+
+    async function selectInferenceEngine(engine: 'llama_cpp' | 'beellama') {
+        if (engine === 'beellama' && !installedBeeBackends.includes(recommendedBeeBackend)) {
+            beeDownloadActive = true;
+            try {
+                await invoke('download_bee_backend', { backend: recommendedBeeBackend });
+                await invoke('set_inference_engine', { engine: 'beellama' });
+                // Force the normal launcher/health/fallback path now so the
+                // selector reports a broken Bee build immediately.
+                await invoke('warm_llama_server');
+                await loadProviderStatus();
+            } catch (e) {
+                beeDownloadActive = false;
+                console.error('BeeLlama installation failed:', e);
+            }
+            return;
+        }
+        await invoke('set_inference_engine', { engine });
+        inferenceEngine = engine;
+        await loadProviderStatus();
     }
 
     async function changeWorkspace() {
@@ -602,12 +652,53 @@
                     Browse...
                 </button>
             </div>
-            
+
+            <div class="compute-device">
+                <span class="compute-label">Inference engine</span>
+                <div class="segmented" role="group" aria-label="Inference engine">
+                    <button
+                        type="button"
+                        class="segment"
+                        class:active={inferenceEngine === 'llama_cpp'}
+                        onclick={() => selectInferenceEngine('llama_cpp')}
+                    >
+                        llama.cpp · Stable
+                    </button>
+                    <button
+                        type="button"
+                        class="segment"
+                        class:active={inferenceEngine === 'beellama'}
+                        disabled={beeDownloadActive}
+                        onclick={() => selectInferenceEngine('beellama')}
+                    >
+                        {beeDownloadActive
+                            ? 'Installing BeeLlama…'
+                            : installedBeeBackends.includes(recommendedBeeBackend)
+                              ? 'BeeLlama · Experimental'
+                              : `Download BeeLlama ${backendLabel(recommendedBeeBackend)}`}
+                    </button>
+                </div>
+                <p class="compute-hint">
+                    BeeLlama v0.4.1 is an experimental, drop-in llama-server fork.
+                    Prompt and persistent slot caching remain enabled. Stock llama.cpp is used automatically if Bee fails to start.
+                </p>
+                {#if inferenceEngine === 'beellama'}
+                    <div class="device-issue warn">
+                        <span class="issue-icon">⚠️</span>
+                        <span>
+                            Experimental engine selected.
+                            {activeEngine === 'llama_cpp'
+                                ? ' BeeLlama failed or is unavailable, so the stable engine is active.'
+                                : ` Active backend: ${activeBackend?.toUpperCase() ?? 'not started yet'}.`}
+                        </span>
+                    </div>
+                {/if}
+            </div>
 
             <div class="compute-device">
                 <span class="compute-label">Compute device</span>
                 <div class="segmented" role="group" aria-label="Compute device">
-                    {#each [{ value: 'auto', label: 'Auto' }, { value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }, { value: 'cpu', label: 'CPU' }] as opt}
+                    {#each [{ value: 'auto', label: 'Auto' }, { value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }, ...(downloadableBackends.includes('metal') ? [{ value: 'metal', label: 'Metal' }] : []), { value: 'cpu', label: 'CPU' }] as opt}
                         {@const disabled = opt.value === 'gpu' && !hasDedicatedGpu}
                         <button
                             type="button"
@@ -626,6 +717,8 @@
                         Most reliable: runs entirely on the CPU. Works with every model (some models give wrong output on the GPU), at the cost of speed.
                     {:else if backendPreference === 'vulkan'}
                         Power-saving: runs on the integrated GPU via Vulkan. The app still manages offload and falls back to CPU if needed.
+                    {:else if backendPreference === 'metal'}
+                        macOS GPU acceleration: runs through Apple Metal. Requires the downloaded Metal backend and falls back to CPU if needed.
                     {:else if backendPreference === 'gpu'}
                         Performance: uses the fastest available GPU (the dedicated GPU where present). Falls back automatically.
                     {:else}
@@ -633,7 +726,7 @@
                     {/if}
                 </p>
 
-                {#if !hasDedicatedGpu && backendPreference !== 'cpu' && backendPreference !== 'auto'}
+                {#if !hasDedicatedGpu && backendPreference !== 'cpu' && backendPreference !== 'auto' && backendPreference !== 'metal'}
                     <div class="device-issue warn">
                         <span class="issue-icon">ℹ️</span>
                         <span>No dedicated GPU detected — GPU mode is unavailable. Using the integrated GPU via Vulkan, or switch to CPU for the most reliable output.</span>
@@ -757,6 +850,30 @@
             <p class="description">
                 Fine-tune llama-server memory usage and CLI flags. Leave blank to use system defaults.
             </p>
+            <label class="toggle-row">
+                <input
+                    type="checkbox"
+                    bind:checked={promptCache}
+                    onchange={async () => {
+                        await invoke('set_prompt_cache', { enabled: promptCache });
+                        llamaCache = await invoke('llama_cache_status');
+                    }}
+                />
+                <span class="toggle-text">
+                    <strong>Persistent per-note prompt cache</strong>
+                    <span class="toggle-hint">
+                        Reuses llama.cpp slot snapshots across restarts. No automatic retention limit.
+                        {#if llamaCache} ({formatMB(llamaCache.sizeBytes)} cached){/if}
+                    </span>
+                </span>
+            </label>
+            <button
+                class="secondary"
+                onclick={async () => {
+                    await invoke('clear_llama_cache');
+                    llamaCache = await invoke('llama_cache_status');
+                }}
+            >Clear prompt cache</button>
             <label class="toggle-row">
                 <input type="checkbox" bind:checked={autoOffload} onchange={debounceSave} />
                 <span class="toggle-text">
@@ -885,7 +1002,9 @@
             <p class="description">
                 Myelin runs the openharn agent harness as a sidecar process that drives the local model
                 and calls back into Myelin for the real note / search / web tools. These settings tune
-                that sidecar. Leave a field blank to use the built-in default.
+                that sidecar. The sidecar binary is required for AI agent and tool-calling features.
+                Run <code>npm run build:sidecar</code> before development or packaging, or choose an
+                existing binary below. Leave the path blank to use the bundled/resource-dir lookup.
             </p>
 
             <div class="input-group full-width">
@@ -981,7 +1100,7 @@
                     Browse…
                 </button>
             </div>
-            <p class="compute-hint">Explicit path to the sidecar binary. Blank = bundled / resource-dir lookup.</p>
+            <p class="compute-hint">Explicit path to the sidecar binary. Blank = bundled/resource-dir lookup. If it is missing, run <code>npm run build:sidecar</code> or set <code>OPENHARN_MYELIN_BIN</code>.</p>
 
             <p class="compute-hint">
                 Tool-calling format, intent detection, and reasoning behavior are selected automatically per request from the active model profile and interaction mode.

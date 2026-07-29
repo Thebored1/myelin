@@ -197,11 +197,92 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
             continue;
         }
         let args_str = cap.get(2).map(|m| m.as_str()).unwrap_or("{}").trim();
-        if !args_str.starts_with('{') && args_str.contains('"') {
+        if !args_str.starts_with('{') && !args_str.contains('=') && args_str.contains('"') {
             continue;
         }
         let args = if args_str.starts_with('{') {
             args_str.to_string()
+        } else if args_str.contains('=') {
+            // Liquid LFM's native format is Pythonic:
+            //   write_note(content="...", mode="replace")
+            // Split only on top-level commas so commas inside JSON-quoted
+            // strings and nested values remain part of the argument.
+            let mut parts = Vec::new();
+            let mut start = 0usize;
+            let mut depth = 0i32;
+            let mut quote = false;
+            let mut escaped = false;
+            for (i, ch) in args_str.char_indices() {
+                if quote {
+                    if escaped {
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        quote = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '"' => quote = true,
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' => depth -= 1,
+                    ',' if depth == 0 => {
+                        parts.push(&args_str[start..i]);
+                        start = i + ch.len_utf8();
+                    }
+                    _ => {}
+                }
+            }
+            parts.push(&args_str[start..]);
+
+            let mut obj = serde_json::Map::new();
+            for part in parts {
+                let Some((key, raw)) = part.split_once('=') else {
+                    continue;
+                };
+                let key = key.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                let raw = raw.trim();
+                let value = serde_json::from_str::<Value>(raw).unwrap_or_else(|_| match raw {
+                    "True" => Value::Bool(true),
+                    "False" => Value::Bool(false),
+                    "None" => Value::Null,
+                    _ => Value::String(raw.to_string()),
+                });
+                obj.insert(key.to_string(), value);
+            }
+            // Schema-sanitize: keep only argument keys the tool declares. A
+            // malformed Pythonic call (e.g. write_note(foo="…")) previously
+            // became a structured call missing `content` — with an unknown-key
+            // model error it now fails loudly at argument validation instead.
+            let tool_schema = schemas
+                .as_array()
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|t| t["function"]["name"].as_str() == Some(name))
+                });
+            if let Some(props) = tool_schema
+                .and_then(|t| t["function"]["parameters"]["properties"].as_object())
+            {
+                obj.retain(|k, _| props.contains_key(k));
+            }
+            let has_required_args = tool_schema
+                .and_then(|t| t["function"]["parameters"]["required"].as_array())
+                .map(|required| {
+                    required.iter().all(|key| {
+                        key.as_str()
+                            .and_then(|key| obj.get(key))
+                            .is_some_and(|value| !value.is_null())
+                    })
+                })
+                .unwrap_or(true);
+            if obj.is_empty() || !has_required_args {
+                continue;
+            }
+            Value::Object(obj).to_string()
         } else if let Some(param) = tool_param(name, schemas) {
             json!({ param: args_str }).to_string()
         } else {
@@ -709,6 +790,50 @@ mod tests {
             serde_json::from_str::<Value>(args).unwrap()["query"],
             "latest rust"
         );
+    }
+
+    #[test]
+    fn parses_lfm_pythonic_named_arguments() {
+        let calls = parse_text_tool_calls(
+            r#"write_note(content="Sea, sky, and shore", mode="replace")"#,
+            &schemas(),
+        )
+        .expect("parse");
+        let args: Value =
+            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["content"], "Sea, sky, and shore");
+        assert_eq!(args["mode"], "replace");
+    }
+
+    #[test]
+    fn pythonic_unknown_keys_are_dropped() {
+        // A hallucinated kwarg must not smuggle a malformed call through:
+        // `foo` is not in the write_note schema and gets dropped.
+        let calls = parse_text_tool_calls(
+            r#"write_note(content="hello", foo="bar")"#,
+            &schemas(),
+        )
+        .expect("parse");
+        let args: Value =
+            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["content"], "hello");
+        assert!(args.get("foo").is_none());
+        // A call whose ENTIRE argument set is unknown is discarded, not
+        // forwarded to the host as a content-less write_note.
+        assert!(
+            parse_text_tool_calls(r#"write_note(wrong_key="boom")"#, &schemas()).is_none(),
+            "all-unknown Pythonic call must be discarded"
+        );
+    }
+
+    #[test]
+    fn pythonic_calls_missing_required_arguments_are_rejected() {
+        assert!(parse_text_tool_calls(r#"write_note(mode="replace")"#, &schemas()).is_none());
+        assert!(parse_text_tool_calls(
+            r#"write_note(content=None, mode="replace")"#,
+            &schemas()
+        )
+        .is_none());
     }
 
     #[test]

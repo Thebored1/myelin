@@ -460,6 +460,7 @@ struct Outcome {
     error: Option<String>,
     note_deltas: usize,
     last_result: Option<String>,
+    new_messages: usize,
 }
 
 fn tool_schemas() -> Value {
@@ -497,6 +498,10 @@ async fn run_chat(
             "max_calls": 1,
             "total_max": 4,
             "tool_timeout_secs": 20,
+            // This mirrors Myelin's host-authoritative operation routing.
+            // The sidecar must not require lexical overlap for an operation.
+            "friendly_results": true,
+            "intent_is_tool": true,
         }
     });
     let resp = client
@@ -521,6 +526,7 @@ async fn run_chat(
         error: None,
         note_deltas: 0,
         last_result: None,
+        new_messages: 0,
     };
 
     while let Some(chunk) = stream.next().await {
@@ -558,7 +564,11 @@ async fn run_chat(
                                 .expect("POST /v1/tool-result");
                         }
                         "note_delta" => out.note_deltas += 1,
-                        "done" => out.done = true,
+                        "done" => {
+                            out.done = true;
+                            let v: Value = serde_json::from_str(&data).expect("done event json");
+                            out.new_messages = v["new_messages"].as_array().map_or(0, Vec::len);
+                        }
                         "error" => out.error = Some(data.clone()),
                         _ => {}
                     }
@@ -680,6 +690,7 @@ async fn every_tool_round_trips_and_edits_md() {
     let o = run_scenario(&client, &sidecar_base, &mock_base, "req-replace", "write_note_replace", &ctx).await;
     assert_eq!(o.tool.as_deref(), Some("write_note"), "write_note replace dispatched");
     assert!(o.done, "write_note replace completed");
+    assert!(o.new_messages >= 2, "done includes assistant/tool-result delta");
     assert_eq!(note().trim(), "# Title\nHello world", "write_note replace body");
 
     // --- write_note: append ---

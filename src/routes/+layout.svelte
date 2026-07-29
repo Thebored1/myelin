@@ -8,6 +8,7 @@
 	import '$lib/theme';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { providerAiStatus, type AiStatus } from '$lib/aiStatus';
 
 	let { children } = $props();
 
@@ -17,7 +18,7 @@
 	let wasSmallScreen = $state(false);
 	let isWindowMaximized = $state(false);
 	let isWindowFullscreen = $state(false);
-	let aiStatus = $state<'loading' | 'ready' | 'unavailable' | 'unconfigured'>('loading');
+	let aiStatus = $state<AiStatus>('loading');
 
 	$effect(() => {
 		const isSmallScreen = windowWidth < 1200;
@@ -37,9 +38,7 @@
 			const syncAiStatus = async () => {
 				try {
 					const status = await invoke<any>('get_provider_status');
-					if (!status?.config?.modelPath) aiStatus = 'unconfigured';
-					else if (!status?.resolved) aiStatus = 'unavailable';
-					else if (status?.healthy) aiStatus = 'ready';
+					aiStatus = providerAiStatus(status, aiStatus);
 				} catch {
 					// Keep the warmup event as the source of truth when status is transiently unavailable.
 				}

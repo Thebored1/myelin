@@ -46,7 +46,7 @@ const WEB_FETCH_LIMIT: usize = 6_000;
 /// calls or describing edits in chat instead of writing them. Tool schemas are
 /// still passed separately via `tool_specs` on every request.
 pub const MYELIN_PREAMBLE: &str = concat!(
-    "You are the assistant inside Myelin, a local notes app, powered by an open model running locally on the user's own machine. If asked what or who you are, identify yourself as Myelin's built-in AI assistant — do not claim to be proprietary or commercial software. The text of the note currently open in the editor is included in the user's message — you already have it.\n\n",
+    "You are the assistant inside Myelin, a local notes app, powered by an open model running locally on the user's own machine. If asked what or who you are, identify yourself as Myelin's built-in AI assistant — do not claim to be proprietary or commercial software. The text of the note currently open in the editor is included in the system context — you already have it.\n\n",
     "- To change the open note (write, rewrite, edit, format, add to, shorten, clear, etc.), pick the matching Edit tool from those listed below. Use write_note to replace the whole note; append_note to add to the end; prepend_note to add to the beginning; insert_after_line to add after a specific line; replace_in_note to change specific text; delete_in_note to remove a part. The ONLY way to change the note is a tool call: never describe the edit, print new note text, or type tool names in your chat reply. When the user says \"write this\", \"put that in the note\", or similar, and a preceding assistant message contains the requested draft, copy that exact draft into `content` — do not compose a substitute or a different version. Preserve its Markdown exactly, including headings, blank lines, lists, bold text, and line breaks.\n",
     "- Write real Markdown: a heading line starts with \"# \" (a hash then a space), \"## \" for a sub-heading; bullets start with \"- \". \"**bold**\" is NOT a heading. Use ONLY plain newline characters (the enter/return key) to separate lines of poetry or paragraphs — never use `<br>` HTML tags, em spaces, asterisks, or any other formatting as line-break separators. Do not include `<`, `<<`, `<>`, or similar markup artifacts — these break the note display.\n",
     "- When editing, reproduce every line that should stay and change only what was asked. Never return an empty or much-shorter note unless the user explicitly asked to clear or shorten it.\n",
@@ -67,6 +67,18 @@ pub const MYELIN_PREAMBLE: &str = concat!(
     "NOTE: (empty)\n",
     "USER: write a short note titled Sea\n",
     "(resulting note)\n# Sea\nThe sea is vast and restless."
+);
+
+/// Minimal system policy for a tool-free Chat turn. Sending the full editing
+/// manual and worked mutation examples when no tools are present wastes prompt
+/// evaluation—especially on recurrent/hybrid models whose llama.cpp cache
+/// backend may be unable to restore a prefix between requests.
+pub const DIRECT_CHAT_PREAMBLE: &str = concat!(
+    "You are Myelin's built-in AI assistant, powered by a local model. ",
+    "The currently open note's title and content are included below. ",
+    "Answer the user's question directly from that context or general knowledge. ",
+    "Do not claim to read, search, or modify anything, and do not emit tool calls. ",
+    "Be concise unless the user asks for detail."
 );
 
 /// OpenAI-format tool definitions mirroring the live agent's tools, in the same
@@ -230,12 +242,41 @@ pub fn tool_specs() -> Vec<Value> {
 /// descriptions for routing and execution, but llama-server only needs each
 /// function name and its argument schema to emit a valid call.
 pub fn compact_tool_specs(specs: Vec<Value>) -> Vec<Value> {
+    compact_tool_specs_for_profile(specs, false)
+}
+
+/// Compact model-facing schemas. Function descriptions are always omitted
+/// because the stable preamble already teaches tool semantics. Parameter
+/// descriptions are retained only for profiles that explicitly need them.
+pub fn compact_tool_specs_for_profile(
+    specs: Vec<Value>,
+    verbose_parameter_descriptions: bool,
+) -> Vec<Value> {
+    fn strip_descriptions(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.remove("description");
+                for child in map.values_mut() {
+                    strip_descriptions(child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    strip_descriptions(item);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut compacted: Vec<Value> = specs
         .into_iter()
         .filter_map(|spec| {
             let function = spec.get("function")?;
             let name = function.get("name")?.clone();
-            let parameters = function.get("parameters")?.clone();
+            let mut parameters = function.get("parameters")?.clone();
+            if !verbose_parameter_descriptions {
+                strip_descriptions(&mut parameters);
+            }
             Some(serde_json::json!({
                 "type": "function",
                 "function": {
@@ -312,6 +353,10 @@ pub struct SelectionArg {
     pub before: String,
     #[serde(default)]
     pub after: String,
+    /// A zero-length target captured from a right-click caret. In this mode
+    /// `before`/`after` locate an insertion boundary rather than selected text.
+    #[serde(default)]
+    pub cursor: bool,
 }
 
 /// Locate the byte range in `body` an armed selection refers to. Picks the
@@ -362,6 +407,32 @@ pub fn locate_selection(body: &str, sel: &SelectionArg) -> Option<(usize, usize)
 /// before/after the selection → it did a full rewrite, which we honor instead).
 pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> Option<WritePlan> {
     let content = strip_prompt_markers(content);
+    if sel.cursor {
+        let positions = (0..=body.len()).filter(|position| {
+            body.is_char_boundary(*position)
+                && (sel.before.is_empty() || body[..*position].ends_with(&sel.before))
+                && (sel.after.is_empty() || body[*position..].starts_with(&sel.after))
+        });
+        let matches: Vec<usize> = positions.take(2).collect();
+        if matches.len() != 1 {
+            return None;
+        }
+        let position = matches[0];
+        let mut insertion = content;
+        let left_alnum = body[..position].chars().next_back().is_some_and(char::is_alphanumeric);
+        let right_alnum = body[position..].chars().next().is_some_and(char::is_alphanumeric);
+        if left_alnum && insertion.chars().next().is_some_and(char::is_alphanumeric) {
+            insertion.insert(0, ' ');
+        }
+        if right_alnum && insertion.chars().next_back().is_some_and(char::is_alphanumeric) {
+            insertion.push(' ');
+        }
+        let mut new_body = String::with_capacity(body.len() + insertion.len());
+        new_body.push_str(&body[..position]);
+        new_body.push_str(&insertion);
+        new_body.push_str(&body[position..]);
+        return Some(WritePlan { new_body, op: WriteOp::EditSnippet });
+    }
     let (start, end) = locate_selection(body, sel)?;
     let regenerated_whole = (!sel.after.trim().is_empty() && content.contains(sel.after.trim()))
         || (!sel.before.trim().is_empty() && content.contains(sel.before.trim()));
@@ -636,7 +707,10 @@ fn is_negated(message: &str, keywords: &[&str]) -> bool {
     let first_pos = keywords.iter().filter_map(|kw| m.find(kw)).min();
     if let Some(pos) = first_pos {
         let before = &m[..pos];
-        return NEGATIONS.iter().any(|n| before.contains(n));
+        // Word-boundary match: a raw substring check on "not"/"no" misfires on
+        // ordinary words — "note" contains "not", "know" contains "no" — which
+        // silently negated e.g. "does this note contain X?".
+        return NEGATIONS.iter().any(|n| contains_any_word(&before, &[n]));
     }
     false
 }
@@ -655,20 +729,10 @@ pub fn append_request_intent(message: &str) -> bool {
         || placement_request_intent(message)
 }
 
-pub fn placement_request_intent(message: &str) -> bool {
-    let text = message.to_ascii_lowercase();
-    ["below it", "under it", "after it", "beneath it", "below this", "under this", "after this", "beneath this"]
-        .iter()
-        .any(|phrase| text.contains(phrase))
-}
-
-/// Whether an operation needs the existing open-note body in its prompt.
-/// Fresh creation, append, and retrieval requests can omit it; edits that must
-/// preserve surrounding text need the authoritative current body.
-pub fn requires_existing_note_context(message: &str, has_selection: bool) -> bool {
-    if has_selection || append_request_intent(message) || !note_write_intent(message) {
-        return false;
-    }
+// Routing-only distinction: prompt construction always includes the body, but
+// the specialized write contract still needs to know whether a request is a
+// fresh whole-note creation or an edit that must preserve existing text.
+fn existing_note_operation(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     [
         "edit", "rewrite", "revis", "format", "shorten", "expand", "reorder", "remove",
@@ -677,6 +741,13 @@ pub fn requires_existing_note_context(message: &str, has_selection: bool) -> boo
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+pub fn placement_request_intent(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    ["below it", "under it", "after it", "beneath it", "below this", "under this", "after this", "beneath this"]
+        .iter()
+        .any(|phrase| text.contains(phrase))
 }
 
 /// opposed to just chatting / asking a question)? Used by `select_tools` to
@@ -1520,6 +1591,8 @@ pub fn wants_documents(message: &str) -> bool {
     const KW: &[&str] = &[
         "the pdf",
         "this pdf",
+        "my pdf",
+        "a pdf",
         "the document",
         "this document",
         "my document",
@@ -1532,6 +1605,9 @@ pub fn wants_documents(message: &str) -> bool {
         "in the text",
     ];
     let matched = m.contains("the pdf")
+        || m.contains("this pdf")
+        || m.contains("my pdf")
+        || m.contains("a pdf")
         || m.contains("this pdf")
         || m.contains("the document")
         || m.contains("this document")
@@ -1606,6 +1682,43 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
     select_tools_cfg(message, has_open_note, edit_thread, true, true)
 }
 
+/// Chat always receives one fixed read-only schema. Question-dependent schemas
+/// change the rendered prompt prefix and defeat llama-server KV reuse.
+pub fn select_chat_tools(_message: &str, _has_open_note: bool) -> Vec<Value> {
+    specs_for(&[
+        "read_note",
+        "fetch_web_page",
+        "web_search",
+        "search_documents",
+        "find_in_note",
+        "search_notes",
+    ])
+}
+
+/// Stable tool schema for both real turns and synthetic prefix warm-up.
+///
+/// The frontend currently exposes only chat and edit. Keep operation and auto
+/// compatible with the full schema for external callers and a future composer
+/// mode toggle.
+pub fn interaction_mode_tools(mode: &str, oversized: bool) -> Vec<Value> {
+    if oversized {
+        return tool_specs()
+            .into_iter()
+            .filter(|tool| {
+                !matches!(
+                    tool["function"]["name"].as_str(),
+                    Some("write_note" | "format_note")
+                )
+            })
+            .collect();
+    }
+    match mode {
+        "chat" => select_chat_tools("", true),
+        "edit" => specs_for(&["write_note"]),
+        _ => tool_specs(),
+    }
+}
+
 /// Filter the full tool spec list down to a set of tool names.
 fn specs_for(names: &[&str]) -> Vec<Value> {
     tool_specs()
@@ -1644,6 +1757,17 @@ pub fn select_tools_cfg(
         return specs_for(&["format_note"]);
     }
 
+    // Fresh whole-note creation does not need the model to choose between
+    // several mutation strategies.  Before the specialized append/insert/
+    // delete tools were introduced, requests such as "write a poem" exposed
+    // only write_note; retain that reliable contract for creation requests.
+    // Requests that need the existing body (rewrite, format, targeted edits,
+    // etc.) continue through the broader mutation routing below.
+    let fresh_whole_note = has_open_note
+        && note_write_intent(message)
+        && !append_request_intent(message)
+        && !existing_note_operation(message);
+
     // Gating off: offer the full general tool set every turn and let the model
     // decide. Read/search tools are harmless on a misfire, so they're always on
     // (this is what keeps web search working — gating's brittle keyword routing
@@ -1661,11 +1785,13 @@ pub fn select_tools_cfg(
         ];
         if has_open_note && (note_write_intent(message) || edit_thread) {
             names.push("write_note");
-            names.push("append_note");
-            names.push("prepend_note");
-            names.push("replace_in_note");
-            names.push("insert_after_line");
-            names.push("delete_in_note");
+            if !fresh_whole_note {
+                names.push("append_note");
+                names.push("prepend_note");
+                names.push("replace_in_note");
+                names.push("insert_after_line");
+                names.push("delete_in_note");
+            }
         }
         if deterministic && has_open_note && wants_find(message) {
             names.push("find_in_note");
@@ -1684,11 +1810,13 @@ pub fn select_tools_cfg(
         && (note_write_intent(message) || edit_thread || detect_format_op(message).is_some())
     {
         names.push("write_note");
-        names.push("append_note");
-        names.push("prepend_note");
-        names.push("replace_in_note");
-        names.push("insert_after_line");
-        names.push("delete_in_note");
+        if !fresh_whole_note {
+            names.push("append_note");
+            names.push("prepend_note");
+            names.push("replace_in_note");
+            names.push("insert_after_line");
+            names.push("delete_in_note");
+        }
     }
     if wants_other_notes(message) {
         names.push("search_notes");
@@ -1740,6 +1868,28 @@ impl Tool for ReadNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // A small model can occasionally ask to read the note already present in
+        // its prompt. Intercept that mistake before resolving any other note.
+        if let Some(open_id) = self.state.current_note_id() {
+            if let Ok(open_note) = self.state.load_note(open_id.clone()).await {
+                let normalize = |value: &str| {
+                    value
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase()
+                };
+                if args.note_id == open_id
+                    || normalize(&args.note_id) == normalize(&open_note.title)
+                {
+                    return Ok(format!(
+                        "ALREADY-OPEN NOTE — its current body was already supplied in the prompt. \
+                         Answer the user directly without another lookup.\n\n{}",
+                        open_note.body
+                    ));
+                }
+            }
+        }
         self.state
             .record_chat_tool("Read Note", args.note_id.clone());
         let _ = self.state.handle.emit(
@@ -2647,6 +2797,8 @@ pub struct SearchDocumentsArgs {
     query: String,
     #[serde(default)]
     count: Option<u32>,
+    #[serde(default)]
+    doc_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2671,7 +2823,8 @@ impl Tool for SearchDocumentsTool {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "What to look for in the documents." },
-                    "count": { "type": "integer", "description": "How many passages (default 5, max 10)." }
+                    "count": { "type": "integer", "description": "How many passages (default 5, max 10)." },
+                    "doc_id": { "type": "string", "description": "Optional document or note ID to search within." }
                 },
                 "required": ["query"]
             }),
@@ -2680,13 +2833,19 @@ impl Tool for SearchDocumentsTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let k = args.count.unwrap_or(5).clamp(1, 10) as usize;
+        let doc_id = args.doc_id.or_else(|| {
+            self.state
+                .oversized_doc_active()
+                .then(|| self.state.current_note_id())
+                .flatten()
+        });
         self.state
             .record_chat_tool("Search Documents", args.query.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
         );
-        match self.state.retrieve_chunks(&args.query, k).await {
+        match self.state.retrieve_chunks(&args.query, k, doc_id.as_deref()).await {
             Ok(chunks) if !chunks.is_empty() => {
                 let mut out = format!("Passages from your documents for \"{}\":\n\n", args.query);
                 for (i, c) in chunks.iter().enumerate() {
@@ -2982,6 +3141,13 @@ mod tests {
     const NOTE: &str = "Cars are fast. They have engines. People drive them daily.";
 
     #[test]
+    fn negation_matching_ignores_words_that_contain_not() {
+        // "note"/"know" contain "not"/"no" as substrings — must NOT read as negation.
+        assert!(wants_find("does this note contain aardvark?"));
+        assert!(!wants_find("do not find anything in the note"));
+    }
+
+    #[test]
     fn clean_note_content_converts_repeated_asterisk_line_separators() {
         let malformed = "**Beneath the sky, the river flows,** *Where stones whisper secrets, soft and low.* *The wind holds still, the world is calm,** *A mirrored path where shadows call.* *In twilight's hush, the stars align,** *A quiet night, a sacred sign.*";
         assert_eq!(
@@ -3256,6 +3422,40 @@ mod tests {
     }
 
     #[test]
+    fn fresh_whole_note_creation_uses_only_write_note() {
+        let has = |v: &[Value], name: &str| {
+            v.iter()
+                .any(|t| t["function"]["name"].as_str() == Some(name))
+        };
+
+        for tools in [
+            select_tools_cfg("write a poem", true, false, true, true),
+            select_tools_cfg("write a poem", true, false, false, true),
+        ] {
+            assert!(has(&tools, "write_note"));
+            for mutation in [
+                "append_note",
+                "prepend_note",
+                "replace_in_note",
+                "insert_after_line",
+                "delete_in_note",
+            ] {
+                assert!(!has(&tools, mutation), "unexpected tool: {mutation}");
+            }
+        }
+
+        // Existing-note rewrites still need the broader edit choices.
+        let rewrite = select_tools_cfg("rewrite the introduction", true, false, true, true);
+        assert!(has(&rewrite, "write_note"));
+        assert!(has(&rewrite, "replace_in_note"));
+
+        // Additions still expose the append path; the state-layer append-only
+        // filter removes the overwrite and targeted-edit tools before dispatch.
+        let append = select_tools_cfg("add a poem", true, false, true, true);
+        assert!(has(&append, "append_note"));
+    }
+
+    #[test]
     fn locate_selection_disambiguates_repeats_via_context() {
         let body = "Cats are nice.\n\nDogs are loyal.\n\nCats are nice.";
         // The phrase occurs twice; the `before` anchor pins the SECOND one.
@@ -3263,6 +3463,7 @@ mod tests {
             text: "Cats are nice.".into(),
             before: "loyal.\n\n".into(),
             after: "".into(),
+            cursor: false,
         };
         let (s, e) = locate_selection(body, &sel).unwrap();
         assert_eq!(s, body.rfind("Cats are nice.").unwrap());
@@ -3278,6 +3479,7 @@ mod tests {
             text: "Food is essential and good.\n\n".into(),
             before: "Intro\n\n**".into(),
             after: "**\n\n## More".into(),
+            cursor: false,
         };
         let (s, e) = locate_selection(body, &sel).unwrap();
         assert_eq!(&body[s..e], "Food is essential and good.");
@@ -3297,6 +3499,7 @@ mod tests {
             text: "Old paragraph here.".into(),
             before: "Intro line.\n\n".into(),
             after: "\n\nClosing line.".into(),
+            cursor: false,
         };
         let plan = selection_scoped_plan(body, "New paragraph.", &sel).unwrap();
         assert_eq!(plan.op, WriteOp::EditSnippet);
@@ -3313,9 +3516,34 @@ mod tests {
             text: "Remove this.".into(),
             before: "Keep this.\n\n".into(),
             after: "\n\nKeep that.".into(),
+            cursor: false,
         };
         let plan = selection_scoped_plan(body, "", &sel).unwrap();
         assert_eq!(plan.new_body, "Keep this.\n\n\n\nKeep that.");
+    }
+
+    #[test]
+    fn cursor_scoped_plan_inserts_at_the_unique_anchor() {
+        let body = "Alpha beta.";
+        let sel = SelectionArg {
+            text: String::new(),
+            before: "Alpha ".into(),
+            after: "beta.".into(),
+            cursor: true,
+        };
+        let plan = selection_scoped_plan(body, "bright", &sel).unwrap();
+        assert_eq!(plan.new_body, "Alpha bright beta.");
+    }
+
+    #[test]
+    fn cursor_scoped_plan_rejects_ambiguous_anchor() {
+        let sel = SelectionArg {
+            text: String::new(),
+            before: String::new(),
+            after: String::new(),
+            cursor: true,
+        };
+        assert!(selection_scoped_plan("abc", "x", &sel).is_none());
     }
 
     #[test]
@@ -3325,6 +3553,7 @@ mod tests {
             text: "Old paragraph here.".into(),
             before: "Intro line.\n\n".into(),
             after: "\n\nClosing line.".into(),
+            cursor: false,
         };
         // Model returned the WHOLE note (contains the after-anchor text) → fall
         // through to normal planning (None) instead of splicing the whole note in.
@@ -3467,6 +3696,56 @@ mod tests {
         // url → fetch
         let f = select_tools("fetch https://example.com", true, false);
         assert!(f.iter().any(|t| t["function"]["name"] == "fetch_web_page"));
+    }
+
+    #[test]
+    fn chat_tools_are_relevant_and_never_mutating() {
+        let names = |tools: Vec<Value>| {
+            tools
+                .into_iter()
+                .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+
+        let expected = vec![
+            "read_note",
+            "fetch_web_page",
+            "web_search",
+            "search_documents",
+            "find_in_note",
+            "search_notes",
+        ];
+        for prompt in [
+            "hello there",
+            "rewrite the introduction",
+            "search the web for current Rust news",
+            "search my other notes for cats",
+            "find the exact phrase neural net in this note",
+        ] {
+            assert_eq!(names(select_chat_tools(prompt, true)), expected);
+        }
+
+        for prompt in [
+            "open https://example.com",
+            "search my documents for the citation",
+            "delete the note",
+        ] {
+            assert!(select_chat_tools(prompt, true).iter().all(|tool| {
+                !matches!(
+                    tool["function"]["name"].as_str(),
+                    Some(
+                        "write_note"
+                            | "append_note"
+                            | "prepend_note"
+                            | "replace_in_note"
+                            | "insert_after_line"
+                            | "delete_in_note"
+                            | "format_note"
+                            | "edit_notebook"
+                    )
+                )
+            }));
+        }
     }
 
     #[test]
@@ -3633,16 +3912,6 @@ mod tests {
         ] {
             assert!(note_write_intent(msg), "expected write intent: {msg}");
         }
-    }
-
-    #[test]
-    fn existing_note_context_is_selective_and_selection_wins() {
-        assert!(!requires_existing_note_context("write a poem about rain", false));
-        assert!(!requires_existing_note_context("append a conclusion", false));
-        assert!(!requires_existing_note_context("search the web and write the results", false));
-        assert!(requires_existing_note_context("rewrite the note more formally", false));
-        assert!(requires_existing_note_context("format the current note", false));
-        assert!(!requires_existing_note_context("rewrite this paragraph", true));
     }
 
     #[test]

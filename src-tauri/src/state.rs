@@ -16,6 +16,7 @@ use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
 use rig_core::completion::{CompletionError, Prompt, PromptError};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -39,6 +40,8 @@ const LARGE_SUMMARY_OVERLAP_WORDS: usize = 120;
 const SUMMARY_REDUCTION_WORDS: usize = 5_000;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
+const NOTE_INGEST_MANIFEST: &str = "note-ingestion.json";
+const NOTE_CHUNKER_VERSION: &str = "words-320-overlap-50-v1";
 // Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
 // We pin that package cache to a directory we own under app data so it lands in
 // a known place we can measure, pre-warm from Settings, and report on.
@@ -399,6 +402,9 @@ pub(crate) struct InnerState {
     // would corrupt it if they built the format at the same time.
     tectonic_lock: AsyncMutex<()>,
     llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
+    /// Serializes complete AI startup across boot, note-open, and first chat.
+    ai_pipeline_lock: AsyncMutex<()>,
+    ai_pipeline_ready: std::sync::atomic::AtomicBool,
     embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
     /// The openharn-myelin agent sidecar: a long-lived `openharn-myelin` process
     /// that runs the agent loop and calls back to Myelin for tool execution.
@@ -420,6 +426,7 @@ pub(crate) struct InnerState {
     current_doc_type: Mutex<Option<String>>,
     current_note_id: Mutex<Option<String>>,
     cancel_ai: std::sync::atomic::AtomicBool,
+    cancel_notify: tokio::sync::Notify,
     require_tool_approval: std::sync::atomic::AtomicBool,
     /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
     /// tools (e.g. the write guard) can read it without re-resolving the config.
@@ -427,6 +434,19 @@ pub(crate) struct InnerState {
     /// Runtime mirror of config.tool_gating (per-message tool gating), refreshed
     /// each chat turn alongside `deterministic_tools`.
     tool_gating: std::sync::atomic::AtomicBool,
+    /// Trusted execution policy for the current serialized chat turn. The model
+    /// sees a stable tool schema for prompt-cache reuse; these flags enforce the
+    /// mode-specific mutation boundary when a tool call reaches Rust.
+    chat_mode: std::sync::atomic::AtomicBool,
+    append_only: std::sync::atomic::AtomicBool,
+    placement_edit: std::sync::atomic::AtomicBool,
+    oversized_doc: std::sync::atomic::AtomicBool,
+    tools_supported: std::sync::atomic::AtomicBool,
+    note_ingest_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    note_ingest_manifest_lock: AsyncMutex<()>,
+    /// At most one note-prefix warm-up should be consuming llama-server at once.
+    /// The key is the exact request prefix; a newer prefix supersedes an older one.
+    prompt_warmup: Mutex<Option<(u64, tokio::task::JoinHandle<()>)>>,
     pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     /// Per-note live conversation as the REAL message array (system-less): user
     /// turns, assistant turns with tool_calls, and the tool RESULTS. The frontend's
@@ -462,10 +482,30 @@ struct PersistedSettings {
     pub background: BackgroundSettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct NoteIngestionManifest {
+    entries: HashMap<String, NoteIngestionEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct NoteIngestionEntry {
+    body_hash: String,
+    chunker: String,
+    embedding: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BackgroundSettings { pub start_with_system: bool }
 impl BackgroundSettings { fn is_default(&self) -> bool { !self.start_with_system } }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlamaCacheStatus {
+    pub enabled: bool,
+    pub size_bytes: u64,
+}
 
 /// Configuration for the openharn-myelin agent sidecar. Persisted in
 /// settings.json and surfaced in the Settings UI. Every field is optional /
@@ -599,6 +639,8 @@ impl AppState {
                 index_lock: AsyncMutex::new(()),
                 tectonic_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
+                ai_pipeline_lock: AsyncMutex::new(()),
+                ai_pipeline_ready: std::sync::atomic::AtomicBool::new(false),
                 embed_server: AsyncMutex::new(None),
                 sidecar: AsyncMutex::new(None),
                 chat_lock: AsyncMutex::new(()),
@@ -614,9 +656,18 @@ impl AppState {
                 current_doc_type: Mutex::new(None),
                 current_note_id: Mutex::new(None),
                 cancel_ai: std::sync::atomic::AtomicBool::new(false),
+                cancel_notify: tokio::sync::Notify::new(),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
                 tool_gating: std::sync::atomic::AtomicBool::new(false),
+                chat_mode: std::sync::atomic::AtomicBool::new(false),
+                append_only: std::sync::atomic::AtomicBool::new(false),
+                placement_edit: std::sync::atomic::AtomicBool::new(false),
+                oversized_doc: std::sync::atomic::AtomicBool::new(false),
+                tools_supported: std::sync::atomic::AtomicBool::new(true),
+                note_ingest_locks: Mutex::new(HashMap::new()),
+                note_ingest_manifest_lock: AsyncMutex::new(()),
+                prompt_warmup: Mutex::new(None),
                 pending_approvals: Mutex::new(HashMap::new()),
                 conversations: Mutex::new(HashMap::new()),
             }),
@@ -679,12 +730,17 @@ impl AppState {
         self.inner
             .cancel_ai
             .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.cancel_notify.notify_waiters();
     }
 
     pub fn ai_cancel_requested(&self) -> bool {
         self.inner
             .cancel_ai
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) async fn wait_for_ai_cancel(&self) {
+        self.inner.cancel_notify.notified().await;
     }
 
     pub fn set_current_note_id(&self, note_id: impl Into<String>) {
@@ -787,6 +843,42 @@ impl AppState {
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub fn set_turn_tool_policy(
+        &self,
+        chat_mode: bool,
+        append_only: bool,
+        placement_edit: bool,
+        oversized_doc: bool,
+        tools_supported: bool,
+    ) {
+        use std::sync::atomic::Ordering;
+        self.inner.chat_mode.store(chat_mode, Ordering::SeqCst);
+        self.inner.append_only.store(append_only, Ordering::SeqCst);
+        self.inner.placement_edit.store(placement_edit, Ordering::SeqCst);
+        self.inner.oversized_doc.store(oversized_doc, Ordering::SeqCst);
+        self.inner.tools_supported.store(tools_supported, Ordering::SeqCst);
+    }
+
+    pub fn authorize_tool_call(&self, name: &str) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        authorize_tool_policy(
+            name,
+            self.inner.chat_mode.load(Ordering::SeqCst),
+            self.inner.append_only.load(Ordering::SeqCst),
+            self.inner.placement_edit.load(Ordering::SeqCst),
+            self.current_selection().is_some(),
+            self.current_doc_type() == "ipynb",
+            self.inner.oversized_doc.load(Ordering::SeqCst),
+            self.inner.tools_supported.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn oversized_doc_active(&self) -> bool {
+        self.inner
+            .oversized_doc
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The openharn sidecar settings (port, binary override, harness tuning).
     pub fn openharn_settings(&self) -> OpenharnSettings {
         self.inner.openharn_settings.lock().clone()
@@ -796,6 +888,7 @@ impl AppState {
     /// running sidecar so the next chat respawns it with the new port / binary /
     /// harness tuning (the running process keeps the old launch args).
     pub fn set_openharn_settings(&self, settings: OpenharnSettings) -> Result<()> {
+        self.invalidate_ai_pipeline();
         let mut all = load_settings(&self.inner.app_data_dir)?;
         all.openharn = settings.clone();
         save_settings(&self.inner.app_data_dir, &all)?;
@@ -861,11 +954,13 @@ impl AppState {
     }
 
     pub async fn set_llama_model_path(&self, model_path: String) -> Result<()> {
+        self.invalidate_ai_pipeline();
         crate::llama_server::set_model_path(&self.inner.app_data_dir, model_path)?;
         Ok(())
     }
 
     pub async fn set_llama_executable_path(&self, executable_path: String) -> Result<()> {
+        self.invalidate_ai_pipeline();
         crate::llama_server::set_executable_path(&self.inner.app_data_dir, executable_path)?;
         Ok(())
     }
@@ -879,6 +974,36 @@ impl AppState {
     pub async fn set_tool_gating(&self, enabled: bool) -> Result<()> {
         crate::llama_server::set_tool_gating(&self.inner.app_data_dir, enabled)?;
         self.set_tool_gating_runtime(enabled);
+        Ok(())
+    }
+
+    pub async fn set_prompt_cache(&self, enabled: bool) -> Result<()> {
+        crate::llama_server::set_prompt_cache(&self.inner.app_data_dir, enabled)?;
+        self.stop_llama_server().await;
+        Ok(())
+    }
+
+    pub async fn set_inference_engine(&self, engine: String) -> Result<()> {
+        crate::llama_server::set_inference_engine(&self.inner.app_data_dir, engine)?;
+        self.stop_llama_server().await;
+        Ok(())
+    }
+
+    pub fn llama_cache_status(&self) -> LlamaCacheStatus {
+        LlamaCacheStatus {
+            enabled: crate::llama_server::resolve_config(&self.inner.app_data_dir)
+                .map(|c| c.prompt_cache)
+                .unwrap_or(true),
+            size_bytes: dir_size(&self.inner.app_data_dir.join("llama-cache")),
+        }
+    }
+
+    pub async fn clear_llama_cache(&self) -> Result<()> {
+        self.stop_llama_server().await;
+        let path = self.inner.app_data_dir.join("llama-cache");
+        if path.exists() {
+            fs::remove_dir_all(&path)?;
+        }
         Ok(())
     }
 
@@ -896,6 +1021,7 @@ impl AppState {
         auto_offload: Option<bool>,
         max_turns: Option<u32>,
     ) -> Result<()> {
+        self.invalidate_ai_pipeline();
         crate::llama_server::set_advanced_config(
             &self.inner.app_data_dir,
             context_size,
@@ -913,12 +1039,28 @@ impl AppState {
         Ok(())
     }
 
+    fn invalidate_ai_pipeline(&self) {
+        self.inner
+            .ai_pipeline_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    fn ai_pipeline_ready(&self) -> bool {
+        self.inner
+            .ai_pipeline_ready
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn list_llama_devices(&self, backend: String) -> Vec<crate::llama_server::DeviceInfo> {
         crate::llama_server::list_devices(&self.inner.app_data_dir, &backend)
     }
 
     pub fn downloadable_backends(&self) -> Vec<String> {
         crate::llama_server::downloadable_backends()
+    }
+
+    pub fn downloadable_bee_backends(&self) -> Vec<String> {
+        crate::llama_server::downloadable_bee_backends()
     }
 
     fn emit_download(&self, backend: &str, phase: &str, percent: f64, message: &str) {
@@ -936,14 +1078,31 @@ impl AppState {
     /// Download, extract and install a llama.cpp backend build into the
     /// app-data bin dir, emitting `backend://download` progress events.
     pub async fn download_llama_backend(&self, backend: String) -> Result<()> {
-        use futures_util::StreamExt;
+        self.download_backend(backend, false).await
+    }
 
-        let assets = crate::llama_server::assets_for_backend(&backend);
+    pub async fn download_bee_backend(&self, backend: String) -> Result<()> {
+        self.download_backend(backend, true).await
+    }
+
+    async fn download_backend(&self, backend: String, bee: bool) -> Result<()> {
+        use futures_util::StreamExt;
+        use sha2::{Digest, Sha256};
+
+        let assets = if bee {
+            crate::llama_server::bee_assets_for_backend(&backend)
+        } else {
+            crate::llama_server::assets_for_backend(&backend)
+        };
         if assets.is_empty() {
             anyhow::bail!("No downloadable {backend} build is available for this platform.");
         }
 
-        let bin_root = self.inner.app_data_dir.join("bin");
+        let bin_root = if bee {
+            self.inner.app_data_dir.join("bin").join("bee")
+        } else {
+            self.inner.app_data_dir.join("bin")
+        };
         let backend_dir = bin_root.join(&backend);
         let staging = bin_root.join(format!(".staging-{backend}"));
         let _ = fs::remove_dir_all(&staging);
@@ -965,7 +1124,11 @@ impl AppState {
         let result: Result<()> = async {
             let total_assets = assets.len() as f64;
             for (i, asset) in assets.iter().enumerate() {
-                let url = crate::llama_server::download_url(asset);
+                let url = if bee {
+                    crate::llama_server::bee_download_url(asset)
+                } else {
+                    crate::llama_server::download_url(asset)
+                };
                 self.emit_download(&backend, "downloading", (i as f64 / total_assets) * 100.0,
                     &format!("Downloading {} ({}/{})", asset, i + 1, assets.len()));
 
@@ -979,12 +1142,14 @@ impl AppState {
                 let mut file = fs::File::create(&archive_path)?;
                 let mut downloaded: u64 = 0;
                 let mut last_pct: i32 = -1;
+                let mut digest = Sha256::new();
                 let mut stream = resp.bytes_stream();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.with_context(|| {
                         format!("download stream interrupted for {asset} (network stalled or connection dropped)")
                     })?;
                     std::io::Write::write_all(&mut file, &chunk)?;
+                    digest.update(&chunk);
                     downloaded += chunk.len() as u64;
                     if total > 0 {
                         let frac = downloaded as f64 / total as f64;
@@ -998,6 +1163,16 @@ impl AppState {
                     }
                 }
                 drop(file);
+                if bee {
+                    let expected = crate::llama_server::bee_asset_sha256(asset)
+                        .ok_or_else(|| anyhow!("No pinned checksum for {asset}"))?;
+                    let actual = format!("{:x}", digest.finalize());
+                    if actual != expected {
+                        anyhow::bail!(
+                            "Checksum mismatch for {asset}: expected {expected}, got {actual}"
+                        );
+                    }
+                }
 
                 self.emit_download(&backend, "extracting", 100.0, &format!("Extracting {asset}"));
                 crate::llama_server::extract_archive(&archive_path, &staging)?;
@@ -1018,7 +1193,10 @@ impl AppState {
                     &backend,
                     "done",
                     100.0,
-                    &format!("{backend} backend installed"),
+                    &format!(
+                        "{} {backend} backend installed",
+                        if bee { "BeeLlama" } else { "llama.cpp" }
+                    ),
                 );
                 Ok(())
             }
@@ -1225,6 +1403,8 @@ impl AppState {
                 .cloned()
                 .ok_or_else(|| anyhow!("note not found"))?
         };
+        let prompt_changed = existing.document.body != body
+            || existing.document.title != title;
 
         let unique_title = self.ensure_unique_title(&title, Some(&note_id));
 
@@ -1247,6 +1427,12 @@ impl AppState {
         };
 
         let path = workspace.join(&updated.relative_path);
+        if prompt_changed {
+            let slot = self.inner.app_data_dir.join("llama-cache").join("slots")
+                .join(Self::slot_filename(&note_id));
+            let _ = fs::remove_file(&slot);
+            let _ = fs::remove_file(slot.with_file_name(format!("{}.json", slot.file_name().unwrap_or_default().to_string_lossy())));
+        }
 
         let vector = self
             .note_embedding(
@@ -1293,12 +1479,41 @@ impl AppState {
         tauri::async_runtime::spawn(async move {
             let _ = state.reindex_workspace(workspace_clone).await;
         });
+        let ingest_state = self.clone();
+        let ingest_note = updated.clone();
+        tauri::async_runtime::spawn(async move {
+            let known = ingest_state.note_has_ingestion_entry(&ingest_note.id);
+            let ctx = ingest_state
+                .running_ctx_size()
+                .await
+                .or_else(|| {
+                    crate::llama_server::resolve_config(&ingest_state.inner.app_data_dir)
+                        .ok()
+                        .map(|config| config.context_size)
+                })
+                .unwrap_or(4096) as usize;
+            let oversized = crate::note_prompt::NotePromptShape::build(
+                &ingest_note.body,
+                &ingest_note.relative_path,
+                ctx,
+            )
+            .oversized;
+            if known || oversized {
+                if let Err(error) = ingest_state.ensure_oversized_note_ingested(&ingest_note).await {
+                    log::warn!("background oversized-note ingestion failed: {error}");
+                }
+            }
+        });
 
         Ok(updated)
     }
 
     pub async fn delete_note(&self, note_id: String) -> Result<AppSnapshot> {
         let workspace = self.require_workspace()?;
+        let slot_dir = self.inner.app_data_dir.join("llama-cache").join("slots");
+        let slot_name = Self::slot_filename(&note_id);
+        let _ = fs::remove_file(slot_dir.join(&slot_name));
+        let _ = fs::remove_file(slot_dir.join(format!("{slot_name}.json")));
         let path = {
             let runtime = self.inner.runtime.read();
             runtime
@@ -1323,6 +1538,13 @@ impl AppState {
         );
         // Drop any RAG chunks ingested for this note from the document store.
         let _ = self.delete_document(&note_id).await;
+        {
+            let _manifest_guard = self.inner.note_ingest_manifest_lock.lock().await;
+            let mut ingestion = self.load_note_ingestion_manifest();
+            if ingestion.entries.remove(&note_id).is_some() {
+                let _ = self.save_note_ingestion_manifest(&ingestion);
+            }
+        }
 
         crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))?;
         self.reindex_workspace(workspace).await?;
@@ -1578,11 +1800,18 @@ impl AppState {
         // Prefer the backend of the running server; fall back to the backend we
         // would select on this machine.
         let mut active_backend = info.selected_backend.clone();
+        let mut active_engine = info
+            .resolved
+            .as_ref()
+            .map(|config| config.inference_engine.clone());
+        let configured_engine =
+            crate::llama_server::normalize_engine(info.config.inference_engine.as_deref());
         let healthy = if let Some(config) = &info.resolved {
             let server = self.inner.llama_server.lock().await;
             if let Some(server) = server.as_ref() {
                 active_backend = Some(server.active_backend.label().to_string());
-                if server.config.matches_runtime(config) {
+                active_engine = Some(server.active_engine.clone());
+                if config.accepts_running(&server.config) {
                     llama_server::health_check(&self.inner.llama_client, &server.config).await
                 } else {
                     info.healthy
@@ -1595,17 +1824,25 @@ impl AppState {
         };
 
         Ok(ProviderStatus {
-            active_provider: "llama.cpp".into(),
-            available_providers: vec!["llama.cpp".into()],
+            active_provider: if active_engine.as_deref() == Some("beellama") {
+                "BeeLlama".into()
+            } else {
+                "llama.cpp".into()
+            },
+            available_providers: vec!["llama.cpp".into(), "BeeLlama".into()],
             healthy,
+            ready: healthy && self.ai_pipeline_ready(),
             detail: info.detail,
             config: Some(info.config),
             resolved: info.resolved,
             active_backend,
+            configured_engine,
+            active_engine,
             nvidia_detected: info.nvidia_detected,
             gpu_available: info.gpu_available,
             gpus: info.gpus,
             installed_backends: info.installed_backends,
+            installed_bee_backends: info.installed_bee_backends,
         })
     }
 
@@ -1803,10 +2040,13 @@ impl AppState {
                 .map_err(|_| anyhow!("The previous AI request did not stop within 10 seconds."))?
             }
         };
+        // Chat and edit are the current frontend paths. Operation and auto stay
+        // accepted for API compatibility and a future composer-mode toggle.
         let interaction_mode = match interaction_mode.as_deref() {
             None | Some("auto") => "auto",
             Some("chat") => "chat",
             Some("operation") => "operation",
+            Some("edit") => "edit",
             Some(mode) => return Err(anyhow!("unknown AI interaction mode: {mode}")),
         };
         self.reset_chat_tools();
@@ -1814,8 +2054,9 @@ impl AppState {
             .cancel_ai
             .store(false, std::sync::atomic::Ordering::Release);
         self.set_latest_chat_question(question.clone());
-        // An armed selection is only meaningful if it carries text; ignore empties.
-        let selection = selection.filter(|s| !s.text.trim().is_empty());
+        // A normal selection carries text; an isolated editor insertion carries
+        // an explicitly marked zero-length cursor target.
+        let selection = selection.filter(|s| s.cursor || !s.text.trim().is_empty());
         self.set_current_selection(selection.clone());
         let doc_type = doc_type.unwrap_or_else(|| "md".to_string());
         self.set_current_doc_type(Some(doc_type.clone()));
@@ -1834,15 +2075,17 @@ impl AppState {
                 return Ok(());
             }
 
-            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+            // A synthetic note-prefix request must never sit ahead of a real
+            // user turn on llama-server's single inference slot.
+            self.cancel_prompt_warmup().await;
+            let config = self.ensure_ai_pipeline_ready().await?;
+            self.cancel_prompt_warmup().await;
             // Fast-chat profile: let the model choose ordinary tools instead of
             // routing through deterministic format/find assists. Rust still
             // executes the selected tools and enforces write safety.
             let deterministic_tools = false;
             self.set_deterministic_tools_runtime(deterministic_tools);
             self.set_tool_gating_runtime(config.tool_gating);
-            self.ensure_llama_server(&config).await?;
-
             // Budget the note to ~half the context window the server ACTUALLY
             // launched with (auto-offload may run far above the configured value),
             // leaving room for the system prompt, tools, chat history, and the
@@ -1852,27 +2095,31 @@ impl AppState {
                 .running_ctx_size()
                 .await
                 .unwrap_or(config.context_size) as usize;
-            let note_char_limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
-            // Truncate on a char boundary (never a raw byte slice — that panics on
-            // multi-byte UTF-8).
-            let note_body_excerpt = if note.body.chars().count() > note_char_limit {
-                let head: String = note.body.chars().take(note_char_limit).collect();
-                format!("{head}\n…[note truncated — ask me to work on a specific section]")
+            let prompt_shape = crate::note_prompt::NotePromptShape::build(
+                &note.body,
+                &note.relative_path,
+                ctx_tokens,
+            );
+            let oversized_ready = if prompt_shape.oversized {
+                self.ensure_oversized_note_ingested(&note).await.is_ok()
             } else {
-                note.body.clone()
+                false
+            };
+            let note_body_excerpt = if prompt_shape.oversized && !oversized_ready {
+                let limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
+                let head: String = note.body.chars().take(limit).collect();
+                format!("{head}\n…[note truncated because full-note indexing failed]")
+            } else {
+                prompt_shape.body.clone()
             };
             // Give the model the note's CURRENT content as editable text. The old
             // "reference only — do NOT copy" framing (plus a 400-char cap) meant it
             // could neither see nor feel allowed to modify existing content, so it
             // could only write fresh, never edit/format/shorten/delete.
-            let append_only = crate::agent::append_request_intent(&question);
+            let isolated_edit = interaction_mode == "edit";
+            let append_only = !isolated_edit && crate::agent::append_request_intent(&question);
             let placement = crate::agent::placement_request_intent(&question);
             let has_selection = selection.is_some();
-            // A fresh write/create does not need the old body. Existing-content
-            // operations do: omitting it would make a rewrite or format request
-            // unsafe. An armed selection is authoritative and is handled below.
-            let needs_existing_body = crate::agent::requires_existing_note_context(&question, has_selection);
-            let mut context = format!("The note currently open is titled \"{}\".", note.title);
             // For a notebook, present readable CELLS (not the raw JSON body) so the
             // model edits via edit_notebook instead of trying to rewrite JSON.
             let notebook_cells = if doc_type == "ipynb" {
@@ -1880,32 +2127,11 @@ impl AppState {
             } else {
                 None
             };
-            if let Some(cells) = &notebook_cells {
-                if !has_selection || needs_existing_body {
-                    context.push_str(&format!("\n\n{cells}"));
-                } else {
-                    context.push_str(
-                        " The full notebook body is intentionally omitted because the user selected an exact edit region below.",
-                    );
-                }
-            } else if has_selection {
-                context.push_str(
-                    " The full note body is intentionally omitted because the user selected an exact edit region below.",
-                );
-            } else if !needs_existing_body {
-                context.push_str(
-                    " The existing note body is intentionally omitted because this operation does not require reproducing it. Use the appropriate append/create/search tool without inventing unchanged note content.",
-                );
-            } else if note_body_excerpt.trim().is_empty() {
-                context.push_str(" It is currently empty.");
-            } else {
-                context.push_str(&format!(
-                    "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{}\n--- END CURRENT NOTE ---",
-                    note_body_excerpt
-                ));
-            }
+            let context = assemble_note_context(&note.title, &note_body_excerpt, notebook_cells.as_deref());
+            let stable_context = context.clone();
+            let mut turn_instructions = String::new();
             if append_only && !has_selection {
-                context.push_str(
+                turn_instructions.push_str(
                     "\n\nAPPEND-ONLY TURN: The current note (if shown) is reference material only. \
                      Add ONLY the new requested text; never reproduce, quote, or regenerate any \
                      existing line. Call append_note with only the new paragraph in content."
@@ -1914,7 +2140,7 @@ impl AppState {
             // The open document isn't always Markdown — tell the model so it edits
             // in the right language instead of defaulting to Markdown headings/lists.
             if doc_type == "tex" {
-                context.push_str(
+                turn_instructions.push_str(
                     "\n\nIMPORTANT: This open document is a LaTeX (.tex) source file, NOT Markdown. \
                      Write and edit it using LaTeX syntax only — e.g. \\section{...}, \\subsection{...}, \
                      \\textbf{...}, \\emph{...}, \\begin{itemize}\\item ...\\end{itemize}, $...$ for math, \
@@ -1927,23 +2153,27 @@ impl AppState {
             // (selection_scoped_plan) enforces "selection only" regardless, but the
             // model still needs to see the selected text to rewrite it well.
             if let Some(sel) = &selection {
-                context.push_str(&format!(
-                    "\n\nThe user has SELECTED the following part of the note. This request applies to the SELECTION ONLY — leave every character outside it unchanged:\n\"\"\"\n{}\n\"\"\"\n\nUse write_note for this selection and send ONLY replacement content. For removal, send an empty `content`. Do not reproduce the whole note or call a mutation tool that targets text outside this selection.",
-                    sel.text
-                ));
-                if placement {
-                    context.push_str(" For a below/after/under/beneath request, use insert_after_line with marker set to the selected text and insert immediately after its line.");
+                if sel.cursor {
+                    turn_instructions.push_str(
+                        "\n\nThe editor supplied an exact CURSOR target. Generate only the new text to insert there and call write_note with that text as content. Never reproduce existing note text.",
+                    );
+                } else {
+                    turn_instructions.push_str(&format!(
+                        "\n\nThe user has SELECTED the following part of the note. This request applies to the SELECTION ONLY — leave every character outside it unchanged:\n\"\"\"\n{}\n\"\"\"\n\nUse write_note for this selection and send ONLY replacement content. For removal, send an empty `content`. Do not reproduce the whole note or call a mutation tool that targets text outside this selection.",
+                        sel.text
+                    ));
+                    if placement {
+                        turn_instructions.push_str(" For a below/after/under/beneath request, use insert_after_line with marker set to the selected text and insert immediately after its line.");
+                    }
                 }
             }
-            // The note context is embedded in the system message so that
-            // llama-server's prompt cache (cache_prompt) sees a matching prefix
-            // across requests. When the note hasn't changed, the entire system
-            // message is cached and only the short question needs evaluation.
+            // The note context is always embedded in the system message so that
+            // cache_prompt sees the same note-scoped prefix across chat and
+            // operation turns. Per-turn routing details are appended to the user
+            // message below and do not change this shared prefix.
 
-            // Per-message tool gating: hand the model ONLY the tools this message
-            // warrants so it can't misfire on one it was never given. We also pass
-            // an edit-thread signal (did a recent user turn ask to write/edit?) so
-            // a verb-less follow-up correction still keeps write_note available.
+            // Keep routing/intent detection for execution policy, but use one
+            // stable model-facing schema list on every supported-model turn.
             let recent_user_msgs: Vec<&str> = note
                 .chat_history
                 .iter()
@@ -1955,7 +2185,7 @@ impl AppState {
             // can't do tool calls (profile-known or probed once + cached), so it
             // works as a chat-only model instead of erroring every turn.
             let model_id = config.model_path.to_string_lossy().to_string();
-            let mut tools = if crate::tool_capability::supports_tools(
+            let supports_tools = crate::tool_capability::supports_tools(
                 &self.inner.llama_client,
                 &config.base_url(),
                 &self.inner.app_data_dir,
@@ -1963,110 +2193,19 @@ impl AppState {
                 &model_id,
                 config.supports_tools,
             )
-            .await
-            {
-                crate::agent::select_tools_cfg(
-                    &question,
-                    true,
-                    edit_thread,
-                    // An explicit Operation-mode choice must not be narrowed by
-                    // the optional heuristic gate; the user already chose work.
-                    config.tool_gating && interaction_mode != "operation",
-                    deterministic_tools,
-                )
-            } else {
-                Vec::new()
-            };
-
-            // Chat mode is non-mutating, not tool-free. The open note is already
-            // in context; other-note tools remain available only when the user
-            // explicitly asks about another note or the workspace.
-            if interaction_mode == "chat" {
-                tools.retain(|tool| {
-                    matches!(
-                        tool["function"]["name"].as_str(),
-                        Some(
-                            "read_note"
-                                | "fetch_web_page"
-                                | "web_search"
-                                | "search_documents"
-                                | "find_in_note"
-                                | "search_notes"
-                        )
-                    )
-                });
-            }
-
-            // Append requests get a dedicated append_note tool. No need to
-            // narrow write_note — it's an overwrite-only tool now, and
-            // append_note is available to handle additions correctly.
-            // Remove write_note from the tool list on append requests so the
-            // model doesn't accidentally overwrite the entire note.
-            if append_only && !has_selection {
-                tools.retain(|tool| {
-                    tool["function"]["name"].as_str() != Some("write_note")
-                        && tool["function"]["name"].as_str() != Some("prepend_note")
-                        && tool["function"]["name"].as_str() != Some("replace_in_note")
-                        && tool["function"]["name"].as_str() != Some("insert_after_line")
-                        && tool["function"]["name"].as_str() != Some("delete_in_note")
-                });
-            }
-
-            // A selection is a hard scope boundary. Keep read/search tools that
-            // the request explicitly needs, but expose only write_note for
-            // mutations because its Rust implementation applies the selection
-            // splice and anchor checks before saving.
-            if has_selection {
-                tools.retain(|tool| {
-                    matches!(
-                        tool["function"]["name"].as_str(),
-                        Some(
-                            "write_note"
-                                | "insert_after_line"
-                                | "search_notes"
-                                | "read_note"
-                                | "search_documents"
-                                | "fetch_web_page"
-                                | "web_search"
-                        )
-                    )
-                });
-            }
-            if has_selection && placement {
-                tools.retain(|tool| tool["function"]["name"].as_str() == Some("insert_after_line"));
-            }
-
-            // A notebook is edited cell-by-cell via edit_notebook, never with the
-            // text tools (write_note/format_note/find_in_note would mangle the JSON).
-            // Swap them out when an edit was warranted; read tools stay.
-            if doc_type == "ipynb" && !tools.is_empty() {
-                let wanted_edit = tools.iter().any(|t| {
-                    matches!(
-                        t["function"]["name"].as_str(),
-                        Some("write_note") | Some("format_note")
-                    )
-                });
-                tools.retain(|t| {
-                    !matches!(
-                        t["function"]["name"].as_str(),
-                        Some("write_note") | Some("format_note") | Some("find_in_note")
-                    )
-                });
-                if wanted_edit {
-                    if let Some(nb) = crate::agent::tool_specs()
-                        .into_iter()
-                        .find(|t| t["function"]["name"].as_str() == Some("edit_notebook"))
-                    {
-                        tools.push(nb);
-                    }
-                }
-            }
-
-            // Keep the request prompt small: the model receives only tool names
-            // and JSON argument schemas. The host owns the verbose descriptions
-            // and deterministic routing, so sending them to llama-server adds
-            // prompt tokens without changing execution.
-            tools = crate::agent::compact_tool_specs(tools);
+            .await;
+            // `oversized_ready` is shared by the wire schema and execution policy:
+            // successful ingestion enables scoped retrieval and the oversized
+            // mutation gate. On failure, ensure_oversized_note_ingested emits
+            // failure progress, the prompt uses its truncated fallback, and this
+            // gate stays off because scoped retrieval is unavailable.
+            self.set_turn_tool_policy(
+                interaction_mode == "chat",
+                append_only && !has_selection,
+                placement && has_selection,
+                oversized_ready,
+                supports_tools,
+            );
 
             // Stream directly against llama-server (not through rig) so the note
             // content can be surfaced token-by-token as it is generated. See
@@ -2077,8 +2216,8 @@ impl AppState {
             // cached prefix (KV cache); the retained tool messages are what let a
             // later "write what you found" actually have the search results.
             let nid = self.current_note_id().unwrap_or_default();
-            let mut convo = self.conversation(&nid);
-            if convo.is_empty() {
+            let mut convo = if isolated_edit { Vec::new() } else { self.conversation(&nid) };
+            if convo.is_empty() && !isolated_edit {
                 // First turn this session: seed from the saved text history (no tool
                 // results — those were never persisted) so we don't lose continuity.
                 convo = chat_history_to_messages(&note.chat_history);
@@ -2088,23 +2227,34 @@ impl AppState {
             // between turns when no tool modifies it). Only the short question
             // at the end needs re-evaluation each turn.
             let mode_instruction = match interaction_mode {
-                "chat" => "COMPOSER MODE: Chat. The open note is already included below and is the default target for every read or question. Answer questions about it directly; do not call search_notes or read_note unless the user explicitly asks about another note, their notes/workspace, or names a different note. Use web/document retrieval only when explicitly requested. Never modify the note for this turn.",
-                "operation" => "COMPOSER MODE: Operation. Perform the user's requested operation using the appropriate tool. The open note is the default target.",
-                _ => "COMPOSER MODE: Auto. Decide whether the user needs a direct answer or an operation.",
+                "chat" => "CHAT TURN POLICY: The open note identified above is the default target for every read or question. Answer questions about it directly; do not call search_notes or read_note unless the user explicitly asks about another note, their notes/workspace, or names a different note. Use web/document retrieval only when explicitly requested. Never modify the note for this turn.",
+                "operation" => "OPERATION TURN POLICY: Perform the user's requested operation using the appropriate tool. The open note identified above is the default target.",
+                "edit" => "EDITOR ACTION: Perform exactly this isolated edit with write_note. Return only the replacement or insertion content in the tool call; never reproduce text outside the target.",
+                _ => "AUTO TURN POLICY: Decide whether the user needs a direct answer or an operation.",
             };
-            let system_content = format!(
-                "{}\n\n{}\n\n{}",
-                crate::agent::MYELIN_PREAMBLE,
+            let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
+                mode: interaction_mode,
+                note_title: &note.title,
+                system_context: &stable_context,
+                conversation: &convo,
+                question: &question,
+                mode_policy: mode_instruction,
+                turn_instructions: &turn_instructions,
+                has_open_note: true,
+                edit_thread,
+                oversized: oversized_ready,
+                supports_tools,
+                verbose_tool_schemas: config.verbose_tool_schemas,
+            });
+            let intent_is_tool = Some(turn.intent_is_tool);
+            let messages = turn.messages;
+            let tools = turn.tools;
+            let user_content = crate::ai_turn::render_user_content(
+                &note.title,
                 mode_instruction,
-                context
+                &turn_instructions,
+                &question,
             );
-            let mut messages = vec![serde_json::json!({
-                "role": "system",
-                "content": system_content,
-            })];
-            messages.extend(convo.iter().cloned());
-            messages.push(serde_json::json!({ "role": "user", "content": question }));
-            let sent_len = messages.len();
 
             let tool_names: Vec<String> = tools
                 .iter()
@@ -2112,7 +2262,7 @@ impl AppState {
                 .collect();
             log::info!(
                 "[ask_ai_stream] mode={} tools_offered={} gating={} deterministic={} edit_thread={} supports_tools={}",
-                interaction_mode, tool_names.join(","), config.tool_gating && interaction_mode != "operation", deterministic_tools, edit_thread, config.supports_tools.unwrap_or(false)
+                interaction_mode, tool_names.join(","), config.tool_gating && interaction_mode != "operation", deterministic_tools, edit_thread, supports_tools
             );
             let tool_mode = self.openharn_settings().tool_mode;
             let _ = self.handle.emit(
@@ -2126,7 +2276,7 @@ impl AppState {
                         config.tool_gating && interaction_mode != "operation",
                         deterministic_tools,
                         edit_thread,
-                        config.supports_tools.unwrap_or(false),
+                        supports_tools,
                         tool_mode,
                     ),
                     "requestId": request_id,
@@ -2137,10 +2287,6 @@ impl AppState {
             // used to select the tool schemas. This avoids the expensive model
             // classifier (which cost ~8s in the trace) while still recognizing
             // note edits, searches, lookups, and document retrieval.
-            let intent_is_tool: Option<bool> = match interaction_mode {
-                "operation" => Some(true),
-                _ => Some(crate::agent::tool_intent(&question, edit_thread)),
-            };
             let final_messages = crate::sidecar::run_chat(
                 self,
                 &config,
@@ -2150,20 +2296,34 @@ impl AppState {
                 &nid,
                 intent_is_tool,
                 interaction_mode == "chat",
-                interaction_mode == "operation",
+                interaction_mode == "operation" || isolated_edit,
                 selection.is_some(),
             )
             .await?;
 
-            // Persist the conversation for the next turn: the raw question
-            // (no note context — it's in the system message and rebuilt fresh
-            // each turn) + this turn's new assistant/tool messages.
-            convo.push(serde_json::json!({ "role": "user", "content": question }));
-            if final_messages.len() > sent_len {
-                convo.extend(final_messages[sent_len..].iter().cloned());
+            // Persist the exact user message sent on the wire. Byte identity is
+            // required for cache_prompt to reuse prior conversation/tool turns.
+            // The UI transcript separately retains the undecorated question.
+            if !isolated_edit {
+                convo.push(serde_json::json!({ "role": "user", "content": user_content }));
+                convo.extend(final_messages.iter().cloned());
+                let convo = trim_conversation(convo, MAX_LIVE_CONVERSATION_CHARS);
+                self.save_conversation(&nid, convo);
             }
-            let convo = trim_conversation(convo, MAX_LIVE_CONVERSATION_CHARS);
-            self.save_conversation(&nid, convo);
+
+            if turn_contains_note_mutation(&final_messages) {
+                let state = self.clone();
+                let note_id = nid.clone();
+                let warm_mode = interaction_mode.to_string();
+                tokio::spawn(async move {
+                    if let Err(error) = state
+                        .warm_llama_server_for_note(Some(note_id), Some(warm_mode))
+                        .await
+                    {
+                        log::debug!("post-write prompt-cache warm-up skipped: {error}");
+                    }
+                });
+            }
 
             Ok(())
         }
@@ -2919,14 +3079,384 @@ impl AppState {
     /// Called on note open. Best-effort: a failure just means the first chat pays
     /// the cold start it already handled before.
     pub async fn warm_llama_server(&self) -> Result<()> {
-        let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
-        self.ensure_llama_server(&config).await
+        self.warm_llama_server_for_note(None, None).await
+    }
+
+    pub async fn warm_llama_server_for_note(
+        &self,
+        note_id: Option<String>,
+        interaction_mode: Option<String>,
+    ) -> Result<()> {
+        let configured = self.ensure_ai_pipeline_ready().await?;
+        // Fingerprint and address the server that actually won candidate
+        // selection. The configured preference may differ from the running
+        // binary/backend after startup fallback.
+        let (config, ctx_tokens) = {
+            let server = self.inner.llama_server.lock().await;
+            match server.as_ref() {
+                Some(server) => (server.config.clone(), server.ctx_size as usize),
+                None => (configured.clone(), configured.context_size as usize),
+            }
+        };
+        let Some(note_id) = note_id else { return Ok(()); };
+        let note = self.load_note(note_id.clone()).await?;
+        let prompt_shape = crate::note_prompt::NotePromptShape::build(
+            &note.body,
+            &note.relative_path,
+            ctx_tokens,
+        );
+        let oversized_ready = if prompt_shape.oversized {
+            self.ensure_oversized_note_ingested(&note).await.is_ok()
+        } else {
+            false
+        };
+        let excerpt = if prompt_shape.oversized && !oversized_ready {
+            let limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
+            let head: String = note.body.chars().take(limit).collect();
+            format!("{head}\n…[note truncated because full-note indexing failed]")
+        } else {
+            prompt_shape.body
+        };
+        let interaction_mode = match interaction_mode.as_deref() {
+            Some("operation") => "operation",
+            Some("edit") => "edit",
+            _ => "chat",
+        };
+        let doc_type = note.relative_path.to_ascii_lowercase();
+        let cells = if doc_type.ends_with(".ipynb") {
+            crate::notebook::present(&note.body)
+        } else {
+            None
+        };
+        let warm_preamble = if interaction_mode == "chat" {
+            crate::agent::DIRECT_CHAT_PREAMBLE
+        } else {
+            crate::agent::MYELIN_PREAMBLE
+        };
+        let system = format!(
+            "{warm_preamble}\n\n{}",
+            assemble_note_context(&note.title, &excerpt, cells.as_deref())
+        );
+        let template_kwargs = self.openharn_settings().template_kwargs;
+        // The synthetic note-open warm-up targets the overwhelmingly common
+        // direct Chat path. Retrieval schemas are question-specific and must
+        // not be paid on every empty/direct turn merely to warm the note prefix.
+        let warm_specs = if interaction_mode == "chat" {
+            Vec::new()
+        } else {
+            crate::agent::interaction_mode_tools(interaction_mode, oversized_ready)
+        };
+        let tools = crate::agent::compact_tool_specs_for_profile(
+            warm_specs,
+            config.verbose_tool_schemas,
+        );
+        let tools_json = serde_json::to_string(&tools).unwrap_or_default();
+        let identity = Self::slot_identity(
+            &config,
+            ctx_tokens as u32,
+            interaction_mode,
+            &system,
+            &tools_json,
+            &template_kwargs,
+        );
+        // Never enqueue synthetic inference while a real chat owns the turn.
+        if self.inner.chat_lock.try_lock().is_err() {
+            return Ok(());
+        }
+        if config.prompt_cache {
+            self.restore_note_slot(&config, &note_id, &identity).await;
+        }
+        self.spawn_note_cache_warmup(
+            &config,
+            note_id,
+            interaction_mode.to_string(),
+            system,
+            tools,
+            template_kwargs,
+            identity,
+        );
+        Ok(())
+    }
+
+    fn slot_filename(note_id: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        note_id.hash(&mut hasher);
+        format!("note-{:016x}.slot", hasher.finish())
+    }
+
+    fn slot_manifest_path(config: &llama_server::ResolvedLlamaConfig, note_id: &str) -> PathBuf {
+        config
+            .slot_save_path
+            .join(format!("{}.json", Self::slot_filename(note_id)))
+    }
+
+    /// Everything that determines whether a saved KV snapshot is still valid:
+    /// the server binary (stock llama.cpp vs. a patched build), the model
+    /// identity, the chat template, the running context size, launch-affecting
+    /// flags, and the exact model-facing payload. A snapshot whose identity
+    /// record does not match must be erased, never restored — a foreign KV is
+    /// silent corruption of an editing assistant.
+    fn slot_identity(
+        config: &llama_server::ResolvedLlamaConfig,
+        running_ctx: u32,
+        interaction_mode: &str,
+        system: &str,
+        tools_json: &str,
+        template_kwargs: &Option<String>,
+    ) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        config.inference_engine.hash(&mut hasher);
+        config.executable_path.hash(&mut hasher);
+        let exe_meta = std::fs::metadata(&config.executable_path).ok();
+        exe_meta.as_ref().map(|m| m.len()).unwrap_or(0).hash(&mut hasher);
+        exe_meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .hash(&mut hasher);
+        config.model_path.hash(&mut hasher);
+        let model_meta = std::fs::metadata(&config.model_path).ok();
+        model_meta.as_ref().map(|m| m.len()).unwrap_or(0).hash(&mut hasher);
+        model_meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .hash(&mut hasher);
+        running_ctx.hash(&mut hasher);
+        config.backend.hash(&mut hasher);
+        config.gpu_layers.hash(&mut hasher);
+        config.threads.hash(&mut hasher);
+        config.gpu_device.hash(&mut hasher);
+        config.chat_format.hash(&mut hasher);
+        config.chat_template_override.hash(&mut hasher);
+        match config.chat_template_override.as_deref() {
+            Some("lfm2") => include_str!("../templates/lfm2.jinja").hash(&mut hasher),
+            Some("lfm25") => include_str!("../templates/lfm25.jinja").hash(&mut hasher),
+            Some(path) if !path.trim().is_empty() => {
+                std::fs::read(path).unwrap_or_default().hash(&mut hasher)
+            }
+            _ => {}
+        }
+        config.extra_args.hash(&mut hasher);
+        interaction_mode.hash(&mut hasher);
+        system.hash(&mut hasher);
+        tools_json.hash(&mut hasher);
+        template_kwargs.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    async fn restore_note_slot(
+        &self,
+        config: &llama_server::ResolvedLlamaConfig,
+        note_id: &str,
+        identity: &str,
+    ) {
+        let filename = Self::slot_filename(note_id);
+        let slot_path = config.slot_save_path.join(&filename);
+        if !slot_path.exists() {
+            return;
+        }
+        // Never restore a snapshot without a matching provenance record: a
+        // changed backend build, model, template, context size, or schema set
+        // makes the saved KV foreign to this note's next request.
+        let recorded = std::fs::read_to_string(Self::slot_manifest_path(config, note_id))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v["identity"].as_str().map(str::to_string));
+        if recorded.as_deref() != Some(identity) {
+            log::info!("discarding stale llama slot for {note_id} (identity mismatch)");
+            let _ = fs::remove_file(&slot_path);
+            let _ = fs::remove_file(Self::slot_manifest_path(config, note_id));
+            return;
+        }
+        let url = format!("{}/slots/0?action=restore", config.base_url());
+        match self.inner.llama_client.post(url).json(&serde_json::json!({"filename": filename})).send().await {
+            Ok(response) if response.status().is_success() => {
+                log::info!("restored persistent llama slot for note {note_id}");
+            }
+            Ok(response) => {
+                log::warn!("slot restore failed for {note_id}: {}", response.status());
+                let _ = fs::remove_file(&slot_path);
+                let _ = fs::remove_file(Self::slot_manifest_path(config, note_id));
+            }
+            Err(error) => log::warn!("slot restore request failed for {note_id}: {error}"),
+        }
+    }
+
+    /// Prepare every process/check that would otherwise delay the first model
+    /// request. The lock makes startup and a quickly submitted chat share the
+    /// same work instead of launching duplicate capability probes.
+    async fn ensure_ai_pipeline_ready(&self) -> Result<llama_server::ResolvedLlamaConfig> {
+        let _pipeline_guard = self.inner.ai_pipeline_lock.lock().await;
+        if !self.ai_pipeline_ready() {
+            let _ = self.handle.emit(
+                "ai://llama_warmup",
+                serde_json::json!({ "status": "started" }),
+            );
+        }
+
+        let result: Result<llama_server::ResolvedLlamaConfig> = async {
+            let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+            self.ensure_llama_server(&config).await?;
+
+            // Sidecar startup is independent of the one-time model capability
+            // probe, so overlap them after llama-server becomes healthy.
+            let model_id = config.model_path.to_string_lossy().to_string();
+            let llama_base = config.base_url();
+            let sidecar = crate::sidecar::ensure_sidecar(self);
+            let capability = crate::tool_capability::supports_tools(
+                &self.inner.llama_client,
+                &llama_base,
+                &self.inner.app_data_dir,
+                &config.model_path,
+                &model_id,
+                config.supports_tools,
+            );
+            let (sidecar_result, _) = tokio::join!(sidecar, capability);
+            sidecar_result?;
+            Ok(config)
+        }
+        .await;
+
+        match result {
+            Ok(config) => {
+                let announce_ready = !self.ai_pipeline_ready();
+                self.inner
+                    .ai_pipeline_ready
+                    .store(true, std::sync::atomic::Ordering::Release);
+                if announce_ready {
+                    let _ = self.handle.emit(
+                        "ai://llama_warmup",
+                        serde_json::json!({ "status": "ready" }),
+                    );
+                }
+                Ok(config)
+            }
+            Err(error) => {
+                self.invalidate_ai_pipeline();
+                let _ = self.handle.emit(
+                    "ai://llama_warmup",
+                    serde_json::json!({ "status": "failed", "message": error.to_string() }),
+                );
+                Err(error)
+            }
+        }
+    }
+
+    async fn cancel_prompt_warmup(&self) {
+        let handle = self
+            .inner
+            .prompt_warmup
+            .lock()
+            .take()
+            .map(|(_, handle)| handle);
+        if let Some(handle) = handle {
+            if !handle.is_finished() {
+                handle.abort();
+                let _ = handle.await;
+                log::debug!("preempted note prompt-cache warm-up for user chat");
+            }
+        }
+    }
+
+    fn spawn_note_cache_warmup(
+        &self,
+        config: &llama_server::ResolvedLlamaConfig,
+        note_id: String,
+        interaction_mode: String,
+        system: String,
+        tools: Vec<serde_json::Value>,
+        template_kwargs: Option<String>,
+        identity: String,
+    ) {
+        use std::hash::{Hash, Hasher};
+        let client = self.inner.llama_client.clone();
+        let url = format!("{}/v1/chat/completions", config.base_url());
+        let model = config.model_name();
+        let slot_url = format!("{}/slots/0?action=save", config.base_url());
+        let slot_filename = Self::slot_filename(&note_id);
+        let slot_dir = config.slot_save_path.clone();
+        let manifest = serde_json::json!({ "identity": identity }).to_string();
+        let persist = config.prompt_cache;
+        let parsed_template_kwargs = template_kwargs
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        model.hash(&mut hasher);
+        system.hash(&mut hasher);
+        interaction_mode.hash(&mut hasher);
+        serde_json::to_string(&tools)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        template_kwargs.hash(&mut hasher);
+        let key = hasher.finish();
+        let mut warmup = self.inner.prompt_warmup.lock();
+        if let Some((existing_key, handle)) = warmup.as_ref() {
+            if *existing_key == key && !handle.is_finished() {
+                return;
+            }
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
+        let handle = tokio::spawn(async move {
+            let mut body = serde_json::json!({
+                "model": model,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": " " }
+                ],
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "cache_prompt": true,
+            });
+            if !tools.is_empty() {
+                body["tools"] = serde_json::json!(tools);
+                body["tool_choice"] = serde_json::json!("none");
+            }
+            if let Some(kwargs) = parsed_template_kwargs {
+                body["chat_template_kwargs"] = kwargs;
+            }
+            match client.post(&url).json(&body).send().await {
+                Ok(response) if response.status().is_success() => {
+                    let usage = response
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .and_then(|value| value.get("usage").cloned());
+                    log::info!("llama note prompt-cache warm-up complete; usage={usage:?}");
+                    if persist {
+                        match client.post(slot_url).json(&serde_json::json!({"filename": slot_filename})).send().await {
+                            Ok(saved) if saved.status().is_success() => {
+                                log::info!("saved persistent llama slot for note {note_id}");
+                                // Record provenance alongside the snapshot; the
+                                // restore path erases snapshots whose identity
+                                // no longer matches the current binaries/payload.
+                                let manifest_path = slot_dir.join(format!("{slot_filename}.json"));
+                                let _ = std::fs::write(&manifest_path, manifest);
+                            }
+                            Ok(saved) => log::warn!("slot save failed for {note_id}: {}", saved.status()),
+                            Err(error) => log::warn!("slot save request failed for {note_id}: {error}"),
+                        }
+                    }
+                },
+                Ok(response) => log::warn!("llama note prompt-cache warm-up returned {}", response.status()),
+                Err(error) => log::warn!("llama note prompt-cache warm-up failed: {error}"),
+            }
+        });
+        *warmup = Some((key, handle));
     }
 
     /// Stop the llama-server (and the embedding server), releasing RAM/VRAM.
     /// Called when the open note is closed — nothing to infer for. The next note
     /// open warms it again. Idempotent.
     pub async fn stop_llama_server(&self) {
+        self.invalidate_ai_pipeline();
+        self.cancel_prompt_warmup().await;
         let mut guard = self.inner.llama_server.lock().await;
         if let Some(mut server) = guard.take() {
             llama_server::stop_server(&mut server).await;
@@ -3002,6 +3532,124 @@ impl AppState {
         self.inner.app_data_dir.join("rag-index")
     }
 
+    fn note_ingestion_manifest_path(&self) -> PathBuf {
+        self.rag_dir().join(NOTE_INGEST_MANIFEST)
+    }
+
+    fn load_note_ingestion_manifest(&self) -> NoteIngestionManifest {
+        fs::read_to_string(self.note_ingestion_manifest_path())
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_note_ingestion_manifest(&self, manifest: &NoteIngestionManifest) -> Result<()> {
+        fs::create_dir_all(self.rag_dir())?;
+        let path = self.note_ingestion_manifest_path();
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, serde_json::to_vec_pretty(manifest)?)?;
+        fs::rename(temp, path)?;
+        Ok(())
+    }
+
+    fn embedding_fingerprint(&self) -> String {
+        let Some(path) = crate::llama_server::embed_model_path(&self.inner.app_data_dir) else {
+            return "hashed-768-v1".to_string();
+        };
+        let metadata = fs::metadata(&path).ok();
+        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("nomic:{path}:{size}:{modified}")
+    }
+
+    fn note_ingestion_entry(&self, body: &str) -> NoteIngestionEntry {
+        let digest = Sha256::digest(body.as_bytes());
+        NoteIngestionEntry {
+            body_hash: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+            chunker: NOTE_CHUNKER_VERSION.to_string(),
+            embedding: self.embedding_fingerprint(),
+        }
+    }
+
+    async fn ensure_oversized_note_ingested(&self, note: &NoteDocument) -> Result<usize> {
+        let lock = {
+            let mut locks = self.inner.note_ingest_locks.lock();
+            Arc::clone(
+                locks
+                    .entry(note.id.clone())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        let _guard = lock.lock().await;
+        let expected = self.note_ingestion_entry(&note.body);
+        {
+            let _manifest_guard = self.inner.note_ingest_manifest_lock.lock().await;
+            let manifest_matches = self
+                .load_note_ingestion_manifest()
+                .entries
+                .get(&note.id)
+                == Some(&expected);
+            if manifest_matches
+                && crate::rag::contains_document(&self.rag_dir(), &note.id)
+                    .await
+                    .unwrap_or(false)
+            {
+                return Ok(0);
+            }
+        }
+
+        let _ = self.handle.emit(
+            "ai://indexing_progress",
+            serde_json::json!({
+                "noteId": note.id,
+                "status": "started",
+                "message": "Indexing the complete oversized note…"
+            }),
+        );
+        let chunks = match self
+            .ingest_document(&note.id, &note.title, &note.body, false)
+            .await
+        {
+            Ok(chunks) => chunks,
+            Err(error) => {
+                let _ = self.handle.emit(
+                    "ai://indexing_progress",
+                    serde_json::json!({
+                        "noteId": note.id,
+                        "status": "failed",
+                        "message": error.to_string()
+                    }),
+                );
+                return Err(error);
+            }
+        };
+        {
+            let _manifest_guard = self.inner.note_ingest_manifest_lock.lock().await;
+            let mut manifest = self.load_note_ingestion_manifest();
+            manifest.entries.insert(note.id.clone(), expected);
+            self.save_note_ingestion_manifest(&manifest)?;
+        }
+        let _ = self.handle.emit(
+            "ai://indexing_progress",
+            serde_json::json!({
+                "noteId": note.id,
+                "status": "done",
+                "chunks": chunks
+            }),
+        );
+        Ok(chunks)
+    }
+
+    fn note_has_ingestion_entry(&self, note_id: &str) -> bool {
+        self.load_note_ingestion_manifest()
+            .entries
+            .contains_key(note_id)
+    }
+
     /// Ingest a document into the RAG store: chunk → embed → store. Re-ingesting
     /// the same doc_id replaces its chunks. `contextual` (for the working doc /
     /// "deep index") embeds each chunk with a one-sentence LLM context that
@@ -3044,7 +3692,14 @@ impl AppState {
             .iter()
             .map(|c| format!("{prefix}{}", c.text))
             .collect();
-        let vectors = self.embed_texts(&embed_input, false).await?;
+        let vectors = if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
+            self.embed_texts(&embed_input, false).await?
+        } else {
+            embed_input
+                .iter()
+                .map(|text| hashed_embedding(text))
+                .collect()
+        };
         let docs: Vec<crate::rag::DocChunk> = chunks
             .iter()
             .zip(vectors)
@@ -3112,28 +3767,41 @@ impl AppState {
         &self,
         query: &str,
         k: usize,
+        doc_id: Option<&str>,
     ) -> Result<Vec<crate::rag::RetrievedChunk>> {
-        let qv = self.embed_texts(&[query.to_string()], true).await?;
-        let qvec = qv.into_iter().next().unwrap_or_default();
+        let qvec = if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
+            self.embed_texts(&[query.to_string()], true)
+                .await?
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        } else {
+            hashed_embedding(query)
+        };
         if qvec.is_empty() {
             return Ok(Vec::new());
         }
-        crate::rag::search_hybrid(&self.rag_dir(), qvec, query, k).await
+        crate::rag::search_hybrid(&self.rag_dir(), qvec, query, k, doc_id).await
     }
 
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
         let _ = self.handle.emit("ai://debug_event", serde_json::json!({
-            "kind": "startup", "msg": "Starting model / checking llama-server readiness"
+            "kind": "startup",
+            "msg": format!(
+                "Starting {} / checking llama-server readiness",
+                if config.inference_engine == "beellama" { "BeeLlama" } else { "llama.cpp" }
+            )
         }));
         let mut guard = self.inner.llama_server.lock().await;
 
         if let Some(server) = guard.as_mut() {
-            if server.config.matches_runtime(config)
+            if config.accepts_running(&server.config)
                 && llama_server::health_check(&self.inner.llama_client, &server.config).await
             {
                 return Ok(());
             }
 
+            self.invalidate_ai_pipeline();
             // Distinguish an unexpected crash (e.g. a GPU device-lost mid-reply)
             // from a config change, and surface it. start_server then relaunches
             // with its adaptive offload + degrade-on-failure plans.
@@ -3143,6 +3811,7 @@ impl AppState {
                     "ai://llama_backend",
                     serde_json::json!({
                         "backend": server.active_backend.label(),
+                        "engine": server.active_engine,
                         "gpuOffloaded": false,
                         "fellBackToCpu": false,
                         "crashed": true,
@@ -3173,20 +3842,23 @@ impl AppState {
             "ai://llama_backend",
             serde_json::json!({
                 "backend": backend,
+                "engine": server.active_engine,
                 "gpuOffloaded": server.gpu_offloaded,
                 "fellBackToCpu": fell_back_to_cpu,
             }),
         );
+        let _ = self.handle.emit(
+            "ai://debug_event",
+            serde_json::json!({
+                "kind": "startup",
+                "msg": format!(
+                    "Inference engine active: {} ({backend})",
+                    if server.active_engine == "beellama" { "BeeLlama" } else { "llama.cpp" }
+                )
+            }),
+        );
 
         *guard = Some(server);
-        drop(guard);
-        // The server is ready for the first real request. That request carries
-        // the actual note-scoped prefix and can populate llama.cpp's prompt
-        // cache without making the user wait behind a synthetic completion.
-        let _ = self.handle.emit(
-            "ai://llama_warmup",
-            serde_json::json!({ "status": "ready" }),
-        );
         Ok(())
     }
 
@@ -3252,6 +3924,121 @@ fn chat_history_to_messages(chat_history: &[crate::models::ChatMessage]) -> Vec<
         .rev()
         .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
         .collect()
+}
+
+fn assemble_note_context(title: &str, body_excerpt: &str, notebook_cells: Option<&str>) -> String {
+    let mut context = format!("The note currently open is titled \"{title}\".");
+    if let Some(cells) = notebook_cells {
+        context.push_str(&format!("\n\n{cells}"));
+    } else if body_excerpt.trim().is_empty() {
+        context.push_str("\n\nThe note's CURRENT content is empty.");
+    } else {
+        context.push_str(&format!(
+            "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{body_excerpt}\n--- END CURRENT NOTE ---"
+        ));
+    }
+    context
+}
+
+#[cfg(test)]
+fn assemble_user_content(
+    note_title: &str,
+    mode_instruction: &str,
+    turn_instructions: &str,
+    question: &str,
+) -> String {
+    format!(
+        "OPEN NOTE TITLE: {note_title:?}\n\n\
+         INTERNAL TURN POLICY (not note metadata):\n{mode_instruction}\n\n\
+         {turn_instructions}\n\n\
+         USER REQUEST:\n{question}"
+    )
+}
+
+pub(crate) fn is_note_mutation_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_note"
+            | "append_note"
+            | "prepend_note"
+            | "replace_in_note"
+            | "insert_after_line"
+            | "delete_in_note"
+            | "format_note"
+            | "edit_notebook"
+    )
+}
+
+fn authorize_tool_policy(
+    name: &str,
+    chat_mode: bool,
+    append_only: bool,
+    placement_edit: bool,
+    has_selection: bool,
+    is_notebook: bool,
+    oversized_doc: bool,
+    tools_supported: bool,
+) -> Result<(), String> {
+    if !tools_supported {
+        return Err("Tool execution is disabled for this model.".to_string());
+    }
+    if !is_note_mutation_tool(name) {
+        return Ok(());
+    }
+    if chat_mode {
+        return Err("Note mutations are disabled in Chat mode.".to_string());
+    }
+    if oversized_doc && matches!(name, "write_note" | "format_note") {
+        return Err(
+            "This note exceeds the model context; retrieve the relevant region with \
+             search_documents, then use replace_in_note, insert_after_line, delete_in_note, \
+             append_note, or prepend_note."
+                .to_string(),
+        );
+    }
+    if is_notebook && name != "edit_notebook" {
+        return Err("Notebook documents may only be mutated with edit_notebook.".to_string());
+    }
+    if !is_notebook && name == "edit_notebook" {
+        return Err("edit_notebook is only available for notebook documents.".to_string());
+    }
+    if has_selection {
+        let allowed = if placement_edit {
+            name == "insert_after_line"
+        } else {
+            name == "write_note"
+        };
+        if !allowed {
+            return Err("This mutation is outside the armed selection.".to_string());
+        }
+    } else if append_only && name != "append_note" {
+        return Err("This is an append-only turn; only append_note is permitted.".to_string());
+    }
+    Ok(())
+}
+
+fn turn_contains_note_mutation(messages: &[serde_json::Value]) -> bool {
+    let mutation_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter_map(|message| message["tool_calls"].as_array())
+        .flatten()
+        .filter(|call| {
+            call["function"]["name"]
+                .as_str()
+                .is_some_and(is_note_mutation_tool)
+        })
+        .filter_map(|call| call["id"].as_str())
+        .collect();
+    messages.iter().any(|message| {
+        message["role"] == "tool"
+            && message["tool_call_id"]
+                .as_str()
+                .is_some_and(|id| mutation_ids.contains(id))
+            && message["content"].as_str().is_some_and(|content| {
+                content.starts_with("Note successfully updated with ID:")
+                    || content.starts_with("Notebook updated (cell ")
+            })
+    })
 }
 
 /// Keep the most recent whole turns of a live conversation under a rough char
@@ -4108,39 +4895,60 @@ fn workspace_storage_key(workspace: &Path) -> String {
 
 fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
     if let Ok(info) = llama_server::inspect_provider(app_data_dir) {
+        let configured_engine =
+            llama_server::normalize_engine(info.config.inference_engine.as_deref());
+        let active_engine = info
+            .resolved
+            .as_ref()
+            .map(|config| config.inference_engine.clone());
         return ProviderStatus {
-            active_provider: "llama.cpp".into(),
-            available_providers: vec!["llama.cpp".into()],
+            active_provider: if active_engine.as_deref() == Some("beellama") {
+                "BeeLlama".into()
+            } else {
+                "llama.cpp".into()
+            },
+            available_providers: vec!["llama.cpp".into(), "BeeLlama".into()],
             healthy: info.healthy,
+            ready: false,
             detail: info.detail,
             config: Some(info.config),
             resolved: info.resolved,
             active_backend: info.selected_backend,
+            configured_engine,
+            active_engine,
             nvidia_detected: info.nvidia_detected,
             gpu_available: info.gpu_available,
             gpus: info.gpus,
             installed_backends: info.installed_backends,
+            installed_bee_backends: info.installed_bee_backends,
         };
     }
 
     ProviderStatus {
         active_provider: "llama.cpp".into(),
-        available_providers: vec!["llama.cpp".into()],
+        available_providers: vec!["llama.cpp".into(), "BeeLlama".into()],
         healthy: false,
+        ready: false,
         detail: "Choose a .gguf model and llama-server executable in Settings.".into(),
         config: None,
         resolved: None,
         active_backend: None,
+        configured_engine: "llama_cpp".into(),
+        active_engine: None,
         nvidia_detected: llama_server::detect_nvidia(),
         gpu_available: llama_server::gpu_available(),
         gpus: llama_server::detect_gpus().0,
         installed_backends: Vec::new(),
+        installed_bee_backends: Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{chat_history_to_messages, hashed_embedding, slugify, split_frontmatter, tokenize};
+    use super::{
+        assemble_note_context, assemble_user_content, authorize_tool_policy,
+        chat_history_to_messages, hashed_embedding, slugify, split_frontmatter, tokenize,
+    };
     use crate::models::ChatMessage;
 
     #[test]
@@ -4196,5 +5004,55 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["content"], "note A question");
         assert_eq!(messages[1]["content"], "note A answer");
+    }
+
+    #[test]
+    fn note_context_always_contains_body_in_the_shared_shape() {
+        let context = assemble_note_context("Today", "body text", None);
+        assert!(context.contains("Today"));
+        assert!(context.contains("body text"));
+        assert!(context.contains("--- CURRENT NOTE ---"));
+    }
+
+    #[test]
+    fn decorated_wire_user_content_is_stable_for_persistence() {
+        let sent = assemble_user_content(
+            "Project Aurora",
+            "CHAT TURN POLICY: Never modify the note.",
+            "TURN RULE",
+            "What changed?",
+        );
+        let persisted = serde_json::json!({ "role": "user", "content": sent.clone() });
+        assert_eq!(persisted["content"], sent);
+        assert!(sent.starts_with("OPEN NOTE TITLE: \"Project Aurora\""));
+        assert!(sent.contains("INTERNAL TURN POLICY (not note metadata):"));
+        assert!(sent.contains("CHAT TURN POLICY:"));
+        assert!(!sent.contains("COMPOSER MODE"));
+        assert!(sent.ends_with("USER REQUEST:\nWhat changed?"));
+    }
+
+    #[test]
+    fn empty_note_context_keeps_the_real_title() {
+        let context = assemble_note_context("Untitled idea", "", None);
+        assert!(context.contains("titled \"Untitled idea\""));
+        assert!(context.contains("CURRENT content is empty"));
+    }
+
+    #[test]
+    fn runtime_policy_blocks_unsafe_mutations() {
+        assert!(authorize_tool_policy("write_note", true, false, false, false, false, false, true).is_err());
+        assert!(authorize_tool_policy("write_note", false, true, false, false, false, false, true).is_err());
+        assert!(authorize_tool_policy("append_note", false, true, false, false, false, false, true).is_ok());
+        assert!(authorize_tool_policy("append_note", false, false, false, true, false, false, true).is_err());
+        assert!(authorize_tool_policy("write_note", false, false, false, true, false, false, true).is_ok());
+        assert!(authorize_tool_policy("insert_after_line", false, false, true, true, false, false, true).is_ok());
+        assert!(authorize_tool_policy("write_note", false, false, false, false, true, false, true).is_err());
+        assert!(authorize_tool_policy("edit_notebook", false, false, false, false, true, false, true).is_ok());
+        assert!(authorize_tool_policy("read_note", false, false, false, false, false, false, false).is_err());
+        let blocked = authorize_tool_policy("write_note", false, false, false, false, false, true, true)
+            .unwrap_err();
+        assert!(blocked.contains("exceeds the model context"));
+        assert!(authorize_tool_policy("format_note", false, false, false, false, false, true, true).is_err());
+        assert!(authorize_tool_policy("replace_in_note", false, false, false, false, false, true, true).is_ok());
     }
 }

@@ -11,8 +11,10 @@ import { invoke } from '@tauri-apps/api/core';
 // trigger the warm-up and subsequent chats will be fast.
 
 /** Call when a note view mounts: warm the server if it isn't already. */
-export function noteOpened(): void {
-	invoke('warm_llama_server').catch(() => {});
+export type InteractionMode = 'chat' | 'operation' | 'edit';
+
+export function noteOpened(noteId: string, interactionMode: InteractionMode = 'chat'): void {
+	invoke('warm_llama_server', { noteId, interactionMode }).catch(() => {});
 }
 
 /** Called when a note view unmounts — no-op: the server stays warm. */

@@ -26,14 +26,6 @@
 	import DOMPurify from 'dompurify';
 
 	let requireToolApproval = $state(false);
-	type AiInteractionMode = 'auto' | 'chat' | 'operation';
-	let aiInteractionMode = $state<AiInteractionMode>('auto');
-
-	function setAiInteractionMode(mode: AiInteractionMode) {
-		aiInteractionMode = mode;
-		localStorage.setItem('myelin_ai_interaction_mode', mode);
-	}
-
 	let note = $state<NoteDocument | null>(null);
 	let isLoadingNote = $state(false);
 	let draftBody = $state('');
@@ -72,6 +64,30 @@
 	});
 	type DebugTraceEntry = { time: number; msg: string; kind: string };
 	let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
+
+	function setStreamingStatus(statusText: string | undefined) {
+		chatMessages = chatMessages.map((message) =>
+			message.isStreaming ? { ...message, statusText } : message
+		);
+		if (chatMessagesEl) setTimeout(() => scrollChatToBottom(false), 0);
+	}
+
+	function visibleAiStatus(kind: string, detail: string): string | undefined {
+		if (kind === 'model_prompt' || kind === 'request_serialized') return 'Reading the note…';
+		if (kind === 'response_headers' || kind === 'first_model_delta' || kind === 'gen') {
+			return 'Writing a response…';
+		}
+		if (kind === 'intent_prompt') return 'Understanding the request…';
+		if (kind === 'tool') {
+			const name = detail.match(/executing\s+([^(]+)/i)?.[1]?.replaceAll('_', ' ');
+			return name ? `Using ${name}…` : 'Looking that up…';
+		}
+		if (kind === 'tool_result') return 'Reading the result…';
+		if (kind === 'session' || kind === 'config' || kind === 'tools' || kind === 'wire_mode') {
+			return 'Preparing the request…';
+		}
+		return undefined;
+	}
 	let debugInfo = $state<{
 		requestStart: number | null;
 		firstChunk: number | null;
@@ -109,6 +125,18 @@
 		words: number;
 	} | null>(null);
 	let selDebounce: ReturnType<typeof setTimeout> | undefined;
+	type AiEditAction = 'replace' | 'rewrite' | 'delete' | 'write';
+	type AiEditTarget = { text: string; before: string; after: string; cursor: boolean };
+	let aiEditMenu = $state<{
+		x: number;
+		y: number;
+		target: AiEditTarget;
+		hasSelection: boolean;
+	} | null>(null);
+	let aiEditAction = $state<AiEditAction>('write');
+	let aiEditInstruction = $state('');
+	let aiEditBusy = $state(false);
+	let aiEditError = $state('');
 
 	// Prompt-box context-usage ring: uses real token count from the server when
 	// available (chat_usage event), otherwise estimates from characters (~32K tokens ≈ 130K chars).
@@ -199,7 +227,9 @@
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
 
-	const NOTE_MIN_WIDTH = 800; // must match .main-pane min-width in CSS
+	// Minimum usable editor width. The Markdown column wraps below its preferred
+	// 120-character width, so notes remain usable in narrower windows.
+	const NOTE_MIN_WIDTH = 950;
 	let sidebarWidth = $state(320);
 	let isSidebarResizing = $state(false);
 
@@ -219,8 +249,12 @@
 			// natural order (PDF left, editor right), so the cursor's fraction from
 			// the left edge is the ratio directly — no per-doc-type inversion.
 			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
-			if (newRatio > 20 && newRatio < 80) {
-				splitRatio = newRatio;
+			const resizerWidth = 10;
+			const minSourceWidth = 320;
+			const maxEditorRatio = ((rect.width - NOTE_MIN_WIDTH - resizerWidth) / rect.width) * 100;
+			const minSourceRatio = ((minSourceWidth) / rect.width) * 100;
+			if (maxEditorRatio >= minSourceRatio) {
+				splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxEditorRatio));
 			}
 		} else if (isSidebarResizing) {
 			const newWidth = window.innerWidth - e.clientX;
@@ -498,8 +532,92 @@
 	// in the editor re-arms via selectionchange.
 	function onDocMouseDown(e: MouseEvent) {
 		const target = e.target as HTMLElement | null;
-		if (target && target.closest('.chat-input-area')) return;
+		if (e.button === 2 || (target && target.closest('.chat-input-area, .ai-edit-popover'))) return;
 		if (armedSelection) clearArmedSelection();
+	}
+
+	function cursorTargetAtPoint(e: MouseEvent): AiEditTarget | null {
+		if (!vditorInstance || !vditorContainer) return null;
+		const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
+		if (!editorEl) return null;
+		const doc = document as Document & {
+			caretRangeFromPoint?: (x: number, y: number) => Range | null;
+			caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+		};
+		let node: Node | null = null;
+		let offset = 0;
+		const range = doc.caretRangeFromPoint?.(e.clientX, e.clientY);
+		if (range) {
+			node = range.startContainer;
+			offset = range.startOffset;
+		} else {
+			const position = doc.caretPositionFromPoint?.(e.clientX, e.clientY);
+			if (position) {
+				node = position.offsetNode;
+				offset = position.offset;
+			}
+		}
+		if (!node || !editorEl.contains(node)) return null;
+		const renderedOffset = textOffsetOf(editorEl, node, offset);
+		if (renderedOffset == null) return null;
+		const source = vditorInstance.getValue();
+		const position = Math.min(renderedOffset, source.length);
+		return {
+			text: '',
+			before: source.slice(Math.max(0, position - 80), position),
+			after: source.slice(position, Math.min(source.length, position + 80)),
+			cursor: true
+		};
+	}
+
+	function openAiEditMenu(e: MouseEvent) {
+		if (workingDocType !== 'md' || isChatStreaming || aiEditBusy) return;
+		const selected = computeSourceSelection();
+		const target: AiEditTarget | null = selected
+			? { ...selected, cursor: false }
+			: cursorTargetAtPoint(e);
+		if (!target) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if (selected) captureEditorSelection();
+		aiEditAction = selected ? 'rewrite' : 'write';
+		aiEditInstruction = '';
+		aiEditError = '';
+		aiEditMenu = {
+			x: Math.min(e.clientX, window.innerWidth - 340),
+			y: Math.min(e.clientY, window.innerHeight - 250),
+			target,
+			hasSelection: !!selected
+		};
+	}
+
+	function closeAiEditMenu() {
+		if (aiEditBusy) return;
+		aiEditMenu = null;
+		aiEditError = '';
+		clearArmedSelection();
+	}
+
+	async function submitAiEdit() {
+		if (!note || !aiEditMenu || aiEditBusy) return;
+		if (aiEditAction !== 'delete' && !aiEditInstruction.trim()) return;
+		aiEditBusy = true;
+		aiEditError = '';
+		try {
+			await invoke('ask_ai_edit', {
+				noteId: note.id,
+				instruction: aiEditInstruction.trim(),
+				action: aiEditAction,
+				requestId: `edit-${Date.now()}`,
+				target: aiEditMenu.target
+			});
+			aiEditMenu = null;
+			clearArmedSelection();
+		} catch (error) {
+			aiEditError = extractChatErrorMessage(error);
+		} finally {
+			aiEditBusy = false;
+		}
 	}
 
 	function onSelectionChange() {
@@ -1183,6 +1301,7 @@
 		try {
 			note = await invoke<NoteDocument>('load_note', { noteId });
 			const loadedNote = note;
+			noteOpened(loadedNote.id, 'chat');
 			// Keep the persisted transcript untouched; reasoning is removed only from
 			// the assistant's presentation below.
 			chatMessages = loadedNote.chatHistory || [];
@@ -1811,7 +1930,7 @@
 		const startTime = Date.now();
 		pendingDebugTrace = [
 			{ time: startTime, msg: 'Request sent', kind: 'send' },
-			{ time: startTime, msg: `Composer mode: ${aiInteractionMode}`, kind: 'config' }
+			{ time: startTime, msg: 'Composer mode: chat', kind: 'config' }
 		];
 		if (showDebugWindow) {
 			debugInfo = {
@@ -1840,7 +1959,13 @@
 		];
 		chatMessages = [
 			...chatMessages,
-			{ role: 'assistant', content: '', isStreaming: true, startTime }
+			{
+				role: 'assistant',
+				content: '',
+				isStreaming: true,
+				startTime,
+				statusText: 'Reading the note… warming the model…'
+			}
 		];
 		activeChatRequestId = requestId;
 		setTimeout(() => scrollChatToBottom(true), 50);
@@ -1851,16 +1976,8 @@
 				requestId,
 				// Working-doc type so the model edits as LaTeX / notebook, not Markdown.
 				docType: workingDocType,
-				// Armed selection persists across sends (cleared only by the ✕ pill),
-				// so several edits can target the same span.
-				selection: armedSelection
-					? {
-							text: armedSelection.text,
-							before: armedSelection.before,
-							after: armedSelection.after
-						}
-					: null,
-				interactionMode: aiInteractionMode
+				selection: null,
+				interactionMode: 'chat'
 			});
 		} catch (e) {
 			console.error('AI Error:', e);
@@ -1957,7 +2074,13 @@
 		cancelNoteStream();
 		chatMessages = chatMessages.map((m) => {
 			if (m.isStreaming)
-				return { ...m, isStreaming: false, endTime: Date.now(), debugTrace: pendingDebugTrace };
+				return {
+					...m,
+					isStreaming: false,
+					statusText: undefined,
+					endTime: Date.now(),
+					debugTrace: pendingDebugTrace
+				};
 			return m;
 		});
 		// Keep the request marked active until persistence completes. Rewind/retry
@@ -2007,6 +2130,7 @@
 				return {
 					...m,
 					isStreaming: false,
+					statusText: undefined,
 					error: true,
 					content: m.content + '\n\n' + errorMsg,
 					tools,
@@ -2469,16 +2593,6 @@
 	onMount(() => {
 		// Warm llama-server (safety net — the server is already started at app
 		// boot and stays warm for the entire session).
-		noteOpened();
-		const savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
-		if (
-			savedInteractionMode === 'auto' ||
-			savedInteractionMode === 'chat' ||
-			savedInteractionMode === 'operation'
-		) {
-			aiInteractionMode = savedInteractionMode;
-		}
-
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
@@ -2500,6 +2614,7 @@
 		let unlistenNoteStreamCancel: UnlistenFn;
 		let unlistenLatex: UnlistenFn;
 		let unlistenSummaryProgress: UnlistenFn;
+		let unlistenAiWarmup: UnlistenFn;
 
 		$showSidebarToggle = true;
 		// The note sidebar's open/closed state is remembered across sessions via the
@@ -2606,7 +2721,8 @@
 					role: 'assistant',
 					content: '',
 					isStreaming: true,
-					startTime: lastStartTime
+					startTime: lastStartTime,
+					statusText: `Using ${event.payload.tool.toLowerCase()}…`
 				}
 			];
 			if (chatMessagesEl) {
@@ -2654,7 +2770,9 @@
 		listen<{ delta: string; requestId: string }>('ai://chat_chunk', (event) => {
 			if (activeChatRequestId !== event.payload.requestId) return;
 			chatMessages = chatMessages.map((m) => {
-				if (m.isStreaming) return { ...m, content: m.content + event.payload.delta };
+				if (m.isStreaming) {
+					return { ...m, content: m.content + event.payload.delta, statusText: undefined };
+				}
 				return m;
 			});
 			if (showDebugWindow && debugInfo) {
@@ -2724,6 +2842,18 @@
 			}
 		).then((fn) => (unlistenError = fn));
 
+		listen<{ status: 'started' | 'ready' | 'failed'; message?: string }>(
+			'ai://llama_warmup',
+			(event) => {
+				if (!activeChatRequestId) return;
+				if (event.payload.status === 'started') {
+					setStreamingStatus('Reading the note… warming the model…');
+				} else if (event.payload.status === 'ready') {
+					setStreamingStatus('Model ready — preparing the response…');
+				}
+			}
+		).then((fn) => (unlistenAiWarmup = fn));
+
 		// Debug event: model behavior, tool calls, grammar config, etc.
 		let unlistenDebug: UnlistenFn | undefined;
 		listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
@@ -2736,6 +2866,8 @@
 			// Keep every trace even with the panel closed; it is attached to
 			// the completed assistant turn and persisted in chat history.
 			pendingDebugTrace = [...pendingDebugTrace, entry];
+			const status = visibleAiStatus(event.payload.kind, event.payload.msg);
+			if (status) setStreamingStatus(status);
 			if (showDebugWindow && debugInfo) {
 				const isModelStart =
 					event.payload.kind === 'gen' || event.payload.kind === 'first_model_delta';
@@ -2792,6 +2924,7 @@
 			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
 			if (unlistenLatex) unlistenLatex();
 			if (unlistenSummaryProgress) unlistenSummaryProgress();
+			if (unlistenAiWarmup) unlistenAiWarmup();
 		};
 	});
 
@@ -3025,6 +3158,7 @@
 							class:toolbar-expanded={toolbarExpanded}
 							class:has-pdf-note={!!activeSourceBytes || (!isSourceMaterial && !!note)}
 							onclickcapture={handleVditorClick}
+							oncontextmenu={openAiEditMenu}
 							onkeydowncapture={handleVditorKeydownCapture}
 							onkeyupcapture={handleVditorKeyupCapture}
 							onwheelcapture={(e) => {
@@ -3263,6 +3397,11 @@
 													{/if}
 													{#if msg.isStreaming && msg.startTime}
 														{#if !msg.content}
+															{#if msg.statusText}
+																<span class="chat-progress" role="status" aria-live="polite"
+																	>{msg.statusText}</span
+																>
+															{/if}
 															<span class="chat-working" aria-label="Working"
 																><span></span><span></span><span></span></span
 															>
@@ -3468,28 +3607,6 @@
 										rows="1"
 									></textarea>
 									<div class="prompt-toolbar">
-										<div class="interaction-mode" role="group" aria-label="AI interaction mode">
-											<button
-												type="button"
-												class:active={aiInteractionMode === 'auto'}
-												onclick={() => setAiInteractionMode('auto')}
-								title="Auto: let the model choose chat or a write">Auto</button
-											>
-											<button
-												type="button"
-												class:active={aiInteractionMode === 'chat'}
-												onclick={() => setAiInteractionMode('chat')}
-												title="Chat: answer, search, or look up information without modifying the note"
-												>Chat</button
-											>
-											<button
-												type="button"
-												class:active={aiInteractionMode === 'operation'}
-												onclick={() => setAiInteractionMode('operation')}
-								title="Write: perform the request on the open note using tools"
-								>Write</button
-											>
-										</div>
 										<button
 											type="button"
 											class="mode-pill"
@@ -3528,30 +3645,6 @@
 												/></svg
 											>
 										</button>
-										{#if armedSelection}
-											<button
-												type="button"
-												class="selection-pill"
-												onclick={() => clearArmedSelection()}
-												title={`The AI will edit only your selection — ${armedSelection.chars} chars, ${armedSelection.words} word${armedSelection.words === 1 ? '' : 's'}. Click to clear.`}
-											>
-												<svg
-													width="13"
-													height="13"
-													viewBox="0 0 24 24"
-													fill="none"
-													stroke="currentColor"
-													stroke-width="2"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													><path
-														d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"
-													/></svg
-												>
-												<span>{armedSelection.chars} sel</span>
-												<span class="sel-x">✕</span>
-											</button>
-										{/if}
 										<div class="prompt-spacer"></div>
 										<button
 											type="button"
@@ -3660,6 +3753,45 @@
 		{/if}
 	</div>
 </div>
+
+{#if aiEditMenu}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		class="ai-edit-popover"
+		style={`left:${aiEditMenu.x}px;top:${aiEditMenu.y}px`}
+		onkeydown={(event) => {
+			if (event.key === 'Escape') closeAiEditMenu();
+			if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') void submitAiEdit();
+		}}
+	>
+		<div class="ai-edit-actions">
+			{#if aiEditMenu.hasSelection}
+				{#each ['replace', 'rewrite', 'delete'] as action}
+					<button type="button" class:active={aiEditAction === action} onclick={() => (aiEditAction = action as AiEditAction)}
+						>{action[0].toUpperCase() + action.slice(1)}</button>
+				{/each}
+			{:else}
+				<strong>Write here</strong>
+			{/if}
+			<button class="ai-edit-close" type="button" onclick={closeAiEditMenu} aria-label="Close">×</button>
+		</div>
+		{#if aiEditAction !== 'delete'}
+			<textarea
+				bind:value={aiEditInstruction}
+				placeholder={aiEditAction === 'rewrite' ? 'How should this be rewritten?' : aiEditAction === 'replace' ? 'What should replace the selection?' : 'What should be written here?'}
+				rows="3"
+			></textarea>
+		{:else}
+			<p class="ai-edit-warning">Delete exactly the selected text?</p>
+		{/if}
+		{#if aiEditError}<p class="ai-edit-error">{aiEditError}</p>{/if}
+		<div class="ai-edit-footer">
+			<span>{aiEditMenu.hasSelection ? `${aiEditMenu.target.text.length} selected` : 'At cursor'}</span>
+			<button type="button" class:danger={aiEditAction === 'delete'} disabled={aiEditBusy || (aiEditAction !== 'delete' && !aiEditInstruction.trim())} onclick={() => void submitAiEdit()}
+				>{aiEditBusy ? 'Working…' : aiEditAction === 'delete' ? 'Delete' : 'Apply'}</button>
+		</div>
+	</div>
+{/if}
 
 <dialog
 	bind:this={versionPreviewDialog}
@@ -4374,7 +4506,7 @@
 	/* Main Pane */
 	.main-pane {
 		flex: 1;
-		min-width: 800px;
+		min-width: var(--note-min-width, 950px);
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-page);
@@ -4397,6 +4529,7 @@
 
 	.content-area {
 		width: 100%;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		flex: 1;
@@ -4407,6 +4540,7 @@
 		position: relative;
 		border: none !important;
 		flex: 1;
+		min-width: 0;
 		min-height: 0;
 	}
 
@@ -4554,6 +4688,7 @@
 		flex-direction: column !important;
 		align-items: stretch !important;
 		width: 100% !important;
+		min-width: 0 !important;
 		background: var(--bg-page) !important;
 		flex: 1 !important;
 		min-height: 0 !important;
@@ -4586,16 +4721,30 @@
 		-ms-overflow-style: none !important;
 	}
 
-	/* Fixed A4 width for the text container, centered horizontally.
-	   This makes the width strictly static across screen sizes. */
+	/* The editor's usable text width is exactly 120 monospace characters. */
 	:global(.vditor-reset) {
-		width: 210mm !important;
+		width: min(100%, calc(120ch + 2 * var(--space-8))) !important;
 		max-width: none !important;
 		margin: 0 auto !important;
 		padding-left: var(--space-8) !important;
 		padding-right: var(--space-8) !important;
-		overflow: visible !important;
+		white-space: pre-wrap !important;
+		overflow-wrap: anywhere !important;
+		word-break: break-word !important;
+		overflow-x: hidden !important;
 		box-sizing: border-box !important;
+	}
+
+	/* Keep Markdown editing and preview readable while allowing the protected
+	   120-character column to fit in a narrower native window. */
+	:global(.vditor-reset),
+	:global(.vditor-textarea) {
+		font-size: 12px !important;
+	}
+
+	:global(.vditor-ir) {
+		min-width: 0 !important;
+		overflow-x: hidden !important;
 	}
 
 	:global(.vditor-preview__action) {
@@ -4685,14 +4834,13 @@
 	}
 
 	/* Large Screen — sidebar docks side by side with the editor */
-	@media (min-width: 1201px) {
+	@media (min-width: 1380px) {
 		.sidebar {
 			position: relative;
 			transform: none;
 			margin-right: calc(var(--sidebar-width, 20rem) * -1);
-			/* Hard cap relative to the layout container (excludes the left rail), so
-			   the note keeps its 800px min-width and the panes never overflow/clip. */
-			max-width: calc(100% - 800px);
+			/* Docking is allowed only when the editor can retain its full width. */
+			max-width: calc(100% - 950px);
 			box-shadow: none;
 			flex-shrink: 0;
 		}
@@ -4704,6 +4852,31 @@
 
 		.sidebar-backdrop {
 			display: none !important;
+		}
+	}
+
+	/* Attached source documents stack above Markdown when side-by-side layout
+	   cannot preserve the editor minimum. */
+	@media (max-width: 1379px) {
+		.main-layout.split-layout {
+			flex-direction: column;
+			overflow-y: auto;
+		}
+
+		.main-layout.split-layout .pdf-pane,
+		.main-layout.split-layout .main-pane {
+			width: 100% !important;
+			min-width: 0;
+			flex: 1 1 50%;
+		}
+
+		.main-layout.split-layout .resizer {
+			display: none;
+		}
+
+		.main-layout.split-layout .main-pane {
+			min-width: var(--note-min-width, 950px);
+			min-height: var(--note-min-height, 0);
 		}
 	}
 
@@ -5569,37 +5742,77 @@
 		flex: 1;
 	}
 
-	.interaction-mode {
-		display: inline-flex;
-		height: 28px;
-		padding: 2px;
+	.ai-edit-popover {
+		position: fixed;
+		z-index: 10000;
+		width: 320px;
+		padding: 10px;
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-md);
 		background: var(--neutral-950);
+		box-shadow: 0 14px 40px rgb(0 0 0 / 35%);
 	}
-	.interaction-mode button {
-		padding: 0 7px;
+	.ai-edit-actions,
+	.ai-edit-footer {
+		display: flex;
+		align-items: center;
+		gap: 5px;
+	}
+	.ai-edit-actions button {
 		border: 0;
-		border-radius: calc(var(--radius-md) - 2px);
+		border-radius: 5px;
 		background: transparent;
 		color: var(--text-secondary);
-		font-size: 0.68rem;
-		font-weight: 600;
-		cursor: pointer;
+		padding: 5px 8px;
 	}
-	.interaction-mode button:hover {
+	.ai-edit-actions button.active {
+		background: var(--neutral-800);
 		color: var(--text-primary);
 	}
-	.interaction-mode button.active {
-		background: var(--accent-100);
-		color: var(--bg-base);
+	.ai-edit-actions .ai-edit-close {
+		margin-left: auto;
+		font-size: 18px;
+	}
+	.ai-edit-popover textarea {
+		box-sizing: border-box;
+		width: 100%;
+		margin: 9px 0;
+		padding: 8px;
+		resize: vertical;
+		border: 1px solid var(--border-default);
+		border-radius: 6px;
+		background: var(--neutral-1000);
+		color: var(--text-primary);
+	}
+	.ai-edit-footer {
+		justify-content: space-between;
+		color: var(--text-secondary);
+		font-size: 0.75rem;
+	}
+	.ai-edit-footer button {
+		padding: 6px 12px;
+		border: 0;
+		border-radius: 6px;
+		background: var(--accent-200);
+		color: var(--neutral-1000);
+	}
+	.ai-edit-footer button.danger {
+		background: var(--danger-solid);
+		color: white;
+	}
+	.ai-edit-warning,
+	.ai-edit-error {
+		margin: 12px 0;
+		font-size: 0.82rem;
+	}
+	.ai-edit-error {
+		color: var(--danger-text);
 	}
 
 	/* Shared control baseline: same height, calm by default, theme-consistent. */
 	.mode-pill,
 	.prompt-icon-btn,
-	.send-btn,
-	.selection-pill {
+	.send-btn {
 		height: 28px;
 		display: inline-flex;
 		align-items: center;
@@ -5652,36 +5865,6 @@
 	.prompt-icon-btn:hover {
 		background: var(--neutral-900);
 		color: var(--text-primary);
-	}
-
-	.selection-pill {
-		gap: 6px;
-		padding: 0 5px 0 9px;
-		border-radius: var(--radius-md);
-		font-size: 0.72rem;
-		font-weight: 600;
-		color: var(--accent-100);
-		background: color-mix(in srgb, var(--accent-100) 9%, transparent);
-	}
-	.selection-pill:hover {
-		background: color-mix(in srgb, var(--accent-100) 15%, transparent);
-	}
-	.selection-pill svg {
-		opacity: 0.75;
-	}
-	.selection-pill .sel-x {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 16px;
-		height: 16px;
-		border-radius: 50%;
-		opacity: 0.5;
-		font-size: 0.66rem;
-	}
-	.selection-pill:hover .sel-x {
-		opacity: 0.95;
-		background: color-mix(in srgb, var(--accent-100) 22%, transparent);
 	}
 
 	.debug-btn {
@@ -5998,6 +6181,14 @@
 	.chat-time-taken.live {
 		color: var(--accent);
 		opacity: 0.9;
+	}
+
+	.chat-progress {
+		display: block;
+		color: var(--text-secondary);
+		font-size: 0.82rem;
+		line-height: 1.35;
+		margin-bottom: var(--space-1);
 	}
 
 	/* Animated "working" dots shown while a turn is running but has produced no

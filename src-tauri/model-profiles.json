@@ -10,15 +10,29 @@
     "notes": "Verified for tool-calling. Hybrid Mamba/transformer — uses its full trained context."
   },
   {
+    "name": "LiquidAI LFM2.5",
+    "architecture": "lfm2",
+    "namePattern": "LFM2.5",
+    "role": "chat",
+    "chatTemplate": "lfm25",
+    "supportsTools": true,
+    "verboseToolSchemas": true,
+    "temperature": 0.3,
+    "topP": 0.9,
+    "verified": false,
+    "notes": "Uses the corrected LFM2.5 multi-turn tool template."
+  },
+  {
     "name": "LiquidAI LFM2",
     "architecture": "lfm2",
     "role": "chat",
     "chatTemplate": "lfm2",
     "supportsTools": true,
+    "verboseToolSchemas": true,
     "temperature": 0.3,
     "topP": 0.9,
     "verified": false,
-    "notes": "Embedded chat template is broken for multi-turn tools; the corrected template is applied automatically. Prompt-tools + strict grammar may help at low quants; choose this in Agent settings if needed."
+    "notes": "Uses the original LFM2 tool-list and tool-response markers. Prompt-tools + strict grammar may help at low quants; choose this in Agent settings if needed."
   },
   {
     "name": "Nomic Embed Text v1.5",

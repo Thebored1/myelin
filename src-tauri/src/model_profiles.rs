@@ -36,6 +36,11 @@ pub struct ModelProfile {
     /// the user's Openharn tool strategy settings.
     #[serde(default)]
     pub prefers_prompt_tools: Option<bool>,
+    /// Preserve natural-language descriptions inside tool JSON schemas. Weak
+    /// models may need this duplication; strong models can rely on the shared
+    /// preamble and pay only for names, types, enums, and required fields.
+    #[serde(default)]
+    pub verbose_tool_schemas: Option<bool>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -73,6 +78,7 @@ pub struct ResolvedProfile {
     pub chat_template: Option<String>,
     pub supports_tools: Option<bool>,
     pub prefers_prompt_tools: Option<bool>,
+    pub verbose_tool_schemas: bool,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub is_recurrent_or_hybrid: bool,
@@ -91,6 +97,7 @@ impl ResolvedProfile {
             chat_template: None,
             supports_tools: None,
             prefers_prompt_tools: None,
+            verbose_tool_schemas: false,
             temperature: None,
             top_p: None,
             is_recurrent_or_hybrid: gguf.map(|g| g.is_recurrent_or_hybrid()).unwrap_or(false),
@@ -120,6 +127,9 @@ impl ResolvedProfile {
         }
         if p.prefers_prompt_tools.is_some() {
             self.prefers_prompt_tools = p.prefers_prompt_tools;
+        }
+        if let Some(verbose) = p.verbose_tool_schemas {
+            self.verbose_tool_schemas = verbose;
         }
         if p.temperature.is_some() {
             self.temperature = p.temperature;
@@ -163,9 +173,23 @@ pub fn all_profiles(app_data_dir: &Path) -> Vec<ModelProfile> {
     all
 }
 
-/// Match strength: an architecture match (exact, case-insensitive) is stronger
-/// than a filename-substring match; 0 = no match.
+/// Match strength: a profile specifying both architecture and filename must
+/// match both and wins over an architecture-only family profile.
 fn match_strength(p: &ModelProfile, arch: Option<&str>, filename: &str) -> u8 {
+    if let (Some(pa), Some(pat), Some(a)) = (
+        p.architecture.as_deref(),
+        p.name_pattern.as_deref(),
+        arch,
+    ) {
+        return if a.eq_ignore_ascii_case(pa)
+            && !pat.is_empty()
+            && filename.to_lowercase().contains(&pat.to_lowercase())
+        {
+            3
+        } else {
+            0
+        };
+    }
     if let (Some(pa), Some(a)) = (p.architecture.as_deref(), arch) {
         if a.eq_ignore_ascii_case(pa) {
             return 2;
@@ -243,14 +267,21 @@ mod tests {
     }
 
     #[test]
-    fn lfm2_gets_template_override() {
+    fn lfm_versions_get_distinct_template_overrides() {
         let r = resolve(
             nowhere(),
             Some(&gguf("lfm2")),
             "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
         );
-        assert_eq!(r.chat_template.as_deref(), Some("lfm2"));
+        assert_eq!(r.chat_template.as_deref(), Some("lfm25"));
         assert!(r.is_recurrent_or_hybrid);
+
+        let r = resolve(
+            nowhere(),
+            Some(&gguf("lfm2")),
+            "LFM2-8B-A1B-Q4_K_M.gguf",
+        );
+        assert_eq!(r.chat_template.as_deref(), Some("lfm2"));
     }
 
     #[test]

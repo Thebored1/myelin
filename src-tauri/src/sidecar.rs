@@ -271,12 +271,11 @@ pub async fn run_chat(
     // Auto is authoritative: ignore legacy manual booleans that may have been
     // persisted by older builds. Openharn decides native vs prompt-tools per
     // request and enables prompt-tools only as a recovery path when needed.
-    // Operation mode starts in the strict prompt-tool format. Unlike Auto, it
-    // must produce an actionable tool call on the first model request; starting
-    // in native auto mode allows some model/template combinations to emit prose
-    // and triggers an unnecessary second request.
-    let use_prompt_tools = explicit_prompt || suppress_chat_output;
-    let use_strict = suppress_chat_output || (explicit_prompt && oh.strict);
+    // Native mode is shared across Chat and Operation so switching modes keeps
+    // the same rendered prompt prefix. Strict prompt-tools remains available as
+    // an explicit setting or as the sidecar's recovery path after native fails.
+    let use_prompt_tools = explicit_prompt;
+    let use_strict = explicit_prompt && (oh.strict || suppress_chat_output);
     // Operation is an explicit user instruction to act, not a routing hint.
     // In native function-calling mode `call_only` becomes `tool_choice: required`
     // below; in prompt-tool mode it selects the call-only grammar.
@@ -306,6 +305,7 @@ pub async fn run_chat(
         "slm": false,
         "chat_mode": chat_mode,
         "selection_scoped": selection_scoped,
+        "native_first": !explicit_prompt,
     });
     // Host-computed deterministic intent overrides model-based classification.
     // The sidecar uses this value directly and skips the separate model
@@ -342,6 +342,21 @@ pub async fn run_chat(
         options["template_kwargs"] = json!(kw);
     }
 
+    // The epoch identifies this exact note/config/prompt revision. It remains
+    // stable for all passes in this request; any changed input naturally yields
+    // a different epoch and prevents a stale slot from being treated as valid.
+    let mut epoch_hash = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    note_id.hash(&mut epoch_hash);
+    config.model_path.hash(&mut epoch_hash);
+    serde_json::to_string(&messages).unwrap_or_default().hash(&mut epoch_hash);
+    serde_json::to_string(&tools).unwrap_or_default().hash(&mut epoch_hash);
+    let epoch = epoch_hash.finish();
+    let pass_kind = if intent_is_tool == Some(true) {
+        "tool selection"
+    } else {
+        "direct answer"
+    };
     let body = json!({
         "request_id": request_id,
         "base_url": llama_base,
@@ -352,6 +367,7 @@ pub async fn run_chat(
         "messages": messages,
         "tools": tools,
         "options": options,
+        "session": { "slot_id": 0, "epoch": epoch, "pass_kind": pass_kind },
     });
 
     let client = http_client();
@@ -375,6 +391,8 @@ pub async fn run_chat(
     let mut emitted_generation_start = false;
     let mut last_tool: Option<String> = None;
     let mut final_messages: Vec<Value> = Vec::new();
+    let mut new_messages: Vec<Value> = Vec::new();
+    let mut has_new_messages = false;
     let handle = &state.handle;
 
     // Emit a debug event so the frontend can show what the model is doing.
@@ -415,17 +433,18 @@ pub async fn run_chat(
     }
 
     loop {
-        // Poll the HTTP stream so cancel_ai is observed even when llama-server
-        // has not produced another SSE chunk (for example while a stale tool
-        // callback is holding the sidecar open).
-        let chunk = match tokio::time::timeout(Duration::from_millis(250), stream.next()).await {
-            Ok(chunk) => chunk,
-            Err(_) => {
-                if state.ai_cancel_requested() {
-                    emit_debug("cancel", "generation stopped by user");
-                    break;
-                }
-                continue;
+        // Wait directly for either upstream data or the cancellation signal.
+        // The old 250 ms timeout loop could leave cancellation latent and added
+        // needless polling around the first visible model delta.
+        if state.ai_cancel_requested() {
+            emit_debug("cancel", "generation stopped by user");
+            break;
+        }
+        let chunk = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = state.wait_for_ai_cancel() => {
+                emit_debug("cancel", "generation stopped by user");
+                break;
             }
         };
         let Some(chunk) = chunk else { break };
@@ -527,6 +546,10 @@ pub async fn run_chat(
                                 if let Some(msgs) = v["messages"].as_array() {
                                     final_messages = msgs.clone();
                                 }
+                                if let Some(msgs) = v["new_messages"].as_array() {
+                                    new_messages = msgs.clone();
+                                    has_new_messages = true;
+                                }
                                 last_tool = v["last_tool"].as_str().map(|s| s.to_string());
                                 if let Some(ref lt) = last_tool {
                                     emit_debug("done", &format!("turn complete (last tool: {lt})"));
@@ -536,7 +559,11 @@ pub async fn run_chat(
                                 // `done` is terminal for this request. Do not
                                 // keep consuming a malformed/late stream that
                                 // could dispatch another tool after completion.
-                                return Ok(final_messages.clone());
+                                return Ok(if !has_new_messages {
+                                    final_messages.clone()
+                                } else {
+                                    new_messages.clone()
+                                });
                             }
                         }
                         "debug" => {
@@ -550,6 +577,13 @@ pub async fn run_chat(
                             if let Ok(v) = serde_json::from_str::<Value>(&data) {
                                 let pt = v["prompt_tokens"].as_u64().unwrap_or(0);
                                 let ct = v["completion_tokens"].as_u64().unwrap_or(0);
+                                let cached = v["cached_tokens"].as_u64().unwrap_or(0);
+                                let evaluated = v["evaluated_tokens"]
+                                    .as_u64()
+                                    .unwrap_or_else(|| pt.saturating_sub(cached));
+                                let ratio = v["cache_reuse_ratio"].as_f64().unwrap_or_else(|| {
+                                    if pt == 0 { 0.0 } else { cached as f64 / pt as f64 }
+                                });
                                 let _ = handle.emit(
                                     "ai://chat_usage",
                                     json!({
@@ -557,9 +591,18 @@ pub async fn run_chat(
                                         "promptTokens": pt,
                                         "completionTokens": ct,
                                         "totalTokens": v["total_tokens"].as_u64().unwrap_or(0),
+                                        "cachedTokens": cached,
+                                        "evaluatedTokens": evaluated,
+                                        "cacheReuseRatio": ratio,
                                     }),
                                 );
-                                emit_debug("usage", &format!("prompt={pt}, completion={ct}"));
+                                emit_debug(
+                                    "usage",
+                                    &format!(
+                                        "prompt={pt}, cached={cached}, evaluated={evaluated}, reuse={:.1}%, completion={ct}",
+                                        ratio * 100.0
+                                    ),
+                                );
                             }
                         }
                         "error" => {

@@ -1,10 +1,12 @@
 mod embeddings;
+pub mod ai_turn;
 mod gguf;
 pub mod git_history;
 mod llama_server;
 mod model_profiles;
 mod models;
 mod notebook;
+mod note_prompt;
 mod rag;
 mod sidecar;
 pub mod state;
@@ -60,6 +62,21 @@ async fn set_tool_gating(state: State<'_, AppState>, enabled: bool) -> Result<()
         .set_tool_gating(enabled)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_prompt_cache(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state.set_prompt_cache(enabled).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn llama_cache_status(state: State<'_, AppState>) -> crate::state::LlamaCacheStatus {
+    state.llama_cache_status()
+}
+
+#[tauri::command]
+async fn clear_llama_cache(state: State<'_, AppState>) -> Result<(), String> {
+    state.clear_llama_cache().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -164,9 +181,30 @@ async fn downloadable_backends(state: State<'_, AppState>) -> Result<Vec<String>
 }
 
 #[tauri::command]
+async fn downloadable_bee_backends(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state.downloadable_bee_backends())
+}
+
+#[tauri::command]
 async fn download_llama_backend(state: State<'_, AppState>, backend: String) -> Result<(), String> {
     state
         .download_llama_backend(backend)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn download_bee_backend(state: State<'_, AppState>, backend: String) -> Result<(), String> {
+    state
+        .download_bee_backend(backend)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_inference_engine(state: State<'_, AppState>, engine: String) -> Result<(), String> {
+    state
+        .set_inference_engine(engine)
         .await
         .map_err(|error| error.to_string())
 }
@@ -319,9 +357,13 @@ async fn get_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String>
 
 /// Warm the llama-server when a note is opened so the first chat is instant.
 #[tauri::command]
-async fn warm_llama_server(state: State<'_, AppState>) -> Result<(), String> {
+async fn warm_llama_server(
+    state: State<'_, AppState>,
+    note_id: Option<String>,
+    interaction_mode: Option<String>,
+) -> Result<(), String> {
     state
-        .warm_llama_server()
+        .warm_llama_server_for_note(note_id, interaction_mode)
         .await
         .map_err(|error| error.to_string())
 }
@@ -479,6 +521,35 @@ async fn ask_ai_stream(
             selection,
             doc_type,
             interaction_mode,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn ask_ai_edit(
+    state: State<'_, AppState>,
+    note_id: String,
+    instruction: String,
+    action: String,
+    request_id: String,
+    target: crate::agent::SelectionArg,
+) -> Result<(), String> {
+    let question = match action.as_str() {
+        "replace" => format!("Replace the selected text with entirely new content following this instruction: {instruction}"),
+        "rewrite" => format!("Rewrite the selected text while preserving its meaning and facts. Follow this instruction: {instruction}"),
+        "delete" => "Delete the selected text. Call write_note with an empty content string.".to_string(),
+        "write" => format!("Write and insert new content at the cursor following this instruction: {instruction}"),
+        _ => return Err("unknown AI edit action".to_string()),
+    };
+    state
+        .ask_ai_stream(
+            note_id,
+            question,
+            request_id,
+            Some(target),
+            Some("md".to_string()),
+            Some("edit".to_string()),
         )
         .await
         .map_err(|error| error.to_string())
@@ -733,7 +804,10 @@ pub fn run() {
             set_llama_advanced_config,
             list_llama_devices,
             downloadable_backends,
+            downloadable_bee_backends,
             download_llama_backend,
+            download_bee_backend,
+            set_inference_engine,
             create_note,
             create_notebook,
             list_notebooks,
@@ -763,6 +837,7 @@ pub fn run() {
             summarise_large_note,
             ask_ai,
             ask_ai_stream,
+            ask_ai_edit,
             cancel_ai,
             save_chat_history,
             clear_ai_conversation,
@@ -781,6 +856,9 @@ pub fn run() {
             set_require_tool_approval,
             set_deterministic_tools,
             set_tool_gating,
+            set_prompt_cache,
+            llama_cache_status,
+            clear_llama_cache,
             resolve_tool_approval,
             get_openharn_settings,
             set_openharn_settings,

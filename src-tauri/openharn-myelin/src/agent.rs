@@ -20,6 +20,31 @@ use tokio::sync::{mpsc, oneshot};
 
 const HISTORY_BUDGET: usize = 16_000;
 
+fn normalize_lfm_tool_arguments(messages: &mut [Value], model: &str) {
+    if !model.to_ascii_lowercase().contains("lfm2") {
+        return;
+    }
+    for message in messages {
+        let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for call in calls {
+            let Some(arguments) = call
+                .get_mut("function")
+                .and_then(|function| function.get_mut("arguments"))
+            else {
+                continue;
+            };
+            let Some(raw) = arguments.as_str() else {
+                continue;
+            };
+            if let Ok(parsed @ Value::Object(_)) = serde_json::from_str::<Value>(raw) {
+                *arguments = parsed;
+            }
+        }
+    }
+}
+
 #[derive(Deserialize, Clone)]
 pub struct Options {
     /// Constrain tool calls with a GBNF grammar (OPENHARN_STRICT_TOOLS). Most
@@ -109,6 +134,10 @@ pub struct Options {
     /// (not just multi-call ones).
     #[serde(default)]
     pub prefers_prompt_tools: bool,
+    /// Host requests should try the native tool format first and use strict
+    /// prompt-tools only as a recovery path.
+    #[serde(default)]
+    pub native_first: bool,
 }
 
 fn default_max_calls() -> usize {
@@ -208,6 +237,7 @@ impl Default for Options {
             chat_mode: false,
             selection_scoped: false,
             prefers_prompt_tools: false,
+            native_first: false,
         }
     }
 }
@@ -232,6 +262,32 @@ pub struct ChatRequest {
     pub tools: Value,
     #[serde(default)]
     pub options: Options,
+    #[serde(default)]
+    pub session: SessionMetadata,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct SessionMetadata {
+    #[serde(default)]
+    pub slot_id: i32,
+    #[serde(default)]
+    pub epoch: u64,
+    #[serde(default = "default_pass_kind")]
+    pub pass_kind: String,
+}
+
+fn default_pass_kind() -> String {
+    "direct answer".into()
+}
+
+impl Default for SessionMetadata {
+    fn default() -> Self {
+        Self {
+            slot_id: 0,
+            epoch: 0,
+            pass_kind: default_pass_kind(),
+        }
+    }
 }
 
 /// Everything the loop can emit to the client (Myelin), mapped 1:1 to SSE events.
@@ -253,6 +309,7 @@ pub enum Out {
     },
     Done {
         messages: Vec<Value>,
+        new_messages: Vec<Value>,
         last_tool: Option<String>,
     },
     Error(String),
@@ -261,6 +318,9 @@ pub enum Out {
         prompt_tokens: u32,
         completion_tokens: u32,
         total_tokens: u32,
+        cached_tokens: u32,
+        evaluated_tokens: u32,
+        cache_reuse_ratio: f64,
     },
     Debug {
         kind: String,
@@ -342,6 +402,7 @@ async fn detect_intent_in_session(
         "stream": true,
         "stream_options": { "include_usage": true },
         "cache_prompt": true,
+        "id_slot": 0,
         "grammar": harness::tool_grammar(&route_schemas, "call"),
     });
     let _ = tx
@@ -402,6 +463,15 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let max_tokens = req.max_tokens.unwrap_or(4096);
     let max_turns = req.max_turns.unwrap_or(8).max(1);
     let opts = req.options.clone();
+    let _ = tx
+        .send(Out::Debug {
+            kind: "session".into(),
+            message: format!(
+                "slot_id={} epoch={} pass_kind={}",
+                req.session.slot_id, req.session.epoch, req.session.pass_kind
+            ),
+        })
+        .await;
 
     let url = format!("{}/chat/completions", req.base_url.trim_end_matches('/'));
     // One pooled client is shared by all requests to llama-server. Cloning a
@@ -460,10 +530,28 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         .find(|m| m["role"].as_str() == Some("user"))
         .and_then(|m| m["content"].as_str())
         .unwrap_or("");
-    let plan_len = if has_tools {
+    let lexical_plan_len = if has_tools {
         harness::harness_decompose(user_text, &effective_schemas).len()
     } else {
         0
+    };
+    // The host may already have classified this turn deterministically from
+    // the live editor state and interaction mode.  In that case lexical
+    // decomposition is still useful for choosing the multi-call recovery
+    // path, but it must not veto a valid operation merely because compact
+    // schemas (or natural language such as "rewrite the introduction") have
+    // no keyword overlap with a tool name/description.
+    //
+    // Keep the fallback at one: the host guarantees that an operation is
+    // actionable, while only lexical evidence should request multi-call
+    // planning.
+    let plan_len = if has_tools
+        && opts.intent_is_tool == Some(true)
+        && lexical_plan_len == 0
+    {
+        1
+    } else {
+        lexical_plan_len
     };
 
     // strict grammar implies prompt-tools (text-form calls); mirror openharn.
@@ -477,8 +565,10 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     // end of JSON input". In that case, force prompt-tools + strict for ALL
     // tool-bearing requests, not just multi-call ones.
     let preview_whole_note = request_allows_replace_preview(user_text);
-    let mut strict =
-        opts.strict || narrow || plan_len > 1 || (opts.prefers_prompt_tools && plan_len <= 1);
+    let mut strict = opts.strict
+        || narrow
+        || (!opts.native_first
+            && (plan_len > 1 || (opts.prefers_prompt_tools && plan_len <= 1)));
     let mut prompt_tools = strict || opts.prompt_tools;
     let mut no_think = opts.no_think && !strict;
     // Call-only keeps tool requests structured until the authoritative write
@@ -493,6 +583,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let mut total_calls = 0usize;
     let mut no_tools = !has_tools;
     let mut last_tool: Option<String> = None;
+    let mut new_messages: Vec<Value> = Vec::new();
 
 
     // Model-based TOOL/CHAT classification (friendly_results mode).
@@ -520,6 +611,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         let _ = tx
             .send(Out::Done {
                 messages: history.clone(),
+                new_messages: Vec::new(),
                 last_tool: None,
             })
             .await;
@@ -537,7 +629,12 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             "stream": true,
             "stream_options": { "include_usage": true },
             "cache_prompt": true,
+            "id_slot": req.session.slot_id,
         });
+        if has_tools {
+            body["tools"] = effective_schemas.clone();
+            body["tool_choice"] = json!("none");
+        }
         if no_think {
             if let Some(arr) = body["messages"].as_array_mut() {
                 arr.push(json!({ "role": "assistant", "content": "<think></think>" }));
@@ -589,6 +686,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         let _ = tx
             .send(Out::Done {
                 messages: h,
+                new_messages: vec![json!({ "role": "assistant", "content": content })],
                 last_tool: None,
             })
             .await;
@@ -603,6 +701,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         } else {
             history.clone()
         };
+        normalize_lfm_tool_arguments(&mut wire, &model);
         if no_think {
             wire.push(json!({ "role": "assistant", "content": "<think></think>" }));
         }
@@ -614,8 +713,15 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             "stream": true,
             "stream_options": { "include_usage": true },
             "cache_prompt": true,
+            "id_slot": req.session.slot_id,
         });
-        if no_tools {
+        if chat_lookup_completed && !prompt_tools {
+            // Keep the identical native schema rendering on the retrieval
+            // follow-up. Removing `tools` here changes the fixed prefix and
+            // throws away llama.cpp's useful KV cache.
+            body["tools"] = effective_schemas.clone();
+            body["tool_choice"] = json!("none");
+        } else if no_tools {
             // no tools available — text only
         } else if prompt_tools {
             if strict {
@@ -675,6 +781,17 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
 
         // Show the exact system/history/user prompt after prompt-tools flattening
         // and before sending it to the model.
+        let wire_mode = if prompt_tools {
+            if opts.native_first { "prompt-recovery" } else { "prompt-explicit" }
+        } else {
+            "native"
+        };
+        let _ = tx
+            .send(Out::Debug {
+                kind: "wire_mode".into(),
+                message: wire_mode.into(),
+            })
+            .await;
         emit_model_prompt(&tx, "AGENT request messages:", &body).await;
         let serialized_at = Instant::now();
         let _ = serde_json::to_vec(&body);
@@ -793,6 +910,15 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         // host suppresses chat output for this mode, so a no-tool completion
         // would otherwise look like a successful operation that did nothing.
         if call_only && tool_calls.is_empty() {
+            if opts.native_first && !prompt_tools {
+                // Native-first operation: retry once with the strict flattened
+                // format when native FC returned prose, an empty response, or
+                // malformed output without a tool call.
+                prompt_tools = true;
+                strict = true;
+                no_think = false;
+                continue;
+            }
             let _ = tx
                 .send(Out::Error(
                     "Operation did not produce a tool call; no changes were made.".to_string(),
@@ -821,6 +947,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 "stream": true,
                 "stream_options": { "include_usage": true },
                 "cache_prompt": true,
+                "id_slot": req.session.slot_id,
                 "grammar": json!(harness::tool_grammar(&effective_schemas, "call")),
             });
             if let Some(kw) = &opts.template_kwargs {
@@ -912,12 +1039,14 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         if !tool_calls.is_empty() {
             assistant["tool_calls"] = json!(tool_calls);
         }
-        history.push(assistant);
+        history.push(assistant.clone());
+        new_messages.push(assistant);
 
         if tool_calls.is_empty() {
             let _ = tx
                 .send(Out::Done {
                     messages: history.clone(),
+                    new_messages: new_messages.clone(),
                     last_tool: last_tool.clone(),
                 })
                 .await;
@@ -971,11 +1100,13 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 })
                 .await;
 
-            history.push(json!({
+            let tool_message = json!({
                 "role": "tool",
                 "tool_call_id": id,
                 "content": capped,
-            }));
+            });
+            history.push(tool_message.clone());
+            new_messages.push(tool_message);
 
             // Operation mode must not retry a failed mutation. The failed call
             // may have been based on a stale selection, and another generation
@@ -999,10 +1130,13 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             // that could repeat or alter the newly written note.
             let confirmation = "Done".to_string();
             let _ = tx.send(Out::ChatChunk(confirmation.clone())).await;
-            history.push(json!({ "role": "assistant", "content": confirmation }));
+            let confirmation_message = json!({ "role": "assistant", "content": confirmation });
+            history.push(confirmation_message.clone());
+            new_messages.push(confirmation_message);
             let _ = tx
                 .send(Out::Done {
                     messages: history.clone(),
+                    new_messages: new_messages.clone(),
                     last_tool: last_tool.clone(),
                 })
                 .await;
@@ -1010,17 +1144,12 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         }
 
         if opts.chat_mode && !chat_lookup_completed {
-            // A Chat-mode lookup is only evidence gathering. Remove tools for
-            // the next model turn and require a direct answer from its result.
+            // A Chat-mode lookup is only evidence gathering. Preserve the
+            // schema and prompt mode for cache identity, but force the native
+            // follow-up to prose with tool_choice:none.
             chat_lookup_completed = true;
-            no_tools = true;
-            prompt_tools = false;
             strict = false;
             call_only = false;
-            history.push(json!({
-                "role": "user",
-                "content": "Use the retrieved result to answer the user's question directly. Do not call any more tools."
-            }));
             continue;
         }
 
@@ -1028,6 +1157,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             let _ = tx
                 .send(Out::Done {
                     messages: history.clone(),
+                    new_messages: new_messages.clone(),
                     last_tool: last_tool.clone(),
                 })
                 .await;
@@ -1035,18 +1165,22 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         }
 
         if let Some(excess) = per_turn_excess {
-            history.push(json!({"role": "user", "content": format!(
+            let guidance = json!({"role": "user", "content": format!(
                 "You made too many tool calls this turn; only the first {} ran and {} were discarded. Make at most {} tool call(s) per turn and wait for the results.",
                 opts.max_calls, excess, opts.max_calls
-            )}));
+            )});
+            history.push(guidance.clone());
+            new_messages.push(guidance);
             continue;
         }
 
         if total_calls >= opts.total_max {
             no_tools = true;
-            history.push(json!({"role": "user", "content":
+            let guidance = json!({"role": "user", "content":
                 "You have used your tool budget. STOP calling tools and answer the user with what you now know (including if something was not found)."
-            }));
+            });
+            history.push(guidance.clone());
+            new_messages.push(guidance);
             continue;
         }
     }
@@ -1055,6 +1189,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     let _ = tx
         .send(Out::Done {
             messages: history,
+            new_messages,
             last_tool,
         })
         .await;
@@ -1164,11 +1299,24 @@ async fn stream_upstream(
                 let pt = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                 let ct = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
                 let tt = usage["total_tokens"].as_u64().unwrap_or(0) as u32;
+                let cached = usage["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .or_else(|| chunk_json["timings"]["cache_n"].as_u64())
+                    .unwrap_or(0) as u32;
+                let evaluated = pt.saturating_sub(cached);
+                let ratio = if pt == 0 {
+                    0.0
+                } else {
+                    cached as f64 / pt as f64
+                };
                 let _ = tx
                     .send(Out::Usage {
                         prompt_tokens: pt,
                         completion_tokens: ct,
                         total_tokens: tt,
+                        cached_tokens: cached,
+                        evaluated_tokens: evaluated,
+                        cache_reuse_ratio: ratio,
                     })
                     .await;
             }
@@ -1334,7 +1482,39 @@ fn finish(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_mutating_tool, is_terminal_mutation};
+    use super::{is_mutating_tool, is_terminal_mutation, normalize_lfm_tool_arguments};
+    use serde_json::json;
+
+    #[test]
+    fn lfm_history_uses_mapping_arguments_for_native_template_rendering() {
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "name": "write_note",
+                    "arguments": "{\"content\":\"hello\",\"mode\":\"replace\"}"
+                }
+            }]
+        })];
+        normalize_lfm_tool_arguments(&mut messages, "LFM2-2.6B-Tool-Q4.gguf");
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"]["content"],
+            "hello"
+        );
+    }
+
+    #[test]
+    fn non_lfm_history_keeps_openai_argument_strings() {
+        let mut messages = vec![json!({
+            "tool_calls": [{
+                "function": {"name": "write_note", "arguments": "{\"content\":\"hello\"}"}
+            }]
+        })];
+        normalize_lfm_tool_arguments(&mut messages, "qwen.gguf");
+        assert!(messages[0]["tool_calls"][0]["function"]["arguments"].is_string());
+    }
 
     #[test]
     fn successful_note_write_is_terminal() {

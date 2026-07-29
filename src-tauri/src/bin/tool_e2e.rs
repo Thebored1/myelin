@@ -11,6 +11,7 @@
 
 use futures_util::StreamExt;
 use myelin_lib::agent::{self, html_to_text, normalize_web_url, plan_write};
+use myelin_lib::ai_turn::{AiTurnBuilder, AiTurnInput};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
@@ -57,6 +58,7 @@ async fn main() {
         format!("{home}/.local/share/com.paper.myelin/bin/cpu/llama-server")
     });
     let port: u16 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(8077);
+    let requested_case = a.get(4).map(String::as_str);
     let base = format!("http://127.0.0.1:{port}");
 
     eprintln!("model: {model}\nbin:   {bin}\nport:  {port}\n");
@@ -75,7 +77,11 @@ async fn main() {
         std::process::exit(2);
     }
 
-    let results = run_all(&client, &base, &model).await;
+    let results = if requested_case == Some("direct-chat") {
+        vec![direct_chat_cache(&client, &base, &model).await]
+    } else {
+        run_all(&client, &base, &model).await
+    };
     let _ = server.kill();
 
     println!("\n================ RESULTS ================");
@@ -91,6 +97,128 @@ async fn main() {
     if failed > 0 {
         std::process::exit(1);
     }
+}
+
+async fn direct_chat_cache(
+    client: &reqwest::Client,
+    base: &str,
+    model: &str,
+) -> (String, bool, String) {
+    let note_body = "Myelin uses a pinned slot to reuse the unchanged system prompt, \
+        note title, note body, and prior conversation. The native acceptance fixture \
+        repeats this stable note paragraph so the fixed prefix is representative of \
+        a real populated note rather than being smaller than the new follow-up turn. "
+        .repeat(12);
+    let context = format!(
+        "The note currently open is titled \"Native cache fixture\".\n\n\
+         Here is the note's CURRENT content.\n--- CURRENT NOTE ---\n{note_body}\n\
+         --- END CURRENT NOTE ---"
+    );
+    let first = AiTurnBuilder::build(AiTurnInput {
+        mode: "chat",
+        note_title: "Native cache fixture",
+        system_context: &context,
+        conversation: &[],
+        question: "What does this note say Myelin reuses?",
+        mode_policy: "CHAT TURN POLICY: answer only.",
+        turn_instructions: "",
+        has_open_note: true,
+        edit_thread: false,
+        oversized: false,
+        supports_tools: true,
+        verbose_tool_schemas: false,
+    });
+    if !first.tools.is_empty() {
+        return (
+            "direct-chat/cache".into(),
+            false,
+            "production builder sent tools on a direct turn".into(),
+        );
+    }
+    let request = |messages: Vec<Value>| {
+        json!({
+            "model": model,
+            "messages": messages,
+            "stream": false,
+            "temperature": 0.0,
+            "max_tokens": 64,
+            "cache_prompt": true,
+            "id_slot": 0
+        })
+    };
+    let first_response = match client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&request(first.messages.clone()))
+        .send()
+        .await
+    {
+        Ok(response) => match response.json::<Value>().await {
+            Ok(value) => value,
+            Err(error) => {
+                return ("direct-chat/cache".into(), false, error.to_string());
+            }
+        },
+        Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
+    };
+    let answer = first_response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let conversation = vec![
+        first.messages.last().cloned().unwrap_or(Value::Null),
+        json!({"role": "assistant", "content": answer}),
+    ];
+    let second = AiTurnBuilder::build(AiTurnInput {
+        mode: "chat",
+        note_title: "Native cache fixture",
+        system_context: &context,
+        conversation: &conversation,
+        question: "What is the note title?",
+        mode_policy: "CHAT TURN POLICY: answer only.",
+        turn_instructions: "",
+        has_open_note: true,
+        edit_thread: false,
+        oversized: false,
+        supports_tools: true,
+        verbose_tool_schemas: false,
+    });
+    let second_response = match client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&request(second.messages))
+        .send()
+        .await
+    {
+        Ok(response) => match response.json::<Value>().await {
+            Ok(value) => value,
+            Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
+        },
+        Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
+    };
+    let prompt = second_response["usage"]["prompt_tokens"]
+        .as_u64()
+        .or_else(|| second_response["timings"]["prompt_n"].as_u64())
+        .unwrap_or(0);
+    let cached = second_response["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .or_else(|| second_response["timings"]["cache_n"].as_u64())
+        .unwrap_or(0);
+    let evaluated = prompt.saturating_sub(cached);
+    let reuse = if prompt == 0 {
+        0.0
+    } else {
+        cached as f64 / prompt as f64
+    };
+    let ok = prompt > 0
+        && reuse >= 0.8
+        && evaluated <= 300.max((prompt as f64 * 0.2).ceil() as u64);
+    (
+        "direct-chat/cache".into(),
+        ok,
+        format!(
+            "slot=0 prompt={prompt} cached={cached} evaluated={evaluated} reuse={:.1}%",
+            reuse * 100.0
+        ),
+    )
 }
 
 async fn run_all(
@@ -766,7 +894,8 @@ fn start_server(bin: &str, model: &str, port: u16) -> std::io::Result<Child> {
     let port_s = port.to_string();
     let mut args: Vec<String> = vec![
         "-m".into(), model.into(), "--jinja".into(), "--ctx-size".into(), "4096".into(),
-        "--port".into(), port_s, "--no-warmup".into(),
+        "--port".into(), port_s, "--no-warmup".into(), "--parallel".into(), "1".into(),
+        "--cache-reuse".into(), "256".into(),
     ];
     // Optional chat-template override (e.g. the corrected LFM2.5 template that
     // fixes multi-turn tool calling). Set CHAT_TEMPLATE_FILE to A/B test it.

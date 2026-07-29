@@ -74,6 +74,26 @@ NVIDIA Windows box). Downloads land in `<app-data>/bin/<backend>/` and are picke
 up immediately. CPU + Vulkan are bundled with the app, so this is mainly for
 adding CUDA. The release tag is pinned in `LLAMA_RELEASE_TAG` (llama_server.rs).
 
+### Experimental BeeLlama engine
+
+Settings also offers BeeLlama v0.4.1 as an explicit experimental inference
+engine. It is never selected for existing users automatically. “Download and
+use BeeLlama” chooses the appropriate CPU, Vulkan, CUDA 12.4, or Metal release,
+verifies its pinned SHA-256 digest, and installs it under
+`<app-data>/bin/bee/<backend>/`.
+
+Bee uses Myelin's normal llama-server request, tool, prompt-cache, and slot
+protocol. Its binaries and persistent slots are isolated from stock llama.cpp.
+When Bee cannot start, Myelin tries the equivalent stock backend and reports the
+active engine in Settings. KVarN, precision-tail, and speculative-decoding
+controls are intentionally not exposed in this first integration.
+
+Native validation on LFM2-8B Q2 found 93.6% direct-chat prefix reuse with both
+stock and Bee (887 of 948 prompt tokens cached). However, Bee v0.4.1 failed the
+required OpenHarn `write_note` call-only grammar case while the pinned stock
+build passed it. The integration therefore remains experimental and is not a
+recommended replacement for stock llama.cpp on LFM2 tool/edit workloads.
+
 ## Bundling for release
 
 The installer ships CPU + Vulkan so users get GPU acceleration with zero setup.

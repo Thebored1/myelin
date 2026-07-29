@@ -116,19 +116,31 @@ fn to_event(out: Out) -> Event {
         ),
         Out::Done {
             messages,
+            new_messages,
             last_tool,
         } => (
             "done",
-            json!({ "messages": messages, "last_tool": last_tool }),
+            json!({ "messages": messages, "new_messages": new_messages, "last_tool": last_tool }),
         ),
         Out::Error(message) => ("error", json!({ "message": message })),
         Out::Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            cached_tokens,
+            evaluated_tokens,
+            cache_reuse_ratio,
         } => (
             "usage",
-            json!({ "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens }),
+            json!({
+                "slot_id": 0,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "cached_tokens": cached_tokens,
+                "evaluated_tokens": evaluated_tokens,
+                "cache_reuse_ratio": cache_reuse_ratio
+            }),
         ),
         Out::Debug { kind, message } => ("debug", json!({ "kind": kind, "message": message })),
     };

@@ -75,6 +75,29 @@ async fn open_or_create(conn: &Connection) -> Result<Table> {
     }
 }
 
+pub async fn contains_document(index_dir: &Path, doc_id: &str) -> Result<bool> {
+    let conn = open(index_dir).await?;
+    let table = match conn.open_table(RAG_TABLE).execute().await {
+        Ok(table) => table,
+        Err(_) => return Ok(false),
+    };
+    let Some(filter) = doc_filter(Some(doc_id)) else {
+        return Ok(false);
+    };
+    let mut stream = table
+        .query()
+        .only_if(filter)
+        .limit(1)
+        .execute()
+        .await
+        .context("failed to check document chunks")?;
+    Ok(stream
+        .try_next()
+        .await
+        .context("failed to read document chunk check")?
+        .is_some_and(|batch| batch.num_rows() > 0))
+}
+
 /// Replace all chunks for a document (re-ingest = replace), then append the new
 /// ones. The delete is a no-op on first ingest.
 pub async fn upsert_document(index_dir: &Path, doc_id: &str, chunks: Vec<DocChunk>) -> Result<()> {
@@ -152,12 +175,24 @@ fn rows_from_batch(batch: &RecordBatch) -> Vec<RetrievedChunk> {
         .collect()
 }
 
-async fn vector_hits(table: &Table, query_vec: Vec<f32>, k: usize) -> Result<Vec<RetrievedChunk>> {
-    let mut stream = table
+fn doc_filter(doc_id: Option<&str>) -> Option<String> {
+    doc_id.map(|id| format!("doc_id = '{}'", id.replace('\'', "''")))
+}
+
+async fn vector_hits(
+    table: &Table,
+    query_vec: Vec<f32>,
+    k: usize,
+    doc_id: Option<&str>,
+) -> Result<Vec<RetrievedChunk>> {
+    let mut query = table
         .query()
         .nearest_to(query_vec)
-        .context("rag nearest_to")?
-        .limit(k)
+        .context("rag nearest_to")?;
+    if let Some(filter) = doc_filter(doc_id) {
+        query = query.only_if(filter);
+    }
+    let mut stream = query.limit(k)
         .execute()
         .await
         .context("rag vector search")?;
@@ -168,11 +203,19 @@ async fn vector_hits(table: &Table, query_vec: Vec<f32>, k: usize) -> Result<Vec
     Ok(out)
 }
 
-async fn fts_hits(table: &Table, query: &str, k: usize) -> Result<Vec<RetrievedChunk>> {
-    let mut stream = table
+async fn fts_hits(
+    table: &Table,
+    query_text: &str,
+    k: usize,
+    doc_id: Option<&str>,
+) -> Result<Vec<RetrievedChunk>> {
+    let mut query = table
         .query()
-        .full_text_search(lancedb::index::scalar::FullTextSearchQuery::new(query.to_string()))
-        .limit(k)
+        .full_text_search(lancedb::index::scalar::FullTextSearchQuery::new(query_text.to_string()));
+    if let Some(filter) = doc_filter(doc_id) {
+        query = query.only_if(filter);
+    }
+    let mut stream = query.limit(k)
         .execute()
         .await
         .context("rag fts search")?;
@@ -190,7 +233,7 @@ pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<V
         Ok(t) => t,
         Err(_) => return Ok(Vec::new()),
     };
-    vector_hits(&table, query_vec, k).await
+    vector_hits(&table, query_vec, k, None).await
 }
 
 /// Hybrid search: vector + BM25 full-text, merged with Reciprocal Rank Fusion.
@@ -201,6 +244,7 @@ pub async fn search_hybrid(
     query_vec: Vec<f32>,
     query_text: &str,
     k: usize,
+    doc_id: Option<&str>,
 ) -> Result<Vec<RetrievedChunk>> {
     let conn = open(index_dir).await?;
     let table = match conn.open_table(RAG_TABLE).execute().await {
@@ -208,8 +252,8 @@ pub async fn search_hybrid(
         Err(_) => return Ok(Vec::new()),
     };
     let pool = (k * 4).max(20);
-    let vec_hits = vector_hits(&table, query_vec, pool).await.unwrap_or_default();
-    let fts = fts_hits(&table, query_text, pool).await.unwrap_or_default();
+    let vec_hits = vector_hits(&table, query_vec, pool, doc_id).await.unwrap_or_default();
+    let fts = fts_hits(&table, query_text, pool, doc_id).await.unwrap_or_default();
 
     // Reciprocal Rank Fusion across the two ranked lists.
     const RRF_K: f32 = 60.0;
@@ -293,10 +337,35 @@ mod tests {
         upsert_document(dir.path(), "d", docs).await.unwrap();
         // Hybrid: BM25 should surface chunk 1 on the text terms even though the
         // query vector is nearer chunk 0. Just assert the merge runs and returns.
-        let res = search_hybrid(dir.path(), vec![0.1; DIM as usize], "attention transformers", 5)
+        let res = search_hybrid(dir.path(), vec![0.1; DIM as usize], "attention transformers", 5, None)
             .await
             .unwrap();
         assert!(!res.is_empty());
         assert!(res.iter().any(|c| c.chunk_index == 1));
+    }
+
+    #[tokio::test]
+    async fn scoped_hybrid_and_document_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        upsert_document(dir.path(), "note-a", vec![chunk("note-a", 0, 0.5)])
+            .await
+            .unwrap();
+        upsert_document(dir.path(), "note-b", vec![chunk("note-b", 0, 0.5)])
+            .await
+            .unwrap();
+
+        assert!(contains_document(dir.path(), "note-a").await.unwrap());
+        assert!(!contains_document(dir.path(), "missing").await.unwrap());
+        let hits = search_hybrid(
+            dir.path(),
+            vec![0.5; DIM as usize],
+            "chunk",
+            10,
+            Some("note-a"),
+        )
+        .await
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.doc_id == "note-a"));
     }
 }

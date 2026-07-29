@@ -49,6 +49,14 @@ Copy-Item "$src\*.dll" $dst -Force   # ~30 files, ~46 MB
 
 ## Build
 
+Build the Openharn agent sidecar before creating the installer. Otherwise the
+installer will contain the desktop app but AI agent/tool-calling requests will
+fail because `openharn-myelin` is missing:
+
+```powershell
+npm run build:sidecar
+```
+
 `bundle.targets` is `["nsis"]` in `tauri.conf.json` (one installer, no separate
 `.msi`). Then:
 

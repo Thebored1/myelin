@@ -164,7 +164,42 @@ Run the CPU sweep with:
 LLAMA_SERVER=/path/to/llama-server MODEL=/path/to/model.gguf ./scripts/benchmark-cpu-profile.sh
 ```
 
-It compares automatic threading versus six physical-core threads, ubatch
-256/512/1024, flash attention on/off, and f16/q8_0 KV. Choose the fastest safe
-configuration by prompt-to-first-delta for the same request, not generation
-tok/s alone. The runtime ladder still falls back when a build rejects a flag.
+It compares llama.cpp's automatic threading versus the machine's detected
+physical-core count, ubatch 256/512/1024, flash attention on/off, and f16/q8_0
+KV. It consumes the full response and reports llama.cpp's prompt and generation
+timing counters; stopping at the first SSE event is invalid because that event
+is normally an empty assistant-role frame.
+
+### CPU measurements (LFM2-8B Q2, 6 physical / 12 logical cores)
+
+The 1,930-token sweep selected six physical threads, ubatch 512, flash attention
+off, and f16 KV:
+
+| Profile | Prompt tok/s | Generation tok/s |
+|---|---:|---:|
+| 6 threads, ubatch 512, FA off, f16 KV | ~95.1 | ~40.2 |
+| 6 threads, ubatch 512, FA off, q8_0 KV | ~84.3 | ~37.2 |
+| 6 threads, ubatch 1024, FA off, f16 KV | ~93.7 | ~38.7 |
+
+An additional three-run SMT probe compared the selected profile at 6 versus 12
+threads. Six threads averaged 94.6 prompt tok/s and 37.2 generation tok/s.
+Twelve threads averaged 94.0 prompt tok/s and 21.2 generation tok/s. SMT
+therefore provided no prompt benefit on this CPU and substantially reduced
+generation throughput, so the runtime default remains physical cores. Users can
+still override `threads` in Settings because this result is machine-specific.
+
+### Direct-chat cache check
+
+A repeated tool-free direct-chat request using the production CPU server flags,
+LFM2 template, pinned slot 0, and `cache_prompt` produced:
+
+| Turn | Prompt tokens | Cached | Newly evaluated | Prompt evaluation | Generation |
+|---|---:|---:|---:|---:|---:|
+| Cold | 160 | 0 | 160 | 1.554 s | 1.491 s |
+| Follow-up | 243 | 223 (91.8%) | 20 | 0.246 s | 0.262 s |
+
+The follow-up spent about 0.51 seconds in model evaluation and generation,
+well below the previous 22.8-second direct-chat observation. The test used a
+small synthetic note so absolute cold latency is not comparable to a 3,000-token
+note; the significant steady-state result is the 91.8% prefix reuse and only 20
+freshly evaluated tokens.

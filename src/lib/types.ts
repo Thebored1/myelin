@@ -3,6 +3,8 @@ export type ChatMessage = {
 	role: string;
 	content: string;
 	isStreaming?: boolean;
+	/** Transient, user-visible progress for a streaming assistant turn. */
+	statusText?: string;
 	error?: boolean;
 	tools?: { name: string; details: string }[];
 	snapshotId?: string;
@@ -80,8 +82,10 @@ export type ProviderStatus = {
 	activeProvider: string;
 	availableProviders: string[];
 	healthy: boolean;
+	ready: boolean;
 	detail: string;
 	config?: {
+		inferenceEngine?: 'llama_cpp' | 'beellama';
 		executablePath?: string;
 		modelPath?: string;
 		contextSize?: number;
@@ -97,8 +101,10 @@ export type ProviderStatus = {
 		maxTurns?: number;
 		deterministicTools?: boolean;
 		toolGating?: boolean;
+		promptCache?: boolean;
 	};
 	resolved?: {
+		inferenceEngine?: 'llama_cpp' | 'beellama';
 		executablePath: string;
 		modelPath: string;
 		host: string;
@@ -113,6 +119,8 @@ export type ProviderStatus = {
 	};
 	/** Backend running or preferred: "cuda" | "vulkan" | "metal" | "cpu". */
 	activeBackend?: string;
+	configuredEngine?: 'llama_cpp' | 'beellama';
+	activeEngine?: 'llama_cpp' | 'beellama';
 	/** Whether an NVIDIA GPU was detected on this machine. */
 	nvidiaDetected?: boolean;
 	/** Whether GPU acceleration is usable on this machine at all. */
@@ -121,6 +129,7 @@ export type ProviderStatus = {
 	gpus?: string[];
 	/** Backend builds installed: subset of "cuda" | "vulkan" | "metal" | "cpu". */
 	installedBackends?: string[];
+	installedBeeBackends?: string[];
 };
 
 /** A compute device exposed by a backend, e.g. { id: "Vulkan0", name: "Intel UHD" }. */

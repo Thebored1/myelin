@@ -98,6 +98,7 @@ async fn run_mode(
             {"role": "user", "content": user_msg}
         ],
         "tools": tool_schemas(),
+        "max_tokens": 256,
         "options": options,
     });
 
@@ -270,7 +271,59 @@ async fn live_lfm2_writes_note() {
         if c_called { "" } else { " NOT" }
     );
 
+    // Mode D: the host has already classified this operation and requires a
+    // mutation. Restrict the schema to the relevant tool and remove the text
+    // branch from prompt-tools grammar.
+    eprintln!("\n[live] ===== MODE D: prompt-tools call-only + write_note subset =====");
+    let (d_called, d_chat) = run_mode(
+        &client,
+        &sidecar_base,
+        &llama_base,
+        "live-D",
+        json!({
+            "strict": true, "prompt_tools": true, "no_think": false,
+            "friendly_results": true, "call_only": true, "intent_is_tool": true,
+            "tool_subset": ["write_note"],
+            "max_calls": 1, "total_max": 4, "tool_timeout_secs": 120, "max_tokens": 1024
+        }),
+    ).await;
+    eprintln!("[live] MODE D chat text:\n{d_chat}");
+    eprintln!(
+        "[live] MODE D: write_note was{} called",
+        if d_called { "" } else { " NOT" }
+    );
+
+    // Mode E: keep the model's native LFM call format but force a call and
+    // expose only the relevant mutation schema.
+    eprintln!("\n[live] ===== MODE E: native required + write_note subset =====");
+    let (e_called, e_chat) = run_mode(
+        &client,
+        &sidecar_base,
+        &llama_base,
+        "live-E",
+        json!({
+            "strict": false, "prompt_tools": false, "no_think": false,
+            "friendly_results": true, "call_only": true, "intent_is_tool": true,
+            "tool_subset": ["write_note"],
+            "max_calls": 1, "total_max": 4, "tool_timeout_secs": 120, "max_tokens": 1024
+        }),
+    ).await;
+    eprintln!("[live] MODE E chat text:\n{e_chat}");
+    eprintln!(
+        "[live] MODE E: write_note was{} called",
+        if e_called { "" } else { " NOT" }
+    );
+
     let _ = child.kill();
-    // Report, don't fail the suite on model behavior.
-    assert!(true);
+
+    // Focused gate. Mode D is the strongest constraint the harness owns
+    // (grammar-constrained prompt-tools, call-only, write_note-only schema): a
+    // working model/server pair MUST produce a call here. Silence in this mode
+    // is exactly the "new note 13" regression. It is the only asserted mode —
+    // A/B/C/E depend on the model's native FC health and stay advisory
+    // (their `[live] MODE x: write_note was/was NOT called` lines above).
+    assert!(
+        d_called,
+        "MODE D (strict prompt-tools + call_only + write_note subset) produced no write_note call"
+    );
 }
