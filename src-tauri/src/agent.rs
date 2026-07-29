@@ -2257,7 +2257,7 @@ impl Tool for PrependNoteTool {
                 existing.id.clone(),
                 existing.title,
                 existing.tags,
-                new_body,
+                new_body.clone(),
                 existing.source_pdf,
                 Some(existing.annotations),
             )
@@ -2267,7 +2267,7 @@ impl Tool for PrependNoteTool {
             })?;
         let _ = self.state.handle.emit(
             "ai://note_written",
-            serde_json::json!({ "noteId": existing.id, "content": content, "mode": "write" }),
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );
         Ok(format!(
             "Note successfully updated with ID: {}",
@@ -2346,7 +2346,7 @@ impl Tool for ReplaceInNoteTool {
                         existing.id.clone(),
                         existing.title,
                         existing.tags,
-                        new_body,
+                        new_body.clone(),
                         existing.source_pdf,
                         Some(existing.annotations),
                     )
@@ -2356,7 +2356,7 @@ impl Tool for ReplaceInNoteTool {
                     })?;
                 let _ = self.state.handle.emit(
                     "ai://note_written",
-                    serde_json::json!({ "noteId": existing.id, "content": replacement, "mode": "write" }),
+                    serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
                 );
                 Ok(format!(
                     "Note successfully updated with ID: {}",

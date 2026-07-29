@@ -1513,8 +1513,15 @@
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		noteAnimationTimer = undefined;
 		noteStreaming = false;
+		// Append needs the CURRENT note as its base on every editor. Markdown uses
+		// the live vditor value; .tex/.ipynb editors (CodeMirror/cell UI) track the
+		// same text in draftBody. Basing append on '' for non-md editors would set
+		// the note to just the appended fragment — and the editor's change listener
+		// would then autosave that truncated body to disk.
 		const baseContent =
-			mode === 'append' && vditorInstance ? vditorInstance.getValue().trimEnd() + '\n\n' : '';
+			mode === 'append'
+				? (vditorInstance ? vditorInstance.getValue() : draftBody).trimEnd() + '\n\n'
+				: '';
 		const finalContent = baseContent + newContent;
 		if (note) note = { ...note, body: finalContent };
 		draftBody = finalContent;

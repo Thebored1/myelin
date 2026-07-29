@@ -1569,7 +1569,7 @@
 									</div>
 								{/each}
 								{#if filteredNotebook.length === 0}
-									{#if indexing}
+									{#if indexing && (app?.notes?.length ?? 0) > 0}
 										<div class="nb-empty nb-indexing">
 											<svg
 												class="nb-spin"
@@ -1585,7 +1585,11 @@
 										</div>
 									{:else}
 										<div class="nb-empty">
-											No {activeTypeFilter === 'all' ? '' : activeTypeFilter + ' '}notes yet.
+											{#if (app?.notes?.length ?? 0) === 0}
+												No notes present.
+											{:else}
+												No {activeTypeFilter === 'all' ? '' : activeTypeFilter + ' '}notes yet.
+											{/if}
 										</div>
 									{/if}
 								{/if}
