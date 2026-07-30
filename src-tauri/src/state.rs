@@ -57,14 +57,34 @@ const DEFAULT_TEX_PREAMBLE: &str = "\\documentclass[11pt]{article}\n\
      \\usepackage{amsmath,amssymb,amsfonts,mathtools}\n\
      \\usepackage{graphicx}\n\
      \\usepackage{booktabs}\n\
-     \\usepackage{enumitem}\n\
-     \\usepackage{xcolor}\n\
-     \\usepackage{hyperref}\n\
-     \\begin{document}";
+     \\usepackage{enumitem}";
 
 /// Wrap bare LaTeX body text (no `\documentclass`) in the default preamble.
 fn wrap_bare_latex(body: &str) -> String {
-    format!("{DEFAULT_TEX_PREAMBLE}\n{body}\n\\end{{document}}")
+    // A note may contain a partial preamble (for example
+    // `\\usepackage[dvipsnames]{xcolor}`) without a document class. Keep those
+    // declarations before `\\begin{document}` so packages see their options.
+    let mut preamble = Vec::new();
+    let mut content = Vec::new();
+    let mut in_preamble = true;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        let is_preamble_command = trimmed.starts_with("\\usepackage")
+            || trimmed.starts_with("\\RequirePackage")
+            || trimmed.starts_with("\\PassOptionsToPackage");
+        if in_preamble && (is_preamble_command || trimmed.is_empty() || trimmed.starts_with('%')) {
+            preamble.push(line);
+        } else {
+            in_preamble = false;
+            content.push(line);
+        }
+    }
+    let user_preamble = if preamble.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", preamble.join("\n"))
+    };
+    format!("{DEFAULT_TEX_PREAMBLE}\n{user_preamble}\\begin{{document}}\n{}\n\\end{{document}}", content.join("\n"))
 }
 
 /// Faithful test entrypoint mirroring [`AppState::compile_latex`]'s transform
@@ -81,7 +101,7 @@ pub fn compile_tex_source(raw: &str) -> std::result::Result<Vec<u8>, String> {
     } else {
         ensure_packages(&body).0
     };
-    compile_with_tectonic(&final_tex).map_err(|f| f.message)
+    compile_with_tectonic(&final_tex, None).map_err(|f| f.message)
 }
 
 // Packages commonly used in notes that we make sure are available even when the
@@ -96,7 +116,6 @@ const ENSURE_PACKAGES: &[&str] = &[
     "graphicx",
     "booktabs",
     "enumitem",
-    "xcolor",
     "hyperref",
 ];
 
@@ -106,10 +125,28 @@ const ENSURE_PACKAGES: &[&str] = &[
 /// (so TeX error lines can be mapped back to the editor). Skipping already-present
 /// packages avoids LaTeX "option clash" errors.
 fn ensure_packages(src: &str) -> (String, usize) {
+    // AI-generated documents occasionally repeat a package with different
+    // options (most commonly xcolor), which LaTeX rejects as an option clash.
+    // Keep the first declaration—the document author’s options—and discard
+    // later duplicates before adding any missing defaults.
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = String::with_capacity(src.len());
+    for line in src.lines() {
+        let duplicate = ENSURE_PACKAGES.iter().chain(["xcolor"].iter()).any(|pkg| {
+            line.trim_start().starts_with("\\usepackage")
+                && line.contains(&format!("{{{pkg}}}"))
+                && !seen.insert(*pkg)
+        });
+        if !duplicate {
+            deduped.push_str(line);
+            deduped.push('\n');
+        }
+    }
+    let src = deduped.trim_end_matches('\n');
     let missing: Vec<&str> = ENSURE_PACKAGES
         .iter()
         .copied()
-        .filter(|pkg| !src.contains(pkg))
+        .filter(|pkg| !src.contains(&format!("{{{pkg}}}")))
         .collect();
     if missing.is_empty() {
         return (src.to_string(), 0);
@@ -180,15 +217,15 @@ fn clear_tectonic_format_cache() {
 /// Compile `tex` to PDF bytes. Self-heals a corrupt format cache: if the engine
 /// claims `\begin{document}` is missing even though our input contains it (the
 /// classic symptom of a broken cached format), drop the format cache and retry.
-fn compile_with_tectonic(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
-    match run_tectonic_session(tex) {
+fn compile_with_tectonic(tex: &str, input_root: Option<&Path>) -> std::result::Result<Vec<u8>, TexFailure> {
+    match run_tectonic_session(tex, input_root) {
         Ok(pdf) => Ok(pdf),
         Err(failure)
             if tex.contains("\\begin{document}")
                 && failure.message.contains("Missing \\begin{document}") =>
         {
             clear_tectonic_format_cache();
-            run_tectonic_session(tex)
+            run_tectonic_session(tex, input_root)
         }
         Err(failure) => Err(failure),
     }
@@ -197,7 +234,7 @@ fn compile_with_tectonic(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> 
 /// Compile `tex` to PDF bytes, capturing the TeX log on failure. Runs the
 /// Tectonic driver directly (vs. latex_to_pdf) so we can attach a capturing
 /// status backend. Honours TECTONIC_CACHE_DIR set at startup.
-fn run_tectonic_session(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
+fn run_tectonic_session(tex: &str, input_root: Option<&Path>) -> std::result::Result<Vec<u8>, TexFailure> {
     use tectonic::config::PersistentConfig;
     use tectonic::driver::{OutputFormat, ProcessingSessionBuilder};
 
@@ -245,6 +282,9 @@ fn run_tectonic_session(tex: &str) -> std::result::Result<Vec<u8>, TexFailure> {
         .print_stdout(false)
         .output_format(OutputFormat::Pdf)
         .do_not_write_output_files();
+	if let Some(root) = input_root {
+		sb.filesystem_root(root);
+	}
 
     let mut sess = match sb.create(&mut status) {
         Ok(s) => s,
@@ -2576,7 +2616,7 @@ impl AppState {
     /// been warmed yet (first run ⇒ ~50 MB bundle fetch) we emit `latex://download`
     /// events (`start` / `progress` with byte counts / `done` / `error`) so the UI
     /// can show a real download indicator instead of a generic spinner.
-    async fn run_tectonic(&self, tex: String, body_line_offset: usize) -> Result<Vec<u8>> {
+    async fn run_tectonic(&self, tex: String, body_line_offset: usize, input_root: Option<PathBuf>) -> Result<Vec<u8>> {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         // One Tectonic run at a time — concurrent runs corrupt the format cache.
@@ -2610,8 +2650,9 @@ impl AppState {
             None
         };
 
-        let result =
-            tauri::async_runtime::spawn_blocking(move || compile_with_tectonic(&tex)).await;
+        let result = tauri::async_runtime::spawn_blocking(move || {
+			compile_with_tectonic(&tex, input_root.as_deref())
+		}).await;
 
         stop.store(true, Ordering::Relaxed);
         if let Some(p) = poller {
@@ -2670,17 +2711,26 @@ impl AppState {
         }
     }
 
-    pub async fn compile_latex(&self, note_id: String) -> Result<Vec<u8>> {
+    pub async fn compile_latex(&self, note_id: String, source: Option<String>) -> Result<Vec<u8>> {
         let workspace = self.require_workspace()?;
-        let path = {
-            let runtime = self.inner.runtime.read();
-            let note = runtime
-                .notes
-                .get(&note_id)
-                .ok_or_else(|| anyhow!("note not found"))?;
-            workspace.join(&note.document.relative_path)
+        let raw = if let Some(source) = source {
+            // Auto-preview compiles the immutable editor snapshot supplied by
+            // the caller, rather than racing the debounced note save.
+            if !self.inner.runtime.read().notes.contains_key(&note_id) {
+                return Err(anyhow!("note not found"));
+            }
+            source
+        } else {
+            let path = {
+                let runtime = self.inner.runtime.read();
+                let note = runtime
+                    .notes
+                    .get(&note_id)
+                    .ok_or_else(|| anyhow!("note not found"))?;
+                workspace.join(&note.document.relative_path)
+            };
+            fs::read_to_string(&path)?
         };
-        let raw = fs::read_to_string(&path)?;
         // The .tex file on disk carries YAML frontmatter (id/title/tags/…). Strip
         // it before compiling — otherwise that metadata block is text BEFORE
         // \documentclass and LaTeX fails with "Missing \begin{document}" at line 1.
@@ -2704,15 +2754,52 @@ impl AppState {
             ensure_packages(&tex_content)
         };
 
-        self.run_tectonic(final_tex, offset).await
+        let note_dir = {
+			let runtime = self.inner.runtime.read();
+			let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
+			workspace.join(&note.document.relative_path).parent().map(Path::to_path_buf)
+		};
+		self.run_tectonic(final_tex, offset, note_dir).await
     }
+
+	pub fn import_latex_asset(&self, note_id: String, source_path: String) -> Result<String> {
+		let workspace = self.require_workspace()?.canonicalize()?;
+		let note_path = {
+			let runtime = self.inner.runtime.read();
+			let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
+			workspace.join(&note.document.relative_path)
+		};
+		let source = PathBuf::from(source_path).canonicalize()?;
+		if !source.is_file() {
+			return Err(anyhow!("selected image is not a file"));
+		}
+		let extension = source.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
+		if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "pdf") {
+			return Err(anyhow!("unsupported LaTeX image type: {extension}"));
+		}
+		let note_dir = note_path.parent().ok_or_else(|| anyhow!("note has no parent directory"))?;
+		let stem = note_path.file_stem().and_then(|v| v.to_str()).unwrap_or("note");
+		let assets_dir = note_dir.join(format!("{stem}-assets"));
+		fs::create_dir_all(&assets_dir)?;
+		let original_name = source.file_name().ok_or_else(|| anyhow!("image has no filename"))?;
+		let mut target = assets_dir.join(original_name);
+		let mut suffix = 2;
+		while target.exists() {
+			let base = source.file_stem().and_then(|v| v.to_str()).unwrap_or("image");
+			target = assets_dir.join(format!("{base}-{suffix}.{extension}"));
+			suffix += 1;
+		}
+		fs::copy(&source, &target)?;
+		let relative = target.strip_prefix(note_dir).map_err(|_| anyhow!("asset path escaped note directory"))?;
+		Ok(relative.to_string_lossy().replace('\\', "/"))
+	}
 
     /// Pre-download Tectonic's support bundle by compiling a tiny stub document,
     /// so users can warm the cache from Settings instead of paying the first-run
     /// fetch when they hit "Compile to PDF".
     pub async fn prewarm_tectonic(&self) -> Result<()> {
         let stub = wrap_bare_latex("Myelin LaTeX warm-up: $E = mc^2$, \\textbf{ready}.");
-        self.run_tectonic(stub, 0).await.map(|_| ())
+        self.run_tectonic(stub, 0, None).await.map(|_| ())
     }
 
     pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {

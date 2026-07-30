@@ -51,6 +51,12 @@
 	// .tex live-preview state.
 	let texAutoCompile = $state(false);
 	let texCompiling = $state(false);
+	let texCacheWarmed = $state(false);
+	let texPreviewStatus = $state<'pending' | 'compiling' | 'current' | 'error' | null>(null);
+	let texCompileError = $state<string | null>(null);
+	let texRevision = 0;
+	let texCompileQueued = false;
+	let lastTexBody = '';
 	let texDiagnostics = $state<{ line: number; message: string; severity?: 'error' | 'warning' }[]>(
 		[]
 	);
@@ -287,9 +293,7 @@
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
 
-	// Minimum usable editor width. The Markdown column wraps below its preferred
-	// 120-character width, so notes remain usable in narrower windows.
-	const NOTE_MIN_WIDTH = 950;
+	const PANE_MIN_WIDTH = 26 * 16;
 	let sidebarWidth = $state(320);
 	let isSidebarResizing = $state(false);
 
@@ -310,20 +314,17 @@
 			// the left edge is the ratio directly — no per-doc-type inversion.
 			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
 			const resizerWidth = 10;
-			const minSourceWidth = 320;
-			const maxEditorRatio = ((rect.width - NOTE_MIN_WIDTH - resizerWidth) / rect.width) * 100;
+			const minSourceWidth = PANE_MIN_WIDTH;
+			const maxSourceRatio =
+				((rect.width - PANE_MIN_WIDTH - resizerWidth) / rect.width) * 100;
 			const minSourceRatio = (minSourceWidth / rect.width) * 100;
-			if (maxEditorRatio >= minSourceRatio) {
-				splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxEditorRatio));
+			if (maxSourceRatio >= minSourceRatio) {
+				splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxSourceRatio));
 			}
 		} else if (isSidebarResizing) {
 			const newWidth = window.innerWidth - e.clientX;
-			// Never let the sidebar grow past the point where the note would drop
-			// below its protected minimum width — keeps it on-screen and the editor
-			// stable. Clamp against the layout container (which excludes the left
-			// rail), not the full window, or the panes overflow and get clipped.
 			const containerWidth = mainLayoutEl?.getBoundingClientRect().width ?? window.innerWidth;
-			const maxSidebar = Math.max(320, containerWidth - NOTE_MIN_WIDTH);
+			const maxSidebar = Math.max(320, containerWidth - PANE_MIN_WIDTH);
 			sidebarWidth = Math.max(320, Math.min(newWidth, maxSidebar));
 		}
 	}
@@ -916,29 +917,78 @@
 		mathDialog?.close();
 	}
 
+	async function pickLatexImage(): Promise<string | null> {
+		if (!note) return null;
+		const selected = await openFileDialog({
+			multiple: false,
+			filters: [{ name: 'LaTeX images', extensions: ['png', 'jpg', 'jpeg', 'pdf'] }]
+		});
+		if (!selected || Array.isArray(selected)) return null;
+		try {
+			return await invoke<string>('import_latex_asset', {
+				noteId: note.id,
+				sourcePath: selected
+			});
+		} catch (error) {
+			texCompileError = `Could not import image: ${String(error)}`;
+			texPreviewStatus = 'error';
+			return null;
+		}
+	}
+
 	// Compile the open .tex note to PDF and show it in the split preview pane.
 	// Shared by the manual button and the debounced auto-compile.
-	async function compileTex(_opts: { manual?: boolean } = {}) {
-		if (!note || texCompiling) return;
+	async function compileTex(opts: { manual?: boolean } = {}) {
+		const manual = opts.manual === true;
+		if (!note) return;
+		if (!manual && !texCacheWarmed) return;
+		if (texCompiling) {
+			texCompileQueued = true;
+			texPreviewStatus = 'pending';
+			return;
+		}
 		texCompiling = true;
-		isBusy = true;
+		texPreviewStatus = 'compiling';
+		texCompileError = null;
+		if (manual) isBusy = true;
 		try {
-			await saveNote();
-			const pdfBytes = await invoke<ArrayBuffer>('compile_latex', { noteId: note.id });
-			activeSourceBytes = new Uint8Array(pdfBytes);
-			sourceMaterialType = 'pdf';
-			showAttachedNote = true;
-			texDiagnostics = [];
-			message = '';
-		} catch (e) {
-			const info = parseLatexError(e);
-			texDiagnostics = info.diagnostics;
-			message = info.diagnostics.length
-				? `LaTeX: ${info.diagnostics.length} error${info.diagnostics.length > 1 ? 's' : ''} — see editor markers.`
-				: `Compile error: ${info.message}`;
+			let processedRevision = -1;
+			let processedNoteId: string = note.id;
+			do {
+				texCompileQueued = false;
+				const revision = texRevision;
+				const noteId: string = note.id;
+				processedNoteId = noteId;
+				const source = draftBody;
+				try {
+					if (manual) await saveNote();
+					const pdfBytes = await invoke<ArrayBuffer>('compile_latex', { noteId, source });
+					// Never let a late compile replace a newer edit or another note's PDF.
+					if (note?.id === noteId && revision === texRevision) {
+						activeSourceBytes = new Uint8Array(pdfBytes);
+						sourceMaterialType = 'pdf';
+						showAttachedNote = true;
+						texDiagnostics = [];
+						texCompileError = null;
+						texCacheWarmed = true;
+						texPreviewStatus = 'current';
+					}
+				} catch (e) {
+					// Errors from obsolete snapshots are intentionally discarded; the
+					// next queued revision will report the relevant result instead.
+					if (note?.id === noteId && revision === texRevision) {
+						const info = parseLatexError(e);
+						texDiagnostics = info.diagnostics;
+						texCompileError = info.message;
+						texPreviewStatus = 'error';
+					}
+				}
+				processedRevision = revision;
+			} while (texCompileQueued || (note?.id === processedNoteId && texRevision !== processedRevision));
 		} finally {
 			texCompiling = false;
-			isBusy = false;
+			if (texCompileQueued) texPreviewStatus = 'pending';
+			if (manual) isBusy = false;
 			latexDownloadMsg = null;
 		}
 	}
@@ -971,11 +1021,16 @@
 
 	// Debounced auto-compile: a couple of seconds after typing stops, when armed.
 	$effect(() => {
-		void draftBody;
+		const body = draftBody;
+		if (workingDocType === 'tex' && body !== lastTexBody) {
+			lastTexBody = body;
+			texRevision += 1;
+			if (texAutoCompile && texCacheWarmed) texPreviewStatus = 'pending';
+		}
 		const armed = texAutoCompile && workingDocType === 'tex';
 		if (!armed) return;
 		if (texAutoTimer) clearTimeout(texAutoTimer);
-		texAutoTimer = setTimeout(() => void compileTex(), 2000);
+		texAutoTimer = setTimeout(() => void compileTex(), 350);
 		return () => {
 			if (texAutoTimer) clearTimeout(texAutoTimer);
 		};
@@ -1390,7 +1445,10 @@
 				const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.id });
 				activeSourceBytes = new Uint8Array(bytes);
 				scratchpadSavedId = existingScratchpad?.id ?? null;
-				showAttachedNote = draftBody.trim().length > 0;
+				// Opening the source document should show only that document. The
+				// linked note has its own dashboard row and opens in split view from
+				// there; it remains available here through the Attach Note button.
+				showAttachedNote = false;
 			} else {
 				workingDocType = relLower.endsWith('.tex')
 					? 'tex'
@@ -1408,7 +1466,9 @@
 						noteId: loadedNote.sourcePdf
 					});
 					activeSourceBytes = new Uint8Array(bytes);
-					showAttachedNote = draftBody.trim().length > 0;
+					// This route was opened through the note itself, so keep its
+					// editor visible even when the note is still empty.
+					showAttachedNote = true;
 					// If a working document has a sourcePdf, we need to know its type.
 					// We'll query it or assume it's PDF for now unless we know otherwise.
 					// (We can load it to find out)
@@ -2455,6 +2515,7 @@
 			activeSourceId = pdfNote.id;
 			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: pdfNote.id });
 			activeSourceBytes = new Uint8Array(bytes);
+			sourceMaterialType = 'pdf';
 			showAttachedNote = true;
 			saveStatus = 'saved';
 			destroyEditorInstance();
@@ -3044,11 +3105,15 @@
 			if (p.phase === 'start' || p.phase === 'progress') {
 				latexDownloadMsg = `Downloading LaTeX support files (first run)… ${mb} MB`;
 			} else if (p.phase === 'done') {
+				texCacheWarmed = true;
 				latexDownloadMsg = null;
 			} else if (p.phase === 'error') {
 				latexDownloadMsg = null;
 			}
 		}).then((fn) => (unlistenLatex = fn));
+		invoke<{ warmed: boolean }>('tectonic_cache_status')
+			.then((status) => (texCacheWarmed = status.warmed))
+			.catch(() => {});
 
 		window.addEventListener('mousemove', handleGlobalMouseMove);
 		window.addEventListener('mouseup', stopResizing);
@@ -3335,17 +3400,17 @@
 						<TexEditorComponent
 							bind:this={texEditorInstance}
 							value={draftBody}
-							onInput={(val: string) => {
-								draftBody = val;
+								onInput={(val: string) => {
+									lastTexBody = val;
+									texRevision += 1;
+									if (texAutoCompile && texCacheWarmed) texPreviewStatus = 'pending';
+									draftBody = val;
 								triggerAutoSave();
 							}}
 							diagnostics={texDiagnostics}
-							onCompile={() => compileTex({ manual: true })}
-							autoCompile={texAutoCompile}
-							onToggleAuto={() => (texAutoCompile = !texAutoCompile)}
+							onPickImage={pickLatexImage}
 							onAiTargetChange={captureExternalTarget}
 							busy={isBusy}
-							statusMsg={latexDownloadMsg ?? (texCompiling ? 'Compiling…' : null)}
 						/>
 					{:else if workingDocType === 'tex'}
 						<div class="editor-loading">Loading LaTeX editor…</div>
@@ -3512,6 +3577,46 @@
 								<p class="empty-state">No backlinks yet.</p>
 							{/if}
 						</div>
+
+						{#if workingDocType === 'tex'}
+							<div class="sidebar-section latex-preview-section" aria-live="polite">
+								<h3>LaTeX preview</h3>
+								<div class="latex-preview-controls">
+									<button class="secondary latex-auto-toggle" onclick={() => (texAutoCompile = !texAutoCompile)}>
+										Auto: {texAutoCompile ? 'on' : 'off'}
+									</button>
+									<button class="primary" disabled={texCompiling} onclick={() => void compileTex({ manual: true })}>
+										{texCompiling ? 'Compiling…' : 'Compile to PDF'}
+									</button>
+								</div>
+								<div class="latex-preview-state" class:error={texPreviewStatus === 'error'}>
+									<span class="latex-status-dot" class:active={texPreviewStatus === 'current'} class:pending={texPreviewStatus === 'pending' || texPreviewStatus === 'compiling'}></span>
+									{#if latexDownloadMsg}
+										{latexDownloadMsg}
+									{:else if texCompiling}
+										Compiling preview…
+									{:else if texPreviewStatus === 'pending'}
+										Preview pending…
+									{:else if texPreviewStatus === 'current'}
+										Preview current
+									{:else if texPreviewStatus === 'error'}
+										Preview error
+									{:else}
+										Preview idle
+									{/if}
+								</div>
+								{#if texCompileError}
+									<p class="latex-error">{texCompileError}</p>
+								{/if}
+								{#if texDiagnostics.length > 0}
+									<ul class="latex-diagnostics">
+										{#each texDiagnostics as diagnostic}
+											<li><span>{diagnostic.line ? `Line ${diagnostic.line}: ` : ''}</span>{diagnostic.message}</li>
+										{/each}
+									</ul>
+								{/if}
+							</div>
+						{/if}
 					{:else if activeSidebarTab === 'chat'}
 						<div class="chat-container">
 							<div class="chat-messages" bind:this={chatMessagesEl} onscroll={handleChatScroll}>
@@ -4612,6 +4717,10 @@
 		z-index: 20; /* Ensures tooltips render above the header's stacking context */
 	}
 
+	.main-layout.split-layout {
+		overflow-x: auto;
+	}
+
 	.pdf-pane {
 		min-width: 26rem;
 	}
@@ -4683,7 +4792,7 @@
 	/* Main Pane */
 	.main-pane {
 		flex: 1;
-		min-width: var(--note-min-width, 950px);
+		min-width: 26rem;
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-page);
@@ -4852,6 +4961,7 @@
 	:global(.vditor) {
 		border: none !important;
 		overflow: visible !important;
+		min-width: 0 !important;
 		height: 100% !important;
 		display: flex !important;
 		flex-direction: column !important;
@@ -4912,8 +5022,18 @@
 		box-sizing: border-box !important;
 	}
 
-	/* Keep Markdown editing and preview readable while allowing the protected
-	   120-character column to fit in a narrower native window. */
+	:global(.vditor-toolbar) {
+		min-width: 0 !important;
+		flex-wrap: wrap !important;
+	}
+
+	:global(.vditor-reset *) {
+		max-width: 100%;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+
+	/* Keep Markdown editing and preview readable in narrow panes. */
 	:global(.vditor-reset),
 	:global(.vditor-textarea) {
 		font-size: 12px !important;
@@ -5016,8 +5136,8 @@
 			position: relative;
 			transform: none;
 			margin-right: calc(var(--sidebar-width, 20rem) * -1);
-			/* Docking is allowed only when the editor can retain its full width. */
-			max-width: calc(100% - 950px);
+			/* Docking is allowed only when the editor can retain its pane minimum. */
+			max-width: calc(100% - 26rem);
 			box-shadow: none;
 			flex-shrink: 0;
 		}
@@ -5029,31 +5149,6 @@
 
 		.sidebar-backdrop {
 			display: none !important;
-		}
-	}
-
-	/* Attached source documents stack above Markdown when side-by-side layout
-	   cannot preserve the editor minimum. */
-	@media (max-width: 1379px) {
-		.main-layout.split-layout {
-			flex-direction: column;
-			overflow-y: auto;
-		}
-
-		.main-layout.split-layout .pdf-pane,
-		.main-layout.split-layout .main-pane {
-			width: 100% !important;
-			min-width: 0;
-			flex: 1 1 50%;
-		}
-
-		.main-layout.split-layout .resizer {
-			display: none;
-		}
-
-		.main-layout.split-layout .main-pane {
-			min-width: var(--note-min-width, 950px);
-			min-height: var(--note-min-height, 0);
 		}
 	}
 
@@ -5076,6 +5171,65 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-3);
+	}
+
+	.latex-preview-section {
+		border-top: 1px solid var(--border-default);
+		padding-top: var(--space-4);
+	}
+
+	.latex-preview-controls {
+		display: flex;
+		gap: var(--space-2);
+	}
+
+	.latex-preview-controls button {
+		font-size: 0.75rem;
+		white-space: nowrap;
+	}
+
+	.latex-preview-state {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--space-2);
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		line-height: 1.4;
+	}
+
+	.latex-preview-state.error,
+	.latex-error,
+	.latex-diagnostics {
+		color: var(--danger-400, #f87171);
+	}
+
+	.latex-status-dot {
+		width: 0.45rem;
+		height: 0.45rem;
+		margin-top: 0.3rem;
+		border-radius: 50%;
+		background: var(--neutral-500);
+		flex: 0 0 auto;
+	}
+
+	.latex-status-dot.active { background: var(--success-400, #4ade80); }
+	.latex-status-dot.pending { background: var(--accent-200); }
+
+	.latex-error,
+	.latex-diagnostics {
+		margin: 0;
+		font-size: 0.72rem;
+		line-height: 1.45;
+		word-break: break-word;
+	}
+
+	.latex-diagnostics {
+		padding-left: 1.1rem;
+	}
+
+	.latex-diagnostics span {
+		font-family: var(--font-mono);
+		font-size: 0.68rem;
 	}
 
 	.sidebar h3 {

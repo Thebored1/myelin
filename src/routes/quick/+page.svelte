@@ -353,7 +353,13 @@
 						<div class="task-card" class:expanded={expandedTaskId === task.id}>
 							<div class="task-item" class:done={task.done}>
 								<button class="subtask-circle main-task-circle" class:done={task.done} onclick={() => task.done = !task.done} tabindex="-1"></button>
-								<input class="task-text-input" type="text" bind:value={task.text} onfocus={() => expandedTaskId = task.id} />
+								<textarea
+									rows="1"
+									use:autoResize
+									class="task-text-input"
+									bind:value={task.text}
+									onfocus={() => expandedTaskId = task.id}
+								></textarea>
 								<button class="task-remove" tabindex="-1" onclick={(e) => { e.preventDefault(); tasks = tasks.filter(t => t.id !== task.id); }}>&times;</button>
 							</div>
 							{#if expandedTaskId === task.id}
@@ -544,6 +550,9 @@
 		line-height: 1.5;
 		padding-right: 14px;
 		font-family: inherit;
+		resize: none;
+		overflow: hidden;
+		white-space: pre-wrap;
 	}
 	.task-item.done .task-text-input {
 		text-decoration: line-through;
@@ -579,8 +588,8 @@
 		padding: 12px 0 0 0;
 	}
 	.task-card.expanded .task-text-input {
-		font-size: 1.4rem;
-		font-weight: 500;
+		font-size: 0.95rem;
+		font-weight: 400;
 		padding-top: 4px;
 		padding-bottom: 4px;
 	}

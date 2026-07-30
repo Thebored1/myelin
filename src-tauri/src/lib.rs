@@ -604,12 +604,24 @@ async fn get_note_version(
 async fn compile_latex(
     state: State<'_, AppState>,
     note_id: String,
+    source: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
     // Raw bytes over IPC (see read_pdf_binary) — the compiled PDF can be large.
     state
-        .compile_latex(note_id)
+        .compile_latex(note_id, source)
         .await
         .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_latex_asset(
+    state: State<'_, AppState>,
+    note_id: String,
+    source_path: String,
+) -> Result<String, String> {
+    state
+        .import_latex_asset(note_id, source_path)
         .map_err(|e| e.to_string())
 }
 
@@ -865,6 +877,7 @@ pub fn run() {
             import_pdf_file,
             save_pdf_annotations,
             compile_latex,
+            import_latex_asset,
             tectonic_cache_status,
             prewarm_tectonic,
             get_quick_shortcut,
