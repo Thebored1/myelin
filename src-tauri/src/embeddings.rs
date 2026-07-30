@@ -71,23 +71,40 @@ pub async fn embed(
         return Ok(Vec::new());
     }
     let prefix = if is_query { TASK_QUERY } else { TASK_DOCUMENT };
-    let input: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
-    let body = json!({ "model": model, "input": input });
-
-    let resp = client
-        .post(format!("{}/v1/embeddings", base_url.trim_end_matches('/')))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("embedding request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("embedding server returned HTTP {}", resp.status()));
+    // llama-server's physical batch is per request, not per input. Sending an
+    // entire PDF's chunks together can overflow it even though every individual
+    // chunk fits the model context. Keep requests bounded and preserve order.
+    let endpoint = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
+    let mut output = Vec::with_capacity(texts.len());
+    for (index, text) in texts.iter().enumerate() {
+        let body = json!({ "model": model, "input": [format!("{prefix}{text}")] });
+        let resp = client
+            .post(&endpoint)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("embedding request for input {index} failed: {e}"))?;
+        let status = resp.status();
+        let raw = resp
+            .text()
+            .await
+            .map_err(|e| format!("embedding read for input {index} failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "embedding server returned HTTP {status} for input {index}: {}",
+                raw.chars().take(500).collect::<String>()
+            ));
+        }
+        let mut vectors = parse_embed_response(&raw)?;
+        if vectors.len() != 1 {
+            return Err(format!(
+                "embedding response for input {index} contained {} vectors",
+                vectors.len()
+            ));
+        }
+        output.push(vectors.remove(0));
     }
-    let raw = resp
-        .text()
-        .await
-        .map_err(|e| format!("embedding read failed: {e}"))?;
-    parse_embed_response(&raw)
+    Ok(output)
 }
 
 /// Parse the OpenAI-style embeddings response: `{ "data": [ { "embedding": [..] } ] }`.

@@ -24,6 +24,7 @@
 	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 	import { hideThinkingContent } from '$lib/chatContent';
 	import { composeNoteStreamPreviewWithStatus } from '$lib/noteStreamPreview';
+	import { resolveActiveAiTarget } from '$lib/aiTarget';
 	import {
 		canApplyReconciledNote,
 		editorNeedsAuthoritativeBody,
@@ -89,7 +90,7 @@
 			}));
 	}
 
-	async function persistChatHistory(noteId = note?.id, messages = chatMessages) {
+	async function persistChatHistory(noteId = activeAiNoteId(), messages = chatMessages) {
 		if (!noteId) return;
 		try {
 			const persisted = persistableChatHistory(messages);
@@ -124,6 +125,11 @@
 		aiInteractionMode = mode;
 		if (mode === 'chat') writeTargetNotice = false;
 		localStorage.setItem('myelin_ai_interaction_mode', mode);
+	}
+
+	function setToolApproval(require: boolean) {
+		requireToolApproval = require;
+		void invoke('set_require_tool_approval', { require });
 	}
 
 	function setStreamingStatus(statusText: string | undefined) {
@@ -201,24 +207,6 @@
 	let activeAiEditTarget: AiEditTarget | null = null;
 	let writeTargetNotice = $state(false);
 
-	// Prompt-box context-usage ring: uses real token count from the server when
-	// available (chat_usage event), otherwise estimates from characters (~32K tokens ≈ 130K chars).
-	const RING_CIRC = 2 * Math.PI * 15.5;
-	const MAX_CONTEXT_TOKENS = 8192;
-	let contextPercent = $derived.by(() => {
-		if (debugInfo?.totalTokens) {
-			return Math.min(100, Math.round((debugInfo.totalTokens / MAX_CONTEXT_TOKENS) * 100));
-		}
-		const noteChars = note?.body?.length ?? 0;
-		const histChars = chatMessages.reduce((s, m) => s + (m.content?.length ?? 0), 0);
-		const used = noteChars + histChars + chatInput.length;
-		return Math.min(100, Math.round((used / 130000) * 100));
-	});
-	let ringOffset = $derived(RING_CIRC * (1 - contextPercent / 100));
-	let ringColor = $derived(
-		contextPercent < 60 ? 'var(--accent-200, #6ea8fe)' : contextPercent < 85 ? '#e0a341' : '#e5484d'
-	);
-
 	// A chat turn is in flight while the last assistant bubble is still streaming.
 	// Sending is blocked until it finishes, but the textarea stays editable so you
 	// can compose your next prompt while the model is still answering.
@@ -288,10 +276,51 @@
 	let activeSourceBytes = $state<Uint8Array | null>(null);
 	let scratchpadSavedId = $state<string | null>(null);
 	let showAttachedNote = $state(false);
+	let pdfIngestionStatus = $state<'idle' | 'indexing' | 'cached' | 'indexed' | 'empty' | 'failed'>(
+		'idle'
+	);
+	let pdfIngestionError = $state<string | null>(null);
+	let pdfIngestionPromise: Promise<void> | null = null;
 
 	let splitRatio = $state(50);
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
+
+	function activeAiNoteId(): string | null {
+		return resolveActiveAiTarget({
+			openedDocumentId: note?.id ?? null,
+			isSourceMaterial,
+			attachedNoteVisible: showAttachedNote,
+			workingNoteId: scratchpadSavedId,
+			attachedSourceId: activeSourceId
+		})?.workingNoteId ?? null;
+	}
+
+	async function openAttachedNote() {
+		if (!note || !isSourceMaterial) return;
+		if (!scratchpadSavedId) {
+			const created = await invoke<NoteDocument>('create_note', {
+				title: draftTitle,
+				sourcePdf: activeSourceId,
+				notebook: openNoteNotebook()
+			});
+			scratchpadSavedId = created.id;
+			draftTitle = created.title;
+			draftBody = created.body;
+			draftTags = created.tags.join(', ');
+			chatMessages = created.chatHistory || [];
+		} else {
+			const workingNote = await invoke<NoteDocument>('load_note', { noteId: scratchpadSavedId });
+			draftTitle = workingNote.title;
+			draftBody = workingNote.body;
+			draftTags = workingNote.tags.join(', ');
+			chatMessages = workingNote.chatHistory || [];
+		}
+		showAttachedNote = true;
+		noteOpened(scratchpadSavedId, 'chat');
+		await tick();
+		setTimeout(() => initVditor(), 100);
+	}
 
 	const PANE_MIN_WIDTH = 26 * 16;
 	let sidebarWidth = $state(320);
@@ -302,12 +331,15 @@
 		isSidebarResizing = true;
 	}
 
-	function startResizing() {
+	function startResizing(e: MouseEvent) {
+		e.preventDefault();
+		window.getSelection()?.removeAllRanges();
 		isResizing = true;
 	}
 
 	function handleGlobalMouseMove(e: MouseEvent) {
 		if (isResizing && mainLayoutEl) {
+			e.preventDefault();
 			const rect = mainLayoutEl.getBoundingClientRect();
 			// splitRatio is the LEFT (PDF) pane's width %, and the panes are in
 			// natural order (PDF left, editor right), so the cursor's fraction from
@@ -1401,8 +1433,9 @@
 			clearTimeout(chatPersistTimer);
 			chatPersistTimer = undefined;
 		}
-		if (note && note.id !== noteId && chatMessages.length) {
-			await persistChatHistory(note.id, chatMessages);
+		const previousAiNoteId = activeAiNoteId();
+		if (previousAiNoteId && previousAiNoteId !== noteId && chatMessages.length) {
+			await persistChatHistory(previousAiNoteId, chatMessages);
 		}
 		destroyEditorInstance();
 		activeSourceBytes = null;
@@ -1413,7 +1446,6 @@
 		try {
 			note = await invoke<NoteDocument>('load_note', { noteId });
 			const loadedNote = note;
-			noteOpened(loadedNote.id, 'chat');
 			// Keep the persisted transcript untouched; reasoning is removed only from
 			// the assistant's presentation below.
 			chatMessages = loadedNote.chatHistory || [];
@@ -1449,6 +1481,7 @@
 				// linked note has its own dashboard row and opens in split view from
 				// there; it remains available here through the Attach Note button.
 				showAttachedNote = false;
+				noteOpened(loadedNote.id, 'chat');
 			} else {
 				workingDocType = relLower.endsWith('.tex')
 					? 'tex'
@@ -1469,6 +1502,8 @@
 					// This route was opened through the note itself, so keep its
 					// editor visible even when the note is still empty.
 					showAttachedNote = true;
+					scratchpadSavedId = loadedNote.id;
+					noteOpened(loadedNote.id, 'chat');
 					// If a working document has a sourcePdf, we need to know its type.
 					// We'll query it or assume it's PDF for now unless we know otherwise.
 					// (We can load it to find out)
@@ -1490,6 +1525,8 @@
 					activeSourceBytes = null;
 					sourceMaterialType = null;
 					showAttachedNote = true;
+					scratchpadSavedId = null;
+					noteOpened(loadedNote.id, 'chat');
 				}
 			}
 
@@ -1899,6 +1936,71 @@
 		appendToNoteBody(`\n\n![Extracted Image](${base64})\n\n`);
 	}
 
+	function handlePdfTextExtracted(text: string) {
+		if (!activeSourceId || !note) return;
+		const sourceId = activeSourceId;
+		const sourceTitle = isSourceMaterial ? note.title : `${draftTitle} — attached PDF`;
+		pdfIngestionStatus = 'indexing';
+		pdfIngestionError = null;
+		const startedAt = Date.now();
+		const startEntry: DebugTraceEntry = {
+			time: startedAt,
+			kind: 'config',
+			msg: `PDF indexing started: ${sourceTitle} (${sourceId}), ${text.length.toLocaleString()} extracted characters`
+		};
+		pendingDebugTrace = [...pendingDebugTrace, startEntry];
+		pdfIngestionPromise = (async () => {
+			try {
+				const result = await invoke<{ status: 'cached' | 'indexed' | 'empty'; chunks: number }>(
+					'ensure_document_ingested',
+					{ docId: sourceId, source: sourceTitle, text }
+				);
+				const entry: DebugTraceEntry = {
+					time: Date.now(),
+					kind: 'done',
+					msg: `PDF indexing ${result.status}: ${sourceTitle} (${result.chunks} chunks)`
+				};
+				pendingDebugTrace = [...pendingDebugTrace, entry];
+				if (debugInfo) debugInfo = { ...debugInfo, trace: [...debugInfo.trace, startEntry, entry] };
+				if (activeSourceId === sourceId) pdfIngestionStatus = result.status;
+			} catch (error) {
+				console.error('Failed to index PDF text', error);
+				const detail =
+					typeof error === 'string'
+						? error
+						: error instanceof Error
+							? error.message
+							: JSON.stringify(error) || String(error);
+				const entry: DebugTraceEntry = {
+					time: Date.now(),
+					kind: 'error',
+					msg: `PDF indexing failed for ${sourceTitle} (${sourceId}): ${detail}`
+				};
+				pendingDebugTrace = [...pendingDebugTrace, entry];
+				showDebugWindow = true;
+				debugInfo = debugInfo
+					? { ...debugInfo, trace: [...debugInfo.trace, startEntry, entry] }
+					: {
+							requestStart: startedAt,
+							firstChunk: null,
+							generationStart: null,
+							generationEnd: null,
+							done: entry.time,
+							promptTokens: 0,
+							completionTokens: 0,
+							totalTokens: 0,
+							turnCount: 0,
+							replyChars: 0,
+							trace: [startEntry, entry]
+						};
+				if (activeSourceId === sourceId) {
+					pdfIngestionStatus = 'failed';
+					pdfIngestionError = detail;
+				}
+			}
+		})();
+	}
+
 	async function saveNote() {
 		if (!note) return;
 		isBusy = true;
@@ -2007,34 +2109,11 @@
 		void stopActiveChat();
 	}
 
-	function toggleDebugWindow() {
-		showDebugWindow = !showDebugWindow;
-		if (showDebugWindow && !debugInfo) {
-			const saved = [...chatMessages]
-				.reverse()
-				.find((message) => message.role === 'assistant' && message.debugTrace?.length)?.debugTrace;
-			if (saved?.length) {
-				debugInfo = {
-					requestStart: saved[0].time,
-					firstChunk: null,
-					generationStart: null,
-					generationEnd: null,
-					done: null,
-					promptTokens: 0,
-					completionTokens: 0,
-					totalTokens: 0,
-					turnCount: 0,
-					replyChars: 0,
-					trace: saved
-				};
-			}
-		}
-	}
-
 	function beginAiRequest(
 		requestId: string,
 		composerMode: 'chat' | 'editor',
-		statusText: string
+		statusText: string,
+		aiNoteId: string
 	): number {
 		const startTime = Date.now();
 		pendingDebugTrace = [
@@ -2062,7 +2141,7 @@
 		];
 		activeAiComposerMode = composerMode;
 		activeChatRequestId = requestId;
-		activeChatNoteId = note?.id ?? null;
+		activeChatNoteId = aiNoteId;
 		setTimeout(() => scrollChatToBottom(true), 50);
 		return startTime;
 	}
@@ -2093,6 +2172,15 @@
 			}
 			return;
 		}
+		if ((isSourceMaterial && showAttachedNote) || saveStatus !== 'saved') {
+			await saveNote();
+		}
+		if (pdfIngestionPromise) await pdfIngestionPromise;
+		const aiNoteId = activeAiNoteId();
+		if (!aiNoteId) {
+			message = 'Open or create the attached note before asking the AI to edit it.';
+			return;
+		}
 		const requestId = Date.now().toString();
 		const composerMode = aiInteractionMode === 'operation' ? 'editor' : 'chat';
 		const selection =
@@ -2111,12 +2199,13 @@
 		beginAiRequest(
 			requestId,
 			composerMode,
-			composerMode === 'editor' ? 'Preparing note edit…' : 'Reading the note… warming the model…'
+			composerMode === 'editor' ? 'Preparing note edit…' : 'Retrieving note and PDF context…',
+			aiNoteId
 		);
 		checkpointChatHistory(0);
 		try {
 			await invoke('ask_ai_stream', {
-				noteId: note.id,
+				noteId: aiNoteId,
 				question: userText,
 				requestId,
 				// Working-doc type so the model edits as LaTeX / notebook, not Markdown.
@@ -2132,6 +2221,8 @@
 
 	async function rewindToSnapshot(snapshot?: NoteSnapshot, fillInput?: string) {
 		if (!snapshot || !note) return;
+		const aiNoteId = activeAiNoteId();
+		if (!aiNoteId) return;
 		if (!(await stopActiveChat())) return;
 		if (noteAnimationTimer) {
 			clearTimeout(noteAnimationTimer);
@@ -2156,21 +2247,21 @@
 		isBusy = true;
 		try {
 			await invoke('save_note', {
-				noteId: note.id,
+				noteId: aiNoteId,
 				title: snapshot.draftTitle,
 				tags: snapshot.draftTags
 					.split(',')
 					.map((t: string) => t.trim())
 					.filter(Boolean),
 				body: snapshot.noteBody,
-				sourcePdf: note.sourcePdf ?? null,
-				annotations: note.annotations
+				sourcePdf: activeSourceId,
+				annotations: isSourceMaterial ? [] : note.annotations
 			});
-			await invoke('save_chat_history', { noteId: note.id, chatHistory: chatMessages });
+			await invoke('save_chat_history', { noteId: aiNoteId, chatHistory: chatMessages });
 			// The backend conversation includes tool calls/results that are not
 			// represented in the UI history. Clear it after a rewind so the next
 			// retry rebuilds from the newly persisted authoritative history.
-			await invoke('clear_ai_conversation', { noteId: note.id });
+			await invoke('clear_ai_conversation', { noteId: aiNoteId });
 		} catch (err) {
 			console.error('Failed to rewind:', err);
 		} finally {
@@ -2197,13 +2288,13 @@
 	}
 
 	async function reconcileRequestNote(expectedNoteId: string) {
-		if (!canApplyReconciledNote(expectedNoteId, note?.id)) return;
+		if (!canApplyReconciledNote(expectedNoteId, activeAiNoteId())) return;
 		const refreshed = await invoke<NoteDocument>('load_note', { noteId: expectedNoteId });
 		// Loading is asynchronous. Re-check after it completes so navigation during
 		// the request cannot let a late completion overwrite the newly opened note.
-		if (!canApplyReconciledNote(expectedNoteId, note?.id)) return;
-		note = { ...refreshed, chatHistory: chatMessages };
+		if (!canApplyReconciledNote(expectedNoteId, activeAiNoteId())) return;
 		if (!isSourceMaterial) {
+			note = { ...refreshed, chatHistory: chatMessages };
 			draftTitle = refreshed.title;
 			draftBody = refreshed.body;
 			draftTags = refreshed.tags.join(', ');
@@ -2212,6 +2303,13 @@
 				vditorInstance &&
 				editorNeedsAuthoritativeBody(vditorInstance.getValue(), refreshed.body)
 			) {
+				vditorInstance.setValue(refreshed.body);
+			}
+		} else {
+			draftTitle = refreshed.title;
+			draftBody = refreshed.body;
+			draftTags = refreshed.tags.join(', ');
+			if (vditorInstance && editorNeedsAuthoritativeBody(vditorInstance.getValue(), refreshed.body)) {
 				vditorInstance.setValue(refreshed.body);
 			}
 		}
@@ -2247,7 +2345,7 @@
 			clearTimeout(chatPersistTimer);
 			chatPersistTimer = undefined;
 		}
-		if (note) await persistChatHistory(note.id, chatMessages);
+		if (requestNoteId) await persistChatHistory(requestNoteId, chatMessages);
 		if (requestNoteId && hasNoteMutation(tools)) {
 			try {
 				await reconcileRequestNote(requestNoteId);
@@ -2321,7 +2419,8 @@
 			clearTimeout(chatPersistTimer);
 			chatPersistTimer = undefined;
 		}
-		if (note) void persistChatHistory(note.id, chatMessages);
+		const aiNoteId = activeAiNoteId();
+		if (aiNoteId) void persistChatHistory(aiNoteId, chatMessages);
 	}
 
 	async function resolveApproval(id: string, approved: boolean) {
@@ -2495,11 +2594,19 @@
 		}, 50);
 	}
 
-	async function attachPdf(pdfNote: NoteDocument) {
+	async function attachPdf(pdfNote: NoteDocument, alreadyImported = false) {
 		if (!note) return;
 		attachPdfDialog?.close();
 		isBusy = true;
+		let createdPdfId: string | null = alreadyImported ? pdfNote.id : null;
 		try {
+			const attachmentPdf = alreadyImported
+				? pdfNote
+				: await invoke<NoteDocument>('clone_pdf_for_attachment', {
+						noteId: pdfNote.id,
+						notebook: openNoteNotebook()
+				  });
+			createdPdfId = attachmentPdf.id;
 			const saved = await invoke<NoteDocument>('save_note', {
 				noteId: note.id,
 				title: draftTitle,
@@ -2508,12 +2615,12 @@
 					.map((t: string) => t.trim())
 					.filter(Boolean),
 				body: draftBody,
-				sourcePdf: pdfNote.id,
+				sourcePdf: attachmentPdf.id,
 				annotations: note.annotations
 			});
 			note = saved;
-			activeSourceId = pdfNote.id;
-			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: pdfNote.id });
+			activeSourceId = attachmentPdf.id;
+			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: attachmentPdf.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			sourceMaterialType = 'pdf';
 			showAttachedNote = true;
@@ -2522,6 +2629,13 @@
 			await tick();
 			initVditor();
 		} catch (err) {
+			if (createdPdfId) {
+				try {
+					await invoke('delete_note', { noteId: createdPdfId });
+				} catch (cleanupError) {
+					console.warn('Failed to clean up copied PDF after attachment failure', cleanupError);
+				}
+			}
 			message = `Failed to attach PDF: ${err}`;
 		} finally {
 			isBusy = false;
@@ -2576,7 +2690,7 @@
 				filePath,
 				notebook: openNoteNotebook()
 			});
-			await attachPdf(pdfNote);
+			await attachPdf(pdfNote, true);
 		} catch (err) {
 			message = `Failed to import PDF: ${err}`;
 			isBusy = false;
@@ -2653,11 +2767,13 @@
 	// AI Actions
 	async function runExtract() {
 		if (!note || !vditorInstance) return;
+		const aiNoteId = activeAiNoteId();
+		if (!aiNoteId) return;
 		isBusy = true;
 		try {
 			message = 'Extracting from paste...';
 			const res = await invoke<string>('extract_from_paste', {
-				noteId: note.id,
+				noteId: aiNoteId,
 				pasteContent: draftBody
 			});
 			const append = `\n\n> AI Extraction:\n${res}`;
@@ -2672,12 +2788,15 @@
 
 	async function runSummarise() {
 		if (!note) return;
+		if ((isSourceMaterial && showAttachedNote) || saveStatus !== 'saved') await saveNote();
+		const aiNoteId = activeAiNoteId();
+		if (!aiNoteId) return;
 		isBusy = true;
 		summaryProgress = { phase: 'starting', completed: 0, total: 0, message: 'Preparing source…' };
 		try {
 			message = 'Summarising source…';
-			const res = await invoke<string>('summarise_large_note', { noteId: note.id });
-			aiModal = { title: 'AI summary', body: res, sourceNoteId: note.id };
+			const res = await invoke<string>('summarise_large_note', { noteId: aiNoteId });
+			aiModal = { title: 'AI summary', body: res, sourceNoteId: aiNoteId };
 			message = 'Summary complete.';
 		} catch (e) {
 			message = `Summary failed: ${String(e)}`;
@@ -2720,8 +2839,12 @@
 		if (!q) return;
 		isBusy = true;
 		try {
+			if ((isSourceMaterial && showAttachedNote) || saveStatus !== 'saved') await saveNote();
+			if (pdfIngestionPromise) await pdfIngestionPromise;
+			const aiNoteId = activeAiNoteId();
+			if (!aiNoteId) return;
 			message = 'Asking AI...';
-			const res = await invoke<string>('ask_ai', { noteId: note.id, question: q });
+			const res = await invoke<string>('ask_ai', { noteId: aiNoteId, question: q });
 			aiModal = { title: 'AI answer', body: res };
 			message = 'AI answered.';
 		} finally {
@@ -2821,7 +2944,7 @@
 			'ai://note_written',
 			(event) => {
 				const { noteId, content, mode } = event.payload;
-				if (!note || note.id !== noteId) return;
+				if (!note || activeAiNoteId() !== noteId) return;
 				applyNoteWrite(content, mode);
 				if (activeChatRequestId && showDebugWindow && debugInfo) {
 					debugInfo = {
@@ -2846,7 +2969,7 @@
 		listen<{ noteId: string; requestId: string }>('ai://note_stream_start', (event) => {
 			if (
 				!note ||
-				note.id !== event.payload.noteId ||
+				activeAiNoteId() !== event.payload.noteId ||
 				activeChatRequestId !== event.payload.requestId
 			)
 				return;
@@ -2865,7 +2988,7 @@
 		listen<{ noteId: string; phase: string; completed: number; total: number; message: string }>(
 			'ai://summary_progress',
 			(event) => {
-				if (!note || note.id !== event.payload.noteId) return;
+				if (!note || activeAiNoteId() !== event.payload.noteId) return;
 				summaryProgress = event.payload;
 				message = event.payload.message;
 			}
@@ -2874,7 +2997,7 @@
 		listen<{ noteId: string; requestId: string; delta: string }>('ai://note_delta', (event) => {
 			if (
 				!note ||
-				note.id !== event.payload.noteId ||
+				activeAiNoteId() !== event.payload.noteId ||
 				activeChatRequestId !== event.payload.requestId
 			)
 				return;
@@ -2900,7 +3023,7 @@
 		listen<{ noteId: string; requestId: string }>('ai://note_stream_cancel', (event) => {
 			if (
 				!note ||
-				note.id !== event.payload.noteId ||
+				activeAiNoteId() !== event.payload.noteId ||
 				activeChatRequestId !== event.payload.requestId
 			)
 				return;
@@ -3152,7 +3275,8 @@
 		// Note view closing — server stays warm (started at app boot, lives until
 		// app exit). Only the note-editor UI is torn down.
 		if (chatPersistTimer) clearTimeout(chatPersistTimer);
-		if (note && chatMessages.length) void persistChatHistory(note.id, chatMessages);
+		const aiNoteId = activeAiNoteId();
+		if (aiNoteId && chatMessages.length) void persistChatHistory(aiNoteId, chatMessages);
 		noteClosed();
 		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
@@ -3214,6 +3338,7 @@
 <div
 	class="editor-shell"
 	class:has-attached-file={!!note?.sourcePdf || (isSourceMaterial && !!activeSourceBytes)}
+	class:resizing={isResizing || isSidebarResizing}
 >
 	<header class="editor-header">
 		<div class="header-copy">
@@ -3313,15 +3438,13 @@
 						onQuote={handlePdfQuote}
 						onAnnotationsChange={handleAnnotationsChange}
 						onImageExtract={handleImageExtract}
+						onTextExtracted={handlePdfTextExtracted}
 						onClosePdf={workingDocType === 'tex'
 							? closeTexPreview
 							: activeSourceBytes !== null && showAttachedNote
 								? requestDetachPdf
 								: undefined}
-						onAttachNote={() => {
-							showAttachedNote = true;
-							setTimeout(() => initVditor(), 100);
-						}}
+						onAttachNote={() => void openAttachedNote()}
 						showAttachButton={!showAttachedNote}
 					/>
 				{:else if sourceMaterialType === 'pdf'}
@@ -3354,6 +3477,22 @@
 					{/if}
 				{:else if sourceMaterialType === 'html'}
 					<div class="viewer-loading">Loading document viewer…</div>
+				{/if}
+				{#if sourceMaterialType === 'pdf' &&
+				(pdfIngestionStatus === 'indexing' ||
+					pdfIngestionStatus === 'empty' ||
+					pdfIngestionStatus === 'failed')}
+					<div
+						class="pdf-index-status"
+						class:error={pdfIngestionStatus === 'failed'}
+						title={pdfIngestionError ?? undefined}
+					>
+						{pdfIngestionStatus === 'indexing'
+							? 'Indexing PDF for AI…'
+							: pdfIngestionStatus === 'empty'
+								? 'No selectable PDF text to index'
+								: 'PDF indexing failed'}
+					</div>
 				{/if}
 			</section>
 			{#if showAttachedNote}
@@ -3894,20 +4033,19 @@
 												title="Write: perform the request on the open note">Write</button
 											>
 										</div>
-										<button
-											type="button"
-											class="mode-pill"
-											class:auto={!requireToolApproval}
-											onclick={() => {
-												requireToolApproval = !requireToolApproval;
-												invoke('set_require_tool_approval', { require: requireToolApproval });
-											}}
-											title={requireToolApproval
-												? 'Ask: confirms before each tool action — click to allow tool actions'
-												: 'Allow: tool actions run without confirmation — click to ask first'}
-										>
-											{requireToolApproval ? 'Ask' : 'Allow'}
-										</button>
+										<div class="interaction-mode approval-toggle">
+											<button
+												type="button"
+												class:active={!requireToolApproval}
+												onclick={() => setToolApproval(!requireToolApproval)}
+												title={requireToolApproval
+													? 'Ask before each tool action — click to allow automatically'
+													: 'Allow tool actions without confirmation — click to ask first'}
+											>
+												{requireToolApproval ? 'Ask' : 'Allow'}
+											</button
+											>
+										</div>
 										<button
 											type="button"
 											class="prompt-icon-btn"
@@ -3967,31 +4105,6 @@
 											</button>
 										{/if}
 										<div class="prompt-spacer"></div>
-										<button
-											type="button"
-											class="prompt-icon-btn debug-btn"
-											class:active={showDebugWindow}
-											onclick={toggleDebugWindow}
-											title={showDebugWindow ? 'Hide debug window' : 'Show debug window'}
-											aria-label="Toggle debug window">🐞</button
-										>
-										<div
-											class="context-ring"
-											title={debugInfo?.totalTokens
-												? `~${contextPercent}% of ~${MAX_CONTEXT_TOKENS} context — ${debugInfo.totalTokens} tokens used`
-												: `~${contextPercent}% of estimated context window used`}
-										>
-											<svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
-												<circle class="ring-track" cx="18" cy="18" r="15.5"></circle>
-												<circle
-													class="ring-value"
-													cx="18"
-													cy="18"
-													r="15.5"
-													style={`stroke-dasharray:${RING_CIRC};stroke-dashoffset:${ringOffset};stroke:${ringColor};`}
-												></circle>
-											</svg>
-										</div>
 										{#if isChatStreaming}
 											<button
 												type="button"
@@ -4581,6 +4694,11 @@
 		background: var(--bg-page);
 	}
 
+	.editor-shell.resizing,
+	.editor-shell.resizing :global(.textLayer) {
+		user-select: none !important;
+	}
+
 	.editor-header {
 		display: flex;
 		justify-content: space-between;
@@ -4662,7 +4780,8 @@
 		padding: 0.25rem 0.5rem;
 		font-family: var(--font-sans);
 		flex: 1;
-		max-width: 30rem;
+		min-width: 0;
+		max-width: none;
 	}
 	.title-input:hover,
 	.title-input:focus {
@@ -4723,6 +4842,25 @@
 
 	.pdf-pane {
 		min-width: 26rem;
+	}
+
+	.pdf-index-status {
+		position: absolute;
+		right: 0.75rem;
+		bottom: 0.75rem;
+		z-index: 8;
+		padding: 0.35rem 0.55rem;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: var(--bg-panel);
+		color: var(--text-secondary);
+		font-size: 0.72rem;
+		pointer-events: none;
+	}
+
+	.pdf-index-status.error {
+		color: var(--danger-text);
+		border-color: var(--danger-border);
 	}
 
 	/* In the .tex split (PDF preview + editor), let both panes shrink with the
@@ -6103,7 +6241,6 @@
 	}
 
 	/* Shared control baseline: same height, calm by default, theme-consistent. */
-	.mode-pill,
 	.prompt-icon-btn,
 	.send-btn,
 	.selection-pill {
@@ -6123,34 +6260,6 @@
 			border-color 0.14s ease,
 			box-shadow 0.14s ease,
 			opacity 0.14s ease;
-	}
-
-	.mode-pill {
-		gap: 6px;
-		padding: 0 11px 0 9px;
-		font-size: 0.72rem;
-		font-weight: 600;
-		border-radius: var(--radius-md);
-		border: 1px solid var(--border-default);
-	}
-	.mode-pill::before {
-		content: '';
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--neutral-500);
-		transition:
-			background 0.14s ease,
-			box-shadow 0.14s ease;
-	}
-	.mode-pill.auto::before {
-		background: var(--accent-100);
-		box-shadow: 0 0 6px color-mix(in srgb, var(--accent-100) 75%, transparent);
-	}
-	.mode-pill:hover {
-		background: var(--neutral-900);
-		color: var(--text-primary);
-		border-color: var(--border-subtle);
 	}
 
 	.prompt-icon-btn {
@@ -6190,17 +6299,6 @@
 		background: color-mix(in srgb, var(--accent-100) 22%, transparent);
 	}
 
-	.debug-btn {
-		font-size: 0.78rem;
-		line-height: 1;
-		opacity: 0.5;
-		transition: opacity 0.14s ease;
-	}
-	.debug-btn:hover,
-	.debug-btn.active {
-		opacity: 1;
-	}
-
 	.send-btn {
 		width: 28px;
 	}
@@ -6217,28 +6315,6 @@
 		cursor: default;
 	}
 
-	.context-ring {
-		display: inline-flex;
-		align-items: center;
-		padding: 0 2px;
-	}
-	.context-ring svg {
-		display: block;
-		transform: rotate(-90deg);
-	}
-	.context-ring .ring-track {
-		fill: none;
-		stroke: var(--border-default);
-		stroke-width: 3;
-	}
-	.context-ring .ring-value {
-		fill: none;
-		stroke-width: 3;
-		stroke-linecap: round;
-		transition:
-			stroke-dashoffset 0.3s ease,
-			stroke 0.3s ease;
-	}
 	.chat-input-area textarea::-webkit-scrollbar {
 		width: 6px;
 	}

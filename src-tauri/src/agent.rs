@@ -2915,19 +2915,28 @@ impl Tool for SearchDocumentsTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let k = args.count.unwrap_or(5).clamp(1, 10) as usize;
-        let doc_id = args.doc_id.or_else(|| {
-            self.state
-                .oversized_doc_active()
-                .then(|| self.state.current_note_id())
-                .flatten()
-        });
+        let scope = self.state.current_attachment_scope();
+        if scope.is_empty() {
+            return Ok("Document search is unavailable because no document is authorized for the active AI workspace.".to_string());
+        }
+        let scoped_ids = match args.doc_id {
+            Some(id) if scope.contains(&id) => vec![id],
+            Some(_) => {
+                return Ok("That document is outside the active note and attachment scope.".to_string())
+            }
+            None => scope,
+        };
         self.state
             .record_chat_tool("Search Documents", args.query.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
         );
-        match self.state.retrieve_chunks(&args.query, k, doc_id.as_deref()).await {
+        match self
+            .state
+            .retrieve_chunks_scoped(&args.query, k, Some(&scoped_ids))
+            .await
+        {
             Ok(chunks) if !chunks.is_empty() => {
                 let mut out = format!("Passages from your documents for \"{}\":\n\n", args.query);
                 for (i, c) in chunks.iter().enumerate() {

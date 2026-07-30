@@ -342,6 +342,18 @@ async fn import_pdf_file(
 }
 
 #[tauri::command]
+async fn clone_pdf_for_attachment(
+    state: State<'_, AppState>,
+    note_id: String,
+    notebook: Option<String>,
+) -> Result<NoteDocument, String> {
+    state
+        .clone_pdf_for_attachment(note_id, notebook)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn save_pdf_annotations(
     state: State<'_, AppState>,
     note_id: String,
@@ -421,6 +433,21 @@ async fn ingest_document(
 ) -> Result<usize, String> {
     state
         .ingest_document(&doc_id, &source, &text, contextual.unwrap_or(false))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Index extracted note/PDF text unless the same content and embedding model
+/// are already represented in the persistent RAG store.
+#[tauri::command]
+async fn ensure_document_ingested(
+    state: State<'_, AppState>,
+    doc_id: String,
+    source: String,
+    text: String,
+) -> Result<crate::state::DocumentIngestionResult, String> {
+    state
+        .ensure_document_ingested(&doc_id, &source, &text)
         .await
         .map_err(|error| error.to_string())
 }
@@ -859,6 +886,7 @@ pub fn run() {
             get_embed_model_path,
             set_embed_model_path,
             ingest_document,
+            ensure_document_ingested,
             delete_document,
             list_model_profiles,
             get_all_note_documents,
@@ -875,6 +903,7 @@ pub fn run() {
             get_note_history,
             get_note_version,
             import_pdf_file,
+            clone_pdf_for_attachment,
             save_pdf_annotations,
             compile_latex,
             import_latex_asset,

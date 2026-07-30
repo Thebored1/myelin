@@ -1941,6 +1941,8 @@ pub struct ManagedEmbedServer {
     pub child: Child,
     pub port: u16,
     pub model_path: PathBuf,
+    pub executable_path: PathBuf,
+    _stderr_reader: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for ManagedEmbedServer {
@@ -1957,7 +1959,8 @@ pub async fn start_embed_server(
     host: &str,
     port: u16,
 ) -> Result<ManagedEmbedServer> {
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--host")
         .arg(host)
         .arg("--port")
@@ -1969,11 +1972,41 @@ pub async fn start_embed_server(
         .arg("mean")
         .arg("--ctx-size")
         .arg("2048")
+        .arg("--batch-size")
+        .arg("2048")
+        .arg("--ubatch-size")
+        .arg("2048")
+        .arg("--parallel")
+        .arg("1")
         .arg("--no-warmup")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped());
+    apply_library_path(&mut command, executable);
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn embedding server: {}", executable.display()))?;
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let reader_handle = child.stderr.take().map(|stderr| {
+        let captured = Arc::clone(&captured);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut guard = captured.lock().unwrap();
+                if guard.len() == STDERR_CAPTURE_LINES {
+                    guard.remove(0);
+                }
+                guard.push(line);
+            }
+        })
+    });
 
     let base = format!("http://{host}:{port}");
     for _ in 0..80 {
@@ -1985,27 +2018,75 @@ pub async fn start_embed_server(
             .unwrap_or(false)
         {
             log::info!(
-                "embedding server ready on port {port} ({})",
+                "embedding server ready on port {port}: {} with {}",
+                executable.display(),
                 model_path.display()
             );
             return Ok(ManagedEmbedServer {
                 child,
                 port,
                 model_path: model_path.to_path_buf(),
+                executable_path: executable.to_path_buf(),
+                _stderr_reader: reader_handle,
             });
         }
         if let Ok(Some(status)) = child.try_wait() {
-            bail!("embedding server exited early ({status})");
+            let detail = captured.lock().unwrap().join(" | ");
+            bail!(
+                "embedding server {} exited early ({status}) while loading {}{}",
+                executable.display(),
+                model_path.display(),
+                (!detail.is_empty())
+                    .then(|| format!(": {detail}"))
+                    .unwrap_or_default()
+            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let _ = child.kill();
-    bail!("embedding server did not become healthy")
+    let detail = captured.lock().unwrap().join(" | ");
+    bail!(
+        "embedding server {} did not become healthy while loading {}{}",
+        executable.display(),
+        model_path.display(),
+        (!detail.is_empty())
+            .then(|| format!(": {detail}"))
+            .unwrap_or_default()
+    )
 }
 
 pub async fn stop_embed_server(server: &mut ManagedEmbedServer) {
     let _ = server.child.kill();
     let _ = server.child.wait();
+}
+
+/// Embeddings deliberately use stock llama.cpp even when chat uses BeeLlama:
+/// the Bee fork is optimized for LFM inference and crashes while loading BERT
+/// embedding architectures such as Nomic Embed.
+pub fn resolve_embedding_executable(app_data_dir: &Path) -> Result<PathBuf> {
+    if let Ok(raw) = env::var("MYELIN_EMBED_SERVER_PATH") {
+        return validate_existing_file(
+            resolve_input_path(app_data_dir, &raw),
+            "embedding llama-server",
+        );
+    }
+    let installed = app_data_dir
+        .join("bin")
+        .join("cpu")
+        .join(executable_name());
+    if installed.is_file() {
+        return Ok(installed);
+    }
+    if let Some(resource) = resource_bin_dir()
+        .map(|root| root.join("cpu").join(executable_name()))
+        .filter(|path| path.is_file())
+    {
+        return Ok(resource);
+    }
+    bail!(
+        "stock CPU embedding server is not installed (expected {})",
+        installed.display()
+    )
 }
 
 fn config_path(app_data_dir: &Path) -> PathBuf {
@@ -2531,6 +2612,7 @@ mod tests {
     use super::{
         bee_asset_sha256, bee_assets_for_backend, cache_reuse_tokens, fit_ngl,
         has_fatal_startup_error, has_tensor_override, normalize_engine,
+        resolve_embedding_executable,
     };
 
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -2639,5 +2721,34 @@ mod tests {
             "llama_model_loader: loading tensors".into(),
             "warning: using CPU fallback".into(),
         ]));
+    }
+
+    #[test]
+    fn embedding_runtime_uses_stock_cpu_and_ignores_bee() {
+        let dir = tempfile::tempdir().unwrap();
+        let stock = dir
+            .path()
+            .join("bin")
+            .join("cpu")
+            .join(super::executable_name());
+        let bee = dir
+            .path()
+            .join("bin")
+            .join("bee")
+            .join("cpu")
+            .join(super::executable_name());
+        std::fs::create_dir_all(stock.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bee.parent().unwrap()).unwrap();
+        std::fs::write(&stock, b"stock").unwrap();
+        std::fs::write(&bee, b"bee").unwrap();
+
+        assert_eq!(resolve_embedding_executable(dir.path()).unwrap(), stock);
+    }
+
+    #[test]
+    fn embedding_runtime_reports_missing_stock_cpu_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = resolve_embedding_executable(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("stock CPU embedding server"));
     }
 }

@@ -15,6 +15,7 @@
 		onQuote, 
 		onAnnotationsChange,
 		onImageExtract,
+		onTextExtracted,
 		onAttachNote,
 		onClosePdf,
 		showAttachButton = true
@@ -24,6 +25,7 @@
 		onQuote?: (quote: string, pageNum: number, rects?: {x:number, y:number, width:number, height:number}[]) => void,
 		onAnnotationsChange?: (annots: PdfAnnotation[]) => void,
 		onImageExtract?: (base64: string) => void,
+		onTextExtracted?: (text: string) => void,
 		onAttachNote?: () => void,
 		onClosePdf?: () => void,
 		showAttachButton?: boolean
@@ -62,8 +64,25 @@
 	let pdfControlsEl: HTMLElement | undefined = $state();
 	let pdfCompact = $state(false);
 	let showMoreMenu = $state(false);
+	let loadGeneration = 0;
+
+	async function extractDocumentText(doc: any, generation: number) {
+		const pages: string[] = [];
+		for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+			if (generation !== loadGeneration) return;
+			const page = await doc.getPage(pageNumber);
+			const content = await page.getTextContent();
+			const text = content.items
+				.map((item: any) => (typeof item?.str === 'string' ? item.str : ''))
+				.filter(Boolean)
+				.join(' ');
+			pages.push(`[Page ${pageNumber}]\n${text}`);
+		}
+		if (generation === loadGeneration) onTextExtracted?.(pages.join('\n\n').trim());
+	}
 
 	async function loadPdf() {
+		const generation = ++loadGeneration;
 		try {
 			errorMessage = '';
 			const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
@@ -74,6 +93,7 @@
 			
 			pdfDoc = doc;
 			numPages = doc.numPages;
+			void extractDocumentText(doc, generation);
 
 			// Fit to the pane width as soon as the PDF renders, so it isn't cropped
 			// on narrow/split windows. Wait for the viewer div to mount + lay out.
@@ -582,11 +602,10 @@
 		font-family: var(--font-mono);
 		font-size: 0.85rem;
 		z-index: 100;
-		overflow-x: auto;
-		scrollbar-width: none; /* keep the 48px bar clean; padding reduction usually avoids the need */
-	}
-	.pdf-controls::-webkit-scrollbar {
-		display: none;
+		/* A scrollable x-axis also computes the y-axis as auto, clipping the
+		   absolutely positioned dropdowns at the toolbar's 48px boundary. */
+		overflow: visible;
+		min-width: 0;
 	}
 
 	.pdf-controls button {
@@ -624,6 +643,7 @@
 
 	.dropdown {
 		position: absolute;
+		z-index: 200;
 		top: 100%;
 		left: 0;
 		margin-top: 0.5rem;

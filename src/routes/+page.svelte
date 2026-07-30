@@ -167,7 +167,9 @@
 	// Main-pane tabs filter by category ("notes" = editable md/tex/ipynb, "documents"
 	// = source pdf/epub); the sidebar dropdowns set a specific type. Both share this.
 	type NbFilter = 'all' | 'notes' | 'documents' | 'md' | 'tex' | 'ipynb' | 'pdf' | 'epub';
-	let activeTypeFilter = $state<NbFilter>('all');
+	// The main notebook view is notes-first. Standalone source documents remain
+	// available through the explicit documents tab and sidebar filter.
+	let activeTypeFilter = $state<NbFilter>('notes');
 
 	function noteType(n: NoteSummary): 'md' | 'pdf' | 'tex' | 'ipynb' | 'epub' {
 		const rel = n.relativePath.toLowerCase();

@@ -547,6 +547,13 @@ pub struct LlamaCacheStatus {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentIngestionResult {
+    pub status: String,
+    pub chunks: usize,
+}
+
 /// Configuration for the openharn-myelin agent sidecar. Persisted in
 /// settings.json and surfaced in the Settings UI. Every field is optional /
 /// overridable; defaults (see `OpenharnSettings::default`) are used when unset.
@@ -832,6 +839,21 @@ impl AppState {
         self.current_note_id()
             .and_then(|id| self.note_by_id(&id))
             .map(|doc| doc.body)
+    }
+
+    pub fn current_attachment_scope(&self) -> Vec<String> {
+        let Some(id) = self.current_note_id() else {
+            return Vec::new();
+        };
+        if let Some(note) = self.note_by_id(&id) {
+            if let Some(source_id) = note.source_pdf {
+                return vec![id, source_id];
+            }
+            if note.relative_path.to_ascii_lowercase().ends_with(".pdf") {
+                return vec![id];
+            }
+        }
+        self.oversized_doc_active().then_some(vec![id]).unwrap_or_default()
     }
 
     /// Resolve the note a chat tool should act on: always prefer the note that
@@ -1444,7 +1466,8 @@ impl AppState {
                 .ok_or_else(|| anyhow!("note not found"))?
         };
         let prompt_changed = existing.document.body != body
-            || existing.document.title != title;
+            || existing.document.title != title
+            || existing.document.source_pdf != source_pdf;
 
         let unique_title = self.ensure_unique_title(&title, Some(&note_id));
 
@@ -2039,12 +2062,37 @@ impl AppState {
             return Ok("Hello. What would you like to work on?".to_string());
         }
         let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
+        let is_pdf = note.relative_path.to_ascii_lowercase().ends_with(".pdf");
+        let body_context = if note.source_pdf.is_some() || is_pdf {
+            if note.source_pdf.is_some() {
+                let _ = self
+                    .ensure_document_ingested(&note.id, &note.title, &note.body)
+                    .await;
+            }
+            let mut scope = vec![note.id.clone()];
+            if let Some(source_id) = note.source_pdf.clone() {
+                scope.push(source_id);
+            }
+            let passages = self
+                .retrieve_chunks_scoped(&question, 4, Some(&scope))
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|chunk| format!("[{}]\n{}", chunk.source, chunk.text))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            format!(
+                "This document workspace is retrieval-backed.\n\nRelevant passages:\n{passages}"
+            )
+        } else {
+            note.body.clone()
+        };
 
         let prompt = format!(
             "Answer the user's latest question directly. Use the open note only if it is relevant to that question.\n\nOpen Note Context:\nTitle: {}\nTags: {}\nBody:\n{}\n\nRecent Chat History for background only:\n{}\n\nLatest Question:\n{}",
             note.title,
             if note.tags.is_empty() { "(none)".to_string() } else { note.tags.join(", ") },
-            note.body,
+            body_context,
             history_text,
             question
         );
@@ -2139,12 +2187,38 @@ impl AppState {
                 &note.relative_path,
                 ctx_tokens,
             );
+            let attachment_backed = note.source_pdf.is_some();
+            let pdf_only = note.relative_path.to_ascii_lowercase().ends_with(".pdf");
             let oversized_ready = if prompt_shape.oversized {
                 self.ensure_oversized_note_ingested(&note).await.is_ok()
             } else {
                 false
             };
-            let note_body_excerpt = if prompt_shape.oversized && !oversized_ready {
+            let attachment_note_ready = if attachment_backed {
+                self.ensure_document_ingested(&note.id, &note.title, &note.body)
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            let retrieval_backed = prompt_shape.oversized || attachment_backed || pdf_only;
+            let note_body_excerpt = if let Some(source_id) = note.source_pdf.as_deref() {
+                let source_title = self
+                    .note_by_id(source_id)
+                    .map(|source| source.title)
+                    .unwrap_or_else(|| "Attached source".to_string());
+                format!(
+                    "[ATTACHED NOTE — retrieval-backed]\n\
+                     Working note ID: {}\nAttached source: {source_title} (ID: {source_id})\n\
+                     Relevant passages from both are supplied per turn.",
+                    note.id,
+                )
+            } else if pdf_only {
+                format!(
+                    "[PDF — read-only retrieval-backed]\nDocument: {} (ID: {})\nRelevant passages are supplied per turn.",
+                    note.title, note.id
+                )
+            } else if prompt_shape.oversized && !oversized_ready {
                 let limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
                 let head: String = note.body.chars().take(limit).collect();
                 format!("{head}\n…[note truncated because full-note indexing failed]")
@@ -2169,6 +2243,82 @@ impl AppState {
             let context = assemble_note_context(&note.title, &note_body_excerpt, notebook_cells.as_deref());
             let stable_context = context.clone();
             let mut turn_instructions = String::new();
+            if (attachment_backed || pdf_only || oversized_ready)
+                && !is_simple_greeting(&question)
+            {
+                let mut scope = vec![note.id.clone()];
+                if let Some(source_id) = note.source_pdf.clone() {
+                    scope.push(source_id);
+                }
+                if attachment_note_ready || pdf_only || oversized_ready || scope.len() > 1 {
+                    let nid = self.current_note_id().unwrap_or_else(|| note.id.clone());
+                    let retrieval_history = {
+                        let live = self.conversation(&nid);
+                        if live.is_empty() {
+                            chat_history_to_messages(&note.chat_history)
+                        } else {
+                            live
+                        }
+                    };
+                    let retrieval_query =
+                        crate::ai_turn::contextual_retrieval_query(&question, &retrieval_history);
+                    let query_preview: String = retrieval_query.chars().take(1_000).collect();
+                    let _ = self.handle.emit(
+                        "ai://debug_event",
+                        serde_json::json!({
+                            "kind": "retrieval",
+                            "msg": format!("query={query_preview:?}; scope={scope:?}"),
+                            "requestId": request_id,
+                        }),
+                    );
+                    match self
+                        .retrieve_chunks_scoped(&retrieval_query, 6, Some(&scope))
+                        .await
+                    {
+                        Ok(chunks) => {
+                            let mut document_ids: Vec<&str> =
+                                chunks.iter().map(|chunk| chunk.doc_id.as_str()).collect();
+                            document_ids.sort_unstable();
+                            document_ids.dedup();
+                            let _ = self.handle.emit(
+                                "ai://debug_event",
+                                serde_json::json!({
+                                    "kind": "retrieval",
+                                    "msg": format!(
+                                        "results={}; document_ids={document_ids:?}",
+                                        chunks.len()
+                                    ),
+                                    "requestId": request_id,
+                                }),
+                            );
+                            let char_budget = ctx_tokens.saturating_mul(3) / 4;
+                            let evidence = crate::rag::pack_passages(chunks, char_budget);
+                            if !evidence.is_empty() {
+                                turn_instructions.push_str(
+                                    "\n\nAUTOMATIC RETRIEVAL FROM THE OPEN NOTE + ATTACHED SOURCE:",
+                                );
+                                turn_instructions.push_str(&evidence);
+                                turn_instructions.push_str(
+                                    "\n\nEVIDENCE POLICY: Retrieved passages and explicit quotations from the user outrank prior assistant claims. Never claim a term or fact is absent when the supplied evidence contains it. If the evidence contradicts an earlier answer, acknowledge and correct that mistake. If the evidence is insufficient, say so instead of inventing a definitive negative. Use only passages relevant to the request.",
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            let _ = self.handle.emit(
+                                "ai://debug_event",
+                                serde_json::json!({
+                                    "kind": "retrieval_error",
+                                    "msg": format!("automatic retrieval failed: {error:#}"),
+                                    "requestId": request_id,
+                                }),
+                            );
+                            turn_instructions.push_str(
+                                "\n\nEVIDENCE POLICY: Automatic retrieval failed for this turn. Do not infer or claim that a term or fact is absent. Say the available evidence is insufficient for a definitive answer.",
+                            );
+                        }
+                    };
+                }
+            }
             if append_only && !has_selection {
                 turn_instructions.push_str(
                     "\n\nAPPEND-ONLY TURN: The current note (if shown) is reference material only. \
@@ -2278,7 +2428,7 @@ impl AppState {
                 interaction_mode == "chat",
                 append_only && !has_selection,
                 placement && has_selection,
-                oversized_ready,
+                retrieval_backed,
                 supports_tools,
             );
 
@@ -2317,11 +2467,13 @@ impl AppState {
                 turn_instructions: &turn_instructions,
                 has_open_note: true,
                 edit_thread,
-                oversized: oversized_ready,
+                oversized: retrieval_backed,
                 supports_tools,
                 verbose_tool_schemas: config.verbose_tool_schemas,
             });
             let intent_is_tool = Some(turn.intent_is_tool);
+            let persist_raw_question =
+                turn.kind == crate::ai_turn::TurnKind::DirectAnswer;
             let user_content = turn
                 .messages
                 .last()
@@ -2382,7 +2534,15 @@ impl AppState {
             // assistant calls and results; save_conversation normalizes any
             // older decorated user messages.
             if !isolated_edit {
-                convo.push(serde_json::json!({ "role": "user", "content": user_content }));
+                let persisted_user_content = if persist_raw_question {
+                    question.clone()
+                } else {
+                    user_content
+                };
+                convo.push(serde_json::json!({
+                    "role": "user",
+                    "content": persisted_user_content
+                }));
                 convo.extend(final_messages.iter().cloned());
                 let convo = trim_conversation(convo, MAX_LIVE_CONVERSATION_CHARS);
                 self.save_conversation(&nid, convo);
@@ -2524,32 +2684,27 @@ impl AppState {
             return Err(anyhow!("file not found: {}", file_path));
         }
 
-        let dest = if src.starts_with(&workspace) {
-            src.clone()
-        } else {
-            let file_name = src
-                .file_name()
-                .ok_or_else(|| anyhow!("invalid file path: no filename"))?;
-            // Place the import inside the given notebook (folder), else workspace root.
-            let target_dir = match &notebook {
-                Some(name)
-                    if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") =>
-                {
-                    let safe = sanitize_relative_folder(name)?;
-                    let dir = workspace.join(folder_to_relative_path(&safe));
-                    fs::create_dir_all(&dir)
-                        .map_err(|e| anyhow!("failed to open notebook: {}", e))?;
-                    dir
-                }
-                _ => workspace.clone(),
-            };
-            let dest = target_dir.join(file_name);
-            if !dest.exists() {
-                fs::copy(&src, &dest)
-                    .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
+        let file_name = src
+            .file_name()
+            .ok_or_else(|| anyhow!("invalid file path: no filename"))?;
+        // Place every import inside the requested notebook (folder), else the
+        // workspace root. Even a file already in the workspace is copied so a
+        // second attachment gets its own source identity and annotations.
+        let target_dir = match &notebook {
+            Some(name)
+                if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") =>
+            {
+                let safe = sanitize_relative_folder(name)?;
+                let dir = workspace.join(folder_to_relative_path(&safe));
+                fs::create_dir_all(&dir)
+                    .map_err(|e| anyhow!("failed to open notebook: {}", e))?;
+                dir
             }
-            dest
+            _ => workspace.clone(),
         };
+        let dest = unique_pdf_path(&target_dir, file_name);
+        fs::copy(&src, &dest)
+            .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
 
         self.reindex_workspace(workspace.clone()).await?;
 
@@ -2561,6 +2716,54 @@ impl AppState {
             .find(|n| n.document.relative_path == rel_path)
             .map(|n| n.document.clone())
             .ok_or_else(|| anyhow!("PDF not found in index after import"))
+    }
+
+    /// Copy an existing workspace PDF into the destination notebook so each
+    /// attached note owns an independent source document.
+    pub async fn clone_pdf_for_attachment(
+        &self,
+        note_id: String,
+        notebook: Option<String>,
+    ) -> Result<NoteDocument> {
+        let workspace = self.require_workspace()?;
+        let source = self
+            .note_by_id(&note_id)
+            .ok_or_else(|| anyhow!("PDF note not found: {note_id}"))?;
+        if !source.relative_path.to_ascii_lowercase().ends_with(".pdf") {
+            return Err(anyhow!("note is not a PDF: {note_id}"));
+        }
+        let source_path = workspace.join(&source.relative_path);
+        if !source_path.is_file() {
+            return Err(anyhow!("PDF file not found: {}", source.relative_path));
+        }
+        let target_dir = match &notebook {
+            Some(name)
+                if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") =>
+            {
+                let safe = sanitize_relative_folder(name)?;
+                let dir = workspace.join(folder_to_relative_path(&safe));
+                fs::create_dir_all(&dir)
+                    .map_err(|e| anyhow!("failed to open notebook: {}", e))?;
+                dir
+            }
+            _ => workspace.clone(),
+        };
+        let file_name = source_path
+            .file_name()
+            .ok_or_else(|| anyhow!("invalid PDF path"))?;
+        let dest = unique_pdf_path(&target_dir, file_name);
+        fs::copy(&source_path, &dest)
+            .map_err(|e| anyhow!("failed to copy PDF for attachment: {}", e))?;
+
+        self.reindex_workspace(workspace.clone()).await?;
+        let rel_path = relative_to_workspace(&workspace, &dest);
+        let runtime = self.inner.runtime.read();
+        runtime
+            .notes
+            .values()
+            .find(|n| n.document.relative_path == rel_path)
+            .map(|n| n.document.clone())
+            .ok_or_else(|| anyhow!("cloned PDF not found in index after copy"))
     }
 
     pub fn snapshot(&self) -> AppSnapshot {
@@ -3234,7 +3437,31 @@ impl AppState {
         } else {
             false
         };
-        let excerpt = if prompt_shape.oversized && !oversized_ready {
+        let attachment_backed = note.source_pdf.is_some();
+        let pdf_only = note.relative_path.to_ascii_lowercase().ends_with(".pdf");
+        if attachment_backed {
+            let _ = self
+                .ensure_document_ingested(&note.id, &note.title, &note.body)
+                .await;
+        }
+        let retrieval_backed = prompt_shape.oversized || attachment_backed || pdf_only;
+        let excerpt = if let Some(source_id) = note.source_pdf.as_deref() {
+            let source_title = self
+                .note_by_id(source_id)
+                .map(|source| source.title)
+                .unwrap_or_else(|| "Attached source".to_string());
+            format!(
+                "[ATTACHED NOTE — retrieval-backed]\n\
+                 Working note ID: {}\nAttached source: {source_title} (ID: {source_id})\n\
+                 Relevant passages are retrieved automatically for each turn.",
+                note.id
+            )
+        } else if pdf_only {
+            format!(
+                "[PDF — read-only retrieval-backed]\nDocument: {} (ID: {})\nRelevant passages are retrieved automatically for each turn.",
+                note.title, note.id
+            )
+        } else if prompt_shape.oversized && !oversized_ready {
             let limit = ctx_tokens.saturating_mul(2).clamp(4_000, 400_000);
             let head: String = note.body.chars().take(limit).collect();
             format!("{head}\n…[note truncated because full-note indexing failed]")
@@ -3268,7 +3495,7 @@ impl AppState {
         let warm_specs = if interaction_mode == "chat" {
             Vec::new()
         } else {
-            crate::agent::interaction_mode_tools(interaction_mode, oversized_ready)
+            crate::agent::interaction_mode_tools(interaction_mode, retrieval_backed)
         };
         let tools = crate::agent::compact_tool_specs_for_profile(
             warm_specs,
@@ -3602,6 +3829,7 @@ impl AppState {
         })?;
         let model_path = std::path::PathBuf::from(&model);
         let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
+        let executable = llama_server::resolve_embedding_executable(&self.inner.app_data_dir)?;
         let host = config.host.clone();
         let port = config.port.saturating_add(1);
         let base = format!("http://{host}:{port}");
@@ -3616,7 +3844,10 @@ impl AppState {
                 .await
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
-            if server.model_path == model_path && healthy {
+            if server.model_path == model_path
+                && server.executable_path == executable
+                && healthy
+            {
                 return Ok(base);
             }
             if let Some(mut old) = guard.take() {
@@ -3625,7 +3856,7 @@ impl AppState {
         }
         let server = llama_server::start_embed_server(
             &self.inner.llama_client,
-            &config.executable_path,
+            &executable,
             &model_path,
             &host,
             port,
@@ -3687,7 +3918,21 @@ impl AppState {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        format!("nomic:{path}:{size}:{modified}")
+        let runtime = crate::llama_server::resolve_embedding_executable(&self.inner.app_data_dir)
+            .ok();
+        let runtime_metadata = runtime.as_ref().and_then(|path| fs::metadata(path).ok());
+        let runtime_size = runtime_metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let runtime_modified = runtime_metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let runtime_path = runtime
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "missing-stock-cpu-runtime".to_string());
+        format!(
+            "nomic-v2:{path}:{size}:{modified}:{runtime_path}:{runtime_size}:{runtime_modified}"
+        )
     }
 
     fn note_ingestion_entry(&self, body: &str) -> NoteIngestionEntry {
@@ -3697,6 +3942,58 @@ impl AppState {
             chunker: NOTE_CHUNKER_VERSION.to_string(),
             embedding: self.embedding_fingerprint(),
         }
+    }
+
+    /// Ensure arbitrary extracted document text is present in the persistent RAG
+    /// store. The content/model fingerprint prevents re-embedding unchanged PDFs
+    /// every time their viewer is opened.
+    pub async fn ensure_document_ingested(
+        &self,
+        doc_id: &str,
+        source: &str,
+        text: &str,
+    ) -> Result<DocumentIngestionResult> {
+        let lock = {
+            let mut locks = self.inner.note_ingest_locks.lock();
+            Arc::clone(
+                locks
+                    .entry(doc_id.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        let _guard = lock.lock().await;
+        let expected = self.note_ingestion_entry(text);
+        {
+            let _manifest_guard = self.inner.note_ingest_manifest_lock.lock().await;
+            let matches = self
+                .load_note_ingestion_manifest()
+                .entries
+                .get(doc_id)
+                == Some(&expected);
+            if matches
+                && (text.trim().is_empty()
+                    || crate::rag::contains_document(&self.rag_dir(), doc_id)
+                        .await
+                        .unwrap_or(false))
+            {
+                return Ok(DocumentIngestionResult {
+                    status: if text.trim().is_empty() { "empty" } else { "cached" }.into(),
+                    chunks: 0,
+                });
+            }
+        }
+
+        let chunks = self.ingest_document(doc_id, source, text, false).await?;
+        {
+            let _manifest_guard = self.inner.note_ingest_manifest_lock.lock().await;
+            let mut manifest = self.load_note_ingestion_manifest();
+            manifest.entries.insert(doc_id.to_string(), expected);
+            self.save_note_ingestion_manifest(&manifest)?;
+        }
+        Ok(DocumentIngestionResult {
+            status: if chunks == 0 { "empty" } else { "indexed" }.into(),
+            chunks,
+        })
     }
 
     async fn ensure_oversized_note_ingested(&self, note: &NoteDocument) -> Result<usize> {
@@ -3842,7 +4139,13 @@ impl AppState {
 
     /// Remove a document's chunks from the RAG store.
     pub async fn delete_document(&self, doc_id: &str) -> Result<()> {
-        crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await
+        crate::rag::upsert_document(&self.rag_dir(), doc_id, Vec::new()).await?;
+        let _manifest_guard = self.inner.note_ingest_manifest_lock.lock().await;
+        let mut manifest = self.load_note_ingestion_manifest();
+        if manifest.entries.remove(doc_id).is_some() {
+            self.save_note_ingestion_manifest(&manifest)?;
+        }
+        Ok(())
     }
 
     /// Embedding for a note / query: real nomic vectors when an embed model is
@@ -3893,6 +4196,21 @@ impl AppState {
         k: usize,
         doc_id: Option<&str>,
     ) -> Result<Vec<crate::rag::RetrievedChunk>> {
+        let doc_ids = doc_id.map(|id| vec![id.to_string()]);
+        self.retrieve_chunks_scoped(query, k, doc_ids.as_deref()).await
+    }
+
+    /// Retrieve only from the active attachment workspace. An empty scope is
+    /// intentionally equivalent to no results, never a workspace-wide search.
+    pub async fn retrieve_chunks_scoped(
+        &self,
+        query: &str,
+        k: usize,
+        doc_ids: Option<&[String]>,
+    ) -> Result<Vec<crate::rag::RetrievedChunk>> {
+        if doc_ids.is_some_and(<[String]>::is_empty) {
+            return Ok(Vec::new());
+        }
         let qvec = if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
             self.embed_texts(&[query.to_string()], true)
                 .await?
@@ -3905,7 +4223,7 @@ impl AppState {
         if qvec.is_empty() {
             return Ok(Vec::new());
         }
-        crate::rag::search_hybrid(&self.rag_dir(), qvec, query, k, doc_id).await
+        crate::rag::search_hybrid(&self.rag_dir(), qvec, query, k, doc_ids).await
     }
 
     async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
@@ -4932,6 +5250,44 @@ fn unique_note_path(workspace: &Path, file_name: &str) -> PathBuf {
     workspace.join(format!("{stem}-{}.{}", Uuid::new_v4(), extension))
 }
 
+fn unique_pdf_path(workspace: &Path, file_name: &OsStr) -> PathBuf {
+    let file_name = file_name.to_string_lossy();
+    let stem = Path::new(file_name.as_ref())
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("document");
+    let extension = Path::new(file_name.as_ref())
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("pdf");
+    let candidate_name = |suffix: Option<usize>| match suffix {
+        Some(index) => format!("{stem} {index}.{extension}"),
+        None => format!("{stem}.{extension}"),
+    };
+    let matches_existing = |name: &str| {
+        workspace
+            .read_dir()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+    };
+
+    let base = candidate_name(None);
+    if !matches_existing(&base) {
+        return workspace.join(base);
+    }
+    for index in 1..=9_999 {
+        let candidate = candidate_name(Some(index));
+        if !matches_existing(&candidate) {
+            return workspace.join(candidate);
+        }
+    }
+    workspace.join(format!("{stem} {}.{}", Uuid::new_v4(), extension))
+}
+
 fn is_note_file(path: &Path) -> bool {
     path.extension()
         .and_then(std::ffi::OsStr::to_str)
@@ -5112,7 +5468,7 @@ mod tests {
     use super::{
         assemble_note_context, assemble_user_content, authorize_tool_policy,
         canonical_wire_conversation, chat_history_to_messages, hashed_embedding, slugify,
-        split_frontmatter, tokenize,
+        split_frontmatter, tokenize, unique_pdf_path,
     };
     use crate::models::ChatMessage;
 
@@ -5120,6 +5476,15 @@ mod tests {
     fn slugify_avoids_reserved_names() {
         assert_eq!(slugify("CON"), "con-note");
         assert_eq!(slugify("Hello World"), "hello-world");
+    }
+
+    #[test]
+    fn pdf_import_names_increment_without_case_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Paper.pdf"), b"one").unwrap();
+        std::fs::write(dir.path().join("paper 1.pdf"), b"two").unwrap();
+        let path = unique_pdf_path(dir.path(), std::ffi::OsStr::new("paper.pdf"));
+        assert_eq!(path.file_name().unwrap(), "paper 2.pdf");
     }
 
     #[test]

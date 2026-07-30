@@ -68,7 +68,7 @@ impl AiTurnBuilder {
         messages.push(json!({
             "role": "user",
             "content": if direct_chat {
-                input.question.to_string()
+                render_direct_chat_user_content(input.question, input.turn_instructions)
             } else {
                 render_user_content(
                     input.note_title,
@@ -133,6 +133,72 @@ fn route_tools(
         "edit" => crate::agent::interaction_mode_tools("edit", oversized),
         _ => crate::agent::select_tools(question, has_open_note, edit_thread),
     }
+}
+
+/// Keep ordinary direct chat maximally cache-friendly, while ensuring dynamic
+/// retrieval/selection instructions are not discarded on grounded turns.
+pub fn render_direct_chat_user_content(question: &str, turn_instructions: &str) -> String {
+    if turn_instructions.trim().is_empty() {
+        question.to_string()
+    } else {
+        format!(
+            "TURN-SPECIFIC CONTEXT AND INSTRUCTIONS:\n{}\n\nUSER REQUEST:\n{}",
+            turn_instructions.trim(),
+            question
+        )
+    }
+}
+
+/// Build a retrieval query that gives the current question the greatest weight,
+/// but carries enough bounded conversational context to resolve follow-ups.
+pub fn contextual_retrieval_query(question: &str, history: &[Value]) -> String {
+    const HISTORY_CHARS: usize = 600;
+    let prior_user = history.iter().rev().find_map(|message| {
+        (message["role"].as_str() == Some("user"))
+            .then(|| message["content"].as_str())
+            .flatten()
+    });
+    let needs_assistant = {
+        let q = question.to_ascii_lowercase();
+        let has_reference = q
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| {
+                matches!(
+                    word,
+                    "it" | "they" | "them" | "that" | "those" | "this" | "these" | "he" | "she"
+                )
+            });
+        has_reference
+            || ["why did you", "what about", "what do you mean"]
+                .iter()
+                .any(|term| q.contains(term))
+    };
+    let prior_assistant = needs_assistant
+        .then(|| {
+            history.iter().rev().find_map(|message| {
+                (message["role"].as_str() == Some("assistant"))
+                    .then(|| message["content"].as_str())
+                    .flatten()
+            })
+        })
+        .flatten();
+
+    let bounded = |text: &str| -> String {
+        let chars: Vec<char> = text.chars().collect();
+        chars[chars.len().saturating_sub(HISTORY_CHARS)..]
+            .iter()
+            .collect::<String>()
+    };
+    let mut query = format!("Latest question: {question}\nLatest question: {question}");
+    if let Some(user) = prior_user {
+        query.push_str("\nPrevious user context: ");
+        query.push_str(&bounded(user));
+    }
+    if let Some(assistant) = prior_assistant {
+        query.push_str("\nPrevious assistant context (may be incorrect): ");
+        query.push_str(&bounded(assistant));
+    }
+    query
 }
 
 pub fn render_user_content(
@@ -272,5 +338,42 @@ mod tests {
         let rendered = serde_json::to_string(&turn.messages).unwrap();
         assert!(!rendered.contains("INTERNAL TURN POLICY"));
         assert_eq!(rendered.matches("Real title").count(), 2);
+    }
+
+    #[test]
+    fn direct_chat_retains_dynamic_retrieval_context() {
+        let turn = AiTurnBuilder::build(AiTurnInput {
+            mode: "chat",
+            note_title: "Paper",
+            system_context: "retrieval-backed",
+            conversation: &[],
+            question: "what about MiniCPM?",
+            mode_policy: "policy",
+            turn_instructions: "AUTOMATIC RETRIEVAL:\na 2-bit LFM2 model scores 47.5%",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: true,
+            verbose_tool_schemas: false,
+        });
+        let content = turn.messages.last().unwrap()["content"].as_str().unwrap();
+        assert!(content.contains("a 2-bit LFM2 model scores 47.5%"));
+        assert!(content.ends_with("what about MiniCPM?"));
+    }
+
+    #[test]
+    fn contextual_query_resolves_pronoun_followups_with_bounded_history() {
+        let history = vec![
+            json!({"role": "user", "content": "Does the paper discuss LFM2 and MiniCPM?"}),
+            json!({"role": "assistant", "content": "They did not have a 2-bit result."}),
+        ];
+        let query = contextual_retrieval_query(
+            "why did you say they did not have it?",
+            &history,
+        );
+        assert!(query.starts_with("Latest question: why did you say"));
+        assert_eq!(query.matches("Latest question:").count(), 2);
+        assert!(query.contains("LFM2 and MiniCPM"));
+        assert!(query.contains("They did not have a 2-bit result"));
     }
 }

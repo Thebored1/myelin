@@ -42,6 +42,31 @@ pub struct RetrievedChunk {
     pub distance: f32,
 }
 
+/// Format ranked passages without allowing retrieval to consume the rest of
+/// the model context. The final chunk is truncated when it reaches the budget.
+pub fn pack_passages(chunks: Vec<RetrievedChunk>, char_budget: usize) -> String {
+    let mut used = 0usize;
+    let mut evidence = String::new();
+    for chunk in chunks {
+        if used >= char_budget {
+            break;
+        }
+        let remaining = char_budget - used;
+        let excerpt: String = chunk.text.chars().take(remaining).collect();
+        if excerpt.trim().is_empty() {
+            continue;
+        }
+        evidence.push_str(&format!(
+            "\n\n[{} | document {}]\n{}",
+            chunk.source,
+            chunk.doc_id,
+            excerpt.trim()
+        ));
+        used += excerpt.chars().count();
+    }
+    evidence
+}
+
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("doc_id", DataType::Utf8, false),
@@ -81,7 +106,8 @@ pub async fn contains_document(index_dir: &Path, doc_id: &str) -> Result<bool> {
         Ok(table) => table,
         Err(_) => return Ok(false),
     };
-    let Some(filter) = doc_filter(Some(doc_id)) else {
+    let ids = [doc_id.to_string()];
+    let Some(filter) = doc_filter(Some(&ids)) else {
         return Ok(false);
     };
     let mut stream = table
@@ -175,21 +201,28 @@ fn rows_from_batch(batch: &RecordBatch) -> Vec<RetrievedChunk> {
         .collect()
 }
 
-fn doc_filter(doc_id: Option<&str>) -> Option<String> {
-    doc_id.map(|id| format!("doc_id = '{}'", id.replace('\'', "''")))
+fn doc_filter(doc_ids: Option<&[String]>) -> Option<String> {
+    doc_ids.and_then(|ids| {
+        let ids: Vec<String> = ids
+            .iter()
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect();
+        (!ids.is_empty()).then(|| format!("doc_id IN ({})", ids.join(", ")))
+    })
 }
 
 async fn vector_hits(
     table: &Table,
     query_vec: Vec<f32>,
     k: usize,
-    doc_id: Option<&str>,
+    doc_ids: Option<&[String]>,
 ) -> Result<Vec<RetrievedChunk>> {
     let mut query = table
         .query()
         .nearest_to(query_vec)
         .context("rag nearest_to")?;
-    if let Some(filter) = doc_filter(doc_id) {
+    if let Some(filter) = doc_filter(doc_ids) {
         query = query.only_if(filter);
     }
     let mut stream = query.limit(k)
@@ -207,12 +240,12 @@ async fn fts_hits(
     table: &Table,
     query_text: &str,
     k: usize,
-    doc_id: Option<&str>,
+    doc_ids: Option<&[String]>,
 ) -> Result<Vec<RetrievedChunk>> {
     let mut query = table
         .query()
         .full_text_search(lancedb::index::scalar::FullTextSearchQuery::new(query_text.to_string()));
-    if let Some(filter) = doc_filter(doc_id) {
+    if let Some(filter) = doc_filter(doc_ids) {
         query = query.only_if(filter);
     }
     let mut stream = query.limit(k)
@@ -244,7 +277,7 @@ pub async fn search_hybrid(
     query_vec: Vec<f32>,
     query_text: &str,
     k: usize,
-    doc_id: Option<&str>,
+    doc_ids: Option<&[String]>,
 ) -> Result<Vec<RetrievedChunk>> {
     let conn = open(index_dir).await?;
     let table = match conn.open_table(RAG_TABLE).execute().await {
@@ -252,8 +285,8 @@ pub async fn search_hybrid(
         Err(_) => return Ok(Vec::new()),
     };
     let pool = (k * 4).max(20);
-    let vec_hits = vector_hits(&table, query_vec, pool, doc_id).await.unwrap_or_default();
-    let fts = fts_hits(&table, query_text, pool, doc_id).await.unwrap_or_default();
+    let vec_hits = vector_hits(&table, query_vec, pool, doc_ids).await.unwrap_or_default();
+    let fts = fts_hits(&table, query_text, pool, doc_ids).await.unwrap_or_default();
 
     // Reciprocal Rank Fusion across the two ranked lists.
     const RRF_K: f32 = 60.0;
@@ -356,16 +389,40 @@ mod tests {
 
         assert!(contains_document(dir.path(), "note-a").await.unwrap());
         assert!(!contains_document(dir.path(), "missing").await.unwrap());
+        let scope = vec!["note-a".to_string()];
         let hits = search_hybrid(
             dir.path(),
             vec![0.5; DIM as usize],
             "chunk",
             10,
-            Some("note-a"),
+            Some(&scope),
         )
         .await
         .unwrap();
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|hit| hit.doc_id == "note-a"));
+
+        let pair = vec!["note-a".to_string(), "note-b".to_string()];
+        let pair_hits =
+            search_hybrid(dir.path(), vec![0.5; DIM as usize], "chunk", 10, Some(&pair))
+                .await
+                .unwrap();
+        assert!(pair_hits.iter().any(|hit| hit.doc_id == "note-a"));
+        assert!(pair_hits.iter().any(|hit| hit.doc_id == "note-b"));
+    }
+
+    #[test]
+    fn passage_packing_labels_sources_and_respects_adaptive_budget() {
+        let chunks = vec![RetrievedChunk {
+            doc_id: "pdf-a".into(),
+            source: "Paper.pdf".into(),
+            chunk_index: 0,
+            text: "abcdefghij".into(),
+            distance: 1.0,
+        }];
+        let packed = pack_passages(chunks, 4);
+        assert!(packed.contains("[Paper.pdf | document pdf-a]"));
+        assert!(packed.ends_with("abcd"));
+        assert!(!packed.contains("abcde"));
     }
 }
