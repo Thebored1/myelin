@@ -26,18 +26,52 @@ pub fn cap_result_with(mut s: String, cap: usize) -> String {
     s
 }
 
-/// Trim the conversation to fit `max_chars`, always keeping the system message and
-/// dropping OLDEST whole turns first (a user message plus the assistant/tool
-/// messages that follow it), so a tool result is never orphaned from its call.
-pub fn fit_context(history: &mut Vec<Value>, max_chars: usize) {
-    let total = |h: &[Value]| -> usize { h.iter().map(|m| m.to_string().len()).sum() };
+/// Trim the conversation to fit `max_chars`, always keeping the system message
+/// and the CURRENT user turn (the latest user message plus the assistant/tool
+/// messages that follow it). Only OLDEST whole turns may be dropped — a user
+/// message plus the assistant/tool messages after it — so a tool result is
+/// never orphaned from its call and the in-flight request is never lost.
+///
+/// The system message (which embeds the note body) is fixed context and is
+/// never counted against the budget: the host sizes it separately, so charging
+/// it here would silently wipe the entire conversation on long notes.
+///
+/// Returns true when the history was actually shortened (so callers can detect
+/// a futile retry when the budget cannot shrink the prompt any further).
+pub fn fit_context(history: &mut Vec<Value>, max_chars: usize) -> bool {
+    if history.len() < 3 {
+        return false;
+    }
+    let fixed_len = if history[0]["role"] == "system" {
+        history[0].to_string().len()
+    } else {
+        0
+    };
+    let total = |h: &[Value]| -> usize {
+        h.iter()
+            .map(|m| m.to_string().len())
+            .sum::<usize>()
+            .saturating_sub(fixed_len)
+    };
+    let mut changed = false;
     while total(history) > max_chars && history.len() > 3 {
+        // The current turn (last user message onward) must never be dropped.
+        let Some(current_user) = history.iter().rposition(|m| m["role"] == "user") else {
+            break;
+        };
+        // End of the OLDEST whole turn: the next user message after index 1.
         let mut end = 2;
-        while end < history.len() && history[end]["role"] != "user" {
+        while end < current_user && history[end]["role"] != "user" {
             end += 1;
         }
+        // Nothing droppable remains without removing the current request.
+        if end >= history.len() || end > current_user {
+            break;
+        }
         history.drain(1..end);
+        changed = true;
     }
+    changed
 }
 
 /// In reasoning-off mode a hybrid-thinking model still leaks a (shortened) chain
@@ -708,28 +742,9 @@ pub fn extract_partial_content(raw: &str) -> Option<String> {
 /// Protocol/template residue is never valid generated note content. Reject the
 /// call instead of trimming and saving an approximation: the speculative
 /// editor preview can then be restored from its authoritative snapshot.
+/// Shared with Myelin's host-side guard so both hosts agree on the markers.
 pub fn note_content_has_protocol_residue(content: &str) -> bool {
-    let tail: String = content
-        .chars()
-        .rev()
-        .take(256)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    let tail = tail.to_ascii_lowercase();
-    [
-        "<|tool_call",
-        "<|tool_call_end|>",
-        "<tool_call",
-        "</tool_call",
-        "/content>}",
-        "</content>",
-        "> write_note(content=",
-        "] write_note(content=",
-    ]
-    .iter()
-    .any(|marker| tail.contains(marker))
+    myelin_edit_core::note_content_has_protocol_residue(content)
 }
 
 
@@ -1026,6 +1041,44 @@ mod tests {
         fit_context(&mut h, 200);
         assert_eq!(h[0]["role"], "system");
         assert!(h.len() < 5);
+        // The latest user turn survives trimming.
+        assert_eq!(h.last().unwrap()["content"], "d".repeat(50));
+    }
+
+    #[test]
+    fn fit_context_never_drops_the_current_user_turn() {
+        // A single-turn multi-tool exchange: [system, user, assistant(tool_calls),
+        // tool, ...]. The current user request and its tool results must survive
+        // even when the conversation alone exceeds the budget.
+        let mut h = vec![
+            json!({"role":"system","content":"sys"}),
+            json!({"role":"user","content":"search then write".repeat(40)}),
+            json!({"role":"assistant","content":null,"tool_calls":[json!({"id":"1","function":{"name":"search_notes","arguments":"{}"}})]}),
+            json!({"role":"tool","tool_call_id":"1","content":"result".repeat(40)}),
+        ];
+        let changed = fit_context(&mut h, 200);
+        assert!(!changed, "the only turn must never be dropped");
+        assert_eq!(h.len(), 4);
+        assert_eq!(h[1]["content"], "search then write".repeat(40));
+        assert_eq!(h[3]["tool_call_id"], "1");
+    }
+
+    #[test]
+    fn fit_context_excludes_the_note_bearing_system_from_budget() {
+        // The system message embeds the note body; it must not consume the
+        // conversation budget, or the model would see zero prior turns on long
+        // notes even though the host persisted them.
+        let mut h = vec![
+            json!({"role":"system","content":"n".repeat(20_000)}),
+            json!({"role":"user","content":"old q".repeat(10)}),
+            json!({"role":"assistant","content":"old a".repeat(10)}),
+            json!({"role":"user","content":"new q".repeat(10)}),
+        ];
+        fit_context(&mut h, 100);
+        assert_eq!(h[0]["role"], "system");
+        // The oldest turn is dropped, the current user turn is kept.
+        assert_eq!(h[1]["content"], "new q".repeat(10));
+        assert_eq!(h.len(), 2);
     }
 
     #[test]

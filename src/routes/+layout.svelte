@@ -296,13 +296,14 @@
 		--text-primary: #eeeeee;
 		--text-secondary: #a49d9a;
 		--text-inverse: #020202;
+		--text-selection: #020202; /* dark text on the orange selection highlight */
 		--text-hero: #f6f1e7;
 		--border-default: #3d3a39;
 		--border-subtle: #4d4947;
 		--bg-page: #020202;
 		--bg-panel: #101010;
 		--bg-code: #1f1d1c;
-		--bg-selection: #ef6f2e;
+		--bg-selection: var(--accent-100);
 		--font-sans: 'Inter', system-ui, -apple-system, sans-serif;
 		--font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
 		--space-1: 0.25rem;
@@ -392,6 +393,7 @@
 		--text-primary: #1f1d1c;
 		--text-secondary: #6e6a67;
 		--text-inverse: #ffffff;
+		--text-selection: #1f1d1c; /* dark text on the orange selection highlight */
 		--text-hero: #1a1714;
 
 		--border-default: #e2ded9;
@@ -400,7 +402,7 @@
 		--bg-page: #f4f2ef;
 		--bg-panel: #ffffff;
 		--bg-code: #f0ede9;
-		/* --bg-selection / accent stay the same orange */
+		--bg-selection: var(--accent-100);
 
 		--hover-overlay: rgba(0, 0, 0, 0.04);
 		--hover-overlay-strong: rgba(0, 0, 0, 0.07);
@@ -502,9 +504,16 @@
 		-webkit-user-select: text;
 	}
 
+	/* The default WebKitGTK focus ring (drawn in the GTK theme accent color)
+	   appears around every clicked control. Suppress it globally. */
+	:global(:focus),
+	:global(:focus-visible) {
+		outline: none;
+	}
+
 	:global(::selection) {
 		background: var(--bg-selection);
-		color: var(--text-inverse);
+		color: var(--text-selection);
 	}
 
 	/* Adjust layout height for all shells to fit inside the custom height */

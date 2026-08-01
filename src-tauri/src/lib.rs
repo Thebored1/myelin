@@ -470,15 +470,6 @@ async fn list_model_profiles(
 }
 
 #[tauri::command]
-async fn extract_from_paste(
-    _state: State<'_, AppState>,
-    _note_id: String,
-    _paste_content: String,
-) -> Result<String, String> {
-    Ok("Mocked extracted content from paste...".into())
-}
-
-#[tauri::command]
 async fn get_all_note_documents(state: State<'_, AppState>) -> Result<Vec<NoteDocument>, String> {
     Ok(state.get_all_note_documents())
 }
@@ -494,37 +485,6 @@ async fn read_pdf_binary(
         .read_pdf_binary(note_id)
         .await
         .map(tauri::ipc::Response::new)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn summarise_note(state: State<'_, AppState>, note_id: String) -> Result<String, String> {
-    state
-        .summarise_note(note_id)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn summarise_large_note(
-    state: State<'_, AppState>,
-    note_id: String,
-) -> Result<String, String> {
-    state
-        .summarise_large_note(note_id)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn ask_ai(
-    state: State<'_, AppState>,
-    note_id: String,
-    question: String,
-) -> Result<String, String> {
-    state
-        .ask_ai(note_id, question)
-        .await
         .map_err(|error| error.to_string())
 }
 
@@ -551,35 +511,6 @@ async fn ask_ai_stream(
             selection,
             doc_type,
             interaction_mode,
-        )
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-async fn ask_ai_edit(
-    state: State<'_, AppState>,
-    note_id: String,
-    instruction: String,
-    action: String,
-    request_id: String,
-    target: crate::agent::SelectionArg,
-) -> Result<(), String> {
-    let question = match action.as_str() {
-        "replace" => format!("Replace the selected text with entirely new content following this instruction: {instruction}"),
-        "rewrite" => format!("Rewrite the selected text while preserving its meaning and facts. Follow this instruction: {instruction}"),
-        "delete" => "Delete the selected text. Call write_note with an empty content string.".to_string(),
-        "write" => format!("Write and insert new content at the cursor following this instruction: {instruction}"),
-        _ => return Err("unknown AI edit action".to_string()),
-    };
-    state
-        .ask_ai_stream(
-            note_id,
-            question,
-            request_id,
-            Some(target),
-            Some("md".to_string()),
-            Some("edit".to_string()),
         )
         .await
         .map_err(|error| error.to_string())
@@ -890,13 +821,8 @@ pub fn run() {
             delete_document,
             list_model_profiles,
             get_all_note_documents,
-            extract_from_paste,
             read_pdf_binary,
-            summarise_note,
-            summarise_large_note,
-            ask_ai,
             ask_ai_stream,
-            ask_ai_edit,
             cancel_ai,
             save_chat_history,
             clear_ai_conversation,

@@ -624,7 +624,11 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
 
     // CHAT intent: skip the tool loop, answer directly in prose.
     if friendly && !intent_is_tool {
-        let wire = history.clone();
+        // The tool loop trims before every wire build; the CHAT path must do the
+        // same so an oversized history (long note + conversation) degrades by
+        // dropping oldest turns instead of hard-failing with a context error.
+        let mut wire = history.clone();
+        harness::fit_context(&mut wire, budget);
         let mut body = json!({
             "model": model,
             "messages": wire,
@@ -650,9 +654,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             }
         }
         emit_model_prompt(&tx, "CHAT request messages:", &body).await;
-        let serialized_at = Instant::now();
-        let _ = serde_json::to_vec(&body);
-        let _ = tx.send(Out::Debug { kind: "request_serialized".into(), message: format!("elapsed_ms={}", serialized_at.elapsed().as_millis()) }).await;
         let dispatched_at = Instant::now();
         let resp = match client
             .post(&url)
@@ -798,9 +799,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             })
             .await;
         emit_model_prompt(&tx, "AGENT request messages:", &body).await;
-        let serialized_at = Instant::now();
-        let _ = serde_json::to_vec(&body);
-        let _ = tx.send(Out::Debug { kind: "request_serialized".into(), message: format!("elapsed_ms={}", serialized_at.elapsed().as_millis()) }).await;
 
         // POST to llama-server, retrying with backoff. The host app starts the
         // server just before calling us, so the first attempt can land while it's
@@ -846,8 +844,21 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             let status = resp.status();
             let txt = resp.text().await.unwrap_or_default();
             // Context overflow: shrink budget and retry this turn instead of dying.
+            // If the budget cannot shrink the prompt any further (e.g. the note
+            // body in the system message alone exceeds the context), retrying is
+            // futile — the retried prompt would be byte-identical. Fail fast
+            // rather than burning repeated round-trips.
             if status.as_u16() == 400 && txt.contains("context") && budget > 4_000 {
                 budget /= 2;
+                let trim_shrank = harness::fit_context(&mut history, budget);
+                if !trim_shrank {
+                    let _ = tx
+                        .send(Out::Error(format!(
+                            "upstream HTTP {status}: {txt} (prompt too large to fit the context; shorten the note or conversation and retry)"
+                        )))
+                        .await;
+                    return;
+                }
                 continue;
             }
             // Tool decoding error: llama-server rejected the model's native FC
@@ -971,9 +982,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 }
             }
             emit_model_prompt(&tx, "PROMPT-TOOLS fallback request messages:", &fb_body).await;
-            let serialized_at = Instant::now();
-            let _ = serde_json::to_vec(&fb_body);
-            let _ = tx.send(Out::Debug { kind: "request_serialized".into(), message: format!("elapsed_ms={}", serialized_at.elapsed().as_millis()) }).await;
             let fb_resp = {
                 let mut attempt = 0u32;
                 const MAX_ATTEMPTS: u32 = 6;

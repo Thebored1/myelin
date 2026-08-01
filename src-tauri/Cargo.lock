@@ -5719,6 +5719,7 @@ dependencies = [
  "lancedb",
  "libc",
  "log",
+ "myelin-edit-core",
  "notify",
  "parking_lot",
  "regex",
@@ -5742,6 +5743,13 @@ dependencies = [
  "uuid",
  "walkdir",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "myelin-edit-core"
+version = "0.1.0"
+dependencies = [
+ "regex",
 ]
 
 [[package]]

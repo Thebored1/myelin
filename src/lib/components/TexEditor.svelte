@@ -112,7 +112,7 @@
 			{ backgroundColor: 'var(--bg-selection) !important' },
 		'.cm-content ::selection': {
 			backgroundColor: 'var(--bg-selection) !important',
-			color: 'var(--text-inverse) !important'
+			color: 'var(--text-selection) !important'
 		},
 		'&.cm-focused': { outline: 'none' },
 		'.cm-lint-marker': { width: '0.8em', height: '0.8em' }

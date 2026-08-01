@@ -23,7 +23,10 @@
 
 	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 	import { hideThinkingContent } from '$lib/chatContent';
-	import { composeNoteStreamPreviewWithStatus } from '$lib/noteStreamPreview';
+	import {
+		composeNoteStreamPreviewWithStatus,
+		locateNoteStreamTarget
+	} from '$lib/noteStreamPreview';
 	import { resolveActiveAiTarget } from '$lib/aiTarget';
 	import {
 		canApplyReconciledNote,
@@ -41,12 +44,6 @@
 	let draftTags = $state('');
 	let isBusy = $state(false);
 	let message = $state('');
-	let summaryProgress = $state<{
-		phase: string;
-		completed: number;
-		total: number;
-		message: string;
-	} | null>(null);
 	// First LaTeX compile fetches Tectonic's ~50 MB bundle; show real progress.
 	let latexDownloadMsg = $state<string | null>(null);
 	// .tex live-preview state.
@@ -73,6 +70,11 @@
 	let chatMessages = $state<ChatMessage[]>([]);
 	let chatInput = $state('');
 	let copiedIdx = $state<number | null>(null);
+	// Coalesce the per-token ai://chat_chunk events into one chatMessages update
+	// per frame, so the streaming bubble re-renders at most 60×/s instead of once
+	// per token (each update re-parses the accumulated markdown).
+	let chatChunkBuf = '';
+	let chatChunkFlushPending = false;
 	let chatPersistTimer: ReturnType<typeof setTimeout> | undefined;
 
 	function persistableChatHistory(messages: ChatMessage[]): ChatMessage[] {
@@ -95,7 +97,6 @@
 		try {
 			const persisted = persistableChatHistory(messages);
 			await invoke('save_chat_history', { noteId, chatHistory: persisted });
-			if (note?.id === noteId) note = { ...note, chatHistory: persisted };
 		} catch (error) {
 			console.error('Failed to persist chat history:', error);
 		}
@@ -109,12 +110,72 @@
 		}, delay);
 	}
 
-	// Debug window state for AI performance metrics.
-	let showDebugWindow = $state(localStorage.getItem('myelin_debug_window') !== 'false');
+	// Apply any chat deltas buffered since the last frame (coalesces the
+	// per-token ai://chat_chunk events into one chatMessages update).
+	function flushChatChunks() {
+		if (!chatChunkBuf) return;
+		const delta = chatChunkBuf;
+		chatChunkBuf = '';
+		chatMessages = chatMessages.map((m) => {
+			if (m.isStreaming) {
+				return { ...m, content: m.content + delta, statusText: undefined };
+			}
+			return m;
+		});
+		checkpointChatHistory();
+		if (showDebugWindow && debugInfo) {
+			if (debugInfo.firstChunk === null) {
+				debugInfo = {
+					...debugInfo,
+					firstChunk: Date.now(),
+					trace: [
+						...debugInfo.trace,
+						{ time: Date.now(), msg: 'Generation started', kind: 'gen' as const }
+					]
+				};
+			}
+			debugInfo = { ...debugInfo, replyChars: debugInfo.replyChars + delta.length };
+		}
+	}
+
+	// Debug window state for AI performance metrics. Off by default — it renders
+	// a live per-request trace (including full model prompts) that churns the
+	// page for every user if left on.
+	let showDebugWindow = $state(localStorage.getItem('myelin_debug_window') === 'true');
 	$effect(() => {
 		localStorage.setItem('myelin_debug_window', String(showDebugWindow));
 	});
 	type DebugTraceEntry = { time: number; msg: string; kind: string };
+	// Keep the trace bounded: full model prompts are multi-KB and would otherwise
+	// bloat every persisted chat message and the live debug window.
+	const MAX_DEBUG_TRACE = 200;
+	const MAX_DEBUG_MSG_CHARS = 2000;
+	function makeDebugTraceEntry(kind: string, msg: string): DebugTraceEntry {
+		let display = msg;
+		if (display.length > MAX_DEBUG_MSG_CHARS) {
+			display =
+				display.slice(0, MAX_DEBUG_MSG_CHARS) + `… (+${display.length - MAX_DEBUG_MSG_CHARS}c)`;
+		}
+		return { time: Date.now(), msg: `[${kind}] ${display}`, kind };
+	}
+
+	// Memoized markdown render for chat bubbles. Each ai://chat_chunk re-renders
+	// the streaming bubble, so without a cache the whole accumulated response is
+	// parsed + sanitized on every token (O(n²) over the stream). Caching by exact
+	// content means only the bubble whose content actually changed re-parses.
+	const chatRenderCache = new Map<string, string>();
+	const MAX_CHAT_RENDER_CACHE = 64;
+	function renderChatContent(content: string): string {
+		const cached = chatRenderCache.get(content);
+		if (cached !== undefined) return cached;
+		const rendered = DOMPurify.sanitize(marked.parse(content) as string);
+		if (chatRenderCache.size >= MAX_CHAT_RENDER_CACHE && chatRenderCache.size > 0) {
+			const oldest = chatRenderCache.keys().next().value as string | undefined;
+			if (oldest) chatRenderCache.delete(oldest);
+		}
+		chatRenderCache.set(content, rendered);
+		return rendered;
+	}
 	let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
 	let activeAiComposerMode: 'chat' | 'editor' | null = null;
 	let activeChatNoteId: string | null = null;
@@ -133,6 +194,10 @@
 	}
 
 	function setStreamingStatus(statusText: string | undefined) {
+		const changed = chatMessages.some(
+			(message) => message.isStreaming && message.statusText !== statusText
+		);
+		if (!changed) return;
 		chatMessages = chatMessages.map((message) =>
 			message.isStreaming ? { ...message, statusText } : message
 		);
@@ -239,6 +304,16 @@
 	let chatMessagesEl: HTMLDivElement | undefined = $state();
 	let currentTime = $state(Date.now());
 	let debugTimer: ReturnType<typeof setInterval> | null = null;
+	// Live "time taken" only matters while a message is streaming; run the
+	// 100ms ticker only then instead of forever.
+	$effect(() => {
+		const streaming = chatMessages.some((m) => m.isStreaming);
+		if (!streaming) return;
+		const ticker = setInterval(() => {
+			currentTime = Date.now();
+		}, 100);
+		return () => clearInterval(ticker);
+	});
 
 	let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
 
@@ -251,11 +326,17 @@
 	// requested only after the note has had a chance to paint.
 	let toolsReady = $state(false);
 	let fullscreenShortcut = $state('Esc');
-	let noteAnimationTimer: ReturnType<typeof setTimeout> | undefined;
 	// Live note streaming (real token-by-token writes from the backend).
 	let noteStreaming = $state(false);
 	let noteStreamBuf = '';
 	let noteStreamBackup = '';
+	// Coalesces the per-token note_delta events into one editor rebuild per
+	// frame. setValue re-parses and re-renders the ENTIRE note, so applying it
+	// on every token makes long writes visibly janky (and destroys the caret).
+	let noteStreamFlushPending = false;
+	// The target span never moves between deltas of one request; locate it once
+	// in beginNoteStream instead of re-scanning the whole note per token.
+	let noteStreamSpan: [number, number] | null = null;
 	let savedEditorRange: Range | null = null;
 	let shortcutEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
@@ -287,13 +368,15 @@
 	let mainLayoutEl: HTMLElement | undefined = $state();
 
 	function activeAiNoteId(): string | null {
-		return resolveActiveAiTarget({
-			openedDocumentId: note?.id ?? null,
-			isSourceMaterial,
-			attachedNoteVisible: showAttachedNote,
-			workingNoteId: scratchpadSavedId,
-			attachedSourceId: activeSourceId
-		})?.workingNoteId ?? null;
+		return (
+			resolveActiveAiTarget({
+				openedDocumentId: note?.id ?? null,
+				isSourceMaterial,
+				attachedNoteVisible: showAttachedNote,
+				workingNoteId: scratchpadSavedId,
+				attachedSourceId: activeSourceId
+			})?.workingNoteId ?? null
+		);
 	}
 
 	async function openAttachedNote() {
@@ -347,8 +430,7 @@
 			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
 			const resizerWidth = 10;
 			const minSourceWidth = PANE_MIN_WIDTH;
-			const maxSourceRatio =
-				((rect.width - PANE_MIN_WIDTH - resizerWidth) / rect.width) * 100;
+			const maxSourceRatio = ((rect.width - PANE_MIN_WIDTH - resizerWidth) / rect.width) * 100;
 			const minSourceRatio = (minSourceWidth / rect.width) * 100;
 			if (maxSourceRatio >= minSourceRatio) {
 				splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxSourceRatio));
@@ -1016,7 +1098,10 @@
 					}
 				}
 				processedRevision = revision;
-			} while (texCompileQueued || (note?.id === processedNoteId && texRevision !== processedRevision));
+			} while (
+				texCompileQueued ||
+				(note?.id === processedNoteId && texRevision !== processedRevision)
+			);
 		} finally {
 			texCompiling = false;
 			if (texCompileQueued) texPreviewStatus = 'pending';
@@ -1573,27 +1658,71 @@
 	// visible until the first real content arrives; clearing here made fast tool
 	// calls flash an empty editor before the authoritative write landed.
 	function beginNoteStream() {
-		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
-		noteAnimationTimer = undefined;
 		noteStreamBackup = vditorInstance ? vditorInstance.getValue() : draftBody;
 		noteStreamBuf = '';
 		noteStreaming = true;
+		// Every stream flush rebuilds the whole IR DOM; keep the transclusion
+		// observer disconnected until the stream settles so it doesn't drain
+		// full-tree mutation batches each frame. scanForTransclusions runs once
+		// after the stream lands (setupTransclusionObserver re-arms it).
+		if (transclusionObserver) transclusionObserver.disconnect();
+		// Locate the cursor/selection target once: it is stable for the whole
+		// request, so per-delta re-scanning a large note is wasted work.
+		noteStreamSpan = activeAiEditTarget
+			? locateNoteStreamTarget(noteStreamBackup, activeAiEditTarget)
+			: null;
+		scheduleNoteStreamFlush();
 	}
 
-	// A token (or several) of the note arrived — replace the old preview with the
-	// growing result only once there is content to show.
-	function appendNoteStream(delta: string): boolean {
-		if (!noteStreaming) beginNoteStream();
-		noteStreamBuf += delta;
+	function scheduleNoteStreamFlush() {
+		if (noteStreamFlushPending) return;
+		noteStreamFlushPending = true;
+		requestAnimationFrame(() => {
+			noteStreamFlushPending = false;
+			flushNoteStream();
+		});
+	}
+
+	// One editor rebuild per frame, coalescing all deltas that arrived since the
+	// last flush. Restores the caret/selection across the rebuild so streaming
+	// no longer destroys the user's cursor position every token.
+	function flushNoteStream() {
+		if (!noteStreaming) return;
 		const result = composeNoteStreamPreviewWithStatus(
 			noteStreamBackup,
 			noteStreamBuf,
-			activeAiEditTarget
+			activeAiEditTarget,
+			noteStreamSpan
 		);
 		if (vditorInstance) {
+			// getSelectionTextOffset walks every text node of the editor; only do
+			// it when the editor actually has focus and a live selection. The
+			// user isn't interacting mid-stream, so skip the walk otherwise.
+			const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+			const hasSelection =
+				editorEl?.contains(document.activeElement) && window.getSelection()?.rangeCount !== 0;
+			const selectionOffset = editorEl && hasSelection ? getSelectionTextOffset(editorEl) : null;
 			vditorInstance.setValue(result.preview);
+			if (selectionOffset !== null) {
+				const refreshed = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+				if (refreshed) {
+					restoreSelectionTextOffset(refreshed, Math.min(selectionOffset, result.preview.length));
+				}
+			}
+			// Keep draftBody in sync with the live preview so any mid-stream save
+			// (title/tag autosave, exit) carries the streamed content instead of
+			// racing the backend with a stale body.
+			draftBody = result.preview;
 		}
-		return result.applied;
+	}
+
+	// A token (or several) of the note arrived — buffer it and coalesce the
+	// editor update to the next animation frame.
+	function appendNoteStream(delta: string): boolean {
+		if (!noteStreaming) beginNoteStream();
+		noteStreamBuf += delta;
+		scheduleNoteStreamFlush();
+		return noteStreamSpan !== null || !activeAiEditTarget;
 	}
 
 	// The stream turned out not to be a whole-body replace (append/edit) — undo
@@ -1602,13 +1731,12 @@
 		if (!noteStreaming) return;
 		noteStreaming = false;
 		if (vditorInstance) vditorInstance.setValue(noteStreamBackup);
+		setupTransclusionObserver();
 	}
 
 	// Authoritative result of a write_note tool call. Sets the final content in
 	// one shot (no fake animation) and reconciles any live-streamed preview.
 	function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
-		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
-		noteAnimationTimer = undefined;
 		noteStreaming = false;
 		// Append needs the CURRENT note as its base on every editor. Markdown uses
 		// the live vditor value; .tex/.ipynb editors (CodeMirror/cell UI) track the
@@ -1624,10 +1752,14 @@
 		draftBody = finalContent;
 		// Avoid a second visible reset only when the editor itself already contains
 		// the authoritative result. The streamed buffer may be stale or may cover
-		// only a cursor/selection target.
+		// only a cursor/selection target. clearStack resets Vditor's undo history so
+		// Ctrl+Z doesn't walk back through every mid-stream snapshot.
 		if (vditorInstance && editorNeedsAuthoritativeBody(vditorInstance.getValue(), finalContent)) {
-			vditorInstance.setValue(finalContent);
+			vditorInstance.setValue(finalContent, true);
 		}
+		// Re-arm the transclusion observer disconnected during streaming and scan
+		// once so the settled content picks up any new links.
+		setupTransclusionObserver();
 	}
 
 	function initVditor() {
@@ -1896,6 +2028,9 @@
 		if (transclusionObserver) transclusionObserver.disconnect();
 
 		transclusionObserver = new MutationObserver(() => {
+			// Streaming setValue rebuilds the entire IR DOM every frame; the
+			// observer is disconnected for the whole stream (see beginNoteStream)
+			// and re-armed when it settles, so scanning only runs on real edits.
 			scanForTransclusions();
 		});
 
@@ -2224,10 +2359,6 @@
 		const aiNoteId = activeAiNoteId();
 		if (!aiNoteId) return;
 		if (!(await stopActiveChat())) return;
-		if (noteAnimationTimer) {
-			clearTimeout(noteAnimationTimer);
-			noteAnimationTimer = undefined;
-		}
 		chatMessages = chatMessages.slice(0, snapshot.chatLength);
 		draftBody = snapshot.noteBody;
 		draftTitle = snapshot.draftTitle;
@@ -2309,7 +2440,10 @@
 			draftTitle = refreshed.title;
 			draftBody = refreshed.body;
 			draftTags = refreshed.tags.join(', ');
-			if (vditorInstance && editorNeedsAuthoritativeBody(vditorInstance.getValue(), refreshed.body)) {
+			if (
+				vditorInstance &&
+				editorNeedsAuthoritativeBody(vditorInstance.getValue(), refreshed.body)
+			) {
 				vditorInstance.setValue(refreshed.body);
 			}
 		}
@@ -2324,6 +2458,9 @@
 		// otherwise it can close the current bubble while its sidecar stream is
 		// still running and allow another request to race with it.
 		if (activeChatRequestId !== requestId) return;
+		// Flush any chat deltas still buffered for the next frame so the final
+		// token(s) are part of the finished bubble before it's marked done.
+		flushChatChunks();
 		const requestNoteId = activeChatNoteId;
 		// A cancelled request can still arrive as chat_done. Revert any speculative
 		// editor preview unless note_written already committed the authoritative body.
@@ -2581,7 +2718,20 @@
 		isBusy = true;
 		try {
 			const allDocs = await invoke<NoteDocument[]>('get_all_note_documents');
-			pdfNotesList = allDocs.filter((d) => d.relativePath.toLowerCase().endsWith('.pdf'));
+			const referenced = new Set(
+				allDocs.map((d) => d.sourcePdf).filter((id): id is string => !!id)
+			);
+			const isCopyName = (d: NoteDocument) => {
+				const name = d.relativePath.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+				return (
+					/ \d+\.(pdf|epub)$/.test(name) ||
+					/ [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|epub)$/.test(name)
+				);
+			};
+			pdfNotesList = allDocs.filter(
+				(d) =>
+					d.relativePath.toLowerCase().endsWith('.pdf') && !(referenced.has(d.id) && isCopyName(d))
+			);
 		} catch (err) {
 			message = `Failed to load PDFs: ${err}`;
 		} finally {
@@ -2605,7 +2755,7 @@
 				: await invoke<NoteDocument>('clone_pdf_for_attachment', {
 						noteId: pdfNote.id,
 						notebook: openNoteNotebook()
-				  });
+					});
 			createdPdfId = attachmentPdf.id;
 			const saved = await invoke<NoteDocument>('save_note', {
 				noteId: note.id,
@@ -2764,94 +2914,6 @@
 		pendingBack = false;
 	}
 
-	// AI Actions
-	async function runExtract() {
-		if (!note || !vditorInstance) return;
-		const aiNoteId = activeAiNoteId();
-		if (!aiNoteId) return;
-		isBusy = true;
-		try {
-			message = 'Extracting from paste...';
-			const res = await invoke<string>('extract_from_paste', {
-				noteId: aiNoteId,
-				pasteContent: draftBody
-			});
-			const append = `\n\n> AI Extraction:\n${res}`;
-			vditorInstance.insertValue(append);
-			message = 'Extraction appended.';
-		} finally {
-			isBusy = false;
-		}
-	}
-
-	let aiModal = $state<{ title: string; body: string; sourceNoteId?: string } | null>(null);
-
-	async function runSummarise() {
-		if (!note) return;
-		if ((isSourceMaterial && showAttachedNote) || saveStatus !== 'saved') await saveNote();
-		const aiNoteId = activeAiNoteId();
-		if (!aiNoteId) return;
-		isBusy = true;
-		summaryProgress = { phase: 'starting', completed: 0, total: 0, message: 'Preparing source…' };
-		try {
-			message = 'Summarising source…';
-			const res = await invoke<string>('summarise_large_note', { noteId: aiNoteId });
-			aiModal = { title: 'AI summary', body: res, sourceNoteId: aiNoteId };
-			message = 'Summary complete.';
-		} catch (e) {
-			message = `Summary failed: ${String(e)}`;
-		} finally {
-			summaryProgress = null;
-			isBusy = false;
-		}
-	}
-
-	async function saveSummaryAsNewNote() {
-		if (!aiModal || !note) return;
-		const created = await invoke<NoteDocument>('create_note', {
-			title: `${note.title} — Summary`,
-			sourcePdf: null,
-			extension: 'md',
-			notebook: openNoteNotebook()
-		});
-		await invoke('save_note', {
-			noteId: created.id,
-			title: created.title,
-			tags: ['summary'],
-			body: aiModal.body,
-			sourcePdf: null,
-			annotations: []
-		});
-		message = 'Summary saved as a new note.';
-		aiModal = null;
-	}
-
-	function appendSummaryToCurrentNote() {
-		if (!aiModal || !note) return;
-		appendToNoteBody(`\n\n## AI Summary\n\n${aiModal.body}\n`);
-		aiModal = null;
-		message = 'Summary appended to the note.';
-	}
-
-	async function runAskAI() {
-		if (!note) return;
-		const q = prompt('What would you like to ask about this note?');
-		if (!q) return;
-		isBusy = true;
-		try {
-			if ((isSourceMaterial && showAttachedNote) || saveStatus !== 'saved') await saveNote();
-			if (pdfIngestionPromise) await pdfIngestionPromise;
-			const aiNoteId = activeAiNoteId();
-			if (!aiNoteId) return;
-			message = 'Asking AI...';
-			const res = await invoke<string>('ask_ai', { noteId: aiNoteId, question: q });
-			aiModal = { title: 'AI answer', body: res };
-			message = 'AI answered.';
-		} finally {
-			isBusy = false;
-		}
-	}
-
 	function updateToolbarOverflow() {
 		const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
 		if (!toolbar) return;
@@ -2873,6 +2935,11 @@
 	});
 
 	function handleGlobalSelectionChange() {
+		// Streaming rebuilds the editor DOM and restores the caret programmatically,
+		// which fires selectionchange; running the full querySelectorAll + onSelection
+		// capture (including a full vditorInstance.getValue()) every ~120ms during
+		// a note stream is wasted work. Skip until the stream settles.
+		if (noteStreaming) return;
 		if (!vditorContainer) return;
 		const sel = window.getSelection();
 
@@ -2910,10 +2977,6 @@
 			if (!isNaN(parsed)) sidebarWidth = parsed;
 		}
 
-		const timerInterval = setInterval(() => {
-			currentTime = Date.now();
-		}, 100);
-
 		let unlistenChunk: UnlistenFn;
 		let unlistenDone: UnlistenFn;
 		let unlistenError: UnlistenFn;
@@ -2924,7 +2987,6 @@
 		let unlistenNoteDelta: UnlistenFn;
 		let unlistenNoteStreamCancel: UnlistenFn;
 		let unlistenLatex: UnlistenFn;
-		let unlistenSummaryProgress: UnlistenFn;
 		let unlistenAiWarmup: UnlistenFn;
 
 		$showSidebarToggle = true;
@@ -2985,15 +3047,6 @@
 			}
 		}).then((fn) => (unlistenNoteStreamStart = fn));
 
-		listen<{ noteId: string; phase: string; completed: number; total: number; message: string }>(
-			'ai://summary_progress',
-			(event) => {
-				if (!note || activeAiNoteId() !== event.payload.noteId) return;
-				summaryProgress = event.payload;
-				message = event.payload.message;
-			}
-		).then((fn) => (unlistenSummaryProgress = fn));
-
 		listen<{ noteId: string; requestId: string; delta: string }>('ai://note_delta', (event) => {
 			if (
 				!note ||
@@ -3001,23 +3054,8 @@
 				activeChatRequestId !== event.payload.requestId
 			)
 				return;
-			const applied = appendNoteStream(event.payload.delta);
-			if (!applied && showDebugWindow && debugInfo) {
-				debugInfo = {
-					...debugInfo,
-					trace: [
-						...debugInfo.trace,
-						{
-							time: Date.now(),
-							msg: `Note delta rejected: stream target not found (${event.payload.delta.length}c)`,
-							kind: 'note' as const
-						}
-					]
-				};
-			}
-			chatMessages = chatMessages.map((m) =>
-				m.isStreaming ? { ...m, statusText: 'Writing replacement…' } : m
-			);
+			appendNoteStream(event.payload.delta);
+			setStreamingStatus('Writing replacement…');
 		}).then((fn) => (unlistenNoteDelta = fn));
 
 		listen<{ noteId: string; requestId: string }>('ai://note_stream_cancel', (event) => {
@@ -3115,25 +3153,15 @@
 
 		listen<{ delta: string; requestId: string }>('ai://chat_chunk', (event) => {
 			if (activeChatRequestId !== event.payload.requestId) return;
-			chatMessages = chatMessages.map((m) => {
-				if (m.isStreaming) {
-					return { ...m, content: m.content + event.payload.delta, statusText: undefined };
-				}
-				return m;
-			});
-			checkpointChatHistory();
-			if (showDebugWindow && debugInfo) {
-				if (debugInfo.firstChunk === null) {
-					debugInfo = {
-						...debugInfo,
-						firstChunk: Date.now(),
-						trace: [
-							...debugInfo.trace,
-							{ time: Date.now(), msg: 'Generation started', kind: 'gen' as const }
-						]
-					};
-				}
-				debugInfo = { ...debugInfo, replyChars: debugInfo.replyChars + event.payload.delta.length };
+			// Buffer deltas and apply once per frame; applying on every token
+			// re-renders the whole streaming bubble (full markdown re-parse).
+			chatChunkBuf += event.payload.delta;
+			if (!chatChunkFlushPending) {
+				chatChunkFlushPending = true;
+				requestAnimationFrame(() => {
+					chatChunkFlushPending = false;
+					flushChatChunks();
+				});
 			}
 		}).then((fn) => (unlistenChunk = fn));
 
@@ -3196,14 +3224,10 @@
 		let unlistenDebug: UnlistenFn | undefined;
 		listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
 			if (activeChatRequestId !== event.payload.requestId) return;
-			const entry: DebugTraceEntry = {
-				time: Date.now(),
-				msg: `[${event.payload.kind}] ${event.payload.msg}`,
-				kind: event.payload.kind
-			};
+			const entry = makeDebugTraceEntry(event.payload.kind, event.payload.msg);
 			// Keep every trace even with the panel closed; it is attached to
 			// the completed assistant turn and persisted in chat history.
-			pendingDebugTrace = [...pendingDebugTrace, entry];
+			pendingDebugTrace = [...pendingDebugTrace.slice(-(MAX_DEBUG_TRACE - 1)), entry];
 			const status = visibleAiStatus(event.payload.kind, event.payload.msg);
 			if (status) setStreamingStatus(status);
 			if (showDebugWindow && debugInfo) {
@@ -3216,7 +3240,7 @@
 						event.payload.kind === 'gen' && debugInfo.firstChunk === null
 							? entry.time
 							: debugInfo.firstChunk,
-					trace: [...debugInfo.trace, entry]
+					trace: [...debugInfo.trace.slice(-(MAX_DEBUG_TRACE - 1)), entry]
 				};
 			}
 		}).then((fn) => (unlistenDebug = fn));
@@ -3252,8 +3276,6 @@
 			window.removeEventListener('beforeunload', handleBeforeUnload);
 			$showSidebarToggle = false;
 
-			clearInterval(timerInterval);
-
 			if (unlistenChunk) unlistenChunk();
 			if (unlistenDone) unlistenDone();
 			if (unlistenError) unlistenError();
@@ -3266,7 +3288,6 @@
 			if (unlistenNoteDelta) unlistenNoteDelta();
 			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
 			if (unlistenLatex) unlistenLatex();
-			if (unlistenSummaryProgress) unlistenSummaryProgress();
 			if (unlistenAiWarmup) unlistenAiWarmup();
 		};
 	});
@@ -3278,7 +3299,6 @@
 		const aiNoteId = activeAiNoteId();
 		if (aiNoteId && chatMessages.length) void persistChatHistory(aiNoteId, chatMessages);
 		noteClosed();
-		if (noteAnimationTimer) clearTimeout(noteAnimationTimer);
 		if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
 		if (vditorInstance) vditorInstance.destroy();
 		if (typeof document !== 'undefined') {
@@ -3302,7 +3322,9 @@
 		}
 	});
 	$effect(() => {
-		if (!showDebugWindow) {
+		// Only keep the 100ms live-elapsed ticker while the debug window is open
+		// AND a request is in flight; the window already renders wall-clock time.
+		if (!showDebugWindow || !debugInfo || debugInfo.done || !activeChatRequestId) {
 			if (debugTimer) {
 				clearInterval(debugTimer);
 				debugTimer = null;
@@ -3478,10 +3500,7 @@
 				{:else if sourceMaterialType === 'html'}
 					<div class="viewer-loading">Loading document viewer…</div>
 				{/if}
-				{#if sourceMaterialType === 'pdf' &&
-				(pdfIngestionStatus === 'indexing' ||
-					pdfIngestionStatus === 'empty' ||
-					pdfIngestionStatus === 'failed')}
+				{#if sourceMaterialType === 'pdf' && (pdfIngestionStatus === 'indexing' || pdfIngestionStatus === 'empty' || pdfIngestionStatus === 'failed')}
 					<div
 						class="pdf-index-status"
 						class:error={pdfIngestionStatus === 'failed'}
@@ -3539,11 +3558,11 @@
 						<TexEditorComponent
 							bind:this={texEditorInstance}
 							value={draftBody}
-								onInput={(val: string) => {
-									lastTexBody = val;
-									texRevision += 1;
-									if (texAutoCompile && texCacheWarmed) texPreviewStatus = 'pending';
-									draftBody = val;
+							onInput={(val: string) => {
+								lastTexBody = val;
+								texRevision += 1;
+								if (texAutoCompile && texCacheWarmed) texPreviewStatus = 'pending';
+								draftBody = val;
 								triggerAutoSave();
 							}}
 							diagnostics={texDiagnostics}
@@ -3721,15 +3740,27 @@
 							<div class="sidebar-section latex-preview-section" aria-live="polite">
 								<h3>LaTeX preview</h3>
 								<div class="latex-preview-controls">
-									<button class="secondary latex-auto-toggle" onclick={() => (texAutoCompile = !texAutoCompile)}>
+									<button
+										class="secondary latex-auto-toggle"
+										onclick={() => (texAutoCompile = !texAutoCompile)}
+									>
 										Auto: {texAutoCompile ? 'on' : 'off'}
 									</button>
-									<button class="primary" disabled={texCompiling} onclick={() => void compileTex({ manual: true })}>
+									<button
+										class="primary"
+										disabled={texCompiling}
+										onclick={() => void compileTex({ manual: true })}
+									>
 										{texCompiling ? 'Compiling…' : 'Compile to PDF'}
 									</button>
 								</div>
 								<div class="latex-preview-state" class:error={texPreviewStatus === 'error'}>
-									<span class="latex-status-dot" class:active={texPreviewStatus === 'current'} class:pending={texPreviewStatus === 'pending' || texPreviewStatus === 'compiling'}></span>
+									<span
+										class="latex-status-dot"
+										class:active={texPreviewStatus === 'current'}
+										class:pending={texPreviewStatus === 'pending' ||
+											texPreviewStatus === 'compiling'}
+									></span>
 									{#if latexDownloadMsg}
 										{latexDownloadMsg}
 									{:else if texCompiling}
@@ -3750,7 +3781,10 @@
 								{#if texDiagnostics.length > 0}
 									<ul class="latex-diagnostics">
 										{#each texDiagnostics as diagnostic}
-											<li><span>{diagnostic.line ? `Line ${diagnostic.line}: ` : ''}</span>{diagnostic.message}</li>
+											<li>
+												<span>{diagnostic.line ? `Line ${diagnostic.line}: ` : ''}</span
+												>{diagnostic.message}
+											</li>
 										{/each}
 									</ul>
 								{/if}
@@ -3795,7 +3829,7 @@
 														/>
 													{:else if msg.role === 'assistant' && visibleContent}
 														<div class="selectable-content">
-															{@html DOMPurify.sanitize(marked.parse(visibleContent) as string)}
+															{@html renderChatContent(visibleContent)}
 														</div>
 													{:else if visibleContent}
 														<span class="selectable-content">{visibleContent}</span>
@@ -4043,8 +4077,7 @@
 													: 'Allow tool actions without confirmation — click to ask first'}
 											>
 												{requireToolApproval ? 'Ask' : 'Allow'}
-											</button
-											>
+											</button>
 										</div>
 										<button
 											type="button"
@@ -4616,75 +4649,7 @@
 	</div>
 </dialog>
 
-{#if aiModal}
-	<div class="ai-modal-overlay" role="presentation" onclick={() => (aiModal = null)}>
-		<div
-			class="ai-modal"
-			role="dialog"
-			aria-modal="true"
-			tabindex="-1"
-			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
-		>
-			<h3 class="ai-modal-title">{aiModal.title}</h3>
-			<div class="ai-modal-body">{aiModal.body}</div>
-			<div class="dialog-actions">
-				<button class="secondary" onclick={saveSummaryAsNewNote}>Save as new note</button>
-				<button class="secondary" onclick={appendSummaryToCurrentNote}>Append to note</button>
-				<button class="secondary" onclick={() => (aiModal = null)}>Close</button>
-			</div>
-		</div>
-	</div>
-{/if}
-
 <style>
-	.ai-modal-overlay {
-		position: fixed;
-		inset: 0;
-		background: var(--scrim-soft);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-		padding: var(--space-4);
-	}
-	.ai-modal {
-		background: var(--bg-elevated, #1a1a1a);
-		border: 1px solid var(--border-default);
-		border-radius: var(--radius-md, 8px);
-		max-width: 640px;
-		width: 100%;
-		max-height: 80vh;
-		display: flex;
-		flex-direction: column;
-		padding: var(--space-4);
-		gap: var(--space-3);
-	}
-	.ai-modal-title {
-		margin: 0;
-		font-size: 0.95rem;
-		color: var(--text-secondary);
-		font-weight: 600;
-	}
-	.ai-modal-body {
-		overflow-y: auto;
-		white-space: pre-wrap;
-		line-height: 1.5;
-		color: var(--text-primary);
-		font-size: 0.9rem;
-	}
-	.summary-progress {
-		display: flex;
-		align-items: center;
-		gap: var(--space-2);
-		margin-top: var(--space-2);
-		font-size: 0.8rem;
-		color: var(--text-secondary);
-	}
-	.summary-progress span:first-child {
-		flex: 1;
-	}
-
 	.editor-shell {
 		height: 100%;
 		position: relative;
@@ -5350,8 +5315,12 @@
 		flex: 0 0 auto;
 	}
 
-	.latex-status-dot.active { background: var(--success-400, #4ade80); }
-	.latex-status-dot.pending { background: var(--accent-200); }
+	.latex-status-dot.active {
+		background: var(--success-400, #4ade80);
+	}
+	.latex-status-dot.pending {
+		background: var(--accent-200);
+	}
 
 	.latex-error,
 	.latex-diagnostics {

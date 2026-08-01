@@ -193,9 +193,30 @@
 		{ type: 'pdf', label: 'pdf' },
 		{ type: 'epub', label: 'epub' }
 	] as const;
+	// Attachment copies are documents created by clone_pdf_for_attachment with a
+	// generated name ("stem 1.pdf", "stem 2.pdf", … or a uuid fallback) and
+	// referenced by a working note's sourcePdf. They are hidden from the
+	// documents group so only standalone originals (or unattached imports)
+	// appear there. Originals referenced by legacy attachments stay listed.
+	let attachedDocIds = $derived.by(() => {
+		const referenced = new Set(
+			(app?.notes ?? []).map((n) => n.sourcePdf).filter((id): id is string => !!id)
+		);
+		const isCopyName = (n: NoteSummary) => {
+			const name = n.relativePath.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+			return (
+				/ \d+\.(pdf|epub)$/.test(name) ||
+				/ [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|epub)$/.test(name)
+			);
+		};
+		return new Set((app?.notes ?? []).filter((n) => referenced.has(n.id) && isCopyName(n)).map((n) => n.id));
+	});
 	let typeCounts = $derived.by(() => {
 		const c: Record<string, number> = { md: 0, tex: 0, ipynb: 0, pdf: 0, epub: 0 };
-		for (const n of dashNotes) c[noteType(n)] += 1;
+		for (const n of dashNotes) {
+			if (DOC_GROUP.includes(noteType(n)) && attachedDocIds.has(n.id)) continue;
+			c[noteType(n)] += 1;
+		}
 		return c;
 	});
 	let notesExpanded = $state(false);
@@ -221,8 +242,12 @@
 		let base = dashNotes;
 		const f = activeTypeFilter;
 		if (f === 'notes') base = base.filter((n) => NOTE_GROUP.includes(noteType(n)));
-		else if (f === 'documents') base = base.filter((n) => DOC_GROUP.includes(noteType(n)));
-		else if (f !== 'all') base = base.filter((n) => noteType(n) === f);
+		else if (f === 'documents')
+			base = base.filter(
+				(n) => DOC_GROUP.includes(noteType(n)) && !attachedDocIds.has(n.id)
+			);
+		else if (f !== 'all')
+			base = base.filter((n) => noteType(n) === f && !attachedDocIds.has(n.id));
 		if (activeTag !== null) base = base.filter((n) => n.tags.includes(activeTag!));
 		// null notebook = "uncategorized" (notes not in any notebook / workspace root).
 		if (activeNotebook === null) base = base.filter((n) => notebookOf(n) === null);

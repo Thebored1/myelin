@@ -81,10 +81,97 @@ pub const DIRECT_CHAT_PREAMBLE: &str = concat!(
     "Be concise unless the user asks for detail."
 );
 
-/// OpenAI-format tool definitions mirroring the live agent's tools, in the same
-/// order they are registered in [`build_myelin_agent`]. Used only by the startup
-/// warm-up request so its cached system+tools prefix matches the live agent's.
-/// Keep name/description/parameters in sync with each `Tool::definition` below.
+/// Single source of truth for every tool's model-facing contract: name,
+/// description, and argument schema. Drives BOTH the wire path (`tool_specs`:
+/// warm-up request, tool gates, sidecar) and the rig path (each `Tool::definition`
+/// impl below), so the two can never drift apart again. Keep this table in the
+/// same order the tools were historically registered so the warm-up prefix
+/// stays stable.
+type ToolParams = fn() -> Value;
+
+const TOOL_CONTRACTS: &[(&str, &str, ToolParams)] = &[
+    (
+        "read_note",
+        "Read the full Markdown of ANOTHER note by its id (ids come from search_notes). Do NOT use this for the note currently open in the editor — that note's content is already provided in the prompt below.",
+        read_note_params,
+    ),
+    (
+        "write_note",
+        "Replace the ENTIRE body of the note currently OPEN in the editor with `content`. Empty string clears the note. Use ONLY when the user asks to write, create, draft, generate, rewrite, or replace the whole note. DO NOT use this for additions, insertions, or targeted edits — use append_note, prepend_note, replace_in_note, insert_after_line, or delete_in_note instead. Never put a placeholder like [insert poem here] in content; write the real final Markdown.",
+        write_note_params,
+    ),
+    (
+        "append_note",
+        "Add a new paragraph or block of text to the END of the note currently OPEN. `content` must contain ONLY the NEW text to add — never reproduce or quote any existing lines from the note. Use this when the user asks to add, append, extend, continue, or elaborate.",
+        append_note_params,
+    ),
+    (
+        "prepend_note",
+        "Add a new paragraph or block of text to the BEGINNING of the note currently OPEN. `content` must contain ONLY the NEW text to add — never reproduce or quote any existing lines.",
+        prepend_note_params,
+    ),
+    (
+        "replace_in_note",
+        "Replace a specific piece of existing text in the note with new text. Finds the exact `find` text and replaces it with `replace`. Empty `replace` deletes the matched text. Use this for surgical edits like fixing a word, swapping a phrase, or removing a specific sentence. DO NOT use this for whole-note operations.",
+        replace_in_note_params,
+    ),
+    (
+        "insert_after_line",
+        "Insert a new block of text in the note AFTER a line containing `marker`. The marker should be a unique heading, phrase, or sentence already in the note. The new content is added on a new line right after the matching line. Use this when the user asks to insert, add between sections, or place text after a specific part.",
+        insert_after_line_params,
+    ),
+    (
+        "delete_in_note",
+        "Delete specific text from the note. The `target` is the exact text to remove — it can be a heading, line, sentence, or phrase. The matching text is removed from the note. Use this when the user asks to delete, remove, erase, or drop a specific part of the note. Do NOT use this for whole-note clearing.",
+        delete_in_note_params,
+    ),
+    (
+        "format_note",
+        "Apply a structural Markdown transform to the OPEN note, performed exactly in code (not by you): remove headings/bold/italic/bullets/numbering/links/images/code/quotes/strikethrough/dividers/blank lines, strip ALL formatting to plain text, convert headings<->bold, promote/demote headings, convert between bulleted and numbered lists, or change case. ALWAYS prefer this over write_note when the user asks to remove, strip, or convert any of these — it is reliable where a full rewrite is not.",
+        format_note_params,
+    ),
+    (
+        "fetch_web_page",
+        "Fetch the text content of a public web page. Use this when the user asks to visit, open, fetch, or get details from a URL or domain.",
+        fetch_web_page_params,
+    ),
+    (
+        "web_search",
+        "Search the web for current information when the user asks you to look something up, search online, or find recent info and you have NO URL. Returns a ranked list of {title, url, snippet}. After searching, call fetch_web_page on the most relevant result to read it in full. Do NOT use this when the user already gave a URL — fetch that directly.",
+        web_search_params,
+    ),
+    (
+        "search_documents",
+        "Search the user's ingested source documents (PDFs, books, web pages, etc.) for passages relevant to a query, and get the most relevant excerpts with their source. Use this when the user asks about their documents, sources, a PDF, a book, or a paper — NOT for the note open in the editor (that text is already in the prompt).",
+        search_documents_params,
+    ),
+    (
+        "find_in_note",
+        "Check whether an exact word or phrase appears in the note currently open in the editor, and how many times. Use this whenever the user asks if the note contains a word, or to find/locate a specific word in the note — it searches the exact text reliably instead of you scanning by eye.",
+        find_in_note_params,
+    ),
+    (
+        "search_notes",
+        "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.",
+        search_notes_params,
+    ),
+    (
+        "edit_notebook",
+        "Edit the OPEN Jupyter notebook (.ipynb) one cell at a time. operation \"edit\" replaces cell `index`'s source with `content`; \"insert\" adds a new `cell_type` cell BEFORE `index`; \"delete\" removes cell `index`. Cells are 0-indexed as shown in the notebook listing. Use this for notebooks INSTEAD of write_note.",
+        edit_notebook_params,
+    ),
+];
+
+/// Look up a tool's canonical (description, parameters) pair.
+fn tool_contract(name: &str) -> Option<(&'static str, &'static str, ToolParams)> {
+    TOOL_CONTRACTS
+        .iter()
+        .copied()
+        .find(|(n, _, _)| *n == name)
+}
+
+/// The full schema list served to the wire path (warm-up request, tool gates,
+/// sidecar). Same source as each `Tool::definition` below.
 pub fn tool_specs() -> Vec<Value> {
     let spec = |name: &str, description: &str, parameters: Value| {
         serde_json::json!({
@@ -92,157 +179,135 @@ pub fn tool_specs() -> Vec<Value> {
             "function": { "name": name, "description": description, "parameters": parameters }
         })
     };
-    vec![
-        spec(
-            "read_note",
-            "Read the full Markdown of ANOTHER note by its id (ids come from search_notes). Do NOT use this for the note currently open in the editor — that note's content is already provided in the prompt below.",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "note_id": { "type": "string", "description": "The id of a DIFFERENT note to read (from search_notes results), not the open note." } },
-                "required": ["note_id"]
-            }),
-        ),
-        spec(
-            "write_note",
-            "Replace the ENTIRE body of the note currently OPEN in the editor with `content`. Empty string clears the note. Use ONLY when the user asks to write, create, draft, generate, rewrite, or replace the whole note. DO NOT use this for additions, insertions, or targeted edits — use append_note, prepend_note, replace_in_note, insert_after_line, or delete_in_note instead. Never put a placeholder like [insert poem here] in content; write the real final Markdown.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "The full new note body. Empty string clears the note. Never a placeholder — write the real content." }
-                },
-                "required": ["content"]
-            }),
-        ),
-        spec(
-            "append_note",
-            "Add a new paragraph or block of text to the END of the note currently OPEN. `content` must contain ONLY the NEW text to add — never reproduce or quote any existing lines from the note. Use this when the user asks to add, append, extend, continue, or elaborate.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "Only the new text to append. Never include any existing note content." }
-                },
-                "required": ["content"]
-            }),
-        ),
-        spec(
-            "prepend_note",
-            "Add a new paragraph or block of text to the BEGINNING of the note currently OPEN. `content` must contain ONLY the NEW text to add — never reproduce or quote any existing lines.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "Only the new text to prepend. Never include any existing note content." }
-                },
-                "required": ["content"]
-            }),
-        ),
-        spec(
-            "replace_in_note",
-            "Replace a specific piece of existing text in the note with new text. Finds the exact `find` text and replaces it with `replace`. Empty `replace` deletes the matched text. Use this for surgical edits like fixing a word, swapping a phrase, or removing a specific sentence. DO NOT use this for whole-note operations.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "find": { "type": "string", "description": "The exact existing text in the note to find and replace." },
-                    "replace": { "type": "string", "description": "The new text to put in its place. Empty string deletes the matched text." }
-                },
-                "required": ["find", "replace"]
-            }),
-        ),
-        spec(
-            "insert_after_line",
-            "Insert a new block of text in the note AFTER a line containing `marker`. The marker should be a unique heading, phrase, or sentence already in the note. The new content is added on a new line right after the matching line. Use this when the user asks to insert, add between sections, or place text after a specific part.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "marker": { "type": "string", "description": "Text in an existing line to insert after. Should be unique enough to identify the location." },
-                    "content": { "type": "string", "description": "The new text to insert after the matching line." }
-                },
-                "required": ["marker", "content"]
-            }),
-        ),
-        spec(
-            "delete_in_note",
-            "Delete specific text from the note. The `target` is the exact text to remove — it can be a heading, line, sentence, or phrase. The matching text is removed from the note. Use this when the user asks to delete, remove, erase, or drop a specific part of the note. Do NOT use this for whole-note clearing.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target": { "type": "string", "description": "The exact text in the note to delete." }
-                },
-                "required": ["target"]
-            }),
-        ),
-        spec(
-            "format_note",
-            "Apply a structural Markdown transform to the OPEN note, performed exactly in code (not by you): remove headings/bold/italic/bullets/numbering/links/images/code/quotes/strikethrough/dividers/blank lines, strip ALL formatting to plain text, convert headings<->bold, promote/demote headings, convert between bulleted and numbered lists, or change case. ALWAYS prefer this over write_note when the user asks to remove, strip, or convert any of these — it is reliable where a full rewrite is not.",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "operation": { "type": "string", "enum": FORMAT_OPS, "description": "Which structural transform to apply to the open note." } },
-                "required": ["operation"]
-            }),
-        ),
-        spec(
-            "fetch_web_page",
-            "Fetch the text content of a public web page. Use this when the user asks to visit, open, fetch, or get details from a URL or domain.",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "url": { "type": "string", "description": "The http(s) URL or domain to fetch." } },
-                "required": ["url"]
-            }),
-        ),
-        spec(
-            "web_search",
-            "Search the web for current information when the user asks you to look something up, search online, or find recent info and you have NO URL. Returns a ranked list of {title, url, snippet}. After searching, call fetch_web_page on the most relevant result to read it in full. Do NOT use this when the user already gave a URL — fetch that directly.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "The search query." },
-                    "count": { "type": "integer", "description": "How many results to return (default 5, max 10)." }
-                },
-                "required": ["query"]
-            }),
-        ),
-        spec(
-            "search_documents",
-            "Search the user's ingested source documents (PDFs, books, web pages, etc.) for passages relevant to a query, and get the most relevant excerpts with their source. Use this when the user asks about their documents, sources, a PDF, a book, or a paper — NOT for the note open in the editor (that text is already in the prompt).",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "What to look for in the documents." },
-                    "count": { "type": "integer", "description": "How many passages to return (default 5, max 10)." }
-                },
-                "required": ["query"]
-            }),
-        ),
-        spec(
-            "find_in_note",
-            "Check whether an exact word or phrase appears in the note currently open in the editor, and how many times. Use this whenever the user asks if the note contains a word, or to find/locate a specific word in the note — it searches the exact text reliably instead of you scanning by eye.",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "query": { "type": "string", "description": "The exact word or phrase to look for in the open note." } },
-                "required": ["query"]
-            }),
-        ),
-        spec(
-            "search_notes",
-            "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "query": { "type": "string", "description": "The search keywords." } },
-                "required": ["query"]
-            }),
-        ),
-        spec(
-            "edit_notebook",
-            "Edit the OPEN Jupyter notebook (.ipynb) one cell at a time. operation \"edit\" replaces cell `index`'s source with `content`; \"insert\" adds a new `cell_type` cell BEFORE `index`; \"delete\" removes cell `index`. Cells are 0-indexed as shown in the notebook listing. Use this for notebooks INSTEAD of write_note.",
-            edit_notebook_params(),
-        ),
-    ]
+    TOOL_CONTRACTS
+        .iter()
+        .map(|(name, description, params)| spec(name, description, params()))
+        .collect()
 }
 
-/// Keep the model-facing tool contract small. The host still retains the full
-/// descriptions for routing and execution, but llama-server only needs each
-/// function name and its argument schema to emit a valid call.
-pub fn compact_tool_specs(specs: Vec<Value>) -> Vec<Value> {
-    compact_tool_specs_for_profile(specs, false)
+fn read_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "note_id": { "type": "string", "description": "The id of a DIFFERENT note to read (from search_notes results), not the open note." } },
+        "required": ["note_id"]
+    })
+}
+
+fn write_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "content": { "type": "string", "description": "The full new note body. Empty string clears the note. Never a placeholder — write the real content." }
+        },
+        "required": ["content"]
+    })
+}
+
+fn append_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "content": { "type": "string", "description": "Only the new text to append. Never include any existing note content." }
+        },
+        "required": ["content"]
+    })
+}
+
+fn prepend_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "content": { "type": "string", "description": "Only the new text to prepend. Never include any existing note content." }
+        },
+        "required": ["content"]
+    })
+}
+
+fn replace_in_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "find": { "type": "string", "description": "The exact existing text in the note to find and replace." },
+            "replace": { "type": "string", "description": "The new text to put in its place. Empty string deletes the matched text." }
+        },
+        "required": ["find", "replace"]
+    })
+}
+
+fn insert_after_line_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "marker": { "type": "string", "description": "Text in an existing line to insert after. Should be unique enough to identify the location." },
+            "content": { "type": "string", "description": "The new text to insert after the matching line." }
+        },
+        "required": ["marker", "content"]
+    })
+}
+
+fn delete_in_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "target": { "type": "string", "description": "The exact text in the note to delete." }
+        },
+        "required": ["target"]
+    })
+}
+
+fn format_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "operation": { "type": "string", "enum": FORMAT_OPS, "description": "Which structural transform to apply to the open note." } },
+        "required": ["operation"]
+    })
+}
+
+fn fetch_web_page_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "url": { "type": "string", "description": "The http(s) URL or domain to fetch." } },
+        "required": ["url"]
+    })
+}
+
+fn web_search_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string", "description": "The search query." },
+            "count": { "type": "integer", "description": "How many results to return (default 5, max 10)." }
+        },
+        "required": ["query"]
+    })
+}
+
+fn search_documents_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string", "description": "What to look for in the documents." },
+            "count": { "type": "integer", "description": "How many passages to return (default 5, max 10)." },
+            "doc_id": { "type": "string", "description": "Optional document or note ID to search within." }
+        },
+        "required": ["query"]
+    })
+}
+
+fn find_in_note_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "query": { "type": "string", "description": "The exact word or phrase to look for in the open note." } },
+        "required": ["query"]
+    })
+}
+
+fn search_notes_params() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "query": { "type": "string", "description": "The search keywords." } },
+        "required": ["query"]
+    })
 }
 
 /// Compact model-facing schemas. Function descriptions are always omitted
@@ -312,33 +377,6 @@ impl std::fmt::Display for ToolError {
     }
 }
 impl std::error::Error for ToolError {}
-
-/// Locate a snippet to edit, tolerating the small mismatches a model makes when
-/// it reproduces existing text: try an exact match, then a trimmed match, then a
-/// whitespace-normalized match (the snippet's words separated by any run of
-/// whitespace). Returns the byte span in `body` to replace.
-fn find_tolerant(body: &str, find: &str) -> Option<(usize, usize)> {
-    if let Some(i) = body.find(find) {
-        return Some((i, i + find.len()));
-    }
-    let trimmed = find.trim();
-    if !trimmed.is_empty() && trimmed.len() != find.len() {
-        if let Some(i) = body.find(trimmed) {
-            return Some((i, i + trimmed.len()));
-        }
-    }
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    let pattern = tokens
-        .iter()
-        .map(|t| regex::escape(t))
-        .collect::<Vec<_>>()
-        .join(r"\s+");
-    let re = regex::Regex::new(&pattern).ok()?;
-    re.find(body).map(|m| (m.start(), m.end()))
-}
 
 /// An editor text selection the user armed, sent alongside the chat request.
 /// `text` is the selected source markdown; `before`/`after` are short surrounding
@@ -494,212 +532,17 @@ pub fn selection_insert_after_plan(
     Ok(WritePlan { new_body, op: WriteOp::Append })
 }
 
-/// How the editor should apply a write (drives the streaming UI and chip label).
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum WriteOp {
-    Replace,
-    Append,
-    EditSnippet,
-}
-
-#[derive(Debug)]
-pub struct WritePlan {
-    pub new_body: String,
-    pub op: WriteOp,
-}
-
-/// Pure decision for `write_note`: given the note's current body and the tool
-/// args, produce the new full body — or an `Err` message to relay back to the
-/// model. Decided from intent, tolerant of the mislabelling models can do:
-///   - explicit `mode == "append"` -> append `content`
-///   - explicit `mode == "replace"` -> whole-body replace, IGNORING any stray
-///     `find` (models often send mode:"replace" with the full note in `content`
-///     AND a leftover `find` — honouring find there garbles the note)
-///   - otherwise a non-empty `find` -> targeted snippet edit/delete
-///   - otherwise (e.g. mode:"edit" with no find, or unspecified) -> replace
-/// Remove a model-regenerated copy of the current note from an append payload.
-/// Weak models often send the complete note followed by the requested addition
-/// despite declaring `mode:"append"`; appending that verbatim duplicates user
-/// content. Tool-call wrapper remnants are never valid note text either.
-fn normalize_append_content(current_body: &str, content: &str) -> String {
-    let mut payload = content.trim().to_string();
-    for marker in ["</content>,", "</content>", "</tool_call>"] {
-        if let Some(stripped) = payload.trim_end().strip_suffix(marker) {
-            payload = stripped.trim_end().to_string();
-        }
-    }
-
-    let current = current_body.trim();
-    if !current.is_empty() {
-        if let Some(rest) = payload.strip_prefix(current) {
-            payload = rest.trim_start_matches(['\r', '\n', ' ', '\t']).to_string();
-        } else if let Some(pos) = payload.find(current) {
-            // Only strip an echoed note near the start; a later quoted copy may
-            // be intentional context in the new paragraph.
-            if pos <= 64 {
-                payload = payload[pos + current.len()..]
-                    .trim_start_matches(['\r', '\n', ' ', '\t'])
-                    .to_string();
-            }
-        }
-    }
-    payload.trim().to_string()
-}
-
-/// Reject leaked model/tool framing instead of silently cleaning and saving a
-/// guessed note body. This is a final host-side guard for both the sidecar and
-/// the legacy in-process streaming path.
-fn note_content_has_protocol_residue(content: &str) -> bool {
-    let tail: String = content
-        .chars()
-        .rev()
-        .take(256)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    let tail = tail.to_ascii_lowercase();
-    [
-        "<|tool_call",
-        "<tool_call",
-        "</tool_call",
-        "/content>}",
-        "</content>",
-        "> write_note(content=",
-        "] write_note(content=",
-    ]
-    .iter()
-    .any(|marker| tail.contains(marker))
-}
-
-/// Strip HTML line-break tags and model-invented markup artifacts from model-
-/// generated note content. Many small models output `<br>` for line breaks or
-/// `<<`/`<>` as formatting markers — these are never valid note text.
-pub fn clean_note_content(content: &str) -> String {
-    let mut s = content.to_string();
-    // A few prompt/tool parsers leave an escaped newline literal behind.
-    s = s
-        .replace("\\r\\n", "\n")
-        .replace("\\n", "\n")
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
-    // Replace <br> (and case/spacing variants) with real newlines.
-    if let Ok(br) = regex::Regex::new(r"(?i)<br\s*/?>") {
-        s = br.replace_all(&s, "\n").into_owned();
-    }
-    // Some small models use an em-space as a visual line separator.
-    s = s.replace(' ', "\n");
-    // Strip trailing <<, <>, >, < markers that some models use as stanza
-    // connectors — they appear at line-ends or between phrases.
-    if let Ok(re) = regex::Regex::new(r"<{1,2}\s*>*\s*|\s*<{1,2}\s*") {
-        // Only strip standalone bracket runs (not inside **bold** or normal text).
-        // A standlone <, <<, <>, >> preceded by a word boundary or punctuation.
-        if let Ok(standalone) = regex::Regex::new(r"(?:\b|,|;|!|\?|—)\s*<{1,2}\s*>?(?:\s*<{1,2}\s*>?)*") {
-            s = standalone.replace_all(&s, "\n").into_owned();
-        }
-        // Also strip leading/trailing bare bracket runs that survive.
-        s = re.replace_all(&s, "").into_owned();
-    }
-    // A malformed Markdown pattern seen in tool arguments is:
-    // `**line one** *line two.* *line three.*`. When it repeats across a
-    // single-line payload, the asterisks are acting as line separators rather
-    // than Markdown. Convert only that repeated pattern; ordinary emphasis
-    // remains untouched.
-    if !s.contains('\n') {
-        if let Ok(separator) = regex::Regex::new(r"\s+\*+") {
-            let parts: Vec<&str> = separator.split(&s).collect();
-            let starred_tails = parts
-                .iter()
-                .skip(1)
-                .filter(|part| part.trim_end().ends_with('*'))
-                .count();
-            if parts.len() >= 4 && starred_tails + 1 >= parts.len() - 1 {
-                let mut lines = Vec::with_capacity(parts.len());
-                for (index, part) in parts.iter().enumerate() {
-                    let mut line = part.trim().to_string();
-                    if index > 0 {
-                        line = line.trim_end_matches('*').trim_end().to_string();
-                    }
-                    if !line.is_empty() {
-                        lines.push(line);
-                    }
-                }
-                s = lines.join("\n");
-            }
-        }
-    }
-
-    // Collapse multiple consecutive blank lines into one.
-    if let Ok(blank) = regex::Regex::new(r"\n{3,}") {
-        s = blank.replace_all(&s, "\n\n").into_owned();
-    }
-    s.trim().to_string()
-}
-
-/// `mode` is passed raw ("" when unspecified) so an explicit "replace" can be
-/// told apart from the default. Kept free of `AppState`/Tauri for unit tests.
-pub fn plan_write(
-    current_body: &str,
-    content: &str,
-    mode: &str,
-    find: &str,
-) -> Result<WritePlan, String> {
-    // Some models echo the prompt's note-framing markers into the tool content.
-    // Strip them so they never land in the saved note. This runs before the
-    // intent logic so the absorb-check can still clean an edit.
-    let content = strip_prompt_markers(content);
-    let content = content.as_str();
-    let m = mode.trim().to_lowercase();
-    let has_find = !find.trim().is_empty();
-    let is_append = m == "append";
-    let explicit_replace = m == "replace";
-    // A targeted edit only when a `find` is given and the model did NOT
-    // explicitly ask for a whole-body replace/append.
-    let snippet = has_find && !explicit_replace && !is_append;
-
-    if snippet {
-        match find_tolerant(current_body, find) {
-            Some((start, end)) => {
-                let prefix = &current_body[..start];
-                let suffix = &current_body[end..];
-                // If `content` already contains the surrounding text (so splicing
-                // would duplicate it), the model actually sent the whole updated
-                // body, not a snippet replacement — treat it as a replace. Catches
-                // e.g. find:"blue", content:"The sky is green today." on a note of
-                // "The sky is blue today." (which would otherwise garble).
-                let absorbs = (!prefix.trim().is_empty() && content.starts_with(prefix))
-                    || (!suffix.trim().is_empty() && content.ends_with(suffix));
-                if absorbs {
-                    return Ok(WritePlan { new_body: content.to_string(), op: WriteOp::Replace });
-                }
-                let mut body = String::with_capacity(current_body.len() + content.len());
-                body.push_str(prefix);
-                body.push_str(content);
-                body.push_str(suffix);
-                Ok(WritePlan { new_body: body, op: WriteOp::EditSnippet })
-            }
-            None => Err("Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`.".to_string()),
-        }
-    } else if is_append {
-        let content = normalize_append_content(current_body, content);
-        let body = if current_body.trim().is_empty() {
-            content
-        } else {
-            format!("{}\n\n{}", current_body.trim_end(), content)
-        };
-        Ok(WritePlan {
-            new_body: body,
-            op: WriteOp::Append,
-        })
-    } else {
-        // Whole-body replace: explicit replace (find ignored), mode:"edit" with
-        // no find, or unspecified mode.
-        Ok(WritePlan {
-            new_body: content.to_string(),
-            op: WriteOp::Replace,
-        })
-    }
-}
+/// Pure decision for `write_note`, `append_note` and the shared edit helpers:
+/// `plan_write`, `apply_format_op`, `clean_note_content`,
+/// `note_content_has_protocol_residue`, `normalize_append_content`,
+/// `strip_prompt_markers`, `find_tolerant`, `FORMAT_OPS`, `is_format_op` and
+/// the `WriteOp`/`WritePlan` types live in `myelin-edit-core` so the sidecar's
+/// on-disk edits stay byte-identical to the app's.
+pub use myelin_edit_core::{
+    apply_format_op, clean_note_content, find_tolerant, is_format_op,
+    note_content_has_protocol_residue, normalize_append_content, plan_write,
+    strip_prompt_markers, WriteOp, WritePlan, FORMAT_OPS,
+};
 
 /// Word-boundary check: true if any of `words` (lowercase literals/phrases)
 /// appears as a whole word in the already-lowercased `haystack`. Avoids
@@ -1237,118 +1080,6 @@ pub fn wants_partial_removal(message: &str) -> bool {
     has_remove && !has_add && !is_negated(message, &remove_kw)
 }
 
-/// Every operation `apply_format_op` understands. Kept in sync with the
-/// format_note tool's `operation` enum and used to validate the model's choice.
-pub const FORMAT_OPS: &[&str] = &[
-    "remove_headings",
-    "remove_bold",
-    "remove_italic",
-    "remove_emphasis",
-    "remove_bullets",
-    "remove_numbering",
-    "remove_links",
-    "remove_images",
-    "remove_code",
-    "remove_blockquotes",
-    "remove_strikethrough",
-    "remove_horizontal_rules",
-    "remove_blank_lines",
-    "strip_markdown",
-    "headings_to_bold",
-    "bold_to_headings",
-    "promote_headings",
-    "demote_headings",
-    "bullets_to_numbered",
-    "numbered_to_bullets",
-    "tasks_to_bullets",
-    "uppercase",
-    "lowercase",
-    "title_case",
-];
-
-pub fn is_format_op(op: &str) -> bool {
-    FORMAT_OPS.contains(&op)
-}
-
-/// Strip bold/italic emphasis. Bold uses doubled markers (** or __), italic
-/// single (* or _). Bold is processed first; when only italic is being removed,
-/// the doubled markers are protected so the single-marker pass can't chew them
-/// (Rust regex has no lookaround).
-fn strip_emphasis(body: &str, bold: bool, italic: bool) -> String {
-    let re = |p: &str| regex::Regex::new(p).unwrap();
-    let mut s = body.to_string();
-    if bold {
-        s = re(r"\*\*(.+?)\*\*").replace_all(&s, "$1").into_owned();
-        s = re(r"__(.+?)__").replace_all(&s, "$1").into_owned();
-    }
-    if italic {
-        let protect = !bold;
-        if protect {
-            s = s.replace("**", "\u{1}B").replace("__", "\u{1}U");
-        }
-        s = re(r"\*(.+?)\*").replace_all(&s, "$1").into_owned();
-        s = re(r"(?:^|\b)_(.+?)_(?:\b|$)")
-            .replace_all(&s, "$1")
-            .into_owned();
-        if protect {
-            s = s.replace("\u{1}B", "**").replace("\u{1}U", "__");
-        }
-    }
-    s
-}
-
-/// Renumber/convert list-item markers. `to` = "number" (1. 2. … reset per block)
-/// or "bullet" (- ). Operates on a contiguous run of list lines.
-fn convert_lists(body: &str, to: &str) -> String {
-    let bullet = regex::Regex::new(r"^(\s*)[-*+][ \t]+").unwrap();
-    let numbered = regex::Regex::new(r"^(\s*)\d+[.)][ \t]+").unwrap();
-    let mut out: Vec<String> = Vec::new();
-    let mut counter = 0u32;
-    for line in body.split('\n') {
-        let b = bullet.captures(line);
-        let n = numbered.captures(line);
-        let caps = b.as_ref().or(n.as_ref());
-        match caps {
-            Some(c) => {
-                counter += 1;
-                let whole = c.get(0).unwrap();
-                let indent = c.get(1).map(|m| m.as_str()).unwrap_or("");
-                let rest = &line[whole.end()..];
-                if to == "number" {
-                    out.push(format!("{indent}{counter}. {rest}"));
-                } else {
-                    out.push(format!("{indent}- {rest}"));
-                }
-            }
-            None => {
-                counter = 0;
-                out.push(line.to_string());
-            }
-        }
-    }
-    out.join("\n")
-}
-
-fn to_title_case(body: &str) -> String {
-    body.split('\n')
-        .map(|line| {
-            line.split(' ')
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        Some(c) => {
-                            c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-                        }
-                        None => String::new(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Recognize a deterministic Markdown transform the model is bad at but a regex
 /// nails (strip/convert headings, emphasis, lists, links, code, …). Returns the
 /// `apply_format_op` operation, or None. Never fires on a request to CREATE fresh
@@ -1496,88 +1227,6 @@ pub fn detect_format_op(message: &str) -> Option<&'static str> {
         }
     }
     None
-}
-
-/// Apply a deterministic Markdown transform. Done in code precisely so the
-/// model never has to (and never gets to wipe or echo the note).
-pub fn apply_format_op(body: &str, op: &str) -> String {
-    let re = |p: &str| regex::Regex::new(p).unwrap();
-    match op {
-        // ---- removals ----
-        "remove_headings" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
-            .replace_all(body, "")
-            .into_owned(),
-        "remove_bold" => strip_emphasis(body, true, false),
-        "remove_italic" => strip_emphasis(body, false, true),
-        "remove_emphasis" => strip_emphasis(body, true, true),
-        "remove_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+")
-            .replace_all(body, "$1")
-            .into_owned(),
-        "remove_numbering" => re(r"(?m)^([ \t]*)\d+[.)][ \t]+")
-            .replace_all(body, "$1")
-            .into_owned(),
-        // Keep link/alt text; drop the (url). Protect images during the link pass.
-        "remove_links" => {
-            let protected = body.replace("![", "\u{1}I");
-            let unlinked = re(r"\[([^\]]*)\]\([^)]*\)")
-                .replace_all(&protected, "$1")
-                .into_owned();
-            unlinked.replace("\u{1}I", "![")
-        }
-        "remove_images" => re(r"!\[[^\]]*\]\([^)]*\)")
-            .replace_all(body, "")
-            .into_owned(),
-        // Fenced blocks first (keep inner code), then inline spans.
-        "remove_code" => {
-            let no_fence = re(r"(?s)```[^\n]*\n(.*?)```")
-                .replace_all(body, "$1")
-                .into_owned();
-            re(r"`([^`\n]+)`").replace_all(&no_fence, "$1").into_owned()
-        }
-        "remove_blockquotes" => re(r"(?m)^[ \t]{0,3}>[ \t]?")
-            .replace_all(body, "")
-            .into_owned(),
-        "remove_strikethrough" => re(r"~~(.+?)~~").replace_all(body, "$1").into_owned(),
-        "remove_horizontal_rules" => re(r"(?m)^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*\n?")
-            .replace_all(body, "")
-            .into_owned(),
-        "remove_blank_lines" => re(r"\n{3,}").replace_all(body, "\n\n").into_owned(),
-        // Everything → plain text, in a safe order.
-        "strip_markdown" => {
-            let mut s = apply_format_op(body, "remove_code");
-            s = apply_format_op(&s, "remove_images");
-            s = apply_format_op(&s, "remove_links");
-            s = apply_format_op(&s, "remove_headings");
-            s = apply_format_op(&s, "remove_blockquotes");
-            s = apply_format_op(&s, "remove_horizontal_rules");
-            s = apply_format_op(&s, "remove_bullets");
-            s = apply_format_op(&s, "remove_numbering");
-            s = apply_format_op(&s, "remove_strikethrough");
-            strip_emphasis(&s, true, true)
-        }
-        // ---- conversions ----
-        "headings_to_bold" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$")
-            .replace_all(body, "**$1**")
-            .into_owned(),
-        "bold_to_headings" => re(r"(?m)^[ \t]*\*\*(.+?)\*\*[ \t]*$")
-            .replace_all(body, "# $1")
-            .into_owned(),
-        // ##→# (one level up); h1 has no second # so is left alone.
-        "promote_headings" => re(r"(?m)^#(#+[ \t])").replace_all(body, "$1").into_owned(),
-        // #→## (one level down); h6 won't match so is capped.
-        "demote_headings" => re(r"(?m)^(#{1,5})([ \t])")
-            .replace_all(body, "#$1$2")
-            .into_owned(),
-        "bullets_to_numbered" => convert_lists(body, "number"),
-        "numbered_to_bullets" => convert_lists(body, "bullet"),
-        "tasks_to_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+")
-            .replace_all(body, "$1- ")
-            .into_owned(),
-        "uppercase" => body.to_uppercase(),
-        "lowercase" => body.to_lowercase(),
-        "title_case" => to_title_case(body),
-        _ => body.to_string(),
-    }
 }
 
 /// Does the message ask whether a specific word/phrase is in the OPEN note (or
@@ -1893,19 +1542,11 @@ impl Tool for ReadNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("read_note").expect("read_note contract");
         ToolDefinition {
             name: "read_note".to_string(),
-            description: "Read the full Markdown of ANOTHER note by its id (ids come from search_notes). Do NOT use this for the note currently open in the editor — that note's content is already provided in the prompt below.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "note_id": {
-                        "type": "string",
-                        "description": "The id of a DIFFERENT note to read (from search_notes results), not the open note."
-                    }
-                },
-                "required": ["note_id"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -1972,18 +1613,11 @@ impl Tool for WriteNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("write_note").expect("write_note contract");
         ToolDefinition {
             name: "write_note".to_string(),
-            description:
-                "Replace the ENTIRE body of the note currently OPEN in the editor with `content`. Empty string clears the note. Use ONLY for whole-note overwrites."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "The full new note body. Empty string clears the note. Never a placeholder — write the real content." }
-                },
-                "required": ["content"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2112,18 +1746,11 @@ impl Tool for AppendNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("append_note").expect("append_note contract");
         ToolDefinition {
             name: "append_note".to_string(),
-            description:
-                "Add a new paragraph or block of text to the END of the note currently OPEN."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "Only the new text to append. Never include any existing note content." }
-                },
-                "required": ["content"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2205,18 +1832,11 @@ impl Tool for PrependNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("prepend_note").expect("prepend_note contract");
         ToolDefinition {
             name: "prepend_note".to_string(),
-            description:
-                "Add a new paragraph or block of text to the BEGINNING of the note currently OPEN."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "Only the new text to prepend. Never include any existing note content." }
-                },
-                "required": ["content"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2297,19 +1917,12 @@ impl Tool for ReplaceInNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) =
+            tool_contract("replace_in_note").expect("replace_in_note contract");
         ToolDefinition {
             name: "replace_in_note".to_string(),
-            description:
-                "Replace a specific piece of existing text in the note with new text."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "find": { "type": "string", "description": "The exact existing text in the note to find and replace." },
-                    "replace": { "type": "string", "description": "The new text to put in its place. Empty string deletes the matched text." }
-                },
-                "required": ["find", "replace"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2391,19 +2004,12 @@ impl Tool for InsertAfterLineTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) =
+            tool_contract("insert_after_line").expect("insert_after_line contract");
         ToolDefinition {
             name: "insert_after_line".to_string(),
-            description:
-                "Insert a new block of text in the note AFTER a line containing `marker`."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "marker": { "type": "string", "description": "Text in an existing line to insert after." },
-                    "content": { "type": "string", "description": "The new text to insert after the matching line." }
-                },
-                "required": ["marker", "content"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2505,18 +2111,12 @@ impl Tool for DeleteInNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) =
+            tool_contract("delete_in_note").expect("delete_in_note contract");
         ToolDefinition {
             name: "delete_in_note".to_string(),
-            description:
-                "Delete specific text from the note. The `target` is the exact text to remove."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "target": { "type": "string", "description": "The exact text in the note to delete." }
-                },
-                "required": ["target"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2604,16 +2204,11 @@ impl Tool for FormatNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("format_note").expect("format_note contract");
         ToolDefinition {
             name: "format_note".to_string(),
-            description:
-                "Apply a structural Markdown transform to the open note, performed exactly in code: remove headings/bold/italic/bullets/numbering/links/images/code/quotes/strikethrough/dividers/blank lines, strip all formatting, convert headings<->bold, promote/demote headings, convert bulleted<->numbered lists, or change case."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": { "operation": { "type": "string", "enum": FORMAT_OPS, "description": "Which structural transform to apply." } },
-                "required": ["operation"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2715,12 +2310,11 @@ impl Tool for EditNotebookTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("edit_notebook").expect("edit_notebook contract");
         ToolDefinition {
             name: "edit_notebook".to_string(),
-            description:
-                "Edit the open Jupyter notebook (.ipynb) by cell: edit a cell's source, insert a new cell, or delete a cell. Use this for notebooks instead of write_note."
-                    .to_string(),
-            parameters: edit_notebook_params(),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2820,18 +2414,11 @@ impl Tool for FetchWebPageTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("fetch_web_page").expect("fetch_web_page contract");
         ToolDefinition {
             name: "fetch_web_page".to_string(),
-            description:
-                "Fetch the text content of a public web page. Use this when the user asks to visit, open, fetch, or get details from a URL or domain."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "description": "The http(s) URL or domain to fetch." }
-                },
-                "required": ["url"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2896,20 +2483,11 @@ impl Tool for SearchDocumentsTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("search_documents").expect("search_documents contract");
         ToolDefinition {
             name: "search_documents".to_string(),
-            description:
-                "Search the user's ingested source documents (PDFs, books, web pages) for passages relevant to a query. Returns the most relevant excerpts with their source."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "What to look for in the documents." },
-                    "count": { "type": "integer", "description": "How many passages (default 5, max 10)." },
-                    "doc_id": { "type": "string", "description": "Optional document or note ID to search within." }
-                },
-                "required": ["query"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2968,16 +2546,11 @@ impl Tool for FindInNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("find_in_note").expect("find_in_note contract");
         ToolDefinition {
             name: "find_in_note".to_string(),
-            description:
-                "Check whether an exact word or phrase appears in the note open in the editor, and how many times."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": { "query": { "type": "string", "description": "The exact word or phrase to look for." } },
-                "required": ["query"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -2992,7 +2565,12 @@ impl Tool for FindInNoteTool {
             return Ok("No search term was given.".to_string());
         }
         let body = self.state.open_note_body().unwrap_or_default();
-        let count = body.to_lowercase().matches(&q.to_lowercase()).count();
+        // Whole-word (boundary) match, not substring: "fix" must not hit
+        // "prefix" and "add" must not hit "address".
+        let pattern = format!(r"(?i)\b{}\b", regex::escape(&q));
+        let count = regex::Regex::new(&pattern)
+            .map(|re| re.find_iter(&body).count())
+            .unwrap_or_else(|_| 0);
         if count == 0 {
             Ok(format!(
                 "The text \"{q}\" does NOT appear in the open note."
@@ -3025,19 +2603,11 @@ impl Tool for WebSearchTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("web_search").expect("web_search contract");
         ToolDefinition {
             name: "web_search".to_string(),
-            description:
-                "Search the web for current information when the user asks you to look something up or find recent info and you have no URL. Returns ranked {title, url, snippet}; then call fetch_web_page on the best result."
-                    .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "The search query." },
-                    "count": { "type": "integer", "description": "How many results to return (default 5, max 10)." }
-                },
-                "required": ["query"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -3070,16 +2640,11 @@ impl Tool for SearchNotesTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("search_notes").expect("search_notes contract");
         ToolDefinition {
             name: "search_notes".to_string(),
-            description: "Search the ENTIRE workspace for OTHER notes containing specific keywords. Do NOT use this to search or modify the currently open note.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "The search keywords." }
-                },
-                "required": ["query"]
-            }),
+            description: description.to_string(),
+            parameters: params(),
         }
     }
 
@@ -3154,28 +2719,26 @@ pub fn build_myelin_agent(
         .tool(DeleteInNoteTool {
             state: state.clone(),
         })
+        .tool(FormatNoteTool {
+            state: state.clone(),
+        })
         .tool(FetchWebPageTool {
             state: state.clone(),
         })
-        .tool(SearchNotesTool { state })
+        .tool(WebSearchTool {
+            state: state.clone(),
+        })
+        .tool(SearchDocumentsTool {
+            state: state.clone(),
+        })
+        .tool(FindInNoteTool {
+            state: state.clone(),
+        })
+        .tool(SearchNotesTool {
+            state: state.clone(),
+        })
+        .tool(EditNotebookTool { state })
         .build()
-}
-
-/// Remove the prompt's note-framing markers that some models echo into content.
-/// Tolerant of the dash-count / spacing variants models produce (e.g. some
-/// models emit "--- END CURRENT NOTE --" with two trailing dashes).
-pub fn strip_prompt_markers(s: &str) -> String {
-    let mut cleaned = regex::Regex::new(r"(?i)-{2,}\s*(?:end\s+)?current note\s*-*")
-        .map(|re| re.replace_all(s, "").into_owned())
-        .unwrap_or_else(|_| s.to_string());
-    // The model sometimes bleeds the "--- CURRENT NOTE ---" delimiter style into
-    // its output as a leading "--- Title" — dashes + text on one line, which is
-    // not a real Markdown rule (an HR is dashes alone). Drop the leading dash run
-    // but keep the text. (Rust's regex has no lookahead, so capture and re-emit.)
-    if let Ok(re) = regex::Regex::new(r"^\s*-{2,}[ \t]+(\S[^\n]*)") {
-        cleaned = re.replace(&cleaned, "$1").into_owned();
-    }
-    cleaned.trim().to_string()
 }
 
 pub fn normalize_web_url(raw: &str) -> Result<String, String> {
@@ -3230,6 +2793,27 @@ mod tests {
     use super::*;
 
     const NOTE: &str = "Cars are fast. They have engines. People drive them daily.";
+
+    #[test]
+    fn tool_specs_matches_contract_table() {
+        let specs = tool_specs();
+        assert_eq!(specs.len(), TOOL_CONTRACTS.len(), "every contract has a spec");
+        for (name, _, _) in TOOL_CONTRACTS {
+            assert!(
+                specs.iter().any(|s| s["function"]["name"] == *name),
+                "missing spec for {name}"
+            );
+        }
+        // The wire schema must expose doc_id so the model can scope a search.
+        let sd = specs
+            .iter()
+            .find(|s| s["function"]["name"] == "search_documents")
+            .expect("search_documents spec");
+        assert!(
+            sd["function"]["parameters"]["properties"].get("doc_id").is_some(),
+            "search_documents must advertise doc_id"
+        );
+    }
 
     #[test]
     fn negation_matching_ignores_words_that_contain_not() {

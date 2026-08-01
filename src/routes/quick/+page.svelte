@@ -457,11 +457,11 @@
 		background: var(--neutral-700);
 		border-radius: 4px;
 	}
-	/* Readable text selection: orange highlight with dark text (the app default).
-	   A faint white background here left the (dark) selected text near-invisible. */
+	/* Readable text selection: theme orange highlight with dark text (matches
+	   the app-wide selection colors). */
 	:global(html.quick-window ::selection) {
 		background: var(--bg-selection) !important;
-		color: var(--text-inverse) !important;
+		color: var(--text-selection) !important;
 	}
 	.quick-app-root {
 		width: 100vw;

@@ -547,6 +547,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "myelin-edit-core"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -558,6 +565,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "myelin-edit-core",
  "regex",
  "reqwest",
  "serde",

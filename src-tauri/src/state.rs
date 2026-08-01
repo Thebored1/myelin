@@ -35,9 +35,6 @@ const INDEX_DIR_NAME: &str = "index";
 // context after restart. Live tool turns are also capped below.
 const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 2;
 const MAX_LIVE_CONVERSATION_CHARS: usize = 8_000;
-const LARGE_SUMMARY_CHUNK_WORDS: usize = 2_400;
-const LARGE_SUMMARY_OVERLAP_WORDS: usize = 120;
-const SUMMARY_REDUCTION_WORDS: usize = 5_000;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
 const NOTE_INGEST_MANIFEST: &str = "note-ingestion.json";
@@ -1910,200 +1907,6 @@ impl AppState {
         })
     }
 
-    pub async fn summarise_note(&self, note_id: String) -> Result<String> {
-        let note = self.load_note(note_id).await?;
-        let prompt = format!(
-            "Summarise this note in concise plain language.\n\nTitle: {}\n\nTags: {}\n\nBody:\n{}",
-            note.title,
-            if note.tags.is_empty() {
-                "(none)".to_string()
-            } else {
-                note.tags.join(", ")
-            },
-            note.body
-        );
-
-        self.run_llama_prompt(
-            "You summarise the user's note faithfully. Keep the response concise, practical, and grounded only in the provided note.",
-            &prompt,
-        )
-        .await
-    }
-
-    /// Summarise a note of arbitrary size without putting the whole source in a
-    /// single model context. Each source chunk is summarised independently, then
-    /// those summaries are recursively reduced until one final summary remains.
-    pub async fn summarise_large_note(&self, note_id: String) -> Result<String> {
-        let note = self.load_note(note_id.clone()).await?;
-        if note.body.trim().is_empty() {
-            return Ok("The note is empty.".to_string());
-        }
-
-        self.inner
-            .cancel_ai
-            .store(false, std::sync::atomic::Ordering::Release);
-        let chunks = crate::embeddings::chunk_text(
-            &note.body,
-            LARGE_SUMMARY_CHUNK_WORDS,
-            LARGE_SUMMARY_OVERLAP_WORDS,
-        );
-        let total = chunks.len();
-        self.emit_summary_progress(&note_id, "chunking", 0, total, "Preparing source");
-
-        let mut summaries = Vec::with_capacity(total);
-        for (index, chunk) in chunks.iter().enumerate() {
-            self.ensure_summary_not_cancelled()?;
-            let prompt = format!(
-                "Summarise this source section faithfully and densely. Preserve important facts, decisions, numbers, names, and conclusions. Do not invent information. Keep the section label in your response.\n\nSource: {}\nSection {}/{}\n\n{}",
-                note.title,
-                index + 1,
-                total,
-                chunk.text
-            );
-            let summary = self
-                .run_llama_prompt(
-                    "You are the first stage of a hierarchical document summarizer. Produce a factual section summary that another model can combine later. Keep it under 600 words.",
-                    &prompt,
-                )
-                .await?;
-            summaries.push(format!("[Section {}/{}]\n{}", index + 1, total, summary.trim()));
-            self.emit_summary_progress(
-                &note_id,
-                "summarizing",
-                index + 1,
-                total,
-                &format!("Summarized section {}/{}", index + 1, total),
-            );
-        }
-
-        let original_total = total;
-        while summaries.len() > 1 {
-            self.ensure_summary_not_cancelled()?;
-            let mut reduced = Vec::new();
-            let mut cursor = 0;
-            while cursor < summaries.len() {
-                self.ensure_summary_not_cancelled()?;
-                let mut group = Vec::new();
-                let mut words = 0;
-                while cursor < summaries.len() {
-                    let next_words = summaries[cursor].split_whitespace().count();
-                    if !group.is_empty() && words + next_words > SUMMARY_REDUCTION_WORDS {
-                        break;
-                    }
-                    words += next_words;
-                    group.push(summaries[cursor].as_str());
-                    cursor += 1;
-                }
-                let prompt = format!(
-                    "Combine the following section summaries into one faithful summary. Preserve all major facts and conclusions, remove repetition, and retain useful section/source labels. Do not mention the summarization process.\n\nDocument: {}\n\n{}",
-                    note.title,
-                    group.join("\n\n")
-                );
-                let summary = self
-                    .run_llama_prompt(
-                        "You are a higher-level document summarizer. Synthesize the supplied summaries without adding facts that are not present. Keep the result under 900 words.",
-                        &prompt,
-                    )
-                    .await?;
-                reduced.push(summary.trim().to_string());
-                self.emit_summary_progress(
-                    &note_id,
-                    "combining",
-                    reduced.len(),
-                    summaries.len(),
-                    "Combining section summaries",
-                );
-            }
-            summaries = reduced;
-        }
-
-        self.ensure_summary_not_cancelled()?;
-        self.emit_summary_progress(
-            &note_id,
-            "complete",
-            original_total,
-            original_total,
-            "Summary complete",
-        );
-        Ok(summaries.pop().unwrap_or_default())
-    }
-
-    fn ensure_summary_not_cancelled(&self) -> Result<()> {
-        if self.ai_cancel_requested() {
-            Err(anyhow!("Summary cancelled"))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn emit_summary_progress(
-        &self,
-        note_id: &str,
-        phase: &str,
-        completed: usize,
-        total: usize,
-        message: &str,
-    ) {
-        let _ = self.handle.emit(
-            "ai://summary_progress",
-            serde_json::json!({
-                "noteId": note_id,
-                "phase": phase,
-                "completed": completed,
-                "total": total,
-                "message": message,
-            }),
-        );
-    }
-
-    pub async fn ask_ai(&self, note_id: String, question: String) -> Result<String> {
-        let note = self.load_note(note_id).await?;
-        if is_simple_greeting(&question) {
-            return Ok("Hello. What would you like to work on?".to_string());
-        }
-        let history_text = format_chat_history_for_prompt(&note.chat_history, &question);
-        let is_pdf = note.relative_path.to_ascii_lowercase().ends_with(".pdf");
-        let body_context = if note.source_pdf.is_some() || is_pdf {
-            if note.source_pdf.is_some() {
-                let _ = self
-                    .ensure_document_ingested(&note.id, &note.title, &note.body)
-                    .await;
-            }
-            let mut scope = vec![note.id.clone()];
-            if let Some(source_id) = note.source_pdf.clone() {
-                scope.push(source_id);
-            }
-            let passages = self
-                .retrieve_chunks_scoped(&question, 4, Some(&scope))
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|chunk| format!("[{}]\n{}", chunk.source, chunk.text))
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            format!(
-                "This document workspace is retrieval-backed.\n\nRelevant passages:\n{passages}"
-            )
-        } else {
-            note.body.clone()
-        };
-
-        let prompt = format!(
-            "Answer the user's latest question directly. Use the open note only if it is relevant to that question.\n\nOpen Note Context:\nTitle: {}\nTags: {}\nBody:\n{}\n\nRecent Chat History for background only:\n{}\n\nLatest Question:\n{}",
-            note.title,
-            if note.tags.is_empty() { "(none)".to_string() } else { note.tags.join(", ") },
-            body_context,
-            history_text,
-            question
-        );
-
-        self.run_llama_prompt(
-            "You are a helpful AI agent. Answer the latest question directly. Ignore the open note and recent chat history unless they are relevant or explicitly referenced.",
-            &prompt,
-        )
-        .await
-    }
-
     pub async fn ask_ai_stream(
         &self,
         note_id: String,
@@ -2472,8 +2275,6 @@ impl AppState {
                 verbose_tool_schemas: config.verbose_tool_schemas,
             });
             let intent_is_tool = Some(turn.intent_is_tool);
-            let persist_raw_question =
-                turn.kind == crate::ai_turn::TurnKind::DirectAnswer;
             let user_content = turn
                 .messages
                 .last()
@@ -2528,20 +2329,16 @@ impl AppState {
             )
             .await?;
 
-            // Retain the canonical system-less turn. Direct Chat sends the raw
-            // question, so the next request reproduces the exact prefix without
-            // paying repeated title/policy wrappers. Tool turns keep their real
-            // assistant calls and results; save_conversation normalizes any
-            // older decorated user messages.
+            // Retain the canonical system-less turn. The user message is stored
+            // in its exact rendered wire form (including any TURN-SPECIFIC
+            // wrapper added for retrieval/selection context) so the next request
+            // reproduces the byte-identical prefix and llama-server can reuse the
+            // KV cache. Persisting the raw question instead would diverge from
+            // the wire whenever turn_instructions were non-empty and break reuse.
             if !isolated_edit {
-                let persisted_user_content = if persist_raw_question {
-                    question.clone()
-                } else {
-                    user_content
-                };
                 convo.push(serde_json::json!({
                     "role": "user",
-                    "content": persisted_user_content
+                    "content": user_content
                 }));
                 convo.extend(final_messages.iter().cloned());
                 let convo = trim_conversation(convo, MAX_LIVE_CONVERSATION_CHARS);
@@ -3479,7 +3276,17 @@ impl AppState {
         } else {
             None
         };
-        let warm_preamble = if interaction_mode == "chat" {
+        let model_id = config.model_path.to_string_lossy().to_string();
+        let supports_tools = crate::tool_capability::supports_tools(
+            &self.inner.llama_client,
+            &config.base_url(),
+            &self.inner.app_data_dir,
+            &config.model_path,
+            &model_id,
+            config.supports_tools,
+        )
+        .await;
+        let warm_preamble = if interaction_mode == "chat" && !supports_tools {
             crate::agent::DIRECT_CHAT_PREAMBLE
         } else {
             crate::agent::MYELIN_PREAMBLE
@@ -3489,10 +3296,11 @@ impl AppState {
             assemble_note_context(&note.title, &excerpt, cells.as_deref())
         );
         let template_kwargs = self.openharn_settings().template_kwargs;
-        // The synthetic note-open warm-up targets the overwhelmingly common
-        // direct Chat path. Retrieval schemas are question-specific and must
-        // not be paid on every empty/direct turn merely to warm the note prefix.
-        let warm_specs = if interaction_mode == "chat" {
+        // Chat always offers one fixed read-only schema set (matching the real
+        // turn's AiTurnBuilder), so the warm-up reproduces the exact system/tool
+        // prefix that the next chat request will reuse from the KV cache. Models
+        // without tool support get the minimal tool-free chat prefix instead.
+        let warm_specs = if !supports_tools {
             Vec::new()
         } else {
             crate::agent::interaction_mode_tools(interaction_mode, retrieval_backed)
@@ -4324,32 +4132,6 @@ fn save_settings(app_data_dir: &Path, settings: &PersistedSettings) -> Result<()
         .with_context(|| format!("failed to write settings at {}", settings_path.display()))
 }
 
-fn format_chat_history_for_prompt(
-    chat_history: &[crate::models::ChatMessage],
-    _latest_question: &str,
-) -> String {
-    let mut messages = chat_history
-        .iter()
-        .filter(|message| !message.content.trim().is_empty())
-        .filter(|message| message.error != Some(true))
-        .rev()
-        .take(MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT)
-        .map(|message| {
-            let content = message.content.trim().replace('\n', " ");
-            let content: String = content.chars().take(800).collect();
-            format!("{}: {}", message.role, content)
-        })
-        .collect::<Vec<_>>();
-
-    messages.reverse();
-
-    if messages.is_empty() {
-        "(none)".to_string()
-    } else {
-        messages.join("\n")
-    }
-}
-
 /// Seed a live conversation from the frontend's saved chat history on the first
 /// turn of a session. Only text turns survive (tool results were never persisted),
 /// but it keeps continuity after an app restart instead of starting blank.
@@ -4370,19 +4152,18 @@ fn chat_history_to_messages(chat_history: &[crate::models::ChatMessage]) -> Vec<
 
 /// The system prompt and generation primers are rebuilt for every request and
 /// must never enter the retained system-less conversation. Keeping them would
-/// change the fixed prefix and recursively inflate subsequent prompts.
+/// change the fixed prefix and recursively inflate subsequent prompts. User
+/// messages are preserved EXACTLY as rendered on the wire (including any
+/// TURN-SPECIFIC/OPEN-NOTE wrapper) so the next request reproduces the
+/// byte-identical prefix and llama-server reuses the KV cache; only system
+/// rows and the sidecar's empty `<think>` placeholders are dropped.
 fn canonical_wire_conversation(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     messages
         .into_iter()
         .map(|mut message| {
             if message["role"].as_str() == Some("user") {
-                if let Some(content) = message["content"].as_str() {
-                    if let Some((_, request)) = content.rsplit_once("\nUSER REQUEST:\n") {
-                        message["content"] = serde_json::Value::String(request.trim().to_string());
-                        if let Some(object) = message.as_object_mut() {
-                            object.remove("metadata");
-                        }
-                    }
+                if let Some(object) = message.as_object_mut() {
+                    object.remove("metadata");
                 }
             }
             message
@@ -5552,7 +5333,12 @@ mod tests {
         let canonical = canonical_wire_conversation(messages);
         assert_eq!(canonical.len(), 3);
         assert_eq!(canonical[0]["role"], "user");
-        assert_eq!(canonical[0]["content"], "question");
+        // The rendered wire form is preserved verbatim (byte-parity for the KV
+        // cache); only metadata, system rows, and empty think placeholders drop.
+        assert_eq!(
+            canonical[0]["content"],
+            "OPEN NOTE TITLE: \"Note\"\n\nINTERNAL TURN POLICY:\npolicy\n\nUSER REQUEST:\nquestion"
+        );
         assert!(canonical[0].get("metadata").is_none());
         assert_eq!(canonical[1]["content"], "answer");
         assert_eq!(canonical[2]["role"], "tool");

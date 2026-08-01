@@ -9,9 +9,10 @@
 //! sidecar's tool-call recovery and HTTP callback round-trip are fully exercised
 //! for all of them.
 //!
-//! The write_note / format_note executors copy Myelin's real `plan_write` and
-//! `apply_format_op` so the on-disk edits are byte-identical to what the app would
-//! do. This is the strict + prompt_tools path (the settings the user enabled).
+//! The write_note / format_note executors use the shared `myelin-edit-core`
+//! crate (the same `plan_write` / `apply_format_op` the app runs), so the
+//! on-disk edits are byte-identical to what the app would do. This is the
+//! strict + prompt_tools path (the settings the user enabled).
 
 use std::convert::Infallible;
 use std::net::TcpListener;
@@ -25,265 +26,8 @@ use axum::{
     Json, Router,
 };
 use futures_util::stream::{self, Stream, StreamExt};
+use myelin_edit_core::{apply_format_op, plan_write};
 use serde_json::{json, Value};
-
-// ---------------------------------------------------------------------------
-// Faithful mirrors of Myelin's tool logic (src-tauri/src/agent.rs)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum WriteOp {
-    Replace,
-    Append,
-    EditSnippet,
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-struct WritePlan {
-    new_body: String,
-    op: WriteOp,
-}
-
-fn find_tolerant(body: &str, find: &str) -> Option<(usize, usize)> {
-    if let Some(i) = body.find(find) {
-        return Some((i, i + find.len()));
-    }
-    let trimmed = find.trim();
-    if !trimmed.is_empty() && trimmed.len() != find.len() {
-        if let Some(i) = body.find(trimmed) {
-            return Some((i, i + trimmed.len()));
-        }
-    }
-    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    let pattern = tokens
-        .iter()
-        .map(|t| regex::escape(t))
-        .collect::<Vec<_>>()
-        .join(r"\s+");
-    let re = regex::Regex::new(&pattern).ok()?;
-    re.find(body).map(|m| (m.start(), m.end()))
-}
-
-fn strip_prompt_markers(s: &str) -> String {
-    let mut cleaned = regex::Regex::new(r"(?i)-{2,}\s*(?:end\s+)?current note\s*-*")
-        .map(|re| re.replace_all(s, "").into_owned())
-        .unwrap_or_else(|_| s.to_string());
-    if let Ok(re) = regex::Regex::new(r"^\s*-{2,}[ \t]+(\S[^\n]*)") {
-        cleaned = re.replace(&cleaned, "$1").into_owned();
-    }
-    cleaned.trim().to_string()
-}
-
-fn plan_write(
-    current_body: &str,
-    content: &str,
-    mode: &str,
-    find: &str,
-) -> Result<WritePlan, String> {
-    let content = strip_prompt_markers(content);
-    let content = content.as_str();
-    let m = mode.trim().to_lowercase();
-    let has_find = !find.trim().is_empty();
-    let is_append = m == "append";
-    let explicit_replace = m == "replace";
-    let snippet = has_find && !explicit_replace && !is_append;
-
-    if snippet {
-        match find_tolerant(current_body, find) {
-            Some((start, end)) => {
-                let prefix = &current_body[..start];
-                let suffix = &current_body[end..];
-                let absorbs = (!prefix.trim().is_empty() && content.starts_with(prefix))
-                    || (!suffix.trim().is_empty() && content.ends_with(suffix));
-                if absorbs {
-                    return Ok(WritePlan {
-                        new_body: content.to_string(),
-                        op: WriteOp::Replace,
-                    });
-                }
-                let mut body = String::with_capacity(current_body.len() + content.len());
-                body.push_str(prefix);
-                body.push_str(content);
-                body.push_str(suffix);
-                Ok(WritePlan {
-                    new_body: body,
-                    op: WriteOp::EditSnippet,
-                })
-            }
-            None => Err(
-                "Could not find the `find` text in the note. Retry with mode \"replace\" and send the COMPLETE updated note as `content`."
-                    .to_string(),
-            ),
-        }
-    } else if is_append {
-        let body = if current_body.trim().is_empty() {
-            content.trim().to_string()
-        } else {
-            format!("{}\n\n{}", current_body.trim_end(), content.trim_start())
-        };
-        Ok(WritePlan {
-            new_body: body,
-            op: WriteOp::Append,
-        })
-    } else {
-        Ok(WritePlan {
-            new_body: content.to_string(),
-            op: WriteOp::Replace,
-        })
-    }
-}
-
-fn strip_emphasis(body: &str, bold: bool, italic: bool) -> String {
-    let re = |p: &str| regex::Regex::new(p).unwrap();
-    let mut s = body.to_string();
-    if bold {
-        s = re(r"\*\*(.+?)\*\*").replace_all(&s, "$1").into_owned();
-        s = re(r"__(.+?)__").replace_all(&s, "$1").into_owned();
-    }
-    if italic {
-        let protect = !bold;
-        if protect {
-            s = s.replace("**", "\u{1}B").replace("__", "\u{1}U");
-        }
-        s = re(r"\*(.+?)\*").replace_all(&s, "$1").into_owned();
-        s = re(r"(?:^|\b)_(.+?)_(?:\b|$)").replace_all(&s, "$1").into_owned();
-        if protect {
-            s = s.replace("\u{1}B", "**").replace("\u{1}U", "__");
-        }
-    }
-    s
-}
-
-fn convert_lists(body: &str, to: &str) -> String {
-    let bullet = regex::Regex::new(r"^(\s*)[-*+][ \t]+").unwrap();
-    let numbered = regex::Regex::new(r"^(\s*)\d+[.)][ \t]+").unwrap();
-    let mut out: Vec<String> = Vec::new();
-    let mut counter = 0u32;
-    for line in body.split('\n') {
-        let b = bullet.captures(line);
-        let n = numbered.captures(line);
-        let caps = b.as_ref().or(n.as_ref());
-        match caps {
-            Some(c) => {
-                counter += 1;
-                let whole = c.get(0).unwrap();
-                let indent = c.get(1).map(|m| m.as_str()).unwrap_or("");
-                let rest = &line[whole.end()..];
-                if to == "number" {
-                    out.push(format!("{indent}{counter}. {rest}"));
-                } else {
-                    out.push(format!("{indent}- {rest}"));
-                }
-            }
-            None => {
-                counter = 0;
-                out.push(line.to_string());
-            }
-        }
-    }
-    out.join("\n")
-}
-
-fn to_title_case(body: &str) -> String {
-    body.split('\n')
-        .map(|line| {
-            line.split(' ')
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        Some(c) => {
-                            c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-                        }
-                        None => String::new(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn apply_format_op(body: &str, op: &str) -> String {
-    let re = |p: &str| regex::Regex::new(p).unwrap();
-    match op {
-        "remove_headings" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
-            .replace_all(body, "")
-            .into_owned(),
-        "remove_bold" => strip_emphasis(body, true, false),
-        "remove_italic" => strip_emphasis(body, false, true),
-        "remove_emphasis" => strip_emphasis(body, true, true),
-        "remove_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+")
-            .replace_all(body, "$1")
-            .into_owned(),
-        "remove_numbering" => re(r"(?m)^([ \t]*)\d+[.)][ \t]+")
-            .replace_all(body, "$1")
-            .into_owned(),
-        "remove_links" => {
-            let protected = body.replace("![", "\u{1}I");
-            let unlinked = re(r"\[([^\]]*)\]\([^)]*\)")
-                .replace_all(&protected, "$1")
-                .into_owned();
-            unlinked.replace("\u{1}I", "![")
-        }
-        "remove_images" => re(r"!\[[^\]]*\]\([^)]*\)")
-            .replace_all(body, "")
-            .into_owned(),
-        "remove_code" => {
-            let no_fence = re(r"(?s)```[^\n]*\n(.*?)```")
-                .replace_all(body, "$1")
-                .into_owned();
-            re(r"`([^`\n]+)`")
-                .replace_all(&no_fence, "$1")
-                .into_owned()
-        }
-        "remove_blockquotes" => re(r"(?m)^[ \t]{0,3}>[ \t]?")
-            .replace_all(body, "")
-            .into_owned(),
-        "remove_strikethrough" => re(r"~~(.+?)~~").replace_all(body, "$1").into_owned(),
-        "remove_horizontal_rules" => re(r"(?m)^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*\n?")
-            .replace_all(body, "")
-            .into_owned(),
-        "remove_blank_lines" => re(r"\n{3,}").replace_all(body, "\n\n").into_owned(),
-        "strip_markdown" => {
-            let mut s = apply_format_op(body, "remove_code");
-            s = apply_format_op(&s, "remove_images");
-            s = apply_format_op(&s, "remove_links");
-            s = apply_format_op(&s, "remove_headings");
-            s = apply_format_op(&s, "remove_blockquotes");
-            s = apply_format_op(&s, "remove_horizontal_rules");
-            s = apply_format_op(&s, "remove_bullets");
-            s = apply_format_op(&s, "remove_numbering");
-            s = apply_format_op(&s, "remove_strikethrough");
-            strip_emphasis(&s, true, true)
-        }
-        "headings_to_bold" => re(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$")
-            .replace_all(body, "**$1**")
-            .into_owned(),
-        "bold_to_headings" => re(r"(?m)^[ \t]*\*\*(.+?)\*\*[ \t]*$")
-            .replace_all(body, "# $1")
-            .into_owned(),
-        "promote_headings" => re(r"(?m)^#(#+[ \t])")
-            .replace_all(body, "$1")
-            .into_owned(),
-        "demote_headings" => re(r"(?m)^(#{1,5})([ \t])")
-            .replace_all(body, "#$1$2")
-            .into_owned(),
-        "bullets_to_numbered" => convert_lists(body, "number"),
-        "numbered_to_bullets" => convert_lists(body, "bullet"),
-        "tasks_to_bullets" => re(r"(?m)^([ \t]*)[-*+][ \t]+\[[ xX]\][ \t]+")
-            .replace_all(body, "$1- ")
-            .into_owned(),
-        "uppercase" => body.to_uppercase(),
-        "lowercase" => body.to_lowercase(),
-        "title_case" => to_title_case(body),
-        _ => body.to_string(),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Test context + faithful tool executor
@@ -346,11 +90,15 @@ fn run_tool(name: &str, args: &Value, ctx: &TestCtx) -> String {
                 .to_string()
         }
         "find_in_note" => {
-            let pat = args["pattern"].as_str().unwrap_or("");
+            let query = args["query"].as_str().unwrap_or("");
             let body = std::fs::read_to_string(&ctx.note_path).unwrap_or_default();
-            let re = regex::Regex::new(pat).unwrap();
-            let matches: Vec<&str> = body.lines().filter(|l| re.is_match(l)).collect();
-            format!("Matches for /{}/:\n{}", pat, matches.join("\n"))
+            let re = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(query))).unwrap();
+            let count = re.find_iter(&body).count();
+            if count == 0 {
+                format!("The text \"{query}\" does NOT appear in the open note.")
+            } else {
+                format!("Yes — \"{query}\" appears {count} time(s) in the open note.")
+            }
         }
         other => format!("unknown tool {other}"),
     }
@@ -394,7 +142,7 @@ fn scripted_call(scenario: &str) -> String {
         "web_search" => call("web_search", json!({ "query": "rust async" })),
         "search_notes" => call("search_notes", json!({ "query": "project" })),
         "search_documents" => call("search_documents", json!({ "query": "report" })),
-        "find_in_note" => call("find_in_note", json!({ "pattern": "world" })),
+        "find_in_note" => call("find_in_note", json!({ "query": "world" })),
         "edit_notebook" => {
             call("edit_notebook", json!({ "operation": "edit", "index": 0, "content": "print(42)" }))
         }
@@ -487,7 +235,7 @@ fn tool_schemas() -> Value {
         {"type":"function","function":{"name":"web_search","description":"Search the web.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
         {"type":"function","function":{"name":"search_notes","description":"Search notes.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
         {"type":"function","function":{"name":"search_documents","description":"Search documents.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
-        {"type":"function","function":{"name":"find_in_note","description":"Find in note.","parameters":{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}}}
+        {"type":"function","function":{"name":"find_in_note","description":"Find in note.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}}
     ])
 }
 
@@ -856,7 +604,11 @@ async fn every_tool_round_trips_and_edits_md() {
     std::fs::write(&ctx.note_path, "world here\nnothing").unwrap();
     let o = run_scenario(&client, &sidecar_base, &mock_base, "req-find", "find_in_note", &ctx).await;
     assert_eq!(o.tool.as_deref(), Some("find_in_note"), "find_in_note dispatched");
-    assert!(o.last_result.as_deref().unwrap().contains("world here"), "find_in_note result");
+    assert!(
+        o.last_result.as_deref().unwrap().contains("appears 1 time(s)"),
+        "find_in_note result: {:?}",
+        o.last_result
+    );
 
     // --- edit_notebook (.ipynb actually changes) ---
     let o = run_scenario(&client, &sidecar_base, &mock_base, "req-nb", "edit_notebook", &ctx).await;

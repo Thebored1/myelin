@@ -53,13 +53,28 @@ impl AiTurnBuilder {
             routed,
             input.verbose_tool_schemas,
         );
-        let intent_is_tool = matches!(input.mode, "operation" | "edit") || !tools.is_empty();
+        // Deterministic TOOL/CHAT intent, decoupled from the offered schema list.
+        // Chat always carries one fixed read-only schema set (so the system/tool
+        // prefix is byte-identical every turn and llama-server can reuse the KV
+        // cache), so "tools present" can no longer mean "this is a tool turn".
+        let intent_is_tool = match input.mode {
+            "operation" | "edit" => true,
+            "chat" => crate::agent::tool_intent(input.question, input.edit_thread),
+            _ => !tools.is_empty(),
+        };
+        // A fixed preamble per mode: chat always uses the editing preamble when
+        // it offers the read-only schema set, and the minimal chat preamble for
+        // tool-less models. The selection depends only on the stable mode+tool
+        // capability, never on the current question, so the system message does
+        // not flip between turns.
         let preamble = if input.mode == "chat" && tools.is_empty() {
             crate::agent::DIRECT_CHAT_PREAMBLE
         } else {
             crate::agent::MYELIN_PREAMBLE
         };
-        let direct_chat = input.mode == "chat" && tools.is_empty();
+        // Chat always renders the minimal direct user content (raw question plus
+        // any turn-specific context) regardless of the read-only schemas offered.
+        let direct_chat = input.mode == "chat";
         let mut messages = vec![json!({
             "role": "system",
             "content": format!("{preamble}\n\n{}", input.system_context),
@@ -103,33 +118,7 @@ fn route_tools(
     oversized: bool,
 ) -> Vec<Value> {
     match mode {
-        "chat" => {
-            let names: &[&str] = if crate::agent::wants_other_notes(question) {
-                if oversized {
-                    &["search_notes", "read_note"]
-                } else {
-                    &["search_notes"]
-                }
-            } else if crate::agent::wants_search(question) {
-                &["web_search", "fetch_web_page"]
-            } else if crate::agent::wants_fetch(question) {
-                &["fetch_web_page"]
-            } else if crate::agent::wants_documents(question) {
-                &["search_documents"]
-            } else if oversized && has_open_note && crate::agent::wants_find(question) {
-                &["find_in_note"]
-            } else {
-                &[]
-            };
-            crate::agent::tool_specs()
-                .into_iter()
-                .filter(|tool| {
-                    tool["function"]["name"]
-                        .as_str()
-                        .is_some_and(|name| names.contains(&name))
-                })
-                .collect()
-        }
+        "chat" => crate::agent::select_chat_tools(question, has_open_note),
         "edit" => crate::agent::interaction_mode_tools("edit", oversized),
         _ => crate::agent::select_tools(question, has_open_note, edit_thread),
     }
@@ -244,9 +233,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_chat_has_no_schema_and_keeps_real_title_metadata() {
+    fn direct_chat_offers_fixed_read_only_schema_and_keeps_real_title_metadata() {
         let turn = build("chat", "What is this note about?");
-        assert!(turn.tools.is_empty());
+        // Chat always carries one fixed read-only schema set so the system/tool
+        // prefix is byte-identical across turns (KV reuse), regardless of the
+        // question. Intent is computed deterministically and stays direct here.
+        assert!(!turn.tools.is_empty());
         assert!(!turn.intent_is_tool);
         assert_eq!(turn.kind, TurnKind::DirectAnswer);
         assert_eq!(
@@ -258,28 +250,21 @@ mod tests {
     }
 
     #[test]
-    fn chat_routes_only_relevant_read_tools() {
-        assert!(names(&build("chat", "does this note contain aardvark?")).is_empty());
-        assert_eq!(names(&build("chat", "summarize https://example.com")), ["fetch_web_page"]);
-        assert_eq!(
-            names(&build("chat", "search the web for rust news")),
-            ["fetch_web_page", "web_search"]
-        );
-        assert_eq!(
-            names(&build("chat", "search my other notes for pasta")),
-            ["search_notes"]
-        );
-        assert_eq!(
-            names(&build("chat", "what does my PDF say about attention?")),
-            ["search_documents"]
-        );
+    fn chat_always_offers_the_fixed_read_only_tool_set() {
+        // Question-dependent tool gating would change the rendered prompt prefix
+        // between turns; chat instead offers one stable read-only set and relies
+        // on deterministic tool_intent for routing.
+        let expected = ["fetch_web_page", "find_in_note", "read_note", "search_documents", "search_notes", "web_search"];
+        assert_eq!(names(&build("chat", "does this note contain aardvark?")), expected);
+        assert_eq!(names(&build("chat", "summarize https://example.com")), expected);
+        assert_eq!(names(&build("chat", "search the web for rust news")), expected);
+        assert_eq!(names(&build("chat", "search my other notes for pasta")), expected);
+        assert_eq!(names(&build("chat", "what does my PDF say about attention?")), expected);
     }
 
     #[test]
-    fn oversized_note_enables_exact_find() {
-        let mut turn = build("chat", "does this note contain aardvark?");
-        assert!(turn.tools.is_empty());
-        turn = AiTurnBuilder::build(AiTurnInput {
+    fn oversized_note_keeps_chat_read_only_schema() {
+        let turn = AiTurnBuilder::build(AiTurnInput {
             mode: "chat",
             note_title: "Large",
             system_context: "retrieval-backed",
@@ -293,7 +278,9 @@ mod tests {
             supports_tools: true,
             verbose_tool_schemas: false,
         });
-        assert_eq!(names(&turn), ["find_in_note"]);
+        let got = names(&turn);
+        assert!(got.contains(&"find_in_note"));
+        assert!(!got.contains(&"write_note"));
     }
 
     #[test]
@@ -304,12 +291,33 @@ mod tests {
     }
 
     #[test]
-    fn direct_chat_uses_small_preamble() {
+    fn direct_chat_uses_small_preamble_only_when_tool_less() {
+        // Chat with tool support carries the read-only schema and the standard
+        // editing preamble (fixed prefix). The minimal DIRECT_CHAT_PREAMBLE is
+        // reserved for tool-less models so they never see a mutation manual.
         let turn = build("chat", "hello");
         let system = turn.messages[0]["content"].as_str().unwrap();
-        assert!(system.starts_with(crate::agent::DIRECT_CHAT_PREAMBLE));
-        assert!(!system.contains("Worked examples"));
-        assert!(system.len() < 1_000);
+        assert!(system.starts_with(crate::agent::MYELIN_PREAMBLE));
+        assert!(!turn.tools.is_empty());
+
+        let tool_less = AiTurnBuilder::build(AiTurnInput {
+            mode: "chat",
+            note_title: "Real title",
+            system_context: "The note currently open is titled \"Real title\".",
+            conversation: &[],
+            question: "hello",
+            mode_policy: "policy",
+            turn_instructions: "",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: false,
+            verbose_tool_schemas: false,
+        });
+        assert!(tool_less.tools.is_empty());
+        let small = tool_less.messages[0]["content"].as_str().unwrap();
+        assert!(small.starts_with(crate::agent::DIRECT_CHAT_PREAMBLE));
+        assert!(small.len() < 1_000);
     }
 
     #[test]

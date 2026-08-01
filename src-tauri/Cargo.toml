@@ -22,6 +22,7 @@ tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
 anyhow = "1.0"
+myelin-edit-core = { path = "edit-core" }
 arrow-array = "53.4"
 arrow-schema = "53.4"
 chrono = { version = "0.4", features = ["serde"] }
