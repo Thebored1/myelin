@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use futures_util::StreamExt;
 use rig_core::client::CompletionClient;
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
@@ -6,6 +7,25 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::Emitter;
+
+/// How long the UI may take to answer a tool-approval prompt before the request
+/// is refused. Bounds the backend wait; the frontend auto-rejects on the same
+/// deadline.
+const TOOL_APPROVAL_TIMEOUT_SECS: u64 = 120;
+
+/// Removes the registered approval entry when the wait completes any way: user
+/// decision, timeout, cancellation, or the awaiting task being dropped. Without
+/// it a cancelled turn leaks a dead sender in `pending_approvals` forever.
+struct PendingApprovalGuard<'a> {
+    state: &'a AppState,
+    id: String,
+}
+
+impl Drop for PendingApprovalGuard<'_> {
+    fn drop(&mut self) {
+        self.state.remove_pending_approval(&self.id);
+    }
+}
 
 async fn check_tool_approval(
     state: &AppState,
@@ -19,6 +39,10 @@ async fn check_tool_approval(
     let req_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.register_pending_approval(req_id.clone(), tx);
+    let _guard = PendingApprovalGuard {
+        state,
+        id: req_id.clone(),
+    };
 
     let _ = state.handle.emit(
         "ai://tool_approval_request",
@@ -30,14 +54,25 @@ async fn check_tool_approval(
         }),
     );
 
-    match rx.await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("User rejected this action.".to_string()),
-        Err(_) => Err("Approval request cancelled.".to_string()),
+    tokio::select! {
+        result = rx => match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("User rejected this action.".to_string()),
+            Err(_) => Err("Approval request cancelled.".to_string()),
+        },
+        _ = state.wait_for_ai_cancel() => {
+            Err("Cancelled by the user while awaiting approval; no changes were made.".to_string())
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(TOOL_APPROVAL_TIMEOUT_SECS)) => {
+            Err("Approval request timed out after 120 seconds; no changes were made.".to_string())
+        }
     }
 }
 
 const WEB_FETCH_LIMIT: usize = 6_000;
+/// Raw body cap for `fetch_web_page`: stop reading after this many bytes so a
+/// huge page cannot fill memory before the 6,000-character text excerpt is cut.
+const WEB_BODY_CAP: usize = 256 * 1024;
 
 /// System preamble for the note assistant. Kept as a single source of truth so
 /// the startup cache warm-up replays the exact same prefix the live agent uses.
@@ -1392,8 +1427,13 @@ pub fn select_chat_tools(_message: &str, _has_open_note: bool) -> Vec<Value> {
 /// compatible with the full schema for external callers and a future composer
 /// mode toggle.
 pub fn interaction_mode_tools(mode: &str, oversized: bool) -> Vec<Value> {
-    if oversized {
-        return tool_specs()
+    match mode {
+        // Chat always renders one fixed read-only set — even for oversized
+        // notes — so the synthetic warm-up prefix is byte-identical to the
+        // real chat turn and its persisted KV snapshot stays reusable.
+        "chat" => select_chat_tools("", true),
+        "edit" => specs_for(&["write_note"]),
+        _ if oversized => tool_specs()
             .into_iter()
             .filter(|tool| {
                 !matches!(
@@ -1401,11 +1441,7 @@ pub fn interaction_mode_tools(mode: &str, oversized: bool) -> Vec<Value> {
                     Some("write_note" | "format_note")
                 )
             })
-            .collect();
-    }
-    match mode {
-        "chat" => select_chat_tools("", true),
-        "edit" => specs_for(&["write_note"]),
+            .collect(),
         _ => tool_specs(),
     }
 }
@@ -1763,8 +1799,10 @@ impl Tool for AppendNoteTool {
         };
 
         // Safety guard: strip echoed existing note content if the model
-        // disregards the tool description.
-        let content = clean_note_content(&normalize_append_content(&existing.body, &args.content));
+        // disregards the tool description, and drop the prompt-framing markers
+        // (--- CURRENT NOTE --- etc.) that every other write tool strips.
+        let content =
+            clean_note_content(&normalize_append_content(&existing.body, &strip_prompt_markers(&args.content)));
 
         if content.trim().is_empty() {
             return Ok("Nothing to append — content was empty after normalization.".to_string());
@@ -1794,7 +1832,7 @@ impl Tool for AppendNoteTool {
                 existing.id.clone(),
                 existing.title,
                 existing.tags,
-                new_body,
+                new_body.clone(),
                 existing.source_pdf,
                 Some(existing.annotations),
             )
@@ -1804,7 +1842,7 @@ impl Tool for AppendNoteTool {
             })?;
         let _ = self.state.handle.emit(
             "ai://note_written",
-            serde_json::json!({ "noteId": existing.id, "content": content, "mode": "append" }),
+            serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );
         Ok(format!(
             "Note successfully updated with ID: {}",
@@ -2213,16 +2251,21 @@ impl Tool for FormatNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Trust the model's operation only if it's a known op; otherwise fall back
-        // to what the user's message clearly asked for. The transform itself is
-        // deterministic either way.
+        // Trust the model's operation only if it's a known op; otherwise fall
+        // back to what the user's message clearly asked for. The transform
+        // itself is deterministic either way. When neither yields a valid op,
+        // refuse: falling back to strip_markdown would silently erase the note
+        // on a misrouted request.
         let requested = args.operation.trim();
         let op = if is_format_op(requested) {
             requested.to_string()
+        } else if let Some(detected) = detect_format_op(&self.state.latest_chat_question()) {
+            detected.to_string()
         } else {
-            detect_format_op(&self.state.latest_chat_question())
-                .unwrap_or("strip_markdown")
-                .to_string()
+            return Ok(format!(
+                "Refused: '{requested}' is not a supported format operation. Supported operations: {}.",
+                FORMAT_OPS.join(", ")
+            ));
         };
 
         let existing = match self.state.resolve_chat_target_note("") {
@@ -2289,7 +2332,7 @@ fn edit_notebook_params() -> Value {
 #[derive(Deserialize, JsonSchema)]
 pub struct EditNotebookArgs {
     pub operation: String,
-    #[serde(default)]
+    /// Required: a missing index must never silently become cell 0.
     pub index: usize,
     #[serde(default)]
     pub cell_type: Option<String>,
@@ -2323,8 +2366,19 @@ impl Tool for EditNotebookTool {
             Some(n) => n,
             None => return Ok("No notebook is currently open to edit.".to_string()),
         };
+        let op_name = args.operation.trim();
+        // A missing content must not silently empty a cell (or insert an empty
+        // one). Refuse instead of guessing.
+        if matches!(op_name, "edit" | "insert")
+            && args.content.as_deref().map(str::trim).unwrap_or("").is_empty()
+        {
+            return Ok(
+                "Refused: `content` is required for edit/insert operations — a missing content would erase the cell. Provide the cell's source text and retry."
+                    .to_string(),
+            );
+        }
         let op = crate::notebook::NotebookOp {
-            operation: args.operation.trim(),
+            operation: op_name,
             index: args.index,
             cell_type: args.cell_type.as_deref().unwrap_or("code"),
             content: args.content.as_deref().unwrap_or(""),
@@ -2424,13 +2478,37 @@ impl Tool for FetchWebPageTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let url = normalize_web_url(&args.url).map_err(|message| ToolError { message })?;
+        // SSRF guard: never fetch loopback/private/link-local addresses (the
+        // user's own machine or LAN), checked again on every redirect hop.
+        let resolved_addr = crate::web_search::resolve_public_url(&url)
+            .await
+            .map_err(|message| ToolError { message })?;
         self.state.record_chat_tool("Fetch Web Page", url.clone());
         let _ = self.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Fetch Web Page", "details": url }),
         );
 
-        let response = crate::web_search::web_client()
+        // Pin the initial hostname to the already-validated public address and
+        // disable redirects. Following redirects would require an async DNS
+        // validation step for every hop; refusing them keeps the guarantee
+        // between validation and connection establishment explicit.
+        let mut client_builder = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(6))
+            .timeout(std::time::Duration::from_secs(20))
+            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(addr) = resolved_addr {
+            if let Some(host) = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)) {
+                client_builder = client_builder.resolve(&host, addr);
+            }
+        }
+        let client = client_builder.build()
+            .map_err(|e| ToolError {
+                message: format!("Failed to build web client: {e}"),
+            })?;
+
+        let response = client
             .get(&url)
             .header(
                 reqwest::header::USER_AGENT,
@@ -2449,9 +2527,25 @@ impl Tool for FetchWebPageTool {
             });
         }
 
-        let body = response.text().await.map_err(|e| ToolError {
-            message: format!("Failed to read response from {url}: {e}"),
-        })?;
+        // Cap the raw body read so a huge page cannot fill memory before the
+        // 6,000-character text excerpt is extracted below.
+        let mut body_bytes: Vec<u8> = Vec::new();
+        let mut stream = response.bytes_stream();
+        while body_bytes.len() < WEB_BODY_CAP {
+            match stream.next().await {
+                Some(Ok(chunk)) => {
+                    let take = (WEB_BODY_CAP - body_bytes.len()).min(chunk.len());
+                    body_bytes.extend_from_slice(&chunk[..take]);
+                }
+                Some(Err(e)) => {
+                    return Err(ToolError {
+                        message: format!("Failed to read response from {url}: {e}"),
+                    })
+                }
+                None => break,
+            }
+        }
+        let body = String::from_utf8_lossy(&body_bytes);
         let text = html_to_text(&body);
         if text.trim().is_empty() {
             Ok(format!("Fetched {url}, but no readable text was found."))

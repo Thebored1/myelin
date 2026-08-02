@@ -57,31 +57,101 @@ const DEFAULT_TEX_PREAMBLE: &str = "\\documentclass[11pt]{article}\n\
      \\usepackage{enumitem}";
 
 /// Wrap bare LaTeX body text (no `\documentclass`) in the default preamble.
-fn wrap_bare_latex(body: &str) -> String {
+#[derive(Debug, Clone)]
+struct TexTransform {
+    source: String,
+    /// Compiled line number (1-based) to editor line number; 0 means generated.
+    line_map: Vec<usize>,
+}
+
+fn tex_line_without_comment(line: &str) -> String {
+    let mut escaped = false;
+    for (index, ch) in line.char_indices() {
+        if ch == '%' && !escaped {
+            return line[..index].to_string();
+        }
+        if ch == '\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+    }
+    line.to_string()
+}
+
+fn tex_package_declaration(line: &str) -> Option<(&'static str, Vec<String>)> {
+    let clean = tex_line_without_comment(line);
+    let trimmed = clean.trim_start();
+    let (kind, mut rest) = if let Some(rest) = trimmed.strip_prefix("\\usepackage") {
+        ("use", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("\\RequirePackage") {
+        ("require", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("\\PassOptionsToPackage") {
+        ("pass", rest)
+    } else {
+        return None;
+    };
+    rest = rest.trim_start();
+    if rest.starts_with('[') {
+        let close = rest.find(']')?;
+        rest = rest[close + 1..].trim_start();
+    }
+    let first_open = rest.find('{')?;
+    let first_close = first_open + 1 + rest[first_open + 1..].find('}')?;
+    let package_text = if kind == "pass" {
+        let second_open = first_close + 1 + rest[first_close + 1..].find('{')?;
+        let second_close = second_open + 1 + rest[second_open + 1..].find('}')?;
+        &rest[second_open + 1..second_close]
+    } else {
+        &rest[first_open + 1..first_close]
+    };
+    let packages = package_text
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    (!packages.is_empty()).then_some((kind, packages))
+}
+
+fn has_active_documentclass(source: &str) -> bool {
+    source
+        .lines()
+        .any(|line| tex_line_without_comment(line).trim_start().starts_with("\\documentclass"))
+}
+
+fn wrap_bare_latex(body: &str) -> TexTransform {
     // A note may contain a partial preamble (for example
     // `\\usepackage[dvipsnames]{xcolor}`) without a document class. Keep those
     // declarations before `\\begin{document}` so packages see their options.
     let mut preamble = Vec::new();
+    let mut preamble_map = Vec::new();
     let mut content = Vec::new();
+    let mut content_map = Vec::new();
     let mut in_preamble = true;
-    for line in body.lines() {
+    for (line_number, line) in body.lines().enumerate() {
         let trimmed = line.trim_start();
-        let is_preamble_command = trimmed.starts_with("\\usepackage")
-            || trimmed.starts_with("\\RequirePackage")
-            || trimmed.starts_with("\\PassOptionsToPackage");
+        let is_preamble_command = tex_package_declaration(line).is_some();
         if in_preamble && (is_preamble_command || trimmed.is_empty() || trimmed.starts_with('%')) {
             preamble.push(line);
+            preamble_map.push(line_number + 1);
         } else {
             in_preamble = false;
             content.push(line);
+            content_map.push(line_number + 1);
         }
     }
-    let user_preamble = if preamble.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", preamble.join("\n"))
-    };
-    format!("{DEFAULT_TEX_PREAMBLE}\n{user_preamble}\\begin{{document}}\n{}\n\\end{{document}}", content.join("\n"))
+    let mut lines = DEFAULT_TEX_PREAMBLE.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut line_map = vec![0; lines.len()];
+    lines.extend(preamble.iter().map(|line| (*line).to_string()));
+    line_map.extend(preamble_map);
+    lines.push("\\begin{document}".to_string());
+    line_map.push(0);
+    lines.extend(content.iter().map(|line| (*line).to_string()));
+    line_map.extend(content_map);
+    lines.push("\\end{document}".to_string());
+    line_map.push(0);
+    TexTransform { source: lines.join("\n"), line_map }
 }
 
 /// Faithful test entrypoint mirroring [`AppState::compile_latex`]'s transform
@@ -93,10 +163,10 @@ pub fn compile_tex_source(raw: &str) -> std::result::Result<Vec<u8>, String> {
     if body.trim().is_empty() {
         return Err("This note is empty — add some LaTeX before compiling.".to_string());
     }
-    let final_tex = if !body.contains("\\documentclass") {
-        wrap_bare_latex(&body)
+    let final_tex = if !has_active_documentclass(&body) {
+        wrap_bare_latex(&body).source
     } else {
-        ensure_packages(&body).0
+        ensure_packages(&body).source
     };
     compile_with_tectonic(&final_tex, None).map_err(|f| f.message)
 }
@@ -121,50 +191,64 @@ const ENSURE_PACKAGES: &[&str] = &[
 /// `\documentclass` line. Returns the new source and how many lines were inserted
 /// (so TeX error lines can be mapped back to the editor). Skipping already-present
 /// packages avoids LaTeX "option clash" errors.
-fn ensure_packages(src: &str) -> (String, usize) {
+fn ensure_packages(src: &str) -> TexTransform {
     // AI-generated documents occasionally repeat a package with different
     // options (most commonly xcolor), which LaTeX rejects as an option clash.
     // Keep the first declaration—the document author’s options—and discard
     // later duplicates before adding any missing defaults.
+    let managed: std::collections::HashSet<&str> = ENSURE_PACKAGES
+        .iter()
+        .copied()
+        .chain(["xcolor"])
+        .collect();
     let mut seen = std::collections::HashSet::new();
-    let mut deduped = String::with_capacity(src.len());
-    for line in src.lines() {
-        let duplicate = ENSURE_PACKAGES.iter().chain(["xcolor"].iter()).any(|pkg| {
-            line.trim_start().starts_with("\\usepackage")
-                && line.contains(&format!("{{{pkg}}}"))
-                && !seen.insert(*pkg)
+    let mut lines = Vec::new();
+    let mut line_map = Vec::new();
+    for (line_number, line) in src.lines().enumerate() {
+        let declaration = tex_package_declaration(line);
+        let duplicate = declaration.as_ref().is_some_and(|(kind, packages)| {
+            *kind != "pass"
+                && packages.iter().all(|pkg| managed.contains(pkg.as_str()) && seen.contains(pkg))
         });
         if !duplicate {
-            deduped.push_str(line);
-            deduped.push('\n');
+            lines.push(line.to_string());
+            line_map.push(line_number + 1);
+        }
+        if let Some((kind, packages)) = declaration {
+            if kind != "pass" {
+                seen.extend(packages);
+            }
         }
     }
-    let src = deduped.trim_end_matches('\n');
     let missing: Vec<&str> = ENSURE_PACKAGES
         .iter()
         .copied()
-        .filter(|pkg| !src.contains(&format!("{{{pkg}}}")))
+        .filter(|pkg| !seen.contains(*pkg))
         .collect();
     if missing.is_empty() {
-        return (src.to_string(), 0);
+        return TexTransform { source: lines.join("\n"), line_map };
     }
-    let Some(dc) = src.find("\\documentclass") else {
-        return (src.to_string(), 0);
+    let Some(dc) = lines.iter().position(|line| {
+        tex_line_without_comment(line).trim_start().starts_with("\\documentclass")
+    }) else {
+        return TexTransform { source: lines.join("\n"), line_map };
     };
     // Insert after the end of the \documentclass line.
-    let insert_at = src[dc..]
-        .find('\n')
-        .map(|i| dc + i + 1)
-        .unwrap_or(src.len());
-    let injected: String = missing
+    let injected = missing
         .iter()
-        .map(|pkg| format!("\\usepackage{{{pkg}}}\n"))
-        .collect();
-    let mut out = String::with_capacity(src.len() + injected.len());
-    out.push_str(&src[..insert_at]);
-    out.push_str(&injected);
-    out.push_str(&src[insert_at..]);
-    (out, missing.len())
+        .map(|pkg| format!("\\usepackage{{{pkg}}}"))
+        .collect::<Vec<_>>();
+    let mut out = Vec::with_capacity(lines.len() + injected.len());
+    let mut out_map = Vec::with_capacity(line_map.len() + injected.len());
+    for index in 0..=dc {
+        out.push(lines[index].clone());
+        out_map.push(line_map[index]);
+    }
+    out.extend(injected);
+    out_map.extend(std::iter::repeat(0).take(missing.len()));
+    out.extend(lines.into_iter().skip(dc + 1));
+    out_map.extend(line_map.into_iter().skip(dc + 1));
+    TexTransform { source: out.join("\n"), line_map: out_map }
 }
 
 /// A failed Tectonic run: the engine's high-level message plus the raw TeX log
@@ -316,16 +400,15 @@ fn run_tectonic_session(tex: &str, input_root: Option<&Path>) -> std::result::Re
     }
 }
 
-/// Parse a TeX error log into editor diagnostics. TeX reports the offending line
-/// as `l.NN`; LaTeX package errors as `... on input line NN`. Line numbers are in
-/// the compiled document's coordinates, so subtract `body_line_offset` (the
-/// preamble length we prepended for bare notes) to map back to the editor.
-fn parse_tex_log(log: &str, body_line_offset: usize) -> Vec<serde_json::Value> {
+/// Parse a TeX error log into editor diagnostics. The transform line map avoids
+/// shifting diagnostics that occur before generated content and handles removed
+/// duplicate package declarations.
+fn parse_tex_log(log: &str, line_map: &[usize]) -> Vec<serde_json::Value> {
     let mut diagnostics = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut current_msg: Option<String> = None;
 
-    let map_line = |n: usize| -> usize { n.saturating_sub(body_line_offset).max(1) };
+    let map_line = |n: usize| -> usize { line_map.get(n.saturating_sub(1)).copied().unwrap_or(0) };
     let leading_number = |s: &str| -> Option<usize> {
         let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
         digits.parse::<usize>().ok()
@@ -383,6 +466,81 @@ fn dir_size(path: &Path) -> u64 {
         }
     }
     total
+}
+
+/// Upper bound on the per-engine on-disk KV snapshot cache. A slot file holds a
+/// full context window (~0.5-1 GB each at 32k), so an unbounded cache would eat
+/// the disk; the LRU eviction keeps only the most recently used notes.
+const SLOT_CACHE_BUDGET_BYTES: u64 = 8 << 30;
+
+/// Delete the oldest `*.slot` snapshots (with their paired `.slot.json`
+/// manifests) until `slot_dir` fits under `budget_bytes`. LRU order is file
+/// mtime: every save and restore refreshes it.
+fn enforce_slot_cache_budget(slot_dir: &Path, budget_bytes: u64) {
+    let Ok(read_dir) = fs::read_dir(slot_dir) else {
+        return;
+    };
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("slot") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        total += meta.len();
+        entries.push((
+            meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            path,
+        ));
+    }
+    if total <= budget_bytes {
+        return;
+    }
+    entries.sort_by_key(|(modified, _)| *modified);
+    for (_, path) in entries {
+        if total <= budget_bytes {
+            break;
+        }
+        if let Ok(meta) = fs::metadata(&path) {
+            total = total.saturating_sub(meta.len());
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        log::info!("evicting llama slot cache entry {}", path.display());
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(slot_dir.join(format!("{name}.json")));
+    }
+}
+
+/// The exact system/tool prefix the synthetic warm-up renders — the provenance
+/// identity a post-turn slot save must record. Chat shares this prefix with the
+/// real turn (stable preamble + fixed read-only schema set), so a persisted KV
+/// snapshot is a strict prefix of the next request and reusable across sessions.
+fn warmup_prefix(
+    note_title: &str,
+    excerpt: &str,
+    cells: Option<&str>,
+    interaction_mode: &str,
+    supports_tools: bool,
+    oversized: bool,
+    verbose_tool_schemas: bool,
+) -> (String, Vec<serde_json::Value>) {
+    let preamble = if interaction_mode == "chat" && !supports_tools {
+        crate::agent::DIRECT_CHAT_PREAMBLE
+    } else {
+        crate::agent::MYELIN_PREAMBLE
+    };
+    let system = format!(
+        "{preamble}\n\n{}",
+        assemble_note_context(note_title, excerpt, cells)
+    );
+    let tools = if !supports_tools {
+        Vec::new()
+    } else {
+        crate::agent::interaction_mode_tools(interaction_mode, oversized)
+    };
+    let tools = crate::agent::compact_tool_specs_for_profile(tools, verbose_tool_schemas);
+    (system, tools)
 }
 
 fn describe_completion_error(error: &CompletionError) -> String {
@@ -484,6 +642,10 @@ pub(crate) struct InnerState {
     /// At most one note-prefix warm-up should be consuming llama-server at once.
     /// The key is the exact request prefix; a newer prefix supersedes an older one.
     prompt_warmup: Mutex<Option<(u64, tokio::task::JoinHandle<()>)>>,
+    /// (note_id, identity) of the most recent successful slot snapshot. Slot 0
+    /// still holds that snapshot's KV when the app quits, so the quit path can
+    /// re-persist it before llama-server dies; the next boot restores it.
+    last_slot_save: Mutex<Option<(String, String)>>,
     pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     /// Per-note live conversation as the REAL message array (system-less): user
     /// turns, assistant turns with tool_calls, and the tool RESULTS. The frontend's
@@ -699,6 +861,7 @@ impl AppState {
                 current_selection: Mutex::new(None),
                 current_doc_type: Mutex::new(None),
                 current_note_id: Mutex::new(None),
+                last_slot_save: Mutex::new(None),
                 cancel_ai: std::sync::atomic::AtomicBool::new(false),
                 cancel_notify: tokio::sync::Notify::new(),
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
@@ -966,6 +1129,11 @@ impl AppState {
         if let Some(tx) = self.inner.pending_approvals.lock().remove(id) {
             let _ = tx.send(approved);
         }
+    }
+
+    /// Drop a pending approval without resolving it (timeout / cancellation).
+    pub fn remove_pending_approval(&self, id: &str) {
+        self.inner.pending_approvals.lock().remove(id);
     }
 
     pub async fn bootstrap(&self) -> Result<AppSnapshot> {
@@ -2075,7 +2243,7 @@ impl AppState {
                         }),
                     );
                     match self
-                        .retrieve_chunks_scoped(&retrieval_query, 6, Some(&scope))
+                        .retrieve_chunks_scoped(&retrieval_query, 3, Some(&scope))
                         .await
                     {
                         Ok(chunks) => {
@@ -2094,8 +2262,26 @@ impl AppState {
                                     "requestId": request_id,
                                 }),
                             );
-                            let char_budget = ctx_tokens.saturating_mul(3) / 4;
-                            let evidence = crate::rag::pack_passages(chunks, char_budget);
+                            // Keep document evidence bounded so retrieval does
+                            // not crowd out the stable prompt prefix, history,
+                            // or the model's answer budget. Four characters per
+                            // token is a conservative approximation here.
+                            let char_budget = ctx_tokens
+                                .saturating_mul(4)
+                                .min(4_000)
+                                .max(1_600);
+                            let evidence = crate::rag::pack_passages_limited(chunks, char_budget, 3);
+                            let _ = self.handle.emit(
+                                "ai://debug_event",
+                                serde_json::json!({
+                                    "kind": "retrieval",
+                                    "msg": format!(
+                                        "evidence_chars={}; evidence_budget_chars={char_budget}",
+                                        evidence.chars().count()
+                                    ),
+                                    "requestId": request_id,
+                                }),
+                            );
                             if !evidence.is_empty() {
                                 turn_instructions.push_str(
                                     "\n\nAUTOMATIC RETRIEVAL FROM THE OPEN NOTE + ATTACHED SOURCE:",
@@ -2357,6 +2543,37 @@ impl AppState {
                         log::debug!("post-write prompt-cache warm-up skipped: {error}");
                     }
                 });
+            } else if config.prompt_cache {
+                // Persist the finished turn's KV snapshot so a later session
+                // restores the whole conversation prefix instead of re-running
+                // the synthetic warm-up. Slot 0 still holds this prefix (the
+                // next request reuses it from RAM), so the detached save cannot
+                // disturb a follow-up turn. Skipped on mutation turns: the note
+                // body inside the system message changed, so the post-write
+                // warm-up above (with the new identity) owns that snapshot.
+                let (system, tools) = warmup_prefix(
+                    &note.title,
+                    &note_body_excerpt,
+                    notebook_cells.as_deref(),
+                    interaction_mode,
+                    supports_tools,
+                    retrieval_backed,
+                    config.verbose_tool_schemas,
+                );
+                let template_kwargs = self.openharn_settings().template_kwargs;
+                let identity = Self::slot_identity(
+                    &config,
+                    ctx_tokens as u32,
+                    interaction_mode,
+                    &system,
+                    &serde_json::to_string(&tools).unwrap_or_default(),
+                    &template_kwargs,
+                );
+                let state = self.clone();
+                let note_id = nid.clone();
+                tokio::spawn(async move {
+                    state.save_note_slot(&note_id, &identity).await;
+                });
             }
 
             Ok(())
@@ -2616,7 +2833,7 @@ impl AppState {
     /// been warmed yet (first run ⇒ ~50 MB bundle fetch) we emit `latex://download`
     /// events (`start` / `progress` with byte counts / `done` / `error`) so the UI
     /// can show a real download indicator instead of a generic spinner.
-    async fn run_tectonic(&self, tex: String, body_line_offset: usize, input_root: Option<PathBuf>) -> Result<Vec<u8>> {
+    async fn run_tectonic(&self, tex: String, line_map: Vec<usize>, input_root: Option<PathBuf>) -> Result<Vec<u8>> {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         // One Tectonic run at a time — concurrent runs corrupt the format cache.
@@ -2695,7 +2912,7 @@ impl AppState {
                 let payload = serde_json::json!({
                     "message": failure.message,
                     "log": failure.log,
-                    "diagnostics": parse_tex_log(&failure.log, body_line_offset),
+                    "diagnostics": parse_tex_log(&failure.log, &line_map),
                 });
                 Err(anyhow!("{payload}"))
             }
@@ -2745,11 +2962,8 @@ impl AppState {
         // \documentclass get any missing common packages injected. Either way the
         // returned offset is how many lines we added before the body, so TeX error
         // lines map back to what the editor shows.
-        let (final_tex, offset) = if !tex_content.contains("\\documentclass") {
-            (
-                wrap_bare_latex(&tex_content),
-                DEFAULT_TEX_PREAMBLE.lines().count(),
-            )
+        let transform = if !has_active_documentclass(&tex_content) {
+            wrap_bare_latex(&tex_content)
         } else {
             ensure_packages(&tex_content)
         };
@@ -2759,7 +2973,7 @@ impl AppState {
 			let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
 			workspace.join(&note.document.relative_path).parent().map(Path::to_path_buf)
 		};
-		self.run_tectonic(final_tex, offset, note_dir).await
+		self.run_tectonic(transform.source, transform.line_map, note_dir).await
     }
 
 	pub fn import_latex_asset(&self, note_id: String, source_path: String) -> Result<String> {
@@ -2799,7 +3013,7 @@ impl AppState {
     /// fetch when they hit "Compile to PDF".
     pub async fn prewarm_tectonic(&self) -> Result<()> {
         let stub = wrap_bare_latex("Myelin LaTeX warm-up: $E = mc^2$, \\textbf{ready}.");
-        self.run_tectonic(stub, 0, None).await.map(|_| ())
+        self.run_tectonic(stub.source, stub.line_map, None).await.map(|_| ())
     }
 
     pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {
@@ -3250,12 +3464,12 @@ impl AppState {
             format!(
                 "[ATTACHED NOTE — retrieval-backed]\n\
                  Working note ID: {}\nAttached source: {source_title} (ID: {source_id})\n\
-                 Relevant passages are retrieved automatically for each turn.",
+                 Relevant passages from both are supplied per turn.",
                 note.id
             )
         } else if pdf_only {
             format!(
-                "[PDF — read-only retrieval-backed]\nDocument: {} (ID: {})\nRelevant passages are retrieved automatically for each turn.",
+                "[PDF — read-only retrieval-backed]\nDocument: {} (ID: {})\nRelevant passages are supplied per turn.",
                 note.title, note.id
             )
         } else if prompt_shape.oversized && !oversized_ready {
@@ -3286,30 +3500,21 @@ impl AppState {
             config.supports_tools,
         )
         .await;
-        let warm_preamble = if interaction_mode == "chat" && !supports_tools {
-            crate::agent::DIRECT_CHAT_PREAMBLE
-        } else {
-            crate::agent::MYELIN_PREAMBLE
-        };
-        let system = format!(
-            "{warm_preamble}\n\n{}",
-            assemble_note_context(&note.title, &excerpt, cells.as_deref())
-        );
-        let template_kwargs = self.openharn_settings().template_kwargs;
         // Chat always offers one fixed read-only schema set (matching the real
         // turn's AiTurnBuilder), so the warm-up reproduces the exact system/tool
         // prefix that the next chat request will reuse from the KV cache. Models
         // without tool support get the minimal tool-free chat prefix instead.
-        let warm_specs = if !supports_tools {
-            Vec::new()
-        } else {
-            crate::agent::interaction_mode_tools(interaction_mode, retrieval_backed)
-        };
-        let tools = crate::agent::compact_tool_specs_for_profile(
-            warm_specs,
+        let (system, tools) = warmup_prefix(
+            &note.title,
+            &excerpt,
+            cells.as_deref(),
+            interaction_mode,
+            supports_tools,
+            retrieval_backed,
             config.verbose_tool_schemas,
         );
         let tools_json = serde_json::to_string(&tools).unwrap_or_default();
+        let template_kwargs = self.openharn_settings().template_kwargs;
         let identity = Self::slot_identity(
             &config,
             ctx_tokens as u32,
@@ -3436,6 +3641,11 @@ impl AppState {
         match self.inner.llama_client.post(url).json(&serde_json::json!({"filename": filename})).send().await {
             Ok(response) if response.status().is_success() => {
                 log::info!("restored persistent llama slot for note {note_id}");
+                // A restore is a use: refresh mtime so LRU eviction keeps notes
+                // that are actually being read instead of only recently saved.
+                if let Ok(file) = std::fs::File::options().write(true).open(&slot_path) {
+                    let _ = file.set_modified(std::time::SystemTime::now());
+                }
             }
             Ok(response) => {
                 log::warn!("slot restore failed for {note_id}: {}", response.status());
@@ -3444,6 +3654,67 @@ impl AppState {
             }
             Err(error) => log::warn!("slot restore request failed for {note_id}: {error}"),
         }
+    }
+
+    /// Persist llama-server's current slot-0 KV under `note_id`'s snapshot file
+    /// with `identity` as provenance, then trim the cache to its budget. The KV
+    /// must be a prefix of the identity's rendered prompt for the restore to pay
+    /// off; identity mismatches are caught at restore time and discarded.
+    /// Best-effort: the server may be mid-turn (the request is deferred) or
+    /// already gone (quit race).
+    async fn save_note_slot(&self, note_id: &str, identity: &str) {
+        let config = {
+            let server = self.inner.llama_server.lock().await;
+            match server.as_ref() {
+                Some(server) => server.config.clone(),
+                None => return,
+            }
+        };
+        if !config.prompt_cache {
+            return;
+        }
+        let filename = Self::slot_filename(note_id);
+        let url = format!("{}/slots/0?action=save", config.base_url());
+        match self
+            .inner
+            .llama_client
+            .post(url)
+            .json(&serde_json::json!({"filename": filename}))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                log::info!("saved persistent llama slot for note {note_id}");
+                // Record provenance alongside the snapshot; the restore path
+                // erases snapshots whose identity no longer matches the
+                // current binaries/payload.
+                let manifest_path = config.slot_save_path.join(format!("{filename}.json"));
+                let _ = std::fs::write(
+                    &manifest_path,
+                    serde_json::json!({ "identity": identity }).to_string(),
+                );
+                *self.inner.last_slot_save.lock() =
+                    Some((note_id.to_string(), identity.to_string()));
+                enforce_slot_cache_budget(&config.slot_save_path, SLOT_CACHE_BUDGET_BYTES);
+            }
+            Ok(response) => log::warn!("slot save failed for {note_id}: {}", response.status()),
+            Err(error) => log::warn!("slot save request failed for {note_id}: {error}"),
+        }
+    }
+
+    /// Best-effort final snapshot before the app exits: llama-server is about
+    /// to die with slot 0's KV in RAM. Re-persist the most recent snapshot under
+    /// its own filename (the KV has not changed since that save), bounded so a
+    /// stuck server cannot stall quit. The next boot restores it on note open.
+    pub async fn save_active_slot_before_quit(&self) {
+        let record = match self.inner.last_slot_save.lock().clone() {
+            Some(record) => record,
+            None => return,
+        };
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            self.save_note_slot(&record.0, &record.1).await;
+        })
+        .await;
     }
 
     /// Prepare every process/check that would otherwise delay the first model
@@ -3533,13 +3804,10 @@ impl AppState {
         identity: String,
     ) {
         use std::hash::{Hash, Hasher};
+        let state = self.clone();
         let client = self.inner.llama_client.clone();
         let url = format!("{}/v1/chat/completions", config.base_url());
         let model = config.model_name();
-        let slot_url = format!("{}/slots/0?action=save", config.base_url());
-        let slot_filename = Self::slot_filename(&note_id);
-        let slot_dir = config.slot_save_path.clone();
-        let manifest = serde_json::json!({ "identity": identity }).to_string();
         let persist = config.prompt_cache;
         let parsed_template_kwargs = template_kwargs
             .as_deref()
@@ -3589,18 +3857,7 @@ impl AppState {
                         .and_then(|value| value.get("usage").cloned());
                     log::info!("llama note prompt-cache warm-up complete; usage={usage:?}");
                     if persist {
-                        match client.post(slot_url).json(&serde_json::json!({"filename": slot_filename})).send().await {
-                            Ok(saved) if saved.status().is_success() => {
-                                log::info!("saved persistent llama slot for note {note_id}");
-                                // Record provenance alongside the snapshot; the
-                                // restore path erases snapshots whose identity
-                                // no longer matches the current binaries/payload.
-                                let manifest_path = slot_dir.join(format!("{slot_filename}.json"));
-                                let _ = std::fs::write(&manifest_path, manifest);
-                            }
-                            Ok(saved) => log::warn!("slot save failed for {note_id}: {}", saved.status()),
-                            Err(error) => log::warn!("slot save request failed for {note_id}: {error}"),
-                        }
+                        state.save_note_slot(&note_id, &identity).await;
                     }
                 },
                 Ok(response) => log::warn!("llama note prompt-cache warm-up returned {}", response.status()),
@@ -5248,10 +5505,138 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
 mod tests {
     use super::{
         assemble_note_context, assemble_user_content, authorize_tool_policy,
-        canonical_wire_conversation, chat_history_to_messages, hashed_embedding, slugify,
-        split_frontmatter, tokenize, unique_pdf_path,
+        canonical_wire_conversation, chat_history_to_messages, enforce_slot_cache_budget,
+        ensure_packages, hashed_embedding, parse_tex_log, slugify, split_frontmatter, tokenize,
+        unique_pdf_path, warmup_prefix, wrap_bare_latex,
     };
     use crate::models::ChatMessage;
+
+    #[test]
+    fn bare_latex_keeps_partial_preamble_before_document_body() {
+        let transform = wrap_bare_latex("\\usepackage[dvipsnames]{xcolor}\n\n\\textcolor{Red}{Body}");
+        assert!(transform.source.contains("\\usepackage[dvipsnames]{xcolor}\n\n\\begin{document}"));
+        let body_line = transform
+            .source
+            .lines()
+            .position(|line| line.contains("textcolor"))
+            .unwrap();
+        assert_eq!(transform.line_map[body_line], 3);
+    }
+
+    #[test]
+    fn package_detection_ignores_comments_and_handles_options_and_requirements() {
+        let source = concat!(
+            "\\documentclass{article}\n",
+            "% \\usepackage{hyperref}\n",
+            "\\PassOptionsToPackage{dvipsnames}{xcolor}\n",
+            "\\usepackage[dvipsnames]{xcolor}\n",
+            "\\RequirePackage{amsmath}\n",
+            "\\usepackage{xcolor}\n",
+            "Body\n",
+        );
+        let transform = ensure_packages(source);
+        let xcolors = transform
+            .source
+            .lines()
+            .filter(|line| line.contains("xcolor") && line.trim_start().starts_with("\\usepackage"))
+            .count();
+        assert_eq!(xcolors, 1);
+        assert!(transform.source.contains("\\usepackage{hyperref}"));
+        assert_eq!(transform.line_map.iter().filter(|line| **line == 0).count(), 7);
+    }
+
+    #[test]
+    fn tex_diagnostic_mapping_does_not_shift_lines_before_injection() {
+        let log = "! Undefined control sequence.\nl.1 \\bad\n! Missing } inserted.\nl.4 body\n";
+        let diagnostics = parse_tex_log(log, &[1, 2, 0, 3]);
+        assert_eq!(diagnostics[0]["line"], 1);
+        assert_eq!(diagnostics[1]["line"], 3);
+    }
+
+    #[test]
+    fn slot_cache_budget_evicts_oldest_snapshots_and_keeps_manifests_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let write_slot = |name: &str, bytes: usize, age_secs: u64| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, vec![b'x'; bytes]).unwrap();
+            std::fs::write(dir.path().join(format!("{name}.json")), b"{}").unwrap();
+            let modified = std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 - age_secs);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        };
+        write_slot("note-a.slot", 400, 100); // oldest
+        write_slot("note-b.slot", 400, 50);
+        write_slot("note-c.slot", 400, 0); // newest
+        // Orphaned manifests are not snapshots and never count toward the budget.
+        std::fs::write(dir.path().join("note-x.slot.json"), b"{}").unwrap();
+
+        enforce_slot_cache_budget(dir.path(), 900);
+
+        assert!(
+            !dir.path().join("note-a.slot").exists(),
+            "oldest snapshot is evicted first"
+        );
+        assert!(
+            !dir.path().join("note-a.slot.json").exists(),
+            "manifest is evicted with its snapshot"
+        );
+        assert!(dir.path().join("note-b.slot").exists());
+        assert!(dir.path().join("note-c.slot").exists());
+        assert!(dir.path().join("note-x.slot.json").exists());
+    }
+
+    #[test]
+    fn slot_cache_budget_does_nothing_under_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note-a.slot"), vec![b'x'; 100]).unwrap();
+        std::fs::write(dir.path().join("note-a.slot.json"), b"{}").unwrap();
+        enforce_slot_cache_budget(dir.path(), 1024);
+        assert!(dir.path().join("note-a.slot").exists());
+    }
+
+    #[test]
+    fn warmup_prefix_matches_real_chat_turn_prefix() {
+        let title = "Parity note";
+        let excerpt = "some note body text";
+        let (system, tools) = warmup_prefix(title, excerpt, None, "chat", true, false, false);
+        let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
+            mode: "chat",
+            note_title: title,
+            system_context: &assemble_note_context(title, excerpt, None),
+            conversation: &[],
+            question: "hello",
+            mode_policy: "policy",
+            turn_instructions: "",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: true,
+            verbose_tool_schemas: false,
+        });
+        assert_eq!(turn.messages[0]["content"].as_str().unwrap(), system);
+        assert_eq!(
+            serde_json::to_string(&turn.tools).unwrap(),
+            serde_json::to_string(&tools).unwrap()
+        );
+    }
+
+    #[test]
+    fn warmup_prefix_oversized_chat_stays_fixed_read_only() {
+        let (_, tools) = warmup_prefix("Big note", "excerpt", None, "chat", true, true, false);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["fetch_web_page", "find_in_note", "read_note", "search_documents", "search_notes", "web_search"]
+        );
+    }
 
     #[test]
     fn slugify_avoids_reserved_names() {

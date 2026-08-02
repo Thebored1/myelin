@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 const HISTORY_BUDGET: usize = 16_000;
 
@@ -68,7 +68,7 @@ pub struct Options {
     /// Seconds to wait for a tool result from the host before failing the call.
     #[serde(default = "default_tool_timeout")]
     pub tool_timeout_secs: u64,
-    /// Maximum duration of one upstream llama-server generation.
+    /// Maximum idle time between upstream llama-server stream chunks.
     #[serde(default = "default_generation_timeout")]
     pub generation_timeout_secs: u64,
     /// Read-only navigation preset (OPENHARN_NARROW): strict + prompt-tools +
@@ -211,6 +211,10 @@ fn upstream_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .pool_max_idle_per_host(2)
             .connect_timeout(Duration::from_secs(10))
+            // This is an idle-read timeout, not a total request deadline. A
+            // large prompt can legitimately take longer than this before its
+            // first token, while a stalled stream still gets released.
+            .read_timeout(Duration::from_secs(120))
             .build()
             .expect("valid upstream HTTP client")
     })
@@ -364,6 +368,7 @@ async fn detect_intent_in_session(
     model: &str,
     history: &[Value],
     tx: &mpsc::Sender<Out>,
+    cancel: &watch::Receiver<bool>,
 ) -> bool {
     let route_schemas = json!([{
         "type": "function",
@@ -423,7 +428,7 @@ async fn detect_intent_in_session(
     }
     let (content, mut calls, _) = match request.send().await {
         Ok(response) if response.status().is_success() => {
-            match stream_upstream(response, tx, false, true, false, &route_schemas).await {
+            match stream_upstream(response, tx, false, true, false, &route_schemas, cancel, 120).await {
                 Ok(result) => result,
                 Err(_) => (String::new(), Vec::new(), false),
             }
@@ -456,8 +461,17 @@ async fn detect_intent_in_session(
 }
 
 /// Drive one user request to completion, streaming events on `tx` and requesting
-/// tool execution from Myelin via the `pending` registry.
-pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending) {
+/// tool execution from Myelin via the `pending` registry. `cancel` is the
+/// request's cancellation flag: the host posts to `/v1/cancel` to flip it, which
+/// aborts the upstream stream and any pending tool wait. On cancel the loop
+/// emits a final `done` carrying the partial history so already-executed tool
+/// calls are not lost from the conversation.
+pub async fn run_loop(
+    req: ChatRequest,
+    tx: mpsc::Sender<Out>,
+    pending: Pending,
+    cancel: watch::Receiver<bool>,
+) {
     let request_id = req
         .request_id
         .clone()
@@ -601,12 +615,30 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         if let Some(classified) = opts.intent_is_tool {
             classified
         } else {
-            detect_intent_in_session(&client, &url, req.api_key.as_deref(), &model, &history, &tx)
-                .await
+            detect_intent_in_session(
+                &client,
+                &url,
+                req.api_key.as_deref(),
+                &model,
+                &history,
+                &tx,
+                &cancel,
+            )
+            .await
         }
     } else {
         true
     };
+    if *cancel.borrow() {
+        let _ = tx
+            .send(Out::Done {
+                messages: history.clone(),
+                new_messages: Vec::new(),
+                last_tool: None,
+            })
+            .await;
+        return;
+    }
 
     // FAST PATH: if the model classified this as TOOL but decomposition found
     // no matching tool, abstain. A CHAT classification must fall through to the
@@ -657,7 +689,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         let dispatched_at = Instant::now();
         let resp = match client
             .post(&url)
-            .timeout(Duration::from_secs(opts.generation_timeout_secs))
             .json(&body)
             .send()
             .await
@@ -679,10 +710,30 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 .await;
             return;
         }
-        let (content, _, _) =
-            match stream_upstream(resp, &tx, no_think, false, false, &effective_schemas).await {
+        let (content, _, _) = match stream_upstream_with_timeout(
+            resp,
+            &tx,
+            no_think,
+            false,
+            false,
+            &effective_schemas,
+            &cancel,
+            opts.generation_timeout_secs,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
+                if *cancel.borrow() {
+                    let _ = tx
+                        .send(Out::Done {
+                            messages: history.clone(),
+                            new_messages,
+                            last_tool: None,
+                        })
+                        .await;
+                    return;
+                }
                 let _ = tx.send(Out::Error(e)).await;
                 return;
             }
@@ -700,6 +751,16 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
     }
 
     for _turn in 0..max_turns {
+        if *cancel.borrow() {
+            let _ = tx
+                .send(Out::Done {
+                    messages: history.clone(),
+                    new_messages: new_messages.clone(),
+                    last_tool: last_tool.clone(),
+                })
+                .await;
+            return;
+        }
         harness::fit_context(&mut history, budget);
 
         let mut wire = if prompt_tools && has_tools {
@@ -810,7 +871,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             loop {
                 let mut rq = client
                     .post(&url)
-                    .timeout(Duration::from_secs(opts.generation_timeout_secs))
                     .json(&body);
                 if let Some(k) = &req.api_key {
                     if !k.is_empty() {
@@ -886,18 +946,32 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
         // content deltas to the note preview instead.
         let suppress_text_call = prompt_tools && friendly && intent_is_tool;
         let (mut content, mut tool_calls, streamed_incomplete_candidate) =
-            match stream_upstream(
+            match stream_upstream_with_timeout(
                 resp,
                 &tx,
                 no_think,
                 suppress_text_call,
                 stream_note_preview,
                 &effective_schemas,
+                &cancel,
+                opts.generation_timeout_secs,
             )
             .await
             {
                 Ok(v) => v,
                 Err(e) => {
+                    if *cancel.borrow() {
+                        // Cancelled: persist the partial history (executed tool
+                        // calls and their results) so the turn is not lost.
+                        let _ = tx
+                            .send(Out::Done {
+                                messages: history.clone(),
+                                new_messages: new_messages.clone(),
+                                last_tool: last_tool.clone(),
+                            })
+                            .await;
+                        return;
+                    }
                     // Tool decoding error in the stream: llama-server emitted an
                     // error mid-stream (e.g. "could not decode tool: unexpected end
                     // of JSON input"). Retry with prompt-tools + strict grammar.
@@ -989,7 +1063,6 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                 loop {
                     let mut rq = client
                         .post(&url)
-                        .timeout(Duration::from_secs(opts.generation_timeout_secs))
                         .json(&fb_body);
                     if let Some(k) = &req.api_key {
                         if !k.is_empty() {
@@ -1014,13 +1087,15 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
             if let Some(fb_resp) = fb_resp {
                 if fb_resp.status().is_success() {
                     let (fb_content, fb_calls, _) =
-                        match stream_upstream(
+                        match stream_upstream_with_timeout(
                             fb_resp,
                             &tx,
                             false,
                             true,
                             stream_note_preview,
                             &effective_schemas,
+                            &cancel,
+                            opts.generation_timeout_secs,
                         )
                         .await
                         {
@@ -1108,6 +1183,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
                     &name,
                     &args_raw,
                     opts.tool_timeout_secs,
+                    &cancel,
                 )
                 .await
             };
@@ -1229,6 +1305,7 @@ pub async fn run_loop(req: ChatRequest, tx: mpsc::Sender<Out>, pending: Pending)
 
 /// Ask Myelin to run a tool: emit a `Tool` event, register a oneshot keyed by
 /// request+call id, and await the result Myelin posts to `/v1/tool-result`.
+/// Aborts the wait immediately when the request is cancelled.
 async fn dispatch_tool(
     tx: &mpsc::Sender<Out>,
     pending: &Pending,
@@ -1237,6 +1314,7 @@ async fn dispatch_tool(
     name: &str,
     args_raw: &str,
     timeout_secs: u64,
+    cancel: &watch::Receiver<bool>,
 ) -> String {
     let key = format!("{request_id}:{call_id}");
     let (otx, orx) = oneshot::channel::<String>();
@@ -1250,15 +1328,22 @@ async fn dispatch_tool(
         })
         .await;
 
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), orx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => {
+    let mut cancel = cancel.clone();
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(timeout_secs), orx) => match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                pending.lock().await.remove(&key);
+                format!("Tool '{name}' failed: the host closed the result channel.")
+            }
+            Err(_) => {
+                pending.lock().await.remove(&key);
+                format!("Tool '{name}' timed out after {timeout_secs}s.")
+            }
+        },
+        _ = cancel.changed() => {
             pending.lock().await.remove(&key);
-            format!("Tool '{name}' failed: the host closed the result channel.")
-        }
-        Err(_) => {
-            pending.lock().await.remove(&key);
-            format!("Tool '{name}' timed out after {timeout_secs}s.")
+            format!("Tool '{name}' was cancelled before it completed.")
         }
     }
 }
@@ -1270,6 +1355,29 @@ async fn dispatch_tool(
 /// `NoteStart`/`NoteDelta` when they arrive incrementally, and assemble the
 /// tool-call deltas. No text is fabricated if the upstream server batches SSE
 /// chunks.
+async fn stream_upstream_with_timeout(
+    resp: reqwest::Response,
+    tx: &mpsc::Sender<Out>,
+    no_think: bool,
+    suppress_text_call: bool,
+    stream_note_preview: bool,
+    schemas: &Value,
+    cancel: &watch::Receiver<bool>,
+    timeout_secs: u64,
+) -> Result<(String, Vec<Value>, bool), String> {
+    stream_upstream(
+        resp,
+        tx,
+        no_think,
+        suppress_text_call,
+        stream_note_preview,
+        schemas,
+        cancel,
+        timeout_secs,
+    )
+    .await
+}
+
 async fn stream_upstream(
     resp: reqwest::Response,
     tx: &mpsc::Sender<Out>,
@@ -1277,6 +1385,8 @@ async fn stream_upstream(
     suppress_text_call: bool,
     stream_note_preview: bool,
     schemas: &Value,
+    cancel: &watch::Receiver<bool>,
+    idle_timeout_secs: u64,
 ) -> Result<(String, Vec<Value>, bool), String> {
     let mut content = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -1293,9 +1403,37 @@ async fn stream_upstream(
     let mut buf: Vec<u8> = Vec::new();
     let stream_started = Instant::now();
     let mut first_delta = false;
+    let mut cancel = cancel.clone();
 
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| format!("stream error: {e}"))?;
+    loop {
+        // Cancellation aborts mid-generation: drop the upstream connection so
+        // the llama slot frees immediately.
+        if *cancel.borrow() {
+            return Err("cancelled by user".to_string());
+        }
+        let chunk = tokio::time::timeout(
+            Duration::from_secs(idle_timeout_secs.max(1)),
+            async {
+                tokio::select! {
+                    chunk = stream.next() => Ok(chunk),
+                    _ = cancel.changed() => Err("cancelled by user"),
+                }
+            },
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "upstream stream idle for {idle_timeout_secs}s while waiting for llama-server output"
+            )
+        })??;
+        let Some(chunk) = chunk else { break };
+        let bytes = chunk.map_err(|e| {
+            if e.is_timeout() {
+                "upstream stream stalled while waiting for llama-server output".to_string()
+            } else {
+                format!("upstream stream error: {e}")
+            }
+        })?;
         buf.extend_from_slice(&bytes);
 
         while let Some(nl) = buf.iter().position(|&b| b == b'\n') {

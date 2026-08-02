@@ -178,7 +178,7 @@ pub fn contextual_retrieval_query(question: &str, history: &[Value]) -> String {
             .iter()
             .collect::<String>()
     };
-    let mut query = format!("Latest question: {question}\nLatest question: {question}");
+    let mut query = format!("Latest question: {question}");
     if let Some(user) = prior_user {
         query.push_str("\nPrevious user context: ");
         query.push_str(&bounded(user));
@@ -380,7 +380,7 @@ mod tests {
             &history,
         );
         assert!(query.starts_with("Latest question: why did you say"));
-        assert_eq!(query.matches("Latest question:").count(), 2);
+        assert_eq!(query.matches("Latest question:").count(), 1);
         assert!(query.contains("LFM2 and MiniCPM"));
         assert!(query.contains("They did not have a 2-bit result"));
     }

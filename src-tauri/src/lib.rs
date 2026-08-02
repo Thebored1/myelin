@@ -37,8 +37,15 @@ fn set_start_with_system(app: tauri::AppHandle, state: State<'_, AppState>, enab
 fn quit_app(app: &tauri::AppHandle) {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     let _ = app.global_shortcut().unregister_all();
-    app.state::<AppState>().shutdown_servers_sync();
-    app.exit(0);
+    // Persist the last slot snapshot before the server dies (bounded to 3s), so
+    // the next boot restores the last conversation's KV prefix per note. Then
+    // kill the child processes and exit.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        app.state::<AppState>().save_active_slot_before_quit().await;
+        app.state::<AppState>().shutdown_servers_sync();
+        app.exit(0);
+    });
 }
 
 #[tauri::command]

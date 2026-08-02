@@ -31,7 +31,10 @@
 </script>
 
 <div style="width: 100%; height: 100%; display: flex; flex-direction: column;">
-	<div class="controls" style="padding: 8px; display: flex; gap: 8px; justify-content: center; background: var(--bg-panel); border-bottom: 1px solid var(--border-default);">
+	<div
+		class="controls"
+		style="padding: 8px; display: flex; gap: 8px; justify-content: center; background: var(--bg-panel); border-bottom: 1px solid var(--border-default);"
+	>
 		<button class="secondary" onclick={() => rendition && rendition.prev()}>Prev</button>
 		<button class="secondary" onclick={() => rendition && rendition.next()}>Next</button>
 	</div>

@@ -4,12 +4,10 @@
 	}
 	let { htmlBytes }: Props = $props();
 
-	let htmlContent = $derived(
-		new TextDecoder('utf-8').decode(htmlBytes)
-	);
-	
+	let htmlContent = $derived(new TextDecoder('utf-8').decode(htmlBytes));
+
 	let iframeEl: HTMLIFrameElement | undefined = $state();
-	
+
 	$effect(() => {
 		if (iframeEl && htmlContent) {
 			iframeEl.srcdoc = htmlContent;

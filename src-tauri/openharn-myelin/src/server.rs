@@ -6,6 +6,10 @@
 //!                          result back to unblock it.
 //!   POST /v1/tool-result   deliver `{request_id, tool_call_id, result}` to a
 //!                          waiting tool call.
+//!   POST /v1/cancel        abort a running request: the loop stops streaming
+//!                          upstream, aborts any pending tool wait, and emits a
+//!                          final `done` so the host can persist the partial
+//!                          turn (including already-executed tool calls).
 //!   GET  /health           liveness probe.
 //!
 //! SSE event names: chat_chunk, note_start, note_delta, note_cancel, tool,
@@ -26,28 +30,35 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Registry of tool calls awaiting a result, keyed by `"{request_id}:{call_id}"`.
 pub type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
 
+/// Per-request cancellation flags, keyed by request id. A request is cancelled
+/// by sending `true` on its watch channel; the loop observes the change.
+pub type Cancels = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub pending: Pending,
+    pub cancels: Cancels,
 }
 
 pub fn router() -> Router {
     let state = AppState {
         pending: Arc::new(Mutex::new(HashMap::new())),
+        cancels: Arc::new(Mutex::new(HashMap::new())),
     };
     Router::new()
         .route("/health", get(health))
         .route("/v1/chat/stream", post(chat_stream))
         .route("/v1/tool-result", post(tool_result))
+        .route("/v1/cancel", post(cancel))
         .with_state(state)
 }
 
@@ -85,17 +96,44 @@ async fn tool_result(
     }
 }
 
+#[derive(Deserialize)]
+struct CancelBody {
+    request_id: String,
+}
+
+async fn cancel(
+    State(state): State<AppState>,
+    Json(body): Json<CancelBody>,
+) -> impl IntoResponse {
+    if let Some(tx) = state.cancels.lock().await.get(&body.request_id) {
+        let _ = tx.send(true);
+    }
+    (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
 async fn chat_stream(
     State(state): State<AppState>,
-    Json(req): Json<ChatRequest>,
+    Json(mut req): Json<ChatRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Buffer generously: the loop can outpace the client briefly (e.g. during a
     // fast note stream) without blocking token generation.
     let (tx, rx) = mpsc::channel::<Out>(256);
     let pending = state.pending.clone();
 
+    // The host cancels by request id, so pin the id here and hand the request
+    // down with it set (run_loop also defaults, as a safety net).
+    let request_id = req
+        .request_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    req.request_id = Some(request_id.clone());
+
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    state.cancels.lock().await.insert(request_id.clone(), cancel_tx);
+    let cancels = state.cancels.clone();
     tokio::spawn(async move {
-        agent::run_loop(req, tx, pending).await;
+        agent::run_loop(req, tx, pending, cancel_rx).await;
+        cancels.lock().await.remove(&request_id);
     });
 
     let stream = ReceiverStream::new(rx).map(|out| Ok(to_event(out)));

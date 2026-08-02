@@ -3,7 +3,7 @@
 Trains a LoRA for **Granite-4.0-h-1b** (the model Myelin ships by default) **entirely
 on a 4 GB RTX 2050, on Windows**, with the training set generated for free via
 **OpenCode Zen**. The whole pipeline is proven end-to-end and reproducible; the
-adapter's *quality* is still being iterated (see [Status](#status)).
+adapter's _quality_ is still being iterated (see [Status](#status)).
 
 This only retrains the shipped default model. The deterministic assists
 (`format_note`, `find_in_note`) + the few-shot card + the Settings toggle still
@@ -11,13 +11,13 @@ cover everything else, and power users swap their own model.
 
 ## Result so far
 
-| | |
-|---|---|
-| Trains in | ~57 min (3 epochs, 162 steps, ~21 s/step) |
-| Loss | 3.05 → **0.30**, token accuracy **98.3%** |
-| Peak VRAM | **3.6 GB** (fits the 4 GB card) — down from 9.1 GB naive |
-| Output | `out/granite-myelin-Q4_K_M.gguf` (859 MB) |
-| Eval (pilot) | **8/11 vs 8/11 base — a wash.** Not shipped. |
+|              |                                                          |
+| ------------ | -------------------------------------------------------- |
+| Trains in    | ~57 min (3 epochs, 162 steps, ~21 s/step)                |
+| Loss         | 3.05 → **0.30**, token accuracy **98.3%**                |
+| Peak VRAM    | **3.6 GB** (fits the 4 GB card) — down from 9.1 GB naive |
+| Output       | `out/granite-myelin-Q4_K_M.gguf` (859 MB)                |
+| Eval (pilot) | **8/11 vs 8/11 base — a wash.** Not shipped.             |
 
 The 9.1 → 3.6 GB drop is the whole game: Granite-4.0-h is a **Mamba-2 hybrid**, and
 its efficient training scan needs CUDA/Triton kernels. Without them the naive
@@ -44,7 +44,7 @@ scripts already):
 
 1. **No Windows wheels** for `causal-conv1d` / `mamba-ssm`. Triton (`mamba_chunk_scan_combined`)
    needs no compile — `pip install triton-windows`. Only `causal-conv1d` must be built.
-2. **No `nvcc`** and the pip `nvidia-cuda-nvcc-cu12` wheel ships `ptxas` but *not* `nvcc.exe`.
+2. **No `nvcc`** and the pip `nvidia-cuda-nvcc-cu12` wheel ships `ptxas` but _not_ `nvcc.exe`.
    Get a real nvcc 12.4 via **micromamba** (`cuda-nvcc` + `cuda-libraries-dev`, pinned
    `cuda-version=12.4`) — **no admin needed**.
 3. **MSVC too new**: VS 18 (14.50) exceeds what CUDA 12.4 supports → `NVCC_PREPEND_FLAGS=-allow-unsupported-compiler`.
@@ -54,7 +54,7 @@ scripts already):
    rewrites them (`_Pragma`, resolve USE_ROCM).
 6. **Version lock**: `causal-conv1d 1.4.0` ↔ `mamba-ssm 2.2.4` (newer causal-conv1d changed
    the `causal_conv1d_fwd` signature).
-7. **QLoRA × fused Mamba**: the fused kernel gets `out_proj` (and `lm_head`/`embed`) *raw*,
+7. **QLoRA × fused Mamba**: the fused kernel gets `out_proj` (and `lm_head`/`embed`) _raw_,
    so those must be excluded from 4-bit (`llm_int8_skip_modules`) or it can't dequantize them.
 8. **DLL load order**: `import pyarrow`/`datasets` **before** torch, or Windows access-violates.
 
@@ -100,4 +100,4 @@ The **pipeline works and is reproducible** — that's the durable win. The first
 425-example pilot adapter scored **8/11 vs 8/11** against base (a wash, with a small
 chat-over-triggering regression), so it was **not shipped**. Next iteration: larger +
 rebalanced data (more faithful-edit + chat/no-tool turns), a bigger eval set, and
-evaluating against the *shipped* preamble (the few-shot card), not the lean one.
+evaluating against the _shipped_ preamble (the few-shot card), not the lean one.

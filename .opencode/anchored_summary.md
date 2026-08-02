@@ -1,7 +1,9 @@
 ## Objective
+
 - Make Myelin's LFM2 model actually write notes (the "new note 13" empty-note bug) while keeping greetings as natural prose. User pointed me to LFM2_TOOL_CALLING_FIX.md and, after I shipped a blunt global `call_only`, asked to gate it on intent (port openharn FRIENDLY_RESULTS) — "option 1".
 
 ## Important Details
+
 - openharn at /tmp/opencode/openharn, branch `myelin-tools`. Sidecar = /home/paper/myelin/src-tauri/openharn-myelin (bin `openharn-myelin`). llama-server: /home/paper/.local/share/com.paper.myelin/bin/cpu/llama-server (v9585). LFM2 template: /home/paper/myelin/src-tauri/templates/lfm2.jinja.
 - **Root causes found & fixed for LFM2-8B-A1B-UD-Q2_K_XL (2-bit quant):**
   1. GBNF `string` rule `[^"\\]` allowed literal newlines → model emitted poem with raw `\n` inside JSON string → invalid JSON → `parse_text_tool_calls` dropped the call. **Fix:** `string ::= "\"" ( [^"\\\n\r\t] | ... )* "\""`.
@@ -12,7 +14,9 @@
 - LFM2.5-8B-A1B-APEX-I-Compact: works with plain `strict`+`prompt_tools` (emits closed `<tool_call>`), no forcing needed.
 
 ## Work State
+
 ### Completed
+
 - Read LFM2_TOOL_CALLING_FIX.md; confirmed its prompt-tools+strict forcing is implemented.
 - Fixed invalid-JSON root cause (string rule excludes `\n\r\t`).
 - Tightened `call` rule (no trailing `ws` before `]`/`,`); changed `ws ::= [ \t]?` to stop whitespace loops.
@@ -22,17 +26,21 @@
 - Unit (6) + e2e (1) tests pass. Release binary rebuilt + reinstalled to resources/bin/openharn-myelin. Myelin `cargo check` clean. Updated LFM2_TOOL_CALLING_FIX.md addendum. Test servers stopped.
 
 ### Active
+
 - (none) — option 1 implemented and verified.
 
 ### Blocked
+
 - (none)
 
 ## Next Move
+
 1. (done) Intent-gated `call_only` (FRIENDLY_RESULTS) for LFM2: greetings → prose, note-writes → forced `write_note`. Optionally verify in Myelin UI with the real model.
 2. (optional) Tighten intent prompt / add keyword fallback if "how do I use this app"-style questions should stay CHAT.
 3. (optional) `npm run check` / tauri build to ship. No code changes pending in the sidecar.
 
 ## Relevant Files
+
 - /home/paper/myelin/LFM2_TOOL_CALLING_FIX.md — root-cause doc (updated addendum: string fix, ws fix, call_only, friendly_results).
 - /home/paper/myelin/src-tauri/openharn-myelin/src/harness.rs — GRAMMAR_TAIL: `string` excludes `\n\r\t`; `ws ::= [ \t]?`; `call` rule trailing-ws removed.
 - /home/paper/myelin/src-tauri/openharn-myelin/src/agent.rs — `Options.call_only`+`friendly_results`; `run_intent_detection`; CHAT-skip + gated grammar.

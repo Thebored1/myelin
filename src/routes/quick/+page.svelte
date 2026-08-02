@@ -35,7 +35,11 @@
 
 	let app = $state<any>(null);
 	let notebooks = $derived(
-		app ? Array.from(new Set(app.workspaces.flatMap((w: any) => w.documents.map((d: any) => d.notebook)))).filter(Boolean) as string[] : []
+		app
+			? (Array.from(
+					new Set(app.workspaces.flatMap((w: any) => w.documents.map((d: any) => d.notebook)))
+				).filter(Boolean) as string[])
+			: []
 	);
 	let expandedTaskId = $state<number | null>(null);
 
@@ -60,8 +64,8 @@
 	let activeFilter = $state<'all' | 'active' | 'done'>('all');
 
 	let filteredTasks = $derived.by(() => {
-		if (activeFilter === 'active') return tasks.filter(t => !t.done);
-		if (activeFilter === 'done') return tasks.filter(t => t.done);
+		if (activeFilter === 'active') return tasks.filter((t) => !t.done);
+		if (activeFilter === 'done') return tasks.filter((t) => t.done);
 		return tasks;
 	});
 
@@ -94,10 +98,10 @@
 	function addTask() {
 		const t = text.trim();
 		if (!t || !workspacePath) return;
-		
-		tasks.push({ 
-			id: Date.now(), 
-			text: t, 
+
+		tasks.push({
+			id: Date.now(),
+			text: t,
 			done: false,
 			details: draftDetails,
 			dueDate: draftDueDate,
@@ -105,14 +109,14 @@
 			notebook: draftNotebook,
 			subtasks: [...draftSubtasks]
 		});
-		
+
 		text = '';
 		draftDetails = '';
 		draftDueDate = '';
 		draftDueTime = '';
 		draftNotebook = '';
 		draftSubtasks = [];
-		
+
 		saved = true;
 		setTimeout(() => {
 			saved = false;
@@ -170,8 +174,8 @@
 			const focusableElements = root.querySelectorAll<HTMLElement>(
 				'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
 			);
-			
-			const focusable = Array.from(focusableElements).filter(el => {
+
+			const focusable = Array.from(focusableElements).filter((el) => {
 				return el.offsetWidth > 0 || el.offsetHeight > 0 || el === document.activeElement;
 			});
 
@@ -181,7 +185,11 @@
 			const lastElement = focusable[focusable.length - 1];
 
 			if (e.shiftKey) {
-				if (document.activeElement === firstElement || document.activeElement === document.body || !document.activeElement) {
+				if (
+					document.activeElement === firstElement ||
+					document.activeElement === document.body ||
+					!document.activeElement
+				) {
 					e.preventDefault();
 					if (document.activeElement !== firstElement) {
 						firstElement.focus();
@@ -253,7 +261,17 @@
 <div class="quick-app-root" bind:this={rootEl}>
 	<div class="quick-card">
 		<div class="quick-row">
-			<svg class="quick-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				class="quick-icon"
+				viewBox="0 0 24 24"
+				width="20"
+				height="20"
+				stroke="currentColor"
+				stroke-width="2"
+				fill="none"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<polyline points="9 11 12 14 22 4"></polyline>
 				<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
 			</svg>
@@ -283,59 +301,131 @@
 			<div class="quick-tasks-container draft-card">
 				<div class="task-expanded-details redesigned">
 					<div class="field-row notebook-row">
-						<NotebookSelect bind:value={draftNotebook} notebooks={notebooks} />
+						<NotebookSelect bind:value={draftNotebook} {notebooks} />
 					</div>
 
 					<div class="field-row">
-						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-						<textarea rows="1" use:autoResize onkeydown={onDraftKey} placeholder="Add details (Shift+Enter for new line)" bind:value={draftDetails} class="field-input textarea-new"></textarea>
+						<svg
+							class="field-icon"
+							viewBox="0 0 24 24"
+							stroke="currentColor"
+							stroke-width="2"
+							fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg
+						>
+						<textarea
+							rows="1"
+							use:autoResize
+							onkeydown={onDraftKey}
+							placeholder="Add details (Shift+Enter for new line)"
+							bind:value={draftDetails}
+							class="field-input textarea-new"
+						></textarea>
 					</div>
 
 					<div class="field-row">
-						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+						<svg
+							class="field-icon"
+							viewBox="0 0 24 24"
+							stroke="currentColor"
+							stroke-width="2"
+							fill="none"
+							><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle
+								cx="12"
+								cy="12"
+								r="2"
+							/></svg
+						>
 						<input
 							type="text"
 							placeholder="Add deadline"
 							bind:value={draftDueDate}
 							class="field-input date-time-new"
 							onkeydown={onDraftKey}
-							onfocus={(e) => { e.currentTarget.type = 'date'; if (!draftDueDate) draftDueDate = todayISO(); }}
-							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }}
+							onfocus={(e) => {
+								e.currentTarget.type = 'date';
+								if (!draftDueDate) draftDueDate = todayISO();
+							}}
+							onblur={(e) => {
+								if (!e.currentTarget.value) e.currentTarget.type = 'text';
+							}}
 						/>
 					</div>
 
 					<div class="field-row">
-						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+						<svg
+							class="field-icon"
+							viewBox="0 0 24 24"
+							stroke="currentColor"
+							stroke-width="2"
+							fill="none"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg
+						>
 						<input
 							type="text"
 							placeholder="Add date/time"
 							bind:value={draftDueTime}
 							class="field-input date-time-new"
 							onkeydown={onDraftKey}
-							onfocus={(e) => e.currentTarget.type = 'time'}
-							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }}
+							onfocus={(e) => (e.currentTarget.type = 'time')}
+							onblur={(e) => {
+								if (!e.currentTarget.value) e.currentTarget.type = 'text';
+							}}
 						/>
 					</div>
 
 					<div class="subtasks-container">
 						{#each draftSubtasks as subtask, i}
 							<div class="subtask-row">
-								<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
-								<button class="subtask-circle" class:done={subtask.done} onclick={() => subtask.done = !subtask.done} tabindex="-1"></button>
-								<input type="text" bind:value={subtask.text} class="field-input subtask-input-new" class:done={subtask.done} />
-								<button class="subtask-remove" tabindex="-1" onclick={() => draftSubtasks.splice(i, 1)}>&times;</button>
+								<svg
+									class="subtask-arrow"
+									viewBox="0 0 24 24"
+									stroke="currentColor"
+									stroke-width="2"
+									fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+								>
+								<button
+									class="subtask-circle"
+									class:done={subtask.done}
+									onclick={() => (subtask.done = !subtask.done)}
+									tabindex="-1"
+								></button>
+								<input
+									type="text"
+									bind:value={subtask.text}
+									class="field-input subtask-input-new"
+									class:done={subtask.done}
+								/>
+								<button
+									class="subtask-remove"
+									tabindex="-1"
+									onclick={() => draftSubtasks.splice(i, 1)}>&times;</button
+								>
 							</div>
 						{/each}
 						<div class="subtask-row">
-							<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+							<svg
+								class="subtask-arrow"
+								viewBox="0 0 24 24"
+								stroke="currentColor"
+								stroke-width="2"
+								fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+							>
 							<div class="subtask-circle empty"></div>
-							<input type="text" placeholder="Enter title" class="field-input subtask-input-new" onkeydown={(e) => {
-								if (e.key === 'Enter' && e.currentTarget.value.trim()) {
-									e.preventDefault();
-									draftSubtasks.push({ id: Date.now(), text: e.currentTarget.value.trim(), done: false });
-									e.currentTarget.value = '';
-								}
-							}} />
+							<input
+								type="text"
+								placeholder="Enter title"
+								class="field-input subtask-input-new"
+								onkeydown={(e) => {
+									if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+										e.preventDefault();
+										draftSubtasks.push({
+											id: Date.now(),
+											text: e.currentTarget.value.trim(),
+											done: false
+										});
+										e.currentTarget.value = '';
+									}
+								}}
+							/>
 						</div>
 						<div class="subtask-add-hint">Add subtasks</div>
 					</div>
@@ -344,56 +434,110 @@
 		{:else if tasks.length > 0}
 			<div class="quick-tasks-container">
 				<div class="filters">
-					<button class:active={activeFilter === 'all'} onclick={() => activeFilter = 'all'}>All</button>
-					<button class:active={activeFilter === 'active'} onclick={() => activeFilter = 'active'}>Active</button>
-					<button class:active={activeFilter === 'done'} onclick={() => activeFilter = 'done'}>Done</button>
+					<button class:active={activeFilter === 'all'} onclick={() => (activeFilter = 'all')}
+						>All</button
+					>
+					<button class:active={activeFilter === 'active'} onclick={() => (activeFilter = 'active')}
+						>Active</button
+					>
+					<button class:active={activeFilter === 'done'} onclick={() => (activeFilter = 'done')}
+						>Done</button
+					>
 				</div>
 				<div class="task-list">
 					{#each filteredTasks as task (task.id)}
 						<div class="task-card" class:expanded={expandedTaskId === task.id}>
 							<div class="task-item" class:done={task.done}>
-								<button class="subtask-circle main-task-circle" class:done={task.done} onclick={() => task.done = !task.done} tabindex="-1"></button>
+								<button
+									class="subtask-circle main-task-circle"
+									class:done={task.done}
+									onclick={() => (task.done = !task.done)}
+									tabindex="-1"
+								></button>
 								<textarea
 									rows="1"
 									use:autoResize
 									class="task-text-input"
 									bind:value={task.text}
-									onfocus={() => expandedTaskId = task.id}
+									onfocus={() => (expandedTaskId = task.id)}
 								></textarea>
-								<button class="task-remove" tabindex="-1" onclick={(e) => { e.preventDefault(); tasks = tasks.filter(t => t.id !== task.id); }}>&times;</button>
+								<button
+									class="task-remove"
+									tabindex="-1"
+									onclick={(e) => {
+										e.preventDefault();
+										tasks = tasks.filter((t) => t.id !== task.id);
+									}}>&times;</button
+								>
 							</div>
 							{#if expandedTaskId === task.id}
 								<div class="task-expanded-details redesigned">
 									<div class="field-row notebook-row">
-														<NotebookSelect bind:value={task.notebook} notebooks={notebooks} />
-													</div>
-
-									<div class="field-row">
-										<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-										<textarea rows="1" use:autoResize placeholder="Add details" bind:value={task.details} class="field-input textarea-new"></textarea>
+										<NotebookSelect bind:value={task.notebook} {notebooks} />
 									</div>
 
 									<div class="field-row">
-										<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-										<input 
-											type="text" 
-											placeholder="Add deadline" 
-											bind:value={task.dueDate} 
-											class="field-input date-time-new" 
-											onfocus={(e) => { e.currentTarget.type = 'date'; if (!task.dueDate) task.dueDate = todayISO(); }}
-											onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+										<svg
+											class="field-icon"
+											viewBox="0 0 24 24"
+											stroke="currentColor"
+											stroke-width="2"
+											fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg
+										>
+										<textarea
+											rows="1"
+											use:autoResize
+											placeholder="Add details"
+											bind:value={task.details}
+											class="field-input textarea-new"
+										></textarea>
+									</div>
+
+									<div class="field-row">
+										<svg
+											class="field-icon"
+											viewBox="0 0 24 24"
+											stroke="currentColor"
+											stroke-width="2"
+											fill="none"
+											><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle
+												cx="12"
+												cy="12"
+												r="2"
+											/></svg
+										>
+										<input
+											type="text"
+											placeholder="Add deadline"
+											bind:value={task.dueDate}
+											class="field-input date-time-new"
+											onfocus={(e) => {
+												e.currentTarget.type = 'date';
+												if (!task.dueDate) task.dueDate = todayISO();
+											}}
+											onblur={(e) => {
+												if (!e.currentTarget.value) e.currentTarget.type = 'text';
+											}}
 										/>
 									</div>
 
 									<div class="field-row">
-										<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-										<input 
-											type="text" 
-											placeholder="Add date/time" 
-											bind:value={task.dueTime} 
-											class="field-input date-time-new" 
-											onfocus={(e) => e.currentTarget.type = 'time'} 
-											onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+										<svg
+											class="field-icon"
+											viewBox="0 0 24 24"
+											stroke="currentColor"
+											stroke-width="2"
+											fill="none"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg
+										>
+										<input
+											type="text"
+											placeholder="Add date/time"
+											bind:value={task.dueTime}
+											class="field-input date-time-new"
+											onfocus={(e) => (e.currentTarget.type = 'time')}
+											onblur={(e) => {
+												if (!e.currentTarget.value) e.currentTarget.type = 'text';
+											}}
 										/>
 									</div>
 
@@ -401,24 +545,61 @@
 										{#if task.subtasks}
 											{#each task.subtasks as subtask, i}
 												<div class="subtask-row">
-													<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
-													<button class="subtask-circle" class:done={subtask.done} onclick={() => subtask.done = !subtask.done} tabindex="-1"></button>
-													<input type="text" bind:value={subtask.text} class="field-input subtask-input-new" class:done={subtask.done} />
-													<button class="subtask-remove" tabindex="-1" onclick={() => task.subtasks!.splice(i, 1)}>&times;</button>
+													<svg
+														class="subtask-arrow"
+														viewBox="0 0 24 24"
+														stroke="currentColor"
+														stroke-width="2"
+														fill="none"
+														><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+													>
+													<button
+														class="subtask-circle"
+														class:done={subtask.done}
+														onclick={() => (subtask.done = !subtask.done)}
+														tabindex="-1"
+													></button>
+													<input
+														type="text"
+														bind:value={subtask.text}
+														class="field-input subtask-input-new"
+														class:done={subtask.done}
+													/>
+													<button
+														class="subtask-remove"
+														tabindex="-1"
+														onclick={() => task.subtasks!.splice(i, 1)}>&times;</button
+													>
 												</div>
 											{/each}
 										{/if}
 										<div class="subtask-row">
-											<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+											<svg
+												class="subtask-arrow"
+												viewBox="0 0 24 24"
+												stroke="currentColor"
+												stroke-width="2"
+												fill="none"
+												><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+											>
 											<div class="subtask-circle empty"></div>
-											<input type="text" placeholder="Enter title" class="field-input subtask-input-new" onkeydown={(e) => {
-												if (e.key === 'Enter' && e.currentTarget.value.trim()) {
-													e.preventDefault();
-													task.subtasks = task.subtasks || [];
-													task.subtasks.push({ id: Date.now(), text: e.currentTarget.value.trim(), done: false });
-													e.currentTarget.value = '';
-												}
-											}} />
+											<input
+												type="text"
+												placeholder="Enter title"
+												class="field-input subtask-input-new"
+												onkeydown={(e) => {
+													if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+														e.preventDefault();
+														task.subtasks = task.subtasks || [];
+														task.subtasks.push({
+															id: Date.now(),
+															text: e.currentTarget.value.trim(),
+															done: false
+														});
+														e.currentTarget.value = '';
+													}
+												}}
+											/>
 										</div>
 										<div class="subtask-add-hint">Add subtasks</div>
 									</div>
@@ -577,7 +758,7 @@
 	.task-remove:hover {
 		color: var(--danger);
 	}
-	
+
 	.task-expanded-details.redesigned {
 		display: flex;
 		flex-direction: column;

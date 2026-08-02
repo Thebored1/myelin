@@ -321,11 +321,15 @@
 	let vditorContainer: HTMLElement | undefined = $state();
 	let vditorInstance: Vditor | null = null;
 	let VditorConstructor = $state<any>(null);
-	let vditorLoading = false;
+	let vditorLoading = $state(false);
 	// Keep the note render separate from the editor/tool bundle. The bundle is
 	// requested only after the note has had a chance to paint.
 	let toolsReady = $state(false);
 	let fullscreenShortcut = $state('Esc');
+	// Pending tool-approval prompts auto-reject after this long if the user
+	// never answers (mirrors the backend's TOOL_APPROVAL_TIMEOUT_SECS).
+	const APPROVAL_TIMEOUT_MS = 120_000;
+	const approvalTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 	// Live note streaming (real token-by-token writes from the backend).
 	let noteStreaming = $state(false);
 	let noteStreamBuf = '';
@@ -1738,16 +1742,21 @@
 	// one shot (no fake animation) and reconciles any live-streamed preview.
 	function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
 		noteStreaming = false;
-		// Append needs the CURRENT note as its base on every editor. Markdown uses
-		// the live vditor value; .tex/.ipynb editors (CodeMirror/cell UI) track the
-		// same text in draftBody. Basing append on '' for non-md editors would set
-		// the note to just the appended fragment — and the editor's change listener
-		// would then autosave that truncated body to disk.
-		const baseContent =
-			mode === 'append'
-				? (vditorInstance ? vditorInstance.getValue() : draftBody).trimEnd() + '\n\n'
-				: '';
-		const finalContent = baseContent + newContent;
+		// Rust emits the full authoritative body for every note mutation. Keep a
+		// compatibility path for older sidecars that may still send an append
+		// fragment, but never duplicate a full body that already contains the
+		// current note prefix.
+		const currentContent = vditorInstance ? vditorInstance.getValue() : draftBody;
+		const currentTrimmed = currentContent.trimEnd();
+		const isAuthoritativeBody =
+			mode === 'write' ||
+			newContent === currentContent ||
+			(mode === 'append' && currentTrimmed.length > 0 && newContent.startsWith(currentTrimmed));
+		const finalContent = isAuthoritativeBody
+			? newContent
+			: currentTrimmed
+				? `${currentTrimmed}\n\n${newContent}`
+				: newContent;
 		if (note) note = { ...note, body: finalContent };
 		draftBody = finalContent;
 		// Avoid a second visible reset only when the editor itself already contains
@@ -2561,6 +2570,11 @@
 	}
 
 	async function resolveApproval(id: string, approved: boolean) {
+		const timeout = approvalTimeouts.get(id);
+		if (timeout) {
+			clearTimeout(timeout);
+			approvalTimeouts.delete(id);
+		}
 		chatMessages = chatMessages.map((m) => {
 			if (m.isApprovalRequest && m.approvalId === id) {
 				return { ...m, approvalStatus: approved ? 'approved' : 'rejected' };
@@ -3117,6 +3131,20 @@
 		listen<{ id: string; tool: string; title: string; content: string }>(
 			'ai://tool_approval_request',
 			(event) => {
+				// Auto-reject if the user never answers: the backend refuses the
+				// request on the same deadline, so the frontend must not show a
+				// stale "pending" bar forever.
+				approvalTimeouts.set(
+					event.payload.id,
+					setTimeout(() => {
+						const pending = chatMessages.find(
+							(m) => m.isApprovalRequest && m.approvalId === event.payload.id
+						);
+						if (pending && pending.approvalStatus === 'pending') {
+							void resolveApproval(event.payload.id, false);
+						}
+					}, APPROVAL_TIMEOUT_MS)
+				);
 				let lastStartTime = Date.now();
 				chatMessages = chatMessages.map((m) => {
 					if (m.isStreaming) {
@@ -3296,6 +3324,9 @@
 		// Note view closing — server stays warm (started at app boot, lives until
 		// app exit). Only the note-editor UI is torn down.
 		if (chatPersistTimer) clearTimeout(chatPersistTimer);
+		if (texAutoTimer) clearTimeout(texAutoTimer);
+		for (const timeout of approvalTimeouts.values()) clearTimeout(timeout);
+		approvalTimeouts.clear();
 		const aiNoteId = activeAiNoteId();
 		if (aiNoteId && chatMessages.length) void persistChatHistory(aiNoteId, chatMessages);
 		noteClosed();

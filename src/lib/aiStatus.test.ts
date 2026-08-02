@@ -18,9 +18,9 @@ describe('providerAiStatus', () => {
 	});
 
 	it('reports an unavailable provider when a configured model cannot be resolved', () => {
-		expect(
-			providerAiStatus({ healthy: false, config: { modelPath: '/missing/model.gguf' } })
-		).toBe('unavailable');
+		expect(providerAiStatus({ healthy: false, config: { modelPath: '/missing/model.gguf' } })).toBe(
+			'unavailable'
+		);
 	});
 
 	it('reports loading while the resolved model is not yet healthy', () => {

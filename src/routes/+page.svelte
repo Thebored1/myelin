@@ -209,7 +209,9 @@
 				/ [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|epub)$/.test(name)
 			);
 		};
-		return new Set((app?.notes ?? []).filter((n) => referenced.has(n.id) && isCopyName(n)).map((n) => n.id));
+		return new Set(
+			(app?.notes ?? []).filter((n) => referenced.has(n.id) && isCopyName(n)).map((n) => n.id)
+		);
 	});
 	let typeCounts = $derived.by(() => {
 		const c: Record<string, number> = { md: 0, tex: 0, ipynb: 0, pdf: 0, epub: 0 };
@@ -243,11 +245,8 @@
 		const f = activeTypeFilter;
 		if (f === 'notes') base = base.filter((n) => NOTE_GROUP.includes(noteType(n)));
 		else if (f === 'documents')
-			base = base.filter(
-				(n) => DOC_GROUP.includes(noteType(n)) && !attachedDocIds.has(n.id)
-			);
-		else if (f !== 'all')
-			base = base.filter((n) => noteType(n) === f && !attachedDocIds.has(n.id));
+			base = base.filter((n) => DOC_GROUP.includes(noteType(n)) && !attachedDocIds.has(n.id));
+		else if (f !== 'all') base = base.filter((n) => noteType(n) === f && !attachedDocIds.has(n.id));
 		if (activeTag !== null) base = base.filter((n) => n.tags.includes(activeTag!));
 		// null notebook = "uncategorized" (notes not in any notebook / workspace root).
 		if (activeNotebook === null) base = base.filter((n) => notebookOf(n) === null);

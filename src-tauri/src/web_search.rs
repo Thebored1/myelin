@@ -5,6 +5,89 @@
 //! reads one.
 
 use serde::Deserialize;
+use std::net::{IpAddr, SocketAddr};
+
+/// True for addresses that the web tools must never fetch: loopback, private,
+/// link-local, CGNAT, unspecified, broadcast, multicast, and IPv4 0/8. Blocks
+/// SSRF into the user's own machine or LAN (127.0.0.1, ::1, 10/8, 172.16/12,
+/// 192.168/16, 169.254/16, 100.64/10, fc00::/7, fe80::/10, ...).
+pub fn is_private_or_link_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127)
+                || octets[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            v6.to_ipv4().is_some_and(|v4| is_private_or_link_local(IpAddr::V4(v4)))
+                || v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
+}
+
+fn unsafe_hostname(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+}
+
+/// Synchronous SSRF surface check for a URL: rejects private/loopback IP
+/// literals and loopback-style hostnames. Safe to run inside a reqwest redirect
+/// policy (no DNS) — each redirect hop is re-checked before it is followed.
+pub fn assert_url_surface(url: &reqwest::Url) -> Result<(), String> {
+    let host = url.host_str().unwrap_or("");
+    if host.is_empty() {
+        return Err(format!("Invalid web URL: {url}"));
+    }
+    if unsafe_hostname(host) {
+        return Err(format!(
+            "Refused to fetch {url}: {host} is not a public web host."
+        ));
+    }
+    // IPv6 hosts come back bracketed ("[::1]"); strip them for the literal check.
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_or_link_local(ip) {
+            return Err(format!(
+                "Refused to fetch {url}: {host} is a private/local address."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a public hostname once and return an address that the HTTP client
+/// can pin for the request. Checking a hostname and then letting the client
+/// resolve it again leaves a DNS-rebinding window between validation and
+/// connection establishment.
+pub async fn resolve_public_url(raw_url: &str) -> Result<Option<SocketAddr>, String> {
+    let url = reqwest::Url::parse(raw_url).map_err(|_| format!("Invalid web URL: {raw_url}"))?;
+    assert_url_surface(&url)?;
+    let host = url.host_str().unwrap_or("").to_string();
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(Some(SocketAddr::new(ip, url.port_or_known_default().unwrap_or(443))));
+    }
+    let port = url.port_or_known_default().unwrap_or(443);
+    let mut addrs = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| format!("DNS lookup failed for {host}: {e}"))?;
+    addrs
+        .find(|addr| !is_private_or_link_local(addr.ip()))
+        .map(Some)
+        .ok_or_else(|| format!("Refused to fetch {raw_url}: {host} has no public address"))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchResult {
@@ -273,5 +356,45 @@ mod tests {
         assert!(out.contains("1. T"));
         assert!(out.contains("https://x.com"));
         assert!(out.contains("fetch_web_page"));
+    }
+
+    #[test]
+    fn private_and_link_local_ranges_are_rejected() {
+        for ip in [
+            "127.0.0.1", "127.8.8.8", "10.0.0.5", "172.16.0.1", "172.31.255.254",
+            "192.168.1.1", "169.254.1.1", "100.64.0.1", "100.127.255.255", "0.0.0.0",
+            "0.1.2.3", "255.255.255.255", "224.0.0.1", "::1", "::", "fc00::1", "fd12::7",
+            "fe80::1",
+        ] {
+            assert!(is_private_or_link_local(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1::1"] {
+            assert!(!is_private_or_link_local(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn url_surface_blocks_loopback_and_private_literals() {
+        for bad in [
+            "https://127.0.0.1/secret",
+            "http://localhost/admin",
+            "http://[::1]/x",
+            "http://[::ffff:127.0.0.1]/x",
+            "http://192.168.1.10:8080/",
+            "https://10.0.0.2/",
+            "http://mybox.local/",
+        ] {
+            assert!(assert_url_surface(&reqwest::Url::parse(bad).unwrap()).is_err(), "{bad}");
+        }
+        for good in ["https://example.com/page", "https://93.184.216.34/"] {
+            assert!(assert_url_surface(&reqwest::Url::parse(good).unwrap()).is_ok(), "{good}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_public_url_rejects_private_literals() {
+        for url in ["http://127.0.0.1/", "http://[::ffff:127.0.0.1]/"] {
+            assert!(resolve_public_url(url).await.is_err(), "{url}");
+        }
     }
 }

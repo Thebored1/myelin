@@ -25,6 +25,7 @@ question text. `cache_prompt` now matches the full system message + conversation
 history, and only the short question needs re-evaluation each turn.
 
 **Files:**
+
 - `src-tauri/src/state.rs` — prompt assembly restructured
 - `src-tauri/src/state.rs` — comment updated, `user_content` removed
 
@@ -40,6 +41,7 @@ loads, so the first chat is near-instant. Best-effort — if it fails, the first
 chat starts the server normally.
 
 **Files:**
+
 - `src-tauri/src/lib.rs` — added `tauri::async_runtime::spawn` with warm-up in setup
 
 The model server is started in the background and shared across notes and chat
@@ -51,6 +53,7 @@ note/tool state. The `ai://llama_warmup` `ready` event means the server is
 healthy; no synthetic completion is issued or awaited before the first chat.
 The in-memory model and KV cache are released when the app exits and are loaded
 again next run.
+
 - Fixed: used `tauri::async_runtime::spawn` instead of `tokio::spawn` (the setup
   callback runs outside a tokio context, causing a panic)
 
@@ -67,6 +70,7 @@ existing deterministic heuristics (`note_write_intent`, `in_edit_thread`,
 fallback is kept for standalone sidecar callers.
 
 **Files:**
+
 - `src-tauri/src/sidecar.rs` — derives `intent_is_tool` from deterministic routing
 - `src-tauri/openharn-myelin/src/agent.rs` — uses `opts.intent_is_tool` when present,
   added `intent_is_tool` field to `Options`
@@ -83,6 +87,7 @@ generation.
 `pool_max_idle_per_host(2)` so connections stay alive across the tool loop.
 
 **Files:**
+
 - `src-tauri/src/sidecar.rs` — `http_client()` for health checks and sidecar requests
 - `src-tauri/openharn-myelin/src/agent.rs` — `upstream_client()` for llama-server
 
@@ -94,6 +99,7 @@ every request body to a temp file on every model turn.
 **Fix:** Removed the `std::fs::write` call.
 
 **Files:**
+
 - `src-tauri/src/stream_chat.rs`
 
 ### 6. Added debug window with performance metrics
@@ -101,17 +107,18 @@ every request body to a temp file on every model turn.
 **What:** A collapsible debug panel above the chat prompt, toggled via a 🐞
 button. Shows:
 
-| Metric | Source |
-|--------|--------|
-| Prompt → First token | Client-side timestamps (first-chunk time − send time) |
-| First token → Done | Client-side timestamps (done time − first-chunk time) |
-| Total elapsed | Wall clock from send to finish |
-| Prompt tokens | From llama-server `include_usage` stream data |
-| Completion tokens | From llama-server, or estimated from reply chars (≈¼ tok/char) |
-| Tokens/s (gen) | Computed from tokens and generation time |
-| Activity trace | Color-coded timeline of events: request sent, generation started, tool calls, note writes, completion |
+| Metric               | Source                                                                                                |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| Prompt → First token | Client-side timestamps (first-chunk time − send time)                                                 |
+| First token → Done   | Client-side timestamps (done time − first-chunk time)                                                 |
+| Total elapsed        | Wall clock from send to finish                                                                        |
+| Prompt tokens        | From llama-server `include_usage` stream data                                                         |
+| Completion tokens    | From llama-server, or estimated from reply chars (≈¼ tok/char)                                        |
+| Tokens/s (gen)       | Computed from tokens and generation time                                                              |
+| Activity trace       | Color-coded timeline of events: request sent, generation started, tool calls, note writes, completion |
 
 **Files:**
+
 - `src/routes/notes/[id]/+page.svelte` — state, listeners, template, CSS
 
 ### 7. Token usage forwarding
@@ -125,6 +132,7 @@ SSE stream and forwarded through the sidecar SSE server → main app → Tauri e
 → Svelte frontend.
 
 **Files:**
+
 - `src-tauri/openharn-myelin/src/agent.rs` — `Out::Usage` variant, parsed from stream
 - `src-tauri/openharn-myelin/src/server.rs` — mapped to `usage` SSE event
 - `src-tauri/src/sidecar.rs` — forwarded as `ai://chat_usage`
@@ -175,11 +183,11 @@ is normally an empty assistant-role frame.
 The 1,930-token sweep selected six physical threads, ubatch 512, flash attention
 off, and f16 KV:
 
-| Profile | Prompt tok/s | Generation tok/s |
-|---|---:|---:|
-| 6 threads, ubatch 512, FA off, f16 KV | ~95.1 | ~40.2 |
-| 6 threads, ubatch 512, FA off, q8_0 KV | ~84.3 | ~37.2 |
-| 6 threads, ubatch 1024, FA off, f16 KV | ~93.7 | ~38.7 |
+| Profile                                | Prompt tok/s | Generation tok/s |
+| -------------------------------------- | -----------: | ---------------: |
+| 6 threads, ubatch 512, FA off, f16 KV  |        ~95.1 |            ~40.2 |
+| 6 threads, ubatch 512, FA off, q8_0 KV |        ~84.3 |            ~37.2 |
+| 6 threads, ubatch 1024, FA off, f16 KV |        ~93.7 |            ~38.7 |
 
 An additional three-run SMT probe compared the selected profile at 6 versus 12
 threads. Six threads averaged 94.6 prompt tok/s and 37.2 generation tok/s.
@@ -194,10 +202,10 @@ A repeated tool-free direct-chat request using streaming, the production
 AiTurnBuilder, an empty note, the LFM2 template, pinned slot 0,
 `--cache-reuse 64`, and `cache_prompt` produced:
 
-| Turn | Prompt tokens | Fixed prefix | Cached | Newly evaluated |
-|---|---:|---:|---:|---:|
-| Cold | 116 | 116 | 0 | 116 |
-| Follow-up | 173 | 116 | 157 (90.8%) | 16 |
+| Turn      | Prompt tokens | Fixed prefix |      Cached | Newly evaluated |
+| --------- | ------------: | -----------: | ----------: | --------------: |
+| Cold      |           116 |          116 |           0 |             116 |
+| Follow-up |           173 |          116 | 157 (90.8%) |              16 |
 
 The follow-up reused 100% of the prior fixed prompt. The additional cached
 tokens came from the prior generated turn. This empty-note streaming case is

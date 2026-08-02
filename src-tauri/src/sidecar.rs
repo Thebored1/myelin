@@ -26,7 +26,12 @@ use tauri::{Emitter, Manager};
 
 const SIDECAR_NAME: &str = "openharn-myelin";
 const DEFAULT_PORT: u16 = 8091;
-const SIDECAR_PROTOCOL_VERSION: u64 = 3;
+const SIDECAR_PROTOCOL_VERSION: u64 = 4;
+
+/// How long to keep draining the sidecar's SSE stream after posting a cancel
+/// request: it needs a moment to emit its final `done` (with the partial turn)
+/// before the connection can be dropped.
+const CANCEL_DRAIN_SECS: u64 = 15;
 
 /// Reuse loopback connections for health checks and sidecar requests. The
 /// sidecar is long-lived, so constructing a new client for every chat turn
@@ -446,38 +451,39 @@ pub async fn run_chat(
         emit_debug("tools", &format!("offered: {}", tool_names.join(", ")));
     }
 
+    let mut cancel_sent = false;
+    // Once a cancel has been posted, the sidecar should emit its final `done`
+    // within this window; if it is stuck (e.g. old binary), give up waiting.
+    let cancel_drain = tokio::time::sleep(Duration::from_secs(CANCEL_DRAIN_SECS));
+    tokio::pin!(cancel_drain);
+
     loop {
-        // Wait directly for either upstream data or the cancellation signal.
-        // The old 250 ms timeout loop could leave cancellation latent and added
-        // needless polling around the first visible model delta.
-        if state.ai_cancel_requested() {
-            emit_debug("cancel", "generation stopped by user");
+        if !cancel_sent && state.ai_cancel_requested() {
+            cancel_sent = true;
+            emit_debug("cancel", "cancelling sidecar turn");
             let _ = handle.emit(
                 "ai://note_stream_cancel",
                 json!({ "noteId": note_id, "requestId": request_id }),
             );
-            break;
+            // Tell the sidecar to abort now instead of running to completion
+            // (a stuck tool wait or a long generation would otherwise occupy
+            // the single llama slot and drop the partial turn).
+            let post = client
+                .post(format!("{base}/v1/cancel"))
+                .json(&json!({ "request_id": request_id }))
+                .send()
+                .await;
+            if let Err(e) = post {
+                log::warn!("[sidecar] cancel request failed: {e}");
+            }
+            cancel_drain.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(CANCEL_DRAIN_SECS));
         }
         let chunk = tokio::select! {
             chunk = stream.next() => chunk,
-            _ = state.wait_for_ai_cancel() => {
-                emit_debug("cancel", "generation stopped by user");
-                let _ = handle.emit(
-                    "ai://note_stream_cancel",
-                    json!({ "noteId": note_id, "requestId": request_id }),
-                );
-                break;
-            }
+            _ = state.wait_for_ai_cancel() => continue,
+            _ = &mut cancel_drain, if cancel_sent => break,
         };
         let Some(chunk) = chunk else { break };
-        if state.ai_cancel_requested() {
-            emit_debug("cancel", "generation stopped by user");
-            let _ = handle.emit(
-                "ai://note_stream_cancel",
-                json!({ "noteId": note_id, "requestId": request_id }),
-            );
-            break;
-        }
         let bytes = chunk.map_err(|e| anyhow!("sidecar stream error: {e}"))?;
         buf.extend_from_slice(&bytes);
 
@@ -559,6 +565,27 @@ pub async fn run_chat(
                             // for write_note, ai://note_written on its own).
                             let result =
                                 crate::stream_chat::execute_tool(state, &name, &args).await;
+                            if state.ai_cancel_requested() {
+                                // The turn was cancelled while the tool ran (e.g.
+                                // awaiting approval). Do not unblock the harness —
+                                // cancel it so the partial turn closes promptly.
+                                cancel_sent = true;
+                                emit_debug("cancel", "dropping tool result (turn cancelled)");
+                                let _ = handle.emit(
+                                    "ai://note_stream_cancel",
+                                    json!({ "noteId": note_id, "requestId": request_id }),
+                                );
+                                let _ = client
+                                    .post(format!("{base}/v1/cancel"))
+                                    .json(&json!({ "request_id": request_id }))
+                                    .send()
+                                    .await;
+                                cancel_drain.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + Duration::from_secs(CANCEL_DRAIN_SECS),
+                                );
+                                continue;
+                            }
                             let result_preview: String = result.chars().take(40).collect();
                             emit_debug("tool_result", &format!("{name} -> {result_preview}"));
                             // Unblock the harness.

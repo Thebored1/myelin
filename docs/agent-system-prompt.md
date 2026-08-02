@@ -8,6 +8,7 @@ meta/clear overrides) was deleted once it proved unnecessary with a model that
 calls tools reliably.
 
 Source of truth:
+
 - Preamble + tools + gating: [`agent.rs`](../src-tauri/src/agent.rs)
 - Streaming chat loop: [`stream_chat.rs`](../src-tauri/src/stream_chat.rs)
 - Prompt assembly: `ask_ai_stream` in [`state.rs`](../src-tauri/src/state.rs)
@@ -56,14 +57,15 @@ so explicitly.
 Four tools (defined in `agent.rs`; the same OpenAI specs are mirrored in
 `tool_specs()` for the startup warm-up and filtered by gating):
 
-| Tool | Purpose |
-|------|---------|
+| Tool                                | Purpose                                                |
+| ----------------------------------- | ------------------------------------------------------ |
 | `write_note(content, mode?, find?)` | Edit the **open** note only — never creates a new note |
-| `read_note(note_id)` | Read **another** note by id (ids from `search_notes`) |
-| `search_notes(query)` | Find **other** notes in the workspace |
-| `fetch_web_page(url)` | Fetch a public web page's text |
+| `read_note(note_id)`                | Read **another** note by id (ids from `search_notes`)  |
+| `search_notes(query)`               | Find **other** notes in the workspace                  |
+| `fetch_web_page(url)`               | Fetch a public web page's text                         |
 
 `write_note` modes (decided by `plan_write`, which is pure + unit-tested):
+
 - **`replace`** (default) — set the whole body to `content` (empty clears it).
 - **`append`** — add `content` to the end.
 - **`edit`** — replace the exact `find` snippet with `content` (empty deletes it).
@@ -83,6 +85,7 @@ the model **only the tools its message warrants** — the model can't misfire
 on a tool it was never given. (Pattern proven in the `ggufplay` experiment.)
 
 `agent::select_tools(message, has_open_note, edit_thread)`:
+
 - **small talk** (`is_small_talk`, ≤4 ack words) → **no tools** (just chat).
 - **write intent** (`note_write_intent` — edit verbs / transform phrasings /
   affirmations / note-targeted soft verbs) → **`write_note`**.
@@ -99,7 +102,7 @@ can suit the model in use (`select_tools_cfg(message, has_open_note, edit_thread
 gating, deterministic)`):
 
 - **Per-message tool gating** (`gating`) — the selection above. **Default OFF.**
-  The heuristics are keyword-based and brittle: they can *withhold* a tool the
+  The heuristics are keyword-based and brittle: they can _withhold_ a tool the
   model would have used (e.g. "search for the latest news" isn't recognised as a
   web search, so the model can't search). With gating off the model gets the full
   general toolset every turn and decides for itself — the standard, model-agnostic
@@ -107,7 +110,7 @@ gating, deterministic)`):
 - **Deterministic format & find** (`deterministic`) — **default ON.** Routes a
   clean structural cleanup to the regex **`format_note`** tool (instead of an LLM
   rewrite) and a word lookup to **`find_in_note`**, and enables the
-  destructive-write guard. These are *correctness* assists, not a gating crutch,
+  destructive-write guard. These are _correctness_ assists, not a gating crutch,
   so they apply **whether or not gating is on** — formatting stays reliable even
   with the full toolset offered.
 

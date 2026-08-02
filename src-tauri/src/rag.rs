@@ -45,11 +45,28 @@ pub struct RetrievedChunk {
 /// Format ranked passages without allowing retrieval to consume the rest of
 /// the model context. The final chunk is truncated when it reaches the budget.
 pub fn pack_passages(chunks: Vec<RetrievedChunk>, char_budget: usize) -> String {
+    pack_passages_limited(chunks, char_budget, usize::MAX)
+}
+
+/// Pack a bounded number of distinct passages for model evidence. Retrieval
+/// may return overlapping vector/FTS hits; exact duplicate text should not
+/// consume prompt budget twice.
+pub fn pack_passages_limited(
+    chunks: Vec<RetrievedChunk>,
+    char_budget: usize,
+    max_chunks: usize,
+) -> String {
     let mut used = 0usize;
+    let mut packed = 0usize;
+    let mut seen = std::collections::HashSet::new();
     let mut evidence = String::new();
     for chunk in chunks {
-        if used >= char_budget {
+        if used >= char_budget || packed >= max_chunks {
             break;
+        }
+        let key = chunk.text.trim();
+        if key.is_empty() || !seen.insert(key.to_string()) {
+            continue;
         }
         let remaining = char_budget - used;
         let excerpt: String = chunk.text.chars().take(remaining).collect();
@@ -63,6 +80,7 @@ pub fn pack_passages(chunks: Vec<RetrievedChunk>, char_budget: usize) -> String 
             excerpt.trim()
         ));
         used += excerpt.chars().count();
+        packed += 1;
     }
     evidence
 }
@@ -280,13 +298,36 @@ pub async fn search_hybrid(
     doc_ids: Option<&[String]>,
 ) -> Result<Vec<RetrievedChunk>> {
     let conn = open(index_dir).await?;
-    let table = match conn.open_table(RAG_TABLE).execute().await {
-        Ok(t) => t,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let table = conn
+        .open_table(RAG_TABLE)
+        .execute()
+        .await
+        .context("document index is not initialized")?;
     let pool = (k * 4).max(20);
-    let vec_hits = vector_hits(&table, query_vec, pool, doc_ids).await.unwrap_or_default();
-    let fts = fts_hits(&table, query_text, pool, doc_ids).await.unwrap_or_default();
+    // A failed sub-search must not silently read as "no evidence": the callers
+    // use an empty result to tell the model the information is not in the store
+    // (the EVIDENCE POLICY). Swallowing errors here produced ungrounded answers
+    // on a broken index. One failing sub-search is degraded-but-serviceable
+    // (fall back to the other); both failing is a retrieval failure.
+    let (vec_hits, fts) = match (
+        vector_hits(&table, query_vec, pool, doc_ids).await,
+        fts_hits(&table, query_text, pool, doc_ids).await,
+    ) {
+        (Ok(v), Ok(f)) => (v, f),
+        (Ok(v), Err(fts_err)) => {
+            log::warn!("[rag] FTS search failed; falling back to vector-only: {fts_err:#}");
+            (v, Vec::new())
+        }
+        (Err(vec_err), Ok(f)) => {
+            log::warn!("[rag] vector search failed; falling back to FTS-only: {vec_err:#}");
+            (Vec::new(), f)
+        }
+        (Err(vec_err), Err(fts_err)) => {
+            return Err(anyhow::anyhow!(
+                "document retrieval failed (vector: {vec_err:#}; full-text: {fts_err:#})"
+            ));
+        }
+    };
 
     // Reciprocal Rank Fusion across the two ranked lists.
     const RRF_K: f32 = 60.0;
@@ -346,6 +387,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let res = search(dir.path(), vec![0.0; DIM as usize], 5).await.unwrap();
         assert!(res.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_reports_uninitialized_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = search_hybrid(dir.path(), vec![0.0; DIM as usize], "query", 5, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("document index is not initialized"));
+    }
+
+    #[test]
+    fn limited_passage_packing_deduplicates_and_caps_results() {
+        let make = |index: i32, text: &str| RetrievedChunk {
+            doc_id: "d".into(),
+            source: "source".into(),
+            chunk_index: index,
+            text: text.into(),
+            distance: 0.0,
+        };
+        let out = pack_passages_limited(
+            vec![make(0, "same"), make(1, "same"), make(2, "second")],
+            1_000,
+            2,
+        );
+        assert_eq!(out.matches("[source | document d]").count(), 2);
+        assert!(out.contains("same"));
+        assert!(out.contains("second"));
     }
 
     #[tokio::test]
