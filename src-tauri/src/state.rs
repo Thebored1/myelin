@@ -38,6 +38,7 @@ const MAX_LIVE_CONVERSATION_CHARS: usize = 8_000;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TABLE_NAME: &str = "notes";
 const NOTE_INGEST_MANIFEST: &str = "note-ingestion.json";
+const QUERY_EMBEDDING_CACHE: &str = "query-embeddings.json";
 const NOTE_CHUNKER_VERSION: &str = "words-320-overlap-50-v1";
 // Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
 // We pin that package cache to a directory we own under app data so it lands in
@@ -513,9 +514,9 @@ fn enforce_slot_cache_budget(slot_dir: &Path, budget_bytes: u64) {
 }
 
 /// The exact system/tool prefix the synthetic warm-up renders — the provenance
-/// identity a post-turn slot save must record. Chat shares this prefix with the
-/// real turn (stable preamble + fixed read-only schema set), so a persisted KV
-/// snapshot is a strict prefix of the next request and reusable across sessions.
+/// identity a post-turn slot save must record. Retrieval-backed chat uses the
+/// same short tool-free profile as the document-answer fast path; ordinary chat
+/// keeps the fixed read-only schema set for cache reuse on tool requests.
 fn warmup_prefix(
     note_title: &str,
     excerpt: &str,
@@ -525,7 +526,8 @@ fn warmup_prefix(
     oversized: bool,
     verbose_tool_schemas: bool,
 ) -> (String, Vec<serde_json::Value>) {
-    let preamble = if interaction_mode == "chat" && !supports_tools {
+    let direct_document_profile = interaction_mode == "chat" && (oversized || !supports_tools);
+    let preamble = if direct_document_profile {
         crate::agent::DIRECT_CHAT_PREAMBLE
     } else {
         crate::agent::MYELIN_PREAMBLE
@@ -534,7 +536,7 @@ fn warmup_prefix(
         "{preamble}\n\n{}",
         assemble_note_context(note_title, excerpt, cells)
     );
-    let tools = if !supports_tools {
+    let tools = if direct_document_profile {
         Vec::new()
     } else {
         crate::agent::interaction_mode_tools(interaction_mode, oversized)
@@ -639,6 +641,10 @@ pub(crate) struct InnerState {
     tools_supported: std::sync::atomic::AtomicBool,
     note_ingest_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     note_ingest_manifest_lock: AsyncMutex<()>,
+    /// Persistent cache for normalized question embeddings. Document vectors
+    /// live in LanceDB; this avoids repeating the embedding-server call for
+    /// repeated retrieval queries.
+    query_embedding_cache: Mutex<Option<QueryEmbeddingCacheFile>>,
     /// At most one note-prefix warm-up should be consuming llama-server at once.
     /// The key is the exact request prefix; a newer prefix supersedes an older one.
     prompt_warmup: Mutex<Option<(u64, tokio::task::JoinHandle<()>)>>,
@@ -692,6 +698,13 @@ struct NoteIngestionEntry {
     body_hash: String,
     chunker: String,
     embedding: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct QueryEmbeddingCacheFile {
+    embedding: String,
+    entries: HashMap<String, Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -874,6 +887,7 @@ impl AppState {
                 tools_supported: std::sync::atomic::AtomicBool::new(true),
                 note_ingest_locks: Mutex::new(HashMap::new()),
                 note_ingest_manifest_lock: AsyncMutex::new(()),
+                query_embedding_cache: Mutex::new(None),
                 prompt_warmup: Mutex::new(None),
                 pending_approvals: Mutex::new(HashMap::new()),
                 conversations: Mutex::new(HashMap::new()),
@@ -2133,11 +2147,11 @@ impl AppState {
                 ));
             }
 
-            // A synthetic note-prefix request must never sit ahead of a real
-            // user turn on llama-server's single inference slot.
-            self.cancel_prompt_warmup().await;
+            // Let the synthetic prefix warm-up overlap document retrieval. It
+            // is finalized immediately before model submission, so the first
+            // real request can reuse its KV prefix instead of always starting
+            // with cached=0.
             let config = self.ensure_ai_pipeline_ready().await?;
-            self.cancel_prompt_warmup().await;
             // Fast-chat profile: let the model choose ordinary tools instead of
             // routing through deterministic format/find assists. Rust still
             // executes the selected tools and enforces write safety.
@@ -2242,11 +2256,37 @@ impl AppState {
                             "requestId": request_id,
                         }),
                     );
+                    let broad_query = crate::ai_turn::is_broad_retrieval_request(&question);
+                    let direct_document_request = interaction_mode == "chat"
+                        && !crate::agent::note_write_intent(&question)
+                        && !crate::agent::wants_other_notes(&question)
+                        && !crate::agent::wants_fetch(&question)
+                        && !crate::agent::wants_search(&question);
+                    let first_pass_k = if broad_query { 2 } else { 3 };
                     match self
-                        .retrieve_chunks_scoped(&retrieval_query, 3, Some(&scope))
+                        .retrieve_chunks_scoped(&retrieval_query, first_pass_k, Some(&scope))
                         .await
                     {
-                        Ok(chunks) => {
+                        Ok(mut chunks) => {
+                            let mut retrieval_passes = 1;
+                            if broad_query
+                                && crate::ai_turn::retrieval_hits_support_query(
+                                    &question,
+                                    &chunks,
+                                )
+                            {
+                                // A broad request with confirmed hits gets a
+                                // second page. The query vector is cached, so
+                                // this adds retrieval recall without another
+                                // embedding-server call.
+                                if let Ok(expanded) = self
+                                    .retrieve_chunks_scoped(&retrieval_query, 6, Some(&scope))
+                                    .await
+                                {
+                                    chunks = expanded;
+                                    retrieval_passes = 2;
+                                }
+                            }
                             let mut document_ids: Vec<&str> =
                                 chunks.iter().map(|chunk| chunk.doc_id.as_str()).collect();
                             document_ids.sort_unstable();
@@ -2268,16 +2308,35 @@ impl AppState {
                             // token is a conservative approximation here.
                             let char_budget = ctx_tokens
                                 .saturating_mul(4)
-                                .min(4_000)
-                                .max(1_600);
-                            let evidence = crate::rag::pack_passages_limited(chunks, char_budget, 3);
+                                .min(if broad_query {
+                                    8_000
+                                } else if direct_document_request {
+                                    800
+                                } else {
+                                    4_000
+                                })
+                                .max(if direct_document_request { 600 } else { 1_600 });
+                            let evidence = if direct_document_request && !broad_query {
+                                crate::rag::pack_passages_focused(
+                                    chunks,
+                                    &question,
+                                    char_budget,
+                                    1,
+                                )
+                            } else {
+                                crate::rag::pack_passages_limited(
+                                    chunks,
+                                    char_budget,
+                                    if broad_query { 6 } else { 3 },
+                                )
+                            };
                             let _ = self.handle.emit(
                                 "ai://debug_event",
                                 serde_json::json!({
                                     "kind": "retrieval",
                                     "msg": format!(
-                                        "evidence_chars={}; evidence_budget_chars={char_budget}",
-                                        evidence.chars().count()
+                                        "passes={retrieval_passes}; evidence_chars={}; evidence_budget_chars={char_budget}",
+                                        evidence.chars().count(),
                                     ),
                                     "requestId": request_id,
                                 }),
@@ -2446,18 +2505,34 @@ impl AppState {
                 "edit" => "EDITOR ACTION: Perform exactly this isolated edit with write_note. Return only the replacement or insertion content in the tool call; never reproduce text outside the target.",
                 _ => "AUTO TURN POLICY: Decide whether the user needs a direct answer or an operation.",
             };
+            self.finish_prompt_warmup().await;
+            // Retrieval already ran for attached/PDF/oversized documents. For
+            // ordinary questions about that evidence, skip the six read-only
+            // schemas and the editing manual entirely. Keep explicit web,
+            // workspace-note, and mutation requests on the tool route.
+            let fast_document_answer = interaction_mode == "chat"
+                && retrieval_backed
+                && !crate::agent::note_write_intent(&question)
+                && !crate::agent::wants_other_notes(&question)
+                && !crate::agent::wants_fetch(&question)
+                && !crate::agent::wants_search(&question);
+            let turn_conversation = if fast_document_answer {
+                crate::ai_turn::compact_document_conversation(&question, &convo)
+            } else {
+                convo.clone()
+            };
             let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
                 mode: interaction_mode,
                 note_title: &note.title,
                 system_context: &stable_context,
-                conversation: &convo,
+                conversation: &turn_conversation,
                 question: &question,
                 mode_policy: mode_instruction,
                 turn_instructions: &turn_instructions,
                 has_open_note: true,
                 edit_thread,
                 oversized: retrieval_backed,
-                supports_tools,
+                supports_tools: supports_tools && !fast_document_answer,
                 verbose_tool_schemas: config.verbose_tool_schemas,
             });
             let intent_is_tool = Some(turn.intent_is_tool);
@@ -2468,7 +2543,15 @@ impl AppState {
                 .unwrap_or(&question)
                 .to_string();
             let messages = turn.messages;
-            let tools = turn.tools;
+            // Retrieval-backed direct questions do not need the read-only tool
+            // schemas: the evidence is already in the user turn. Keeping this
+            // fast path tool-less makes its system prefix smaller and stable,
+            // while tool-intent chat requests retain the full tool path.
+            let tools = if fast_document_answer {
+                Vec::new()
+            } else {
+                turn.tools
+            };
 
             let tool_names: Vec<String> = tools
                 .iter()
@@ -2484,13 +2567,14 @@ impl AppState {
                 serde_json::json!({
                     "kind": "config",
                     "msg": format!(
-                        "mode={}, tools: {}, gate={}, determ={}, edit={}, tools_supported={}, tool_mode={}",
+                        "mode={}, tools: {}, gate={}, determ={}, edit={}, tools_supported={}, fast_document={}, tool_mode={}",
                         interaction_mode,
                         tool_names.join(", "),
                         config.tool_gating && interaction_mode != "operation",
                         deterministic_tools,
                         edit_thread,
                         supports_tools,
+                        fast_document_answer,
                         tool_mode,
                     ),
                     "requestId": request_id,
@@ -3500,10 +3584,9 @@ impl AppState {
             config.supports_tools,
         )
         .await;
-        // Chat always offers one fixed read-only schema set (matching the real
-        // turn's AiTurnBuilder), so the warm-up reproduces the exact system/tool
-        // prefix that the next chat request will reuse from the KV cache. Models
-        // without tool support get the minimal tool-free chat prefix instead.
+        // Retrieval-backed chat uses the same tool-free profile as the direct
+        // document-answer route, so the warm-up can be reused by that request.
+        // Ordinary tool-capable chat retains its fixed read-only schema prefix.
         let (system, tools) = warmup_prefix(
             &note.title,
             &excerpt,
@@ -3793,6 +3876,31 @@ impl AppState {
         }
     }
 
+    /// Wait for a note-prefix warm-up that was already started on note open.
+    /// Retrieval runs concurrently with it; a short wait makes a nearly
+    /// finished warm-up useful without adding a long cold-start delay.
+    async fn finish_prompt_warmup(&self) {
+        let handle = self
+            .inner
+            .prompt_warmup
+            .lock()
+            .take()
+            .map(|(_, handle)| handle);
+        let Some(mut handle) = handle else { return };
+        if handle.is_finished() {
+            let _ = handle.await;
+            return;
+        }
+        if tokio::time::timeout(std::time::Duration::from_secs(1), &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+            log::debug!("prompt-cache warm-up exceeded 1 second; proceeding with compact prompt");
+        }
+    }
+
     fn spawn_note_cache_warmup(
         &self,
         config: &llama_server::ResolvedLlamaConfig,
@@ -3840,6 +3948,7 @@ impl AppState {
                 "max_tokens": 1,
                 "temperature": 0.0,
                 "cache_prompt": true,
+                "id_slot": 0,
             });
             if !tools.is_empty() {
                 body["tools"] = serde_json::json!(tools);
@@ -3998,6 +4107,60 @@ impl AppState {
         format!(
             "nomic-v2:{path}:{size}:{modified}:{runtime_path}:{runtime_size}:{runtime_modified}"
         )
+    }
+
+    fn query_embedding_cache_path(&self) -> PathBuf {
+        self.inner.app_data_dir.join(QUERY_EMBEDDING_CACHE)
+    }
+
+    fn query_embedding_key(&self, query: &str) -> String {
+        let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut hasher = Sha256::new();
+        hasher.update(self.embedding_fingerprint().as_bytes());
+        hasher.update(b"\0query\0");
+        hasher.update(normalized.to_ascii_lowercase().as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn cached_query_embedding(&self, query: &str) -> Option<Vec<f32>> {
+        let fingerprint = self.embedding_fingerprint();
+        let mut cache = self.inner.query_embedding_cache.lock();
+        if cache.is_none() {
+            *cache = fs::read(self.query_embedding_cache_path())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .filter(|file: &QueryEmbeddingCacheFile| file.embedding == fingerprint);
+        }
+        cache
+            .as_ref()
+            .and_then(|file| file.entries.get(&self.query_embedding_key(query)).cloned())
+    }
+
+    fn store_query_embedding(&self, query: &str, vector: Vec<f32>) {
+        let fingerprint = self.embedding_fingerprint();
+        let key = self.query_embedding_key(query);
+        let mut cache = self.inner.query_embedding_cache.lock();
+        let file = cache.get_or_insert_with(|| QueryEmbeddingCacheFile {
+            embedding: fingerprint.clone(),
+            entries: HashMap::new(),
+        });
+        if file.embedding != fingerprint {
+            file.embedding = fingerprint;
+            file.entries.clear();
+        }
+        if file.entries.len() >= 256 && !file.entries.contains_key(&key) {
+            if let Some(oldest) = file.entries.keys().next().cloned() {
+                file.entries.remove(&oldest);
+            }
+        }
+        file.entries.insert(key, vector);
+        if let Ok(bytes) = serde_json::to_vec(file) {
+            let path = self.query_embedding_cache_path();
+            let temp = path.with_extension("json.tmp");
+            if fs::write(&temp, bytes).is_ok() {
+                let _ = fs::rename(temp, path);
+            }
+        }
     }
 
     fn note_ingestion_entry(&self, body: &str) -> NoteIngestionEntry {
@@ -4276,14 +4439,23 @@ impl AppState {
         if doc_ids.is_some_and(<[String]>::is_empty) {
             return Ok(Vec::new());
         }
-        let qvec = if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
-            self.embed_texts(&[query.to_string()], true)
+        let qvec = if let Some(cached) = self.cached_query_embedding(query) {
+            cached
+        } else if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
+            let vector = self
+                .embed_texts(&[query.to_string()], true)
                 .await?
                 .into_iter()
                 .next()
-                .unwrap_or_default()
+                .unwrap_or_default();
+            if !vector.is_empty() {
+                self.store_query_embedding(query, vector.clone());
+            }
+            vector
         } else {
-            hashed_embedding(query)
+            let vector = hashed_embedding(query);
+            self.store_query_embedding(query, vector.clone());
+            vector
         };
         if qvec.is_empty() {
             return Ok(Vec::new());
@@ -5626,16 +5798,9 @@ mod tests {
     }
 
     #[test]
-    fn warmup_prefix_oversized_chat_stays_fixed_read_only() {
+    fn warmup_prefix_retrieval_chat_uses_tool_free_profile() {
         let (_, tools) = warmup_prefix("Big note", "excerpt", None, "chat", true, true, false);
-        let names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| t["function"]["name"].as_str())
-            .collect();
-        assert_eq!(
-            names,
-            ["fetch_web_page", "find_in_note", "read_note", "search_documents", "search_notes", "web_search"]
-        );
+        assert!(tools.is_empty());
     }
 
     #[test]

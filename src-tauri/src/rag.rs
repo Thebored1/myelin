@@ -85,6 +85,68 @@ pub fn pack_passages_limited(
     evidence
 }
 
+/// Pack a small query-focused excerpt for direct document answers. The normal
+/// packer keeps each passage's beginning, which can miss an exact name that
+/// appears later in a long chunk. This variant centers the excerpt around the
+/// most distinctive query term while retaining the source label.
+pub fn pack_passages_focused(
+    chunks: Vec<RetrievedChunk>,
+    query: &str,
+    char_budget: usize,
+    max_chunks: usize,
+) -> String {
+    const STOP: &[&str] = &[
+        "about", "does", "from", "mention", "paper", "tell", "that", "this", "what",
+        "which", "with",
+    ];
+    let mut terms: Vec<String> = query
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|term| term.len() >= 4 && !STOP.contains(term))
+        .map(str::to_string)
+        .collect();
+    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
+
+    let mut used = 0usize;
+    let mut packed = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    let mut evidence = String::new();
+    for chunk in chunks {
+        if used >= char_budget || packed >= max_chunks {
+            break;
+        }
+        if chunk.text.trim().is_empty() || !seen.insert(chunk.text.trim().to_string()) {
+            continue;
+        }
+        let remaining = char_budget - used;
+        let text_lower = chunk.text.to_ascii_lowercase();
+        let match_at = terms
+            .iter()
+            .find_map(|term| text_lower.find(term));
+        let start = match_at
+            .map(|at| text_lower[..at].chars().count().saturating_sub(remaining / 3))
+            .unwrap_or(0);
+        let excerpt: String = chunk
+            .text
+            .chars()
+            .skip(start)
+            .take(remaining)
+            .collect();
+        if excerpt.trim().is_empty() {
+            continue;
+        }
+        evidence.push_str(&format!(
+            "\n\n[{} | document {}]\n{}",
+            chunk.source,
+            chunk.doc_id,
+            excerpt.trim()
+        ));
+        used += excerpt.chars().count();
+        packed += 1;
+    }
+    evidence
+}
+
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("doc_id", DataType::Utf8, false),

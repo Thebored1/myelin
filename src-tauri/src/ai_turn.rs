@@ -59,7 +59,13 @@ impl AiTurnBuilder {
         // cache), so "tools present" can no longer mean "this is a tool turn".
         let intent_is_tool = match input.mode {
             "operation" | "edit" => true,
-            "chat" => crate::agent::tool_intent(input.question, input.edit_thread),
+            // A chat-only model cannot execute a tool. This also covers the
+            // retrieval-backed fast path, which deliberately removes the
+            // read-only schemas after the host has already fetched evidence.
+            "chat" => {
+                input.supports_tools
+                    && crate::agent::tool_intent(input.question, input.edit_thread)
+            }
             _ => !tools.is_empty(),
         };
         // A fixed preamble per mode: chat always uses the editing preamble when
@@ -188,6 +194,86 @@ pub fn contextual_retrieval_query(question: &str, history: &[Value]) -> String {
         query.push_str(&bounded(assistant));
     }
     query
+}
+
+/// Keep document-grounded prompts small when the latest question stands alone.
+/// Retrieval already carries the relevant source evidence; replaying unrelated
+/// old chat turns only increases prompt evaluation. Pronoun/follow-up questions
+/// retain a small tail of history so conversational references still resolve.
+pub fn compact_document_conversation(question: &str, history: &[Value]) -> Vec<Value> {
+    let q = question.to_ascii_lowercase();
+    let needs_history = q
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| matches!(word, "it" | "they" | "them" | "those" | "these"))
+        || ["why", "what about", "you said", "earlier", "previous answer"]
+            .iter()
+            .any(|marker| q.contains(marker));
+    if !needs_history {
+        return Vec::new();
+    }
+
+    const MAX_HISTORY_CHARS: usize = 2_000;
+    let mut kept = Vec::new();
+    let mut chars = 0;
+    for message in history.iter().rev() {
+        if !matches!(message["role"].as_str(), Some("user") | Some("assistant")) {
+            continue;
+        }
+        let Some(content) = message["content"].as_str() else {
+            continue;
+        };
+        if chars >= MAX_HISTORY_CHARS {
+            break;
+        }
+        let remaining = MAX_HISTORY_CHARS - chars;
+        let bounded: String = content.chars().take(remaining).collect();
+        chars += bounded.chars().count();
+        let mut copy = message.clone();
+        copy["content"] = Value::String(bounded);
+        kept.push(copy);
+    }
+    kept.reverse();
+    kept
+}
+
+/// Broad retrieval requests usually ask for a set or an exhaustive scan. They
+/// deserve a second retrieval pass when the first passages confirm the topic,
+/// while ordinary factual questions keep the fast small-result path.
+pub fn is_broad_retrieval_request(question: &str) -> bool {
+    let q = question.to_ascii_lowercase();
+    [
+        "all ",
+        "every ",
+        "each ",
+        "list ",
+        "throughout",
+        "find all",
+        "show all",
+        "which poems",
+        "what poems",
+    ]
+    .iter()
+    .any(|marker| q.contains(marker))
+}
+
+/// Cheap lexical confirmation for the adaptive retrieval pass. The vector/FTS
+/// search has already ranked the chunks; this only decides whether the first
+/// page contains enough visible topic evidence to justify fetching more.
+pub fn retrieval_hits_support_query(
+    question: &str,
+    chunks: &[crate::rag::RetrievedChunk],
+) -> bool {
+    let terms: Vec<String> = question
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|term| term.len() >= 5)
+        .map(str::to_string)
+        .collect();
+    !terms.is_empty()
+        && chunks.iter().any(|chunk| {
+            let text = chunk.text.to_ascii_lowercase();
+            terms.iter().any(|term| text.contains(term))
+        })
 }
 
 pub fn render_user_content(
@@ -383,5 +469,22 @@ mod tests {
         assert_eq!(query.matches("Latest question:").count(), 1);
         assert!(query.contains("LFM2 and MiniCPM"));
         assert!(query.contains("They did not have a 2-bit result"));
+    }
+
+    #[test]
+    fn independent_document_questions_drop_unrelated_history() {
+        let history = vec![
+            json!({"role": "user", "content": "What is GPTQ?"}),
+            json!({"role": "assistant", "content": "A quantization method."}),
+        ];
+        assert!(compact_document_conversation("Does this paper mention MiniCPM-V?", &history).is_empty());
+        assert_eq!(compact_document_conversation("Why did you say that?", &history).len(), 2);
+    }
+
+    #[test]
+    fn broad_retrieval_requests_are_detected() {
+        assert!(is_broad_retrieval_request("find all poems by Shakespeare"));
+        assert!(is_broad_retrieval_request("list every mention of climate"));
+        assert!(!is_broad_retrieval_request("what does the introduction say?"));
     }
 }

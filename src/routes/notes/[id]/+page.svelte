@@ -410,7 +410,8 @@
 	}
 
 	const PANE_MIN_WIDTH = 26 * 16;
-	let sidebarWidth = $state(320);
+	const SIDEBAR_MIN_WIDTH = 320;
+	let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
 	let isSidebarResizing = $state(false);
 
 	function startSidebarResizing(e: MouseEvent) {
@@ -440,10 +441,14 @@
 				splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxSourceRatio));
 			}
 		} else if (isSidebarResizing) {
-			const newWidth = window.innerWidth - e.clientX;
-			const containerWidth = mainLayoutEl?.getBoundingClientRect().width ?? window.innerWidth;
-			const maxSidebar = Math.max(320, containerWidth - PANE_MIN_WIDTH);
-			sidebarWidth = Math.max(320, Math.min(newWidth, maxSidebar));
+			const layoutRect = mainLayoutEl?.getBoundingClientRect();
+			const containerWidth = layoutRect?.width ?? window.innerWidth;
+			// Measure from the actual layout edge rather than the browser window.
+			// The note view can be inset by a host shell, and using window.innerWidth
+			// made the sidebar grow past the editor when it was resized.
+			const newWidth = (layoutRect?.right ?? window.innerWidth) - e.clientX;
+			const maxSidebar = Math.max(SIDEBAR_MIN_WIDTH, containerWidth - PANE_MIN_WIDTH);
+			sidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(newWidth, maxSidebar));
 		}
 	}
 
@@ -2988,7 +2993,13 @@
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
-			if (!isNaN(parsed)) sidebarWidth = parsed;
+			if (!isNaN(parsed)) {
+				const maxSidebar = Math.max(
+					SIDEBAR_MIN_WIDTH,
+					window.innerWidth - PANE_MIN_WIDTH
+				);
+				sidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(parsed, maxSidebar));
+			}
 		}
 
 		let unlistenChunk: UnlistenFn;
@@ -5233,6 +5244,8 @@
 		right: 0;
 		bottom: 0;
 		width: var(--sidebar-width, 20rem);
+		box-sizing: border-box;
+		min-width: 0;
 		max-width: 85vw;
 		background: var(--bg-panel);
 		padding: 0 var(--space-6) var(--space-6) var(--space-6);
@@ -5271,7 +5284,7 @@
 			transform: none;
 			margin-right: calc(var(--sidebar-width, 20rem) * -1);
 			/* Docking is allowed only when the editor can retain its pane minimum. */
-			max-width: calc(100% - 26rem);
+			max-width: min(calc(100% - 26rem), 42rem);
 			box-shadow: none;
 			flex-shrink: 0;
 		}
@@ -5931,6 +5944,9 @@
 	/* Sidebar Tabs */
 	.sidebar-tabs {
 		display: flex;
+		min-width: 0;
+		width: 100%;
+		box-sizing: border-box;
 		height: 48px;
 		border-bottom: 1px solid var(--border-subtle);
 		margin-bottom: var(--space-4);
@@ -5962,6 +5978,9 @@
 	.sidebar-content {
 		display: flex;
 		flex-direction: column;
+		min-width: 0;
+		width: 100%;
+		box-sizing: border-box;
 		gap: var(--space-6);
 		flex: 1;
 		min-height: 0;
@@ -5988,9 +6007,11 @@
 		flex-direction: column;
 		height: 100%;
 		flex: 1;
+		min-width: 0;
 	}
 	.chat-messages {
 		flex: 1;
+		min-width: 0;
 		overflow-y: auto;
 		display: flex;
 		flex-direction: column;

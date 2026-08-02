@@ -381,7 +381,10 @@ pub async fn run_chat(
         "base_url": llama_base,
         "model": config.model_name(),
         "temperature": config.temperature,
-        "max_tokens": 4096,
+        // Direct chat answers are intentionally bounded, but tool-intent chat
+        // and operation turns keep the full budget so tool arguments/results
+        // are never cut off mid-call.
+        "max_tokens": if chat_mode && intent_is_tool != Some(true) { 768 } else { 4096 },
         "max_turns": config.max_turns.max(1) as usize,
         "messages": messages,
         "tools": tools,
