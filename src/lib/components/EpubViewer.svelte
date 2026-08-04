@@ -2,14 +2,72 @@
 	import { onMount, onDestroy } from 'svelte';
 	import ePub from 'epubjs';
 
+	interface Section {
+		key: string;
+		label: string;
+		content: string;
+	}
+
 	interface Props {
 		epubBytes: Uint8Array;
+		onActiveSection?: (section: Section) => void;
+		onSectionsReady?: (sections: Section[]) => void;
 	}
-	let { epubBytes }: Props = $props();
+	let { epubBytes, onActiveSection, onSectionsReady }: Props = $props();
 
 	let container: HTMLDivElement | undefined = $state();
 	let book: any = null;
 	let rendition: any = null;
+	let sectionsEmitted = false;
+
+	function reportLocation(location: any) {
+		const contents = rendition?.getContents?.() ?? [];
+		const text = contents
+			.map((item: any) => item?.document?.body?.innerText ?? '')
+			.join('\n')
+			.trim();
+		if (text && onActiveSection) {
+			onActiveSection({
+				key: `epub:${location?.start?.cfi ?? location?.start?.href ?? 'current'}`,
+				label: location?.start?.href ?? 'Current chapter',
+				content: text.slice(0, 80_000)
+			});
+		}
+	}
+
+	// Load every chapter once so the whole book becomes section-cached at once
+	// instead of chapter-by-chapter as the reader navigates. Skipped in the
+	// backend whenever a chapter's snapshot already exists.
+	function extractAllChapters() {
+		if (!book || !onSectionsReady || sectionsEmitted) return;
+		const spine = book.spine?.items ?? book.spine ?? [];
+		const sections: Section[] = [];
+		let index = 0;
+		let fired = false;
+		const next = () => {
+			const item = spine[index++];
+			if (!item) {
+				if (!fired && sections.length) {
+					fired = true;
+					sectionsEmitted = true;
+					onSectionsReady(sections);
+				}
+				return;
+			}
+			item
+				.load(book.load.bind(book))
+				.then((doc: any) => {
+					const text = (doc?.body?.innerText ?? '').trim().slice(0, 80_000);
+					if (text) {
+						const href = item.href ?? `chapter-${index}`;
+						sections.push({ key: `epub:${href}`, label: href, content: text });
+					}
+					next();
+				})
+				.catch(() => next());
+		};
+		next();
+	}
 
 	onMount(() => {
 		if (container && epubBytes) {
@@ -19,7 +77,11 @@
 				height: '100%',
 				spread: 'none'
 			});
-			rendition.display();
+			rendition.on('relocated', reportLocation);
+			rendition.display().then(() => {
+				reportLocation({ start: { href: 'current' } });
+				extractAllChapters();
+			});
 		}
 	});
 

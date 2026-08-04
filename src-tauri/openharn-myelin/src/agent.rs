@@ -55,10 +55,16 @@ pub struct Options {
     /// (OPENHARN_PROMPT_TOOLS) — for servers without native function calling.
     #[serde(default)]
     pub prompt_tools: bool,
-    /// Prime a closed `<think>` turn so the model emits no reasoning
-    /// (OPENHARN_NO_THINK). Can't combine with strict's grammar.
+    /// Strip reasoning output (and, when enabled below, prime a closed think
+    /// turn) so the model returns only its answer. Can't combine with strict.
     #[serde(default)]
     pub no_think: bool,
+    /// Whether `no_think` should also inject the legacy closed-think assistant
+    /// prefill. Managed llama-server instances already support reasoning-off
+    /// mode, so their host disables this to keep the serialized prompt stable;
+    /// default true preserves the standalone sidecar's prior behavior.
+    #[serde(default = "default_true")]
+    pub no_think_prefill: bool,
     /// Per-turn circuit-breaker limit on tool calls (OPENHARN_MAX_CALLS).
     #[serde(default = "default_max_calls")]
     pub max_calls: usize,
@@ -143,6 +149,9 @@ pub struct Options {
 fn default_max_calls() -> usize {
     1
 }
+fn default_true() -> bool {
+    true
+}
 fn default_total_max() -> usize {
     5
 }
@@ -226,6 +235,7 @@ impl Default for Options {
             strict: false,
             prompt_tools: false,
             no_think: false,
+            no_think_prefill: true,
             max_calls: default_max_calls(),
             total_max: default_total_max(),
             tool_timeout_secs: default_tool_timeout(),
@@ -675,7 +685,7 @@ pub async fn run_loop(
             body["tools"] = effective_schemas.clone();
             body["tool_choice"] = json!("none");
         }
-        if no_think {
+        if no_think && opts.no_think_prefill {
             if let Some(arr) = body["messages"].as_array_mut() {
                 arr.push(json!({ "role": "assistant", "content": "<think></think>" }));
             }
@@ -769,7 +779,7 @@ pub async fn run_loop(
             history.clone()
         };
         normalize_lfm_tool_arguments(&mut wire, &model);
-        if no_think {
+        if no_think && opts.no_think_prefill {
             wire.push(json!({ "role": "assistant", "content": "<think></think>" }));
         }
         let mut body = json!({

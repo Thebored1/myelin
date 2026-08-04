@@ -1,19 +1,12 @@
 //! Embeddings & RAG foundation: the client that turns text into vectors via a
-//! local nomic-embed `llama-server` (embedding mode), plus the chunker that
+//! local GTE-small `llama-server` (embedding mode), plus the chunker that
 //! splits large documents into overlapping windows so a whole book is never put
 //! in the model's context — only the few retrieved chunks are.
 //!
-//! nomic-embed-text v1.5 is asymmetric: documents must be prefixed
-//! `search_document:` and queries `search_query:`, or retrieval quality drops.
+//! GTE-small uses the same plain-text input for documents and queries.
 
 use reqwest::Client;
 use serde_json::json;
-
-/// nomic-embed-text v1.5 output width (full Matryoshka, max quality).
-pub const EMBED_DIM: usize = 768;
-
-const TASK_QUERY: &str = "search_query: ";
-const TASK_DOCUMENT: &str = "search_document: ";
 
 /// One chunk of a document, ready to embed and store.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,9 +19,9 @@ pub struct Chunk {
 }
 
 /// Split text into overlapping word-windows of ~`target_words` with
-/// `overlap_words` carried between them. Approximate by design — the embedder
-/// tokenizes precisely; ~320 words ≈ ~430 tokens, far under nomic's 8192 limit.
-/// Overlap preserves context that would otherwise be cut mid-thought.
+/// `overlap_words` carried between them. GTE-small accepts 512 tokens, so the
+/// caller uses a conservative 192-word window rather than relying on raw word
+/// counts to fit every tokenizer edge case.
 pub fn chunk_text(text: &str, target_words: usize, overlap_words: usize) -> Vec<Chunk> {
     let target = target_words.max(20);
     let overlap = overlap_words.min(target / 2);
@@ -59,25 +52,25 @@ pub fn chunk_text(text: &str, target_words: usize, overlap_words: usize) -> Vec<
 }
 
 /// Embed a batch of texts via the embedding server's OpenAI-compatible endpoint.
-/// `is_query` selects the nomic task prefix (query vs document).
+/// `is_query` is retained for API compatibility; GTE-small uses plain text for
+/// both query and document inputs.
 pub async fn embed(
     client: &Client,
     base_url: &str,
     model: &str,
     texts: &[String],
-    is_query: bool,
+    _is_query: bool,
 ) -> Result<Vec<Vec<f32>>, String> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let prefix = if is_query { TASK_QUERY } else { TASK_DOCUMENT };
     // llama-server's physical batch is per request, not per input. Sending an
     // entire PDF's chunks together can overflow it even though every individual
     // chunk fits the model context. Keep requests bounded and preserve order.
     let endpoint = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
     let mut output = Vec::with_capacity(texts.len());
     for (index, text) in texts.iter().enumerate() {
-        let body = json!({ "model": model, "input": [format!("{prefix}{text}")] });
+        let body = json!({ "model": model, "input": [text] });
         let resp = client
             .post(&endpoint)
             .json(&body)

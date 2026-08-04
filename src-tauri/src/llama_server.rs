@@ -1951,7 +1951,8 @@ impl Drop for ManagedEmbedServer {
     }
 }
 
-/// Spawn the embedding server (nomic-embed etc.) and wait until it's healthy.
+/// Spawn the configured embedding server (currently GTE-small) and wait until
+/// it's healthy.
 pub async fn start_embed_server(
     client: &Client,
     executable: &Path,
@@ -1971,11 +1972,11 @@ pub async fn start_embed_server(
         .arg("--pooling")
         .arg("mean")
         .arg("--ctx-size")
-        .arg("2048")
+        .arg("512")
         .arg("--batch-size")
-        .arg("2048")
+        .arg("1024")
         .arg("--ubatch-size")
-        .arg("2048")
+        .arg("1024")
         .arg("--parallel")
         .arg("1")
         .arg("--no-warmup")

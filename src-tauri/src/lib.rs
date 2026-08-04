@@ -383,9 +383,10 @@ async fn warm_llama_server(
     state: State<'_, AppState>,
     note_id: Option<String>,
     interaction_mode: Option<String>,
+    active_section: Option<crate::models::ActiveSection>,
 ) -> Result<(), String> {
     state
-        .warm_llama_server_for_note(note_id, interaction_mode)
+        .warm_llama_server_for_note(note_id, interaction_mode, active_section)
         .await
         .map_err(|error| error.to_string())
 }
@@ -395,6 +396,22 @@ async fn warm_llama_server(
 async fn stop_llama_server(state: State<'_, AppState>) -> Result<(), String> {
     state.stop_llama_server().await;
     Ok(())
+}
+
+/// Eagerly evaluate and persist one slot snapshot per document section (in the
+/// background, with progress events) so asks restore the active section's KV
+/// instead of evaluating it inline.
+#[tauri::command]
+async fn cache_note_sections(
+    state: State<'_, AppState>,
+    note_id: String,
+    sections: Vec<crate::models::ActiveSection>,
+    interaction_mode: Option<String>,
+) -> Result<(), String> {
+    state
+        .cache_note_sections(note_id, sections, interaction_mode)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Current SearXNG base URL for web search (empty = DuckDuckGo fallback).
@@ -509,6 +526,7 @@ async fn ask_ai_stream(
     selection: Option<crate::agent::SelectionArg>,
     doc_type: Option<String>,
     interaction_mode: Option<String>,
+    active_section: Option<crate::models::ActiveSection>,
 ) -> Result<(), String> {
     state
         .ask_ai_stream(
@@ -518,6 +536,7 @@ async fn ask_ai_stream(
             selection,
             doc_type,
             interaction_mode,
+            active_section,
         )
         .await
         .map_err(|error| error.to_string())
@@ -819,6 +838,7 @@ pub fn run() {
             get_snapshot,
             warm_llama_server,
             stop_llama_server,
+            cache_note_sections,
             get_searxng_url,
             set_searxng_url,
             get_embed_model_path,

@@ -1398,6 +1398,18 @@ pub fn tool_intent(message: &str, edit_thread: bool) -> bool {
         || wants_find(message)
 }
 
+/// Tools available in Chat mode are read-only. Mutation wording such as
+/// "rewrite the introduction" asks for a prose draft in Chat; it must not force
+/// a tool call when no write tool is present. Actual mutations are routed by
+/// Operation/Edit mode instead.
+pub fn chat_tool_intent(message: &str) -> bool {
+    wants_other_notes(message)
+        || wants_search(message)
+        || wants_documents(message)
+        || wants_fetch(message)
+        || wants_find(message)
+}
+
 /// Per-message tool gating: hand the model ONLY the tools its message warrants,
 /// so the model can't misfire on one it was never given. write_note is
 /// the primary action (the open note is the workspace); search_notes/read_note

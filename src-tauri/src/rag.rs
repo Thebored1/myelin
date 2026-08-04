@@ -20,8 +20,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 const RAG_TABLE: &str = "doc_chunks";
-/// nomic-embed-text v1.5 dimension.
-const DIM: i32 = 768;
+/// thenlper/gte-small dimension.
+const DIM: i32 = 384;
 
 /// A chunk to store: which document, where in it, the text, and its embedding.
 pub struct DocChunk {
@@ -339,6 +339,54 @@ async fn fts_hits(
     Ok(out)
 }
 
+fn latest_question(query_text: &str) -> &str {
+    let question = query_text
+        .strip_prefix("Latest question:")
+        .unwrap_or(query_text);
+    question
+        .find("\nPrevious ")
+        .map(|end| &question[..end])
+        .unwrap_or(question)
+        .trim()
+}
+
+fn lexical_boost(query_text: &str, chunk_text: &str) -> f32 {
+    const STOP: &[&str] = &[
+        "about", "all", "an", "and", "are", "as", "at", "be", "does", "each", "every",
+        "find", "for", "from", "hold", "in", "is", "it", "list", "me", "mention", "of",
+        "on", "or", "paper", "pdf", "read", "show", "tell", "that", "the", "this", "to",
+        "what", "which", "with", "works",
+    ];
+    let question = latest_question(query_text);
+    let mut terms = Vec::new();
+    let mut entities = Vec::new();
+    for raw in question.split(|c: char| !c.is_alphanumeric()) {
+        let normalized = raw.to_ascii_lowercase();
+        if raw.len() < 4 || STOP.contains(&normalized.as_str()) {
+            continue;
+        }
+        if raw.chars().next().is_some_and(|c| c.is_uppercase()) {
+            entities.push(normalized.clone());
+        }
+        terms.push(normalized);
+    }
+    if terms.is_empty() {
+        return 0.0;
+    }
+
+    let text = chunk_text.to_ascii_lowercase();
+    let mut score: f32 = 0.0;
+    if entities.len() >= 2 && text.contains(&entities.join(" ")) {
+        score += 0.18;
+    }
+    for term in terms {
+        if text.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| word == term) {
+            score += if entities.contains(&term) { 0.06 } else { 0.015 };
+        }
+    }
+    score.min(0.5)
+}
+
 /// Vector-only search (kept for tests / when there is no query text).
 pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<Vec<RetrievedChunk>> {
     let conn = open(index_dir).await?;
@@ -401,6 +449,13 @@ pub async fn search_hybrid(
             let bump = 1.0 / (RRF_K + rank as f32 + 1.0);
             scored.entry(key).or_insert((0.0, chunk)).0 += bump;
         }
+    }
+    // RRF combines semantic and lexical rank, then this deterministic pass
+    // gives the user's current question a final say. In particular, exact
+    // named entities from the latest question must beat stale terms carried
+    // over from a previous conversational answer.
+    for (_, (score, chunk)) in scored.iter_mut() {
+        *score += lexical_boost(query_text, &chunk.text);
     }
     let mut merged: Vec<(f32, RetrievedChunk)> = scored.into_values().collect();
     merged.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -477,6 +532,18 @@ mod tests {
         assert_eq!(out.matches("[source | document d]").count(), 2);
         assert!(out.contains("same"));
         assert!(out.contains("second"));
+    }
+
+    #[test]
+    fn lexical_rerank_uses_latest_question_not_previous_context() {
+        let query = "Latest question: does it hold the works of William Shakespeare\nPrevious assistant context (may be incorrect): prayer blessing curses";
+        let shakespeare = "SONNET XVIII by William Shakespeare Shall I compare thee to a summer's day?";
+        let prayer = "The prayer asks for a blessing and warns about curses.";
+
+        assert!(latest_question(query).contains("William Shakespeare"));
+        assert!(!latest_question(query).contains("prayer"));
+        assert!(lexical_boost(query, shakespeare) > lexical_boost(query, prayer));
+        assert!(lexical_boost(query, shakespeare) >= 0.18);
     }
 
     #[tokio::test]

@@ -319,6 +319,10 @@ pub async fn run_chat(
         // `<think>` blocks. Operation mode may retain the user's configured
         // reasoning setting because it can help tool selection/edit quality.
         "no_think": oh.no_think || chat_mode,
+        // The managed llama-server already has a model-level --reasoning
+        // on/off switch. Keep stripping any leaked think markup from chat, but
+        // inject the legacy fake assistant prefill only when reasoning is on.
+        "no_think_prefill": config.thinking && (oh.no_think || chat_mode),
         "narrow": false,
         "slm": false,
         "chat_mode": chat_mode,
@@ -376,15 +380,23 @@ pub async fn run_chat(
         "direct answer"
     };
     let submitted_messages = messages.clone();
+    // Direct document/chat answers should be allowed to use the model's full
+    // remaining context. The old 768-token ceiling cut long answers off in the
+    // middle of a sentence (for example, while reciting a retrieved poem). The
+    // llama server still stops at the actual context boundary; this value is
+    // only the upper bound sent for prediction. Keep tool turns bounded because
+    // their output is structured arguments/results rather than prose.
+    let max_output_tokens = if chat_mode && intent_is_tool != Some(true) {
+        config.context_size.max(4096)
+    } else {
+        4096
+    };
     let body = json!({
         "request_id": request_id,
         "base_url": llama_base,
         "model": config.model_name(),
         "temperature": config.temperature,
-        // Direct chat answers are intentionally bounded, but tool-intent chat
-        // and operation turns keep the full budget so tool arguments/results
-        // are never cut off mid-call.
-        "max_tokens": if chat_mode && intent_is_tool != Some(true) { 768 } else { 4096 },
+        "max_tokens": max_output_tokens,
         "max_turns": config.max_turns.max(1) as usize,
         "messages": messages,
         "tools": tools,
@@ -432,7 +444,7 @@ pub async fn run_chat(
     emit_debug(
         "config",
         &format!(
-            "options: mode={}, strict={}, prompt_tools={}, call_only={}, intent_is_tool={}, max_calls={}",
+            "options: mode={}, strict={}, prompt_tools={}, call_only={}, intent_is_tool={}, max_calls={}, max_output_tokens={}",
             tool_mode,
             options["strict"],
             options["prompt_tools"],
@@ -442,7 +454,8 @@ pub async fn run_chat(
                 .map_or("null".to_string(), |v| v.to_string()),
             options
                 .get("max_calls")
-                .map_or(1, |v| v.as_u64().unwrap_or(1))
+                .map_or(1, |v| v.as_u64().unwrap_or(1)),
+            max_output_tokens,
         ),
     );
 
@@ -615,6 +628,40 @@ pub async fn run_chat(
                                     has_new_messages = true;
                                 }
                                 last_tool = v["last_tool"].as_str().map(|s| s.to_string());
+                                // A tool loop can complete with the final
+                                // assistant message present in `done` but no
+                                // corresponding streamed chat_chunk (for
+                                // example when the upstream server batches the
+                                // final SSE content). Do not leave the frontend
+                                // with an empty assistant bubble: recover the
+                                // last ordinary assistant message once, while
+                                // still preferring normal streaming whenever it
+                                // happened.
+                                if !suppress_chat_output && !emitted_text {
+                                    let recovered = new_messages
+                                        .iter()
+                                        .rev()
+                                        .chain(final_messages.iter().rev())
+                                        .find_map(|message| {
+                                            (message["role"].as_str() == Some("assistant")
+                                                && message["tool_calls"].is_null())
+                                                .then(|| message["content"].as_str())
+                                                .flatten()
+                                                .map(str::trim)
+                                                .filter(|content| !content.is_empty())
+                                                .map(str::to_string)
+                                        });
+                                    if let Some(content) = recovered {
+                                        emit_debug(
+                                            "gen",
+                                            "recovered final assistant text from completed turn",
+                                        );
+                                        let _ = handle.emit(
+                                            "ai://chat_chunk",
+                                            json!({ "requestId": request_id, "delta": content }),
+                                        );
+                                    }
+                                }
                                 if let Some(ref lt) = last_tool {
                                     emit_debug("done", &format!("turn complete (last tool: {lt})"));
                                 } else {

@@ -16,6 +16,8 @@
 		onAnnotationsChange,
 		onImageExtract,
 		onTextExtracted,
+		onActiveSection,
+		onSectionsReady,
 		onAttachNote,
 		onClosePdf,
 		showAttachButton = true
@@ -30,6 +32,10 @@
 		onAnnotationsChange?: (annots: PdfAnnotation[]) => void;
 		onImageExtract?: (base64: string) => void;
 		onTextExtracted?: (text: string) => void;
+		onActiveSection?: (section: { key: string; label: string; content: string }) => void;
+		onSectionsReady?: (
+			sections: { key: string; label: string; content: string }[]
+		) => void;
 		onAttachNote?: () => void;
 		onClosePdf?: () => void;
 		showAttachButton?: boolean;
@@ -47,7 +53,7 @@
 	type ScrollMode = 'vertical' | 'horizontal' | 'wrapped' | 'page';
 	type SpreadMode = 'none' | 'odd' | 'even';
 
-	let scrollMode = $state<ScrollMode>('vertical');
+	let scrollMode = $state<ScrollMode>('page');
 	let spreadMode = $state<SpreadMode>('none');
 	let showDisplayMenu = $state(false);
 
@@ -69,6 +75,9 @@
 	let pdfCompact = $state(false);
 	let showMoreMenu = $state(false);
 	let loadGeneration = 0;
+	let activePage = $state(0);
+	let sectionReportGeneration = 0;
+	let handleViewerScroll: (() => void) | null = null;
 
 	async function extractDocumentText(doc: any, generation: number) {
 		const pages: string[] = [];
@@ -82,7 +91,76 @@
 				.join(' ');
 			pages.push(`[Page ${pageNumber}]\n${text}`);
 		}
-		if (generation === loadGeneration) onTextExtracted?.(pages.join('\n\n').trim());
+		if (generation === loadGeneration) {
+			onTextExtracted?.(pages.join('\n\n').trim());
+			// Eager section cache: every page becomes a cacheable section so the
+			// model never re-evaluates a page the user jumps to. Active page
+			// first (the reader is on it), then the rest in document order.
+			const active = activePage || 1;
+			const ordered = [
+				active,
+				...Array.from({ length: pages.length }, (_, i) => i + 1).filter(
+					(page) => page !== active
+				)
+			];
+			onSectionsReady?.(
+				ordered.map((pageNumber) => ({
+					key: `page:${pageNumber}`,
+					label: `Page ${pageNumber}`,
+					content: pages[pageNumber - 1]
+				}))
+			);
+		}
+	}
+
+	async function reportPageSection(pageNumber: number) {
+		if (!pdfDoc || !onActiveSection || pageNumber < 1 || pageNumber > numPages) return;
+		const generation = ++sectionReportGeneration;
+		try {
+			const page = await pdfDoc.getPage(pageNumber);
+			const content = await page.getTextContent();
+			const text = content.items
+				.map((item: any) => (typeof item?.str === 'string' ? item.str : ''))
+				.filter(Boolean)
+				.join(' ')
+				.trim();
+			if (generation === sectionReportGeneration && text) {
+				onActiveSection({
+					key: `page:${pageNumber}`,
+					label: `Page ${pageNumber}`,
+					content: `[Page ${pageNumber}]\n${text}`
+				});
+			}
+		} catch (error) {
+			console.debug('Could not read active PDF page:', error);
+		}
+	}
+
+	function changePage(delta: number) {
+		if (!numPages) return;
+		const nextPage = Math.min(numPages, Math.max(1, (activePage || 1) + delta));
+		if (nextPage === activePage) return;
+		activePage = nextPage;
+		void reportPageSection(nextPage);
+	}
+
+	function reportActiveSection() {
+		if (!pdfViewerDiv || !pdfDoc || !onActiveSection) return;
+		const root = pdfViewerDiv.getBoundingClientRect();
+		let bestPage = 0;
+		let bestVisible = 0;
+		for (const element of Array.from(pdfViewerDiv.querySelectorAll<HTMLElement>('.pdf-page-container'))) {
+			const page = Number(element.dataset.pageNumber);
+			const rect = element.getBoundingClientRect();
+			const visible = Math.max(0, Math.min(rect.bottom, root.bottom) - Math.max(rect.top, root.top));
+			if (visible > bestVisible) {
+				bestVisible = visible;
+				bestPage = page;
+			}
+		}
+		if (!bestPage || bestPage === activePage) return;
+		activePage = bestPage;
+		void reportPageSection(bestPage);
 	}
 
 	async function loadPdf() {
@@ -97,12 +175,16 @@
 
 			pdfDoc = doc;
 			numPages = doc.numPages;
+			activePage = 1;
 			void extractDocumentText(doc, generation);
 
 			// Fit to the pane width as soon as the PDF renders, so it isn't cropped
 			// on narrow/split windows. Wait for the viewer div to mount + lay out.
 			await tick();
-			requestAnimationFrame(() => fitToScreen());
+			requestAnimationFrame(() => {
+				fitToScreen();
+				void reportPageSection(activePage || 1);
+			});
 		} catch (error: any) {
 			console.error('Error loading PDF:', error);
 			errorMessage = error?.message || String(error);
@@ -367,6 +449,8 @@
 	});
 
 	onMount(() => {
+		handleViewerScroll = () => requestAnimationFrame(() => void reportActiveSection());
+		pdfViewerDiv?.addEventListener('scroll', handleViewerScroll, { passive: true });
 		document.addEventListener('selectionchange', handleSelection);
 		handleDocumentClick = (e: MouseEvent) => {
 			const target = e.target as HTMLElement;
@@ -381,6 +465,7 @@
 	});
 
 	onDestroy(() => {
+		if (handleViewerScroll) pdfViewerDiv?.removeEventListener('scroll', handleViewerScroll);
 		document.removeEventListener('selectionchange', handleSelection);
 		if (handleDocumentClick) {
 			document.removeEventListener('click', handleDocumentClick);
@@ -459,7 +544,35 @@
 
 			<div style="flex-grow: 1;"></div>
 
-			<span style="white-space: nowrap;">{numPages} Pages</span>
+			{#if scrollMode !== 'page'}
+				<span style="white-space: nowrap;">{numPages} Pages</span>
+			{/if}
+
+			{#if scrollMode === 'page'}
+				<button
+					class="page-nav-btn"
+					onclick={() => changePage(-1)}
+					disabled={activePage <= 1}
+					title="Previous page"
+					aria-label="Previous page"
+				>
+					<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+						><path d="m15 18-6-6 6-6" /></svg
+					>
+				</button>
+				<span class="page-counter">Page {activePage || 1} / {numPages}</span>
+				<button
+					class="page-nav-btn"
+					onclick={() => changePage(1)}
+					disabled={activePage >= numPages}
+					title="Next page"
+					aria-label="Next page"
+				>
+					<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+						><path d="m9 18 6-6-6-6" /></svg
+					>
+				</button>
+			{/if}
 
 			<div class="display-menu-container">
 				<button
@@ -508,7 +621,7 @@
 									><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M7 8h10M7 16h10"
 									></path></svg
 								>
-								Page Scrolling
+								Single Page
 							</button>
 							<button
 								class:active={scrollMode === 'vertical'}
@@ -847,7 +960,7 @@
 									><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M7 8h10M7 16h10"
 									></path></svg
 								>
-								Page Scrolling
+								Single Page
 							</button>
 							<button
 								class:active={scrollMode === 'vertical'}
@@ -957,26 +1070,48 @@
 
 		{#if pdfDoc && defaultViewport}
 			<div class="pdf-pages-container layout-{scrollMode} spread-{spreadMode}">
-				{#each Array(numPages) as _, i}
-					{@const pageNum = i + 1}
-					<PdfPage
-						{pdfDoc}
-						{pageNum}
-						{scale}
-						{annotations}
-						{toolMode}
-						{isDrawing}
-						currentPath={activeDrawingPage === pageNum ? currentPath : []}
-						currentRect={activeDrawingPage === pageNum ? currentRect : null}
-						{onAnnotationsChange}
-						{onImageExtract}
-						onPointerDown={handlePointerDown}
-						onPointerMove={handlePointerMove}
-						onPointerUp={handlePointerUp}
-						{pdfViewerDiv}
-						{defaultViewport}
-					/>
-				{/each}
+				{#if scrollMode === 'page'}
+					{#key activePage}
+						<PdfPage
+							{pdfDoc}
+							pageNum={activePage || 1}
+							{scale}
+							{annotations}
+							{toolMode}
+							{isDrawing}
+							currentPath={activeDrawingPage === activePage ? currentPath : []}
+							currentRect={activeDrawingPage === activePage ? currentRect : null}
+							{onAnnotationsChange}
+							{onImageExtract}
+							onPointerDown={handlePointerDown}
+							onPointerMove={handlePointerMove}
+							onPointerUp={handlePointerUp}
+							{pdfViewerDiv}
+							{defaultViewport}
+						/>
+					{/key}
+				{:else}
+					{#each Array(numPages) as _, i}
+						{@const pageNum = i + 1}
+						<PdfPage
+							{pdfDoc}
+							{pageNum}
+							{scale}
+							{annotations}
+							{toolMode}
+							{isDrawing}
+							currentPath={activeDrawingPage === pageNum ? currentPath : []}
+							currentRect={activeDrawingPage === pageNum ? currentRect : null}
+							{onAnnotationsChange}
+							{onImageExtract}
+							onPointerDown={handlePointerDown}
+							onPointerMove={handlePointerMove}
+							onPointerUp={handlePointerUp}
+							{pdfViewerDiv}
+							{defaultViewport}
+						/>
+					{/each}
+				{/if}
 			</div>
 		{/if}
 
@@ -1200,6 +1335,21 @@
 		flex: 1;
 	}
 
+	.page-nav-btn {
+		padding: 0 0.2rem !important;
+		min-width: 24px !important;
+	}
+
+	.page-nav-btn:disabled {
+		opacity: 0.35;
+		cursor: default;
+	}
+
+	.page-counter {
+		white-space: nowrap;
+		font-variant-numeric: tabular-nums;
+	}
+
 	.pdf-viewer-scroll-area {
 		flex: 1;
 		overflow: auto;
@@ -1237,7 +1387,7 @@
 		max-width: 100%;
 	}
 
-	/* Page (Single Page view with snappy scroll is hard natively, so we just use Vertical + snap or just Vertical) */
+	/* Single-page mode renders only the active page; the toolbar controls navigation. */
 	.pdf-pages-container.layout-page {
 		flex-direction: column;
 		align-items: center;

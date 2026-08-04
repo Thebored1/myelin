@@ -1,3 +1,4 @@
 # Current Required Changes
 
-No outstanding tasks.
+1. **Section-scoped KV caching v4** — implemented (uncommitted): clean conversation-free section files primed at the exact chat-template user-content boundary via first-character-distinct `/apply-template` sentinels + `/completion` `n_predict: 0`; serialized slot-0 operations; verified save/restore token counts; active section is the default chat scope; Chat preparation matches the tool-free active-page profile; Operation/Auto use stable schemas; section text is canonicalized; manifests commit atomically; RAG only for explicit whole-document/other-page requests; one bounded relevant exchange selected from universal conversation history; partial preparation failures are visible.
+2. Live verification after restarting the dev app: prepared section asks should evaluate only the question/template tail. The observed live baseline before v2 was 5,458 prompt tokens with only 50 processed when restore succeeded.

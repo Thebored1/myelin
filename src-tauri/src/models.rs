@@ -72,6 +72,19 @@ pub struct ChatMessage {
     pub snapshot: Option<NoteSnapshot>,
 }
 
+/// The portion of a document currently visible in a split-pane viewer. The
+/// viewer owns the layout (PDF page, EPUB chapter, HTML viewport, etc.) and
+/// sends the already extracted text so the backend can make it the stable
+/// model-prefix context without re-parsing binary document formats.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveSection {
+    pub key: String,
+    pub content: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteSnapshot {

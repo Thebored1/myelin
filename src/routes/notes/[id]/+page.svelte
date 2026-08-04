@@ -359,6 +359,18 @@
 	let ipynbEditorInstance: { focusEditor?: () => void } | undefined = $state();
 	let activeSourceId = $state<string | null>(null);
 	let activeSourceBytes = $state<Uint8Array | null>(null);
+	type ActiveSection = { key: string; label?: string; content: string };
+	let activeSection = $state<ActiveSection | null>(null);
+	type SectionCacheState = {
+		done: number;
+		total: number;
+		label: string;
+		startedAt: number;
+		finished: boolean;
+		failed: number;
+		elapsedMs: number | null;
+	};
+	let sectionCache = $state<SectionCacheState | null>(null);
 	let scratchpadSavedId = $state<string | null>(null);
 	let showAttachedNote = $state(false);
 	let pdfIngestionStatus = $state<'idle' | 'indexing' | 'cached' | 'indexed' | 'empty' | 'failed'>(
@@ -381,6 +393,53 @@
 				attachedSourceId: activeSourceId
 			})?.workingNoteId ?? null
 		);
+	}
+
+	// The viewer extracted the whole document's sections (PDF pages / EPUB
+	// chapters / HTML buckets). Hand them to the backend so every section's KV
+	// snapshot is evaluated once, in the background, and saved to disk — by the
+	// time the user asks, the active section restores in milliseconds.
+	async function handleSectionsReady(sections: ActiveSection[]) {
+		if (!sections.length) return;
+		const aiNoteId = activeAiNoteId();
+		if (!aiNoteId) return;
+		// Optimistic start: show the bar immediately; the backend refines it with
+		// progress events and always emits a terminal event with which we can stop
+		// the elapsed-time clock.
+		sectionCache = {
+			done: 0,
+			total: sections.length,
+			label: sections[0]?.label ?? '',
+			startedAt: performance.now(),
+			finished: false,
+			failed: 0,
+			elapsedMs: null
+		};
+		try {
+			await invoke('cache_note_sections', {
+				noteId: aiNoteId,
+				sections,
+				interactionMode: aiInteractionMode
+			});
+		} catch (error) {
+			if (sectionCache && !sectionCache.finished) {
+				sectionCache = {
+					...sectionCache,
+					failed: Math.max(sectionCache.failed, sectionCache.total - sectionCache.done),
+					finished: true,
+					elapsedMs: Math.max(0, performance.now() - sectionCache.startedAt)
+				};
+			}
+			console.debug('Section pre-cache skipped:', error);
+		}
+	}
+
+	function formatSectionCacheDuration(milliseconds: number): string {
+		if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
+		const seconds = milliseconds / 1000;
+		if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+		const minutes = Math.floor(seconds / 60);
+		return `${minutes}m ${Math.round(seconds % 60)}s`;
 	}
 
 	async function openAttachedNote() {
@@ -1142,6 +1201,8 @@
 
 	function closeTexPreview() {
 		activeSourceBytes = null;
+		activeSection = null;
+		sectionCache = null;
 		showAttachedNote = false;
 	}
 
@@ -1534,6 +1595,8 @@
 		destroyEditorInstance();
 		activeSourceBytes = null;
 		activeSourceId = null;
+		activeSection = null;
+		sectionCache = null;
 		showAttachedNote = false;
 		note = null;
 
@@ -1617,6 +1680,7 @@
 				} else {
 					activeSourceId = null;
 					activeSourceBytes = null;
+					activeSection = null;
 					sourceMaterialType = null;
 					showAttachedNote = true;
 					scratchpadSavedId = null;
@@ -2353,14 +2417,15 @@
 		);
 		checkpointChatHistory(0);
 		try {
-			await invoke('ask_ai_stream', {
+				await invoke('ask_ai_stream', {
 				noteId: aiNoteId,
 				question: userText,
 				requestId,
 				// Working-doc type so the model edits as LaTeX / notebook, not Markdown.
 				docType: workingDocType,
-				selection,
-				interactionMode: aiInteractionMode
+					selection,
+					interactionMode: aiInteractionMode,
+					activeSection
 			});
 		} catch (e) {
 			console.error('AI Error:', e);
@@ -2789,6 +2854,7 @@
 			});
 			note = saved;
 			activeSourceId = attachmentPdf.id;
+			sectionCache = null;
 			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: attachmentPdf.id });
 			activeSourceBytes = new Uint8Array(bytes);
 			sourceMaterialType = 'pdf';
@@ -2834,6 +2900,8 @@
 			note = saved;
 			activeSourceId = null;
 			activeSourceBytes = null;
+			activeSection = null;
+			sectionCache = null;
 			saveStatus = 'saved';
 			destroyEditorInstance();
 			await tick();
@@ -3259,6 +3327,51 @@
 			}
 		).then((fn) => (unlistenAiWarmup = fn));
 
+		// Whole-document section pre-cache progress (shown over the document pane).
+		let unlistenSectionCache: UnlistenFn | undefined;
+		listen<{
+			noteId: string;
+			done: number;
+			total: number;
+			label: string;
+			failed?: number;
+			finished?: boolean;
+		}>(
+			'ai://section_cache_progress',
+			(event) => {
+				const { done, total, label, failed = 0, finished = false } = event.payload;
+				if (finished || done >= total) {
+					if (event.payload.noteId !== activeAiNoteId()) return;
+					if (!sectionCache) return;
+					sectionCache = {
+						...sectionCache,
+						done,
+						total: Math.max(total, 1),
+						label,
+						failed,
+						finished: true,
+						elapsedMs: Math.max(0, performance.now() - sectionCache.startedAt)
+					};
+					return;
+				}
+				if (event.payload.noteId !== activeAiNoteId()) return;
+				sectionCache = {
+					...(sectionCache ?? {
+						startedAt: performance.now(),
+						finished: false,
+						failed: 0,
+						elapsedMs: null
+					}),
+					done: Math.max(done, 0),
+					total: Math.max(total, 1),
+					label,
+					failed,
+					finished: false,
+					elapsedMs: null
+				};
+			}
+		).then((fn) => (unlistenSectionCache = fn));
+
 		// Debug event: model behavior, tool calls, grammar config, etc.
 		let unlistenDebug: UnlistenFn | undefined;
 		listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
@@ -3328,6 +3441,7 @@
 			if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
 			if (unlistenLatex) unlistenLatex();
 			if (unlistenAiWarmup) unlistenAiWarmup();
+			if (unlistenSectionCache) unlistenSectionCache();
 		};
 	});
 
@@ -3492,6 +3606,34 @@
 				class:tex-pane={workingDocType === 'tex'}
 				style="position: relative; width: {!showAttachedNote ? '100%' : `${splitRatio}%`}"
 			>
+				{#if sectionCache}
+					<div
+						class="section-cache-overlay"
+						class:section-cache-complete={sectionCache.finished}
+						class:section-cache-failed={sectionCache.finished && sectionCache.failed > 0}
+						role="status"
+						aria-live="polite"
+					>
+						<div class="section-cache-bar">
+							<div
+								class="section-cache-fill"
+								style="width: {(sectionCache.done / sectionCache.total) * 100}%"
+							></div>
+						</div>
+						<span class="section-cache-label">
+							{#if sectionCache.finished && sectionCache.failed > 0}
+								Prepared {sectionCache.done}/{sectionCache.total}; {sectionCache.failed} failed.
+								Took {formatSectionCacheDuration(sectionCache.elapsedMs ?? 0)}. Reopen to retry.
+							{:else if sectionCache.finished}
+								Prepared {sectionCache.done}/{sectionCache.total} section caches in
+								{formatSectionCacheDuration(sectionCache.elapsedMs ?? 0)}
+							{:else}
+								Preparing {sectionCache.done}/{sectionCache.total} section
+								caches{sectionCache.label ? ` — ${sectionCache.label}` : ''}…
+							{/if}
+						</span>
+					</div>
+				{/if}
 				{#if workingDocType === 'tex'}
 					<div class="tex-pane-badge">PDF preview</div>
 				{/if}
@@ -3503,6 +3645,8 @@
 						onAnnotationsChange={handleAnnotationsChange}
 						onImageExtract={handleImageExtract}
 						onTextExtracted={handlePdfTextExtracted}
+						onActiveSection={(section: ActiveSection) => (activeSection = section)}
+						onSectionsReady={handleSectionsReady}
 						onClosePdf={workingDocType === 'tex'
 							? closeTexPreview
 							: activeSourceBytes !== null && showAttachedNote
@@ -3514,7 +3658,11 @@
 				{:else if sourceMaterialType === 'pdf'}
 					<div class="viewer-loading">Loading PDF viewer…</div>
 				{:else if sourceMaterialType === 'epub' && EpubViewerComponent}
-					<EpubViewerComponent epubBytes={activeSourceBytes} />
+					<EpubViewerComponent
+						epubBytes={activeSourceBytes}
+						onActiveSection={(section: ActiveSection) => (activeSection = section)}
+						onSectionsReady={handleSectionsReady}
+					/>
 					{#if !showAttachedNote}
 						<button
 							style="position: absolute; top: 10px; right: 10px;"
@@ -3528,7 +3676,11 @@
 				{:else if sourceMaterialType === 'epub'}
 					<div class="viewer-loading">Loading EPUB viewer…</div>
 				{:else if sourceMaterialType === 'html' && HtmlViewerComponent}
-					<HtmlViewerComponent htmlBytes={activeSourceBytes} />
+						<HtmlViewerComponent
+							htmlBytes={activeSourceBytes}
+							onActiveSection={(section: ActiveSection) => (activeSection = section)}
+							onSectionsReady={handleSectionsReady}
+						/>
 					{#if !showAttachedNote}
 						<button
 							style="position: absolute; top: 10px; right: 10px;"
@@ -4849,6 +5001,56 @@
 
 	.pdf-pane {
 		min-width: 26rem;
+	}
+
+	.section-cache-overlay {
+		position: absolute;
+		/* Keep it below the PDF toolbar, which occupies the first 48px of the pane. */
+		top: 3.5rem;
+		left: 50%;
+		transform: translateX(-50%);
+		z-index: 9;
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		width: min(26rem, calc(100% - 3rem));
+		padding: 0.45rem 0.7rem;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: var(--bg-panel);
+		box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.15));
+		pointer-events: none;
+	}
+
+	.section-cache-bar {
+		flex: 0 0 6.5rem;
+		height: 0.4rem;
+		border-radius: 0.2rem;
+		background: var(--border-default);
+		overflow: hidden;
+	}
+
+	.section-cache-fill {
+		height: 100%;
+		background: var(--accent, #4f7cff);
+		transition: width 0.25s ease;
+	}
+
+	.section-cache-complete .section-cache-fill {
+		background: var(--success, #42a66b);
+	}
+
+	.section-cache-failed .section-cache-fill {
+		background: var(--danger, #d45b5b);
+	}
+
+	.section-cache-label {
+		flex: 1;
+		color: var(--text-secondary);
+		font-size: 0.72rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.pdf-index-status {
