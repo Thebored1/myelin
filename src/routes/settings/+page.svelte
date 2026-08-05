@@ -320,6 +320,99 @@
 	let ohBaseUrl = $state('');
 	let ohSaving = $state(false);
 
+	type AiConfigStatus = {
+		configPath: string;
+		schemaPath: string;
+		candidateHash: string | null;
+		appliedHash: string | null;
+		hasUnappliedChanges: boolean;
+		validationState: string;
+		activeProfile: string | null;
+		runtimeId: string | null;
+		modelPath: string | null;
+		aiAvailable: boolean;
+		errors: { path: string; category: string; message: string }[];
+	};
+	let aiConfig = $state<AiConfigStatus | null>(null);
+	let aiConfigBusy = $state(false);
+	let aiConfigMessage = $state('');
+	let showAiConfig = $state(false);
+	let aiConfigText = $state('');
+	let aiConfigSearch = $state('');
+	let aiConfigSearchInput: HTMLInputElement;
+	let aiConfigEditor: HTMLTextAreaElement;
+	let aiConfigSearchIndex = $state(-1);
+	function configMatchPositions() {
+		const query = aiConfigSearch.trim().toLowerCase();
+		if (!query) return [] as number[];
+		const source = aiConfigText.toLowerCase();
+		const positions: number[] = [];
+		let offset = 0;
+		while (offset < source.length) {
+			const found = source.indexOf(query, offset);
+			if (found < 0) break;
+			positions.push(found);
+			offset = found + Math.max(query.length, 1);
+		}
+		return positions;
+	}
+	function gotoConfigMatch(direction = 1) {
+		const positions = configMatchPositions();
+		if (!positions.length) return;
+		aiConfigSearchIndex = (aiConfigSearchIndex + direction + positions.length) % positions.length;
+		const start = positions[aiConfigSearchIndex];
+		const end = start + aiConfigSearch.trim().length;
+		aiConfigEditor?.focus();
+		aiConfigEditor?.setSelectionRange(start, end);
+		if (aiConfigEditor) {
+			const lineHeight = parseFloat(getComputedStyle(aiConfigEditor).lineHeight) || 20;
+			const line = aiConfigText.slice(0, start).split('\n').length - 1;
+			aiConfigEditor.scrollTop = Math.max(0, line * lineHeight - aiConfigEditor.clientHeight / 2);
+		}
+	}
+	function handleConfigSearchKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter') { event.preventDefault(); gotoConfigMatch(event.shiftKey ? -1 : 1); }
+	}
+	function handleAiConfigKeydown(event: KeyboardEvent) {
+		if (!showAiConfig || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return;
+		event.preventDefault();
+		event.stopPropagation();
+		aiConfigSearchInput?.focus();
+		aiConfigSearchInput?.select();
+	}
+	function configMatchCount() {
+		return configMatchPositions().length;
+	}
+	async function refreshAiConfig() {
+		aiConfig = await invoke<AiConfigStatus>('get_ai_config_status');
+	}
+	async function validateAiConfig() {
+		aiConfigBusy = true; aiConfigMessage = '';
+		try { aiConfig = await invoke<AiConfigStatus>('validate_ai_config'); aiConfigMessage = 'Configuration validated.'; }
+		catch (e) { aiConfigMessage = String(e); await refreshAiConfig(); }
+		finally { aiConfigBusy = false; }
+	}
+	async function applyAiConfig() {
+		if (!aiConfig?.candidateHash) return;
+		aiConfigBusy = true; aiConfigMessage = '';
+		try { aiConfig = await invoke<AiConfigStatus>('apply_ai_config', { candidateHash: aiConfig.candidateHash }); aiConfigMessage = 'Configuration applied.'; }
+		catch (e) { aiConfigMessage = String(e); }
+		finally { aiConfigBusy = false; }
+	}
+	async function copyAiConfigPath() {
+		if (aiConfig?.configPath) await navigator.clipboard?.writeText(aiConfig.configPath);
+	}
+	async function openAiConfig() {
+		try { await invoke('open_ai_config_file'); aiConfigText = await invoke<string>('read_ai_config'); showAiConfig = true; }
+		catch (e) { aiConfigMessage = String(e); }
+	}
+	async function saveAiConfigText() {
+		aiConfigBusy = true;
+		try { await invoke('save_ai_config', { contents: aiConfigText }); await refreshAiConfig(); showAiConfig = false; aiConfigMessage = 'Configuration saved. Validate it before applying.'; }
+		catch (e) { aiConfigMessage = String(e); }
+		finally { aiConfigBusy = false; }
+	}
+
 	// Web search + embeddings/RAG + model compatibility (Phase 5).
 	let searxngUrl = $state('');
 	let embedModelPath = $state('');
@@ -386,6 +479,7 @@
 
 	onMount(async () => {
 		try {
+			await refreshAiConfig();
 			await refreshSnapshot();
 			const status = await loadProviderStatus();
 			downloadableBackends = await invoke<string[]>('downloadable_backends');
@@ -793,6 +887,32 @@
 			</div>
 		</section>
 
+		<section class="settings-section">
+			<h2>AI Configuration File</h2>
+			<p class="description">
+				Technical AI settings are managed in a versioned JSON file so custom llama-server runtimes
+				and model profiles can be changed without adding fragile UI controls.
+			</p>
+			<div class="info-grid">
+				<div class="info-card"><span class="info-label">Status</span><span class="info-value">{aiConfig?.validationState ?? '—'}</span></div>
+				<div class="info-card"><span class="info-label">Profile</span><span class="info-value">{aiConfig?.activeProfile ?? '—'}</span></div>
+				<div class="info-card"><span class="info-label">Runtime</span><span class="info-value">{aiConfig?.runtimeId ?? '—'}</span></div>
+			</div>
+			<p class="compute-hint">{aiConfig?.configPath ?? 'AI config path unavailable'}{aiConfig?.hasUnappliedChanges ? ' · unapplied changes' : ''}</p>
+			{#if aiConfig?.errors?.length}
+				<div class="error-box">{#each aiConfig.errors as error}<div><code>{error.path}</code>: {error.message}</div>{/each}</div>
+			{/if}
+			{#if aiConfigMessage}<p class="compute-hint">{aiConfigMessage}</p>{/if}
+			<div class="ws-actions">
+				<button class="browse-btn" onclick={openAiConfig} disabled={!aiConfig}>Open config</button>
+				<button class="browse-btn" onclick={copyAiConfigPath} disabled={!aiConfig}>Copy path</button>
+				<button class="browse-btn" onclick={validateAiConfig} disabled={aiConfigBusy}>Validate</button>
+				<button class="browse-btn" onclick={applyAiConfig} disabled={aiConfigBusy || !aiConfig?.candidateHash || aiConfig.validationState !== 'valid'}>Apply</button>
+			</div>
+		</section>
+
+		<div style="display: none">
+		{#if true}
 		<section class="settings-section">
 			<h2>Local AI Model Configuration</h2>
 			<p class="description">
@@ -1439,6 +1559,8 @@
 			</p>
 		</section>
 
+		{/if}
+		</div>
 		<section class="settings-section">
 			<h2>Appearance</h2>
 			<div
@@ -1608,6 +1730,31 @@
 	</div>
 </div>
 
+	<svelte:window onkeydown={handleAiConfigKeydown} />
+
+{#if showAiConfig}
+	<div class="config-modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) showAiConfig = false; }}>
+		<section class="config-modal" role="dialog" aria-modal="true" aria-labelledby="ai-config-title">
+			<header class="config-modal-header">
+				<div><h2 id="ai-config-title">AI Configuration</h2><p>{aiConfig?.configPath}</p></div>
+				<button class="icon-btn" aria-label="Close configuration" onclick={() => (showAiConfig = false)}>×</button>
+			</header>
+			<div class="config-search-row">
+				<input class="config-search" bind:this={aiConfigSearchInput} bind:value={aiConfigSearch} oninput={() => (aiConfigSearchIndex = -1)} onkeydown={handleConfigSearchKeydown} placeholder="Search configuration (Ctrl+F)" aria-label="Search configuration" />
+				{#if aiConfigSearch}<span>{configMatchCount() ? `${aiConfigSearchIndex + 1} / ${configMatchCount()}` : '0 matches'}</span>{/if}
+				<button class="config-nav-btn" onclick={() => gotoConfigMatch(-1)} disabled={!configMatchCount()} aria-label="Previous match">↑</button>
+				<button class="config-nav-btn" onclick={() => gotoConfigMatch(1)} disabled={!configMatchCount()} aria-label="Next match">↓</button>
+			</div>
+			<textarea class="config-editor" bind:this={aiConfigEditor} bind:value={aiConfigText} spellcheck="false" aria-label="AI configuration JSON"></textarea>
+			<div class="config-modal-actions">
+				<button class="browse-btn" onclick={() => (showAiConfig = false)}>Cancel</button>
+				<button class="browse-btn" onclick={saveAiConfigText} disabled={aiConfigBusy}>Save</button>
+				<button class="browse-btn primary" onclick={async () => { await saveAiConfigText(); await validateAiConfig(); }}>Save &amp; Validate</button>
+			</div>
+		</section>
+	</div>
+{/if}
+
 {#if saved}
 	<div class="success-message">
 		<svg
@@ -1725,6 +1872,25 @@
 		flex-direction: column;
 		gap: var(--space-4);
 	}
+	.config-modal-backdrop {
+		position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+		background: rgba(0, 0, 0, 0.68); padding: 2rem;
+	}
+	.config-modal {
+		width: min(900px, 95vw); height: min(760px, 90vh); display: flex; flex-direction: column;
+		background: var(--background-primary, #171717); border: 1px solid var(--border-default);
+		border-radius: 8px; box-shadow: 0 24px 80px rgba(0,0,0,.5); padding: 1rem;
+	}
+	.config-modal-header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
+	.config-modal-header h2 { margin: 0; }
+	.config-modal-header p { margin: .35rem 0 1rem; color: var(--text-secondary); font-size: .8rem; word-break: break-all; }
+	.config-editor { flex: 1; width: 100%; resize: none; box-sizing: border-box; padding: 1rem; color: var(--text-primary); background: #0d0d0d; border: 1px solid var(--border-default); border-radius: 5px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+	.config-search-row { display: flex; align-items: center; gap: .6rem; margin-bottom: .6rem; color: var(--text-secondary); font-size: .8rem; }
+	.config-search { flex: 1; padding: .5rem .65rem; color: var(--text-primary); background: #0d0d0d; border: 1px solid var(--border-default); border-radius: 4px; }
+	.config-nav-btn { min-width: 2rem; padding: .35rem .55rem; color: var(--text-primary); background: var(--background-secondary, #242424); border: 1px solid var(--border-default); border-radius: 4px; cursor: pointer; }
+	.config-nav-btn:disabled { opacity: .4; cursor: default; }
+	.config-modal-actions { display: flex; justify-content: flex-end; gap: .6rem; padding-top: 1rem; }
+	.config-modal-actions .primary { background: var(--accent-100); color: #fff; }
 
 	.settings-section h2 {
 		margin: 0;

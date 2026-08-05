@@ -179,13 +179,37 @@
 	let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
 	let activeAiComposerMode: 'chat' | 'editor' | null = null;
 	let activeChatNoteId: string | null = null;
-	type AiInteractionMode = 'chat' | 'operation';
+	type AiInteractionMode = 'chat' | 'write';
 	let aiInteractionMode = $state<AiInteractionMode>('chat');
 
 	function setAiInteractionMode(mode: AiInteractionMode) {
 		aiInteractionMode = mode;
 		if (mode === 'chat') writeTargetNotice = false;
 		localStorage.setItem('myelin_ai_interaction_mode', mode);
+		if (mode === 'write' && activeSection) {
+			const aiNoteId = activeAiNoteId();
+			if (aiNoteId) {
+				void invoke('warm_llama_server', {
+					noteId: aiNoteId,
+					interactionMode: mode,
+					activeSection
+				}).catch((error) => console.debug('Write profile warm-up skipped:', error));
+			}
+		}
+	}
+
+	function handleActiveSectionChange(section: ActiveSection) {
+		const changed = activeSection?.key !== section.key;
+		activeSection = section;
+		if (!changed) return;
+		const aiNoteId = activeAiNoteId();
+		if (aiNoteId) {
+			void invoke('warm_llama_server', {
+				noteId: aiNoteId,
+				interactionMode: aiInteractionMode,
+				activeSection: section
+			}).catch((error) => console.debug('Section profile warm-up skipped:', error));
+		}
 	}
 
 	function setToolApproval(require: boolean) {
@@ -364,10 +388,14 @@
 	type SectionCacheState = {
 		done: number;
 		total: number;
+		sectionDone: number;
+		sectionTotal: number;
 		label: string;
+		profile: 'chat' | 'write' | '';
 		startedAt: number;
 		finished: boolean;
 		failed: number;
+		failedDetails: string[];
 		elapsedMs: number | null;
 	};
 	let sectionCache = $state<SectionCacheState | null>(null);
@@ -408,18 +436,23 @@
 		// the elapsed-time clock.
 		sectionCache = {
 			done: 0,
-			total: sections.length,
+			total: sections.length * 2,
+			sectionDone: 0,
+			sectionTotal: sections.length,
 			label: sections[0]?.label ?? '',
+			profile: '',
 			startedAt: performance.now(),
 			finished: false,
 			failed: 0,
+			failedDetails: [],
 			elapsedMs: null
 		};
 		try {
 			await invoke('cache_note_sections', {
 				noteId: aiNoteId,
 				sections,
-				interactionMode: aiInteractionMode
+				activeSectionKey: activeSection?.key ?? sections[0]?.key ?? null,
+				interactionMode: null
 			});
 		} catch (error) {
 			if (sectionCache && !sectionCache.finished) {
@@ -2361,7 +2394,7 @@
 
 	async function sendChatMessage() {
 		if (!note || !chatInput.trim() || isChatStreaming) return;
-		if (aiInteractionMode === 'operation' && !armedEditTarget()) {
+		if (aiInteractionMode === 'write' && !armedEditTarget()) {
 			writeTargetNotice = true;
 			return;
 		}
@@ -2374,7 +2407,7 @@
 	async function sendChatText(userText: string) {
 		if (!note) return;
 		const editorTarget = armedEditTarget();
-		if (aiInteractionMode === 'operation' && !editorTarget) {
+		if (aiInteractionMode === 'write' && !editorTarget) {
 			writeTargetNotice = true;
 			if (!chatInput.trim()) chatInput = userText;
 			await tick();
@@ -2395,7 +2428,7 @@
 			return;
 		}
 		const requestId = Date.now().toString();
-		const composerMode = aiInteractionMode === 'operation' ? 'editor' : 'chat';
+		const composerMode = aiInteractionMode === 'write' ? 'editor' : 'chat';
 		const selection =
 			composerMode === 'editor' ? editorTarget : editorTarget?.cursor ? null : editorTarget;
 		activeAiEditTarget = composerMode === 'editor' ? selection : null;
@@ -3057,7 +3090,7 @@
 		// Warm llama-server (safety net — the server is already started at app
 		// boot and stays warm for the entire session).
 		const savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
-		aiInteractionMode = savedInteractionMode === 'operation' ? 'operation' : 'chat';
+		aiInteractionMode = savedInteractionMode === 'operation' || savedInteractionMode === 'write' ? 'write' : 'chat';
 		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
@@ -3333,13 +3366,27 @@
 			noteId: string;
 			done: number;
 			total: number;
+			sectionDone?: number;
+			sectionTotal?: number;
 			label: string;
-			failed?: number;
-			finished?: boolean;
+			profile?: 'chat' | 'write' | '';
+				failed?: number;
+				failedDetails?: string[];
+				finished?: boolean;
 		}>(
 			'ai://section_cache_progress',
 			(event) => {
-				const { done, total, label, failed = 0, finished = false } = event.payload;
+				const {
+					done,
+					total,
+					sectionDone = 0,
+					sectionTotal = Math.max(1, Math.ceil(total / 2)),
+					label,
+					profile = '',
+					failed = 0,
+					failedDetails = [],
+					finished = false
+				} = event.payload;
 				if (finished || done >= total) {
 					if (event.payload.noteId !== activeAiNoteId()) return;
 					if (!sectionCache) return;
@@ -3347,8 +3394,12 @@
 						...sectionCache,
 						done,
 						total: Math.max(total, 1),
+						sectionDone,
+						sectionTotal,
 						label,
+						profile,
 						failed,
+						failedDetails,
 						finished: true,
 						elapsedMs: Math.max(0, performance.now() - sectionCache.startedAt)
 					};
@@ -3357,15 +3408,26 @@
 				if (event.payload.noteId !== activeAiNoteId()) return;
 				sectionCache = {
 					...(sectionCache ?? {
+						done: 0,
+						total: Math.max(total, 1),
+						sectionDone: 0,
+						sectionTotal,
+						label: '',
+						profile: '',
 						startedAt: performance.now(),
 						finished: false,
 						failed: 0,
+						failedDetails: [],
 						elapsedMs: null
 					}),
 					done: Math.max(done, 0),
 					total: Math.max(total, 1),
+					sectionDone,
+					sectionTotal,
 					label,
+					profile,
 					failed,
+					failedDetails,
 					finished: false,
 					elapsedMs: null
 				};
@@ -3622,14 +3684,17 @@
 						</div>
 						<span class="section-cache-label">
 							{#if sectionCache.finished && sectionCache.failed > 0}
-								Prepared {sectionCache.done}/{sectionCache.total}; {sectionCache.failed} failed.
+								Prepared {sectionCache.sectionDone}/{sectionCache.sectionTotal} sections;
+								{sectionCache.failed} cache profiles failed.
+								{sectionCache.failedDetails.length > 0 ? ` Failed: ${sectionCache.failedDetails.join(', ')}.` : ''}
 								Took {formatSectionCacheDuration(sectionCache.elapsedMs ?? 0)}. Reopen to retry.
 							{:else if sectionCache.finished}
-								Prepared {sectionCache.done}/{sectionCache.total} section caches in
+								Prepared {sectionCache.sectionDone}/{sectionCache.sectionTotal} sections for Chat + Write in
 								{formatSectionCacheDuration(sectionCache.elapsedMs ?? 0)}
 							{:else}
-								Preparing {sectionCache.done}/{sectionCache.total} section
-								caches{sectionCache.label ? ` — ${sectionCache.label}` : ''}…
+								Preparing {sectionCache.done}/{sectionCache.total} cache profiles
+								{sectionCache.label ? ` — ${sectionCache.label}` : ''}
+								{sectionCache.profile ? ` · ${sectionCache.profile}` : ''}…
 							{/if}
 						</span>
 					</div>
@@ -3645,7 +3710,7 @@
 						onAnnotationsChange={handleAnnotationsChange}
 						onImageExtract={handleImageExtract}
 						onTextExtracted={handlePdfTextExtracted}
-						onActiveSection={(section: ActiveSection) => (activeSection = section)}
+						onActiveSection={handleActiveSectionChange}
 						onSectionsReady={handleSectionsReady}
 						onClosePdf={workingDocType === 'tex'
 							? closeTexPreview
@@ -3660,7 +3725,7 @@
 				{:else if sourceMaterialType === 'epub' && EpubViewerComponent}
 					<EpubViewerComponent
 						epubBytes={activeSourceBytes}
-						onActiveSection={(section: ActiveSection) => (activeSection = section)}
+						onActiveSection={handleActiveSectionChange}
 						onSectionsReady={handleSectionsReady}
 					/>
 					{#if !showAttachedNote}
@@ -3678,7 +3743,7 @@
 				{:else if sourceMaterialType === 'html' && HtmlViewerComponent}
 						<HtmlViewerComponent
 							htmlBytes={activeSourceBytes}
-							onActiveSection={(section: ActiveSection) => (activeSection = section)}
+						onActiveSection={handleActiveSectionChange}
 							onSectionsReady={handleSectionsReady}
 						/>
 					{#if !showAttachedNote}
@@ -4240,7 +4305,7 @@
 										placeholder="Ask AI…"
 										rows="1"
 									></textarea>
-									{#if writeTargetNotice && aiInteractionMode === 'operation'}
+									{#if writeTargetNotice && aiInteractionMode === 'write'}
 										<div class="write-target-notice" role="status">
 											Place the cursor where you want to write, or select text to rewrite. Then send
 											again.
@@ -4256,8 +4321,8 @@
 											>
 											<button
 												type="button"
-												class:active={aiInteractionMode === 'operation'}
-												onclick={() => setAiInteractionMode('operation')}
+											class:active={aiInteractionMode === 'write'}
+											onclick={() => setAiInteractionMode('write')}
 												title="Write: perform the request on the open note">Write</button
 											>
 										</div>

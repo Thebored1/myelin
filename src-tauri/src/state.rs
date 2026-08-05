@@ -469,7 +469,7 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
-/// Upper bound on the per-engine on-disk KV snapshot cache. A slot file holds a
+/// Upper bound on the complete on-disk KV snapshot cache. A slot file holds a
 /// full context window (~0.5-1 GB each at 32k), so an unbounded cache would eat
 /// the disk; the LRU eviction keeps only the most recently used notes.
 const SLOT_CACHE_BUDGET_BYTES: u64 = 8 << 30;
@@ -485,17 +485,14 @@ struct ActiveSlotCache {
 /// manifests) until `slot_dir` fits under `budget_bytes`. LRU order is file
 /// mtime: every save and restore refreshes it.
 fn enforce_slot_cache_budget(slot_dir: &Path, budget_bytes: u64) {
-    let Ok(read_dir) = fs::read_dir(slot_dir) else {
-        return;
-    };
     let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     let mut total: u64 = 0;
-    for entry in read_dir.flatten() {
-        let path = entry.path();
+    for entry in walkdir::WalkDir::new(slot_dir).into_iter().flatten() {
+        let path = entry.path().to_path_buf();
         if path.extension().and_then(|e| e.to_str()) != Some("slot") {
             continue;
         }
-        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(meta) = fs::metadata(&path) else { continue };
         total += meta.len();
         entries.push((
             meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
@@ -516,7 +513,7 @@ fn enforce_slot_cache_budget(slot_dir: &Path, budget_bytes: u64) {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         log::info!("evicting llama slot cache entry {}", path.display());
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(slot_dir.join(format!("{name}.json")));
+        let _ = fs::remove_file(path.with_file_name(format!("{name}.json")));
     }
 }
 
@@ -623,22 +620,29 @@ fn warmup_prefix(
     excerpt: &str,
     cells: Option<&str>,
     interaction_mode: &str,
+    doc_type: &str,
     supports_tools: bool,
     oversized: bool,
     verbose_tool_schemas: bool,
 ) -> (String, Vec<serde_json::Value>) {
     let direct_document_profile = interaction_mode == "chat" && (oversized || !supports_tools);
-    let preamble = if direct_document_profile {
+    let preamble = if interaction_mode == "write" {
+        crate::agent::TARGETED_WRITE_PREAMBLE
+    } else if direct_document_profile {
         crate::agent::DIRECT_CHAT_PREAMBLE
     } else {
         crate::agent::MYELIN_PREAMBLE
     };
-    let system = format!(
-        "{preamble}\n\n{}",
+    let context = if interaction_mode == "write" {
+        assemble_targeted_write_context(note_title, excerpt, cells)
+    } else {
         assemble_note_context(note_title, excerpt, cells)
-    );
+    };
+    let system = format!("{preamble}\n\n{context}");
     let tools = if direct_document_profile {
         Vec::new()
+    } else if interaction_mode == "write" {
+        crate::agent::targeted_write_tools(doc_type)
     } else {
         crate::agent::interaction_mode_tools(interaction_mode, oversized)
     };
@@ -715,6 +719,10 @@ pub(crate) struct InnerState {
     /// all target the same slot; overlapping them makes the in-memory resident
     /// page marker disagree with the server's actual KV state.
     llama_slot_lock: AsyncMutex<()>,
+    /// A real user turn temporarily preempts background section priming. The
+    /// scan remains alive and resumes at its current profile afterward.
+    section_cache_preempt: std::sync::atomic::AtomicBool,
+    section_cache_resume: tokio::sync::Notify,
     /// Live mirror of the persisted openharn sidecar settings, refreshed on save.
     openharn_settings: Mutex<OpenharnSettings>,
     background_settings: Mutex<BackgroundSettings>,
@@ -740,6 +748,7 @@ pub(crate) struct InnerState {
     /// Trusted execution policy for the current serialized chat turn. The model
     /// sees a stable tool schema for prompt-cache reuse; these flags enforce the
     /// mode-specific mutation boundary when a tool call reaches Rust.
+    targeted_write: std::sync::atomic::AtomicBool,
     chat_mode: std::sync::atomic::AtomicBool,
     append_only: std::sync::atomic::AtomicBool,
     placement_edit: std::sync::atomic::AtomicBool,
@@ -924,6 +933,112 @@ struct Frontmatter {
 }
 
 impl AppState {
+    pub fn ai_config_status(&self) -> crate::ai_config::AiConfigStatus {
+        crate::ai_config::status(&self.inner.app_data_dir)
+    }
+
+    pub async fn install_ai_runtime(&self, runtime_id: &str) -> anyhow::Result<()> {
+        use futures_util::StreamExt;
+        use sha2::{Digest, Sha256};
+        let config = crate::ai_config::load(&self.inner.app_data_dir)?;
+        let runtime = config.runtimes.get(runtime_id).ok_or_else(|| anyhow::anyhow!("runtime '{runtime_id}' is not configured"))?.clone();
+        let crate::ai_config::RuntimeSource::Download { url, sha256, archive_format, binary_path } = runtime.source else {
+            anyhow::bail!("runtime '{runtime_id}' is not a downloadable runtime")
+        };
+        if !url.starts_with("https://") { anyhow::bail!("runtime download URL must use HTTPS") }
+        let root = self.inner.app_data_dir.join("bin").join("runtimes").join(runtime_id);
+        let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&staging)?;
+        let result: anyhow::Result<()> = async {
+            let response = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).user_agent("Myelin").build()?.get(&url).send().await?.error_for_status()?;
+            if response.content_length().is_some_and(|n| n > 4 * 1024 * 1024 * 1024) { anyhow::bail!("runtime archive exceeds 4 GiB") }
+            let archive = staging.join("download");
+            let mut file = fs::File::create(&archive)?;
+            let mut hash = Sha256::new(); let mut bytes = 0u64; let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await { let chunk = chunk?; bytes += chunk.len() as u64; if bytes > 4 * 1024 * 1024 * 1024 { anyhow::bail!("runtime archive exceeds 4 GiB") } hash.update(&chunk); std::io::Write::write_all(&mut file, &chunk)?; }
+            drop(file);
+            let actual = format!("{:x}", hash.finalize()); if !actual.eq_ignore_ascii_case(&sha256) { anyhow::bail!("runtime checksum mismatch: expected {sha256}, got {actual}") }
+            let payload = staging.join("payload"); fs::create_dir_all(&payload)?;
+            match archive_format {
+                crate::ai_config::RuntimeArchiveFormat::Raw => { fs::copy(&archive, payload.join(binary_path.as_ref().and_then(|p| p.file_name()).and_then(|p| p.to_str()).unwrap_or("llama-server")))?; }
+                crate::ai_config::RuntimeArchiveFormat::Zip => { let status = std::process::Command::new("unzip").args(["-q", "-:", archive.to_str().unwrap_or_default(), "-d", payload.to_str().unwrap_or_default()]).status()?; if !status.success() { anyhow::bail!("unzip failed") } }
+                crate::ai_config::RuntimeArchiveFormat::TarGz => { let status = std::process::Command::new("tar").args(["--no-absolute-names", "--warning=no-unknown-keyword", "-xzf", archive.to_str().unwrap_or_default(), "-C", payload.to_str().unwrap_or_default()]).status()?; if !status.success() { anyhow::bail!("tar extraction failed") } }
+            }
+            let executable = if let Some(relative) = binary_path { payload.join(relative) } else { payload.join("llama-server") };
+            if !executable.is_file() { anyhow::bail!("configured runtime binary was not found at {}", executable.display()) }
+            let installed = root.join(&actual[..16]); fs::create_dir_all(&root)?; if installed.exists() { fs::remove_dir_all(&installed)?; }
+            fs::rename(&payload, &installed)?;
+            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; let mode = fs::metadata(&installed)?.permissions().mode(); for entry in walkdir::WalkDir::new(&installed).into_iter().flatten() { if entry.file_type().is_file() { let current = fs::metadata(entry.path())?.permissions().mode(); fs::set_permissions(entry.path(), fs::Permissions::from_mode(if entry.path() == executable { 0o755 } else { current | (mode & 0o111) }))?; } } }
+            Ok(())
+        }.await;
+        let _ = fs::remove_dir_all(&staging);
+        result
+    }
+
+    pub fn ensure_ai_config(&self) -> anyhow::Result<()> {
+        crate::ai_config::ensure_file(&self.inner.app_data_dir)?;
+        crate::ai_config::ensure_schema(&self.inner.app_data_dir)?;
+        Ok(())
+    }
+
+    pub async fn validate_ai_config(&self) -> anyhow::Result<crate::ai_config::AiConfigStatus> {
+        let _chat_guard = self.inner.chat_lock.try_lock().map_err(|_| anyhow::anyhow!("cannot validate while a model turn is active"))?;
+        let _slot_guard = self.inner.llama_slot_lock.try_lock().map_err(|_| anyhow::anyhow!("cannot validate while a cache operation is active"))?;
+        self.ensure_ai_config()?;
+        let config = crate::ai_config::load(&self.inner.app_data_dir)?;
+        crate::ai_config::require_valid(&config)?;
+        let profile = config.profiles.get(&config.active_profile).ok_or_else(|| anyhow::anyhow!("active profile is missing"))?;
+        if let Some(runtime) = config.runtimes.get(&profile.runtime) {
+            match &runtime.source {
+                crate::ai_config::RuntimeSource::Path { executable } if !executable.is_file() => anyhow::bail!("runtime executable does not exist: {}", executable.display()),
+                crate::ai_config::RuntimeSource::Download { binary_path, .. } => {
+                    let root = self.inner.app_data_dir.join("bin").join("runtimes").join(&profile.runtime);
+                    let found = fs::read_dir(&root).ok().into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()).any(|dir| binary_path.as_ref().map(|p| dir.join(p).is_file()).unwrap_or_else(|| dir.join("llama-server").is_file()));
+                    if !found { anyhow::bail!("downloaded runtime '{}' is not installed", profile.runtime) }
+                }
+                _ => {}
+            }
+        }
+        let resolved = crate::llama_server::resolve_config(&self.inner.app_data_dir)?;
+        if !crate::llama_server::health_check(&self.inner.llama_client, &resolved).await {
+            anyhow::bail!("configured runtime is not healthy at {}", resolved.base_url())
+        }
+        let request = serde_json::json!({
+            "model": resolved.model_name(),
+            "messages": [{"role": "user", "content": "Reply with one token."}],
+            "max_tokens": 1,
+            "stream": false,
+            "cache_prompt": true,
+            "id_slot": 0
+        });
+        let response = self.inner.llama_client.post(format!("{}/v1/chat/completions", resolved.base_url())).json(&request).send().await?.error_for_status()?;
+        let body: serde_json::Value = response.json().await?;
+        if body.get("error").is_some() { anyhow::bail!("runtime rejected cached inference probe: {body}") }
+        let save = self.inner.llama_client.post(format!("{}/slots/0?action=save", resolved.base_url())).send().await?.error_for_status()?;
+        let save_body: serde_json::Value = save.json().await?;
+        let saved = save_body.get("n_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+        if saved == 0 { anyhow::bail!("runtime slot save probe returned no saved tokens: {save_body}") }
+        let restore = self.inner.llama_client.post(format!("{}/slots/0?action=restore", resolved.base_url())).send().await?.error_for_status()?;
+        let restore_body: serde_json::Value = restore.json().await?;
+        let restored = restore_body.get("n_restored").and_then(|v| v.as_u64()).unwrap_or(0);
+        if restored != saved { anyhow::bail!("runtime slot restore probe mismatch: saved {saved}, restored {restored}") }
+        log::info!("runtime validation passed: slot save/restore saved={saved} restored={restored}");
+        Ok(self.ai_config_status())
+    }
+
+    pub async fn apply_ai_config(&self, candidate_hash: &str) -> anyhow::Result<crate::ai_config::AiConfigStatus> {
+        if self.inner.chat_lock.try_lock().is_err() || self.inner.llama_slot_lock.try_lock().is_err() {
+            anyhow::bail!("AI configuration cannot be applied while a model turn or cache operation is active")
+        }
+        self.ensure_ai_config()?;
+        let config = crate::ai_config::load(&self.inner.app_data_dir)?;
+        crate::ai_config::require_valid(&config)?;
+        let actual = crate::ai_config::canonical_hash(&config)?;
+        if actual != candidate_hash { anyhow::bail!("AI configuration changed after validation; validate it again") }
+        crate::ai_config::write_atomic(&crate::ai_config::applied_path(&self.inner.app_data_dir), &config)?;
+        Ok(self.ai_config_status())
+    }
+
     pub fn new(handle: AppHandle) -> Result<Self> {
         let app_data_dir = handle
             .path()
@@ -935,6 +1050,13 @@ impl AppState {
                 app_data_dir.display()
             )
         })?;
+
+        // Create the schema-backed AI configuration alongside legacy settings.
+        // The launcher still reads its legacy projection for now; this makes
+        // the file available immediately without changing an existing user's
+        // active runtime during the migration.
+        crate::ai_config::ensure_file(&app_data_dir)?;
+        crate::ai_config::ensure_schema(&app_data_dir)?;
 
         // Pin Tectonic's package cache under app data (see TECTONIC_CACHE_DIR_NAME).
         // Honoured by tectonic via the TECTONIC_CACHE_DIR env var (>= v0.9). Set
@@ -978,6 +1100,8 @@ impl AppState {
                 sidecar: AsyncMutex::new(None),
                 chat_lock: AsyncMutex::new(()),
                 llama_slot_lock: AsyncMutex::new(()),
+                section_cache_preempt: std::sync::atomic::AtomicBool::new(false),
+                section_cache_resume: tokio::sync::Notify::new(),
                 openharn_settings: Mutex::new(openharn_settings),
                 background_settings: Mutex::new(background_settings),
                 llama_client: Client::builder()
@@ -997,6 +1121,7 @@ impl AppState {
                 require_tool_approval: std::sync::atomic::AtomicBool::new(false),
                 deterministic_tools: std::sync::atomic::AtomicBool::new(true),
                 tool_gating: std::sync::atomic::AtomicBool::new(false),
+                targeted_write: std::sync::atomic::AtomicBool::new(false),
                 chat_mode: std::sync::atomic::AtomicBool::new(false),
                 append_only: std::sync::atomic::AtomicBool::new(false),
                 placement_edit: std::sync::atomic::AtomicBool::new(false),
@@ -1062,6 +1187,26 @@ impl AppState {
             .lock()
             .clone()
             .unwrap_or_else(|| "md".to_string())
+    }
+
+    pub fn targeted_write_active(&self) -> bool {
+        self.inner
+            .targeted_write
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn pause_section_cache_for_turn(&self) {
+        self.inner
+            .section_cache_preempt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.section_cache_resume.notify_waiters();
+    }
+
+    fn resume_section_cache_after_turn(&self) {
+        self.inner
+            .section_cache_preempt
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.inner.section_cache_resume.notify_waiters();
     }
 
     pub fn request_ai_cancel(&self) {
@@ -2260,15 +2405,20 @@ impl AppState {
                 .map_err(|_| anyhow!("The previous AI request did not stop within 10 seconds."))?
             }
         };
-        // Chat and edit are the current frontend paths. Operation and auto stay
-        // accepted for API compatibility and a future composer-mode toggle.
+        // Chat and focused Write are the frontend paths. Operation, auto, and
+        // edit remain accepted for API compatibility and headless callers.
         let interaction_mode = match interaction_mode.as_deref() {
             None | Some("auto") => "auto",
             Some("chat") => "chat",
+            Some("write") => "write",
             Some("operation") => "operation",
             Some("edit") => "edit",
             Some(mode) => return Err(anyhow!("unknown AI interaction mode: {mode}")),
         };
+        self.inner.targeted_write.store(
+            interaction_mode == "write",
+            std::sync::atomic::Ordering::SeqCst,
+        );
         self.reset_chat_tools();
         self.inner
             .cancel_ai
@@ -2281,13 +2431,31 @@ impl AppState {
         let doc_type = doc_type.unwrap_or_else(|| "md".to_string());
         self.set_current_doc_type(Some(doc_type.clone()));
         self.set_current_note_id(note_id.clone());
+        self.pause_section_cache_for_turn();
         let result: Result<()> = async {
+            let setup_started = std::time::Instant::now();
+            let _ = self.handle.emit(
+                "ai://debug_event",
+                serde_json::json!({
+                    "kind": "setup",
+                    "msg": "begin request setup",
+                    "requestId": request_id,
+                }),
+            );
             let note = self.load_note(note_id).await?;
+            let _ = self.handle.emit(
+                "ai://debug_event",
+                serde_json::json!({
+                    "kind": "setup",
+                    "msg": format!("note loaded in {} ms", setup_started.elapsed().as_millis()),
+                    "requestId": request_id,
+                }),
+            );
 
             // Write mode is always spatially explicit. Refuse before model
             // initialization, prompt caching, or tool execution if a caller
             // bypasses the frontend's deterministic target gate.
-            if matches!(interaction_mode, "operation" | "edit") && selection.is_none() {
+            if matches!(interaction_mode, "write" | "operation" | "edit") && selection.is_none() {
                 return Err(anyhow!(
                     "Place the cursor where you want to write, or select text to rewrite. Then send again."
                 ));
@@ -2297,7 +2465,16 @@ impl AppState {
             // is finalized immediately before model submission, so the first
             // real request can reuse its KV prefix instead of always starting
             // with cached=0.
+            let pipeline_started = std::time::Instant::now();
             let config = self.ensure_ai_pipeline_ready().await?;
+            let _ = self.handle.emit(
+                "ai://debug_event",
+                serde_json::json!({
+                    "kind": "setup",
+                    "msg": format!("pipeline ready in {} ms; total {} ms", pipeline_started.elapsed().as_millis(), setup_started.elapsed().as_millis()),
+                    "requestId": request_id,
+                }),
+            );
             // Fast-chat profile: let the model choose ordinary tools instead of
             // routing through deterministic format/find assists. Rust still
             // executes the selected tools and enforces write safety.
@@ -2332,7 +2509,7 @@ impl AppState {
                     section.label.as_deref(),
                 )
             });
-            let active_section_request = interaction_mode == "chat"
+            let active_section_request = matches!(interaction_mode, "chat" | "write")
                 && active_section.is_some()
                 && !whole_document_request
                 && !other_page_request
@@ -2401,7 +2578,9 @@ Section key: {}
             // could neither see nor feel allowed to modify existing content, so it
             // could only write fresh, never edit/format/shorten/delete.
             let isolated_edit = interaction_mode == "edit";
-            let append_only = !isolated_edit && crate::agent::append_request_intent(&question);
+            let append_only = !isolated_edit
+                && interaction_mode != "write"
+                && crate::agent::append_request_intent(&question);
             let placement = crate::agent::placement_request_intent(&question);
             let has_selection = selection.is_some();
             // For a notebook, present readable CELLS (not the raw JSON body) so the
@@ -2411,7 +2590,15 @@ Section key: {}
             } else {
                 None
             };
-            let context = assemble_note_context(&note.title, &note_body_excerpt, notebook_cells.as_deref());
+            let context = if interaction_mode == "write" {
+                assemble_targeted_write_context(
+                    &note.title,
+                    &note_body_excerpt,
+                    notebook_cells.as_deref(),
+                )
+            } else {
+                assemble_note_context(&note.title, &note_body_excerpt, notebook_cells.as_deref())
+            };
             let stable_context = context.clone();
             let mut turn_instructions = String::new();
             // Viewer chat is section-scoped by default. Whole-document and
@@ -2682,16 +2869,27 @@ Section key: {}
                 config.supports_tools,
             )
             .await;
+            let _ = self.handle.emit(
+                "ai://debug_event",
+                serde_json::json!({
+                    "kind": "setup",
+                    "msg": format!("tool capability ready; total {} ms", setup_started.elapsed().as_millis()),
+                    "requestId": request_id,
+                }),
+            );
             // `oversized_ready` is shared by the wire schema and execution policy:
-            // successful ingestion enables scoped retrieval and the oversized
-            // mutation gate. On failure, ensure_oversized_note_ingested emits
+            // successful ingestion enables scoped retrieval. Only an actually
+            // oversized note should activate the oversized mutation gate;
+            // PDFs/attachments are retrieval-backed but their visible section
+            // remains a valid targeted Write source. On failure,
+            // ensure_oversized_note_ingested emits
             // failure progress, the prompt uses its truncated fallback, and this
             // gate stays off because scoped retrieval is unavailable.
             self.set_turn_tool_policy(
                 interaction_mode == "chat",
                 append_only && !has_selection,
-                placement && has_selection,
-                retrieval_backed,
+                placement && has_selection && interaction_mode != "write",
+                prompt_shape.oversized,
                 supports_tools,
             );
 
@@ -2716,6 +2914,7 @@ Section key: {}
             // at the end needs re-evaluation each turn.
             let mode_instruction = match interaction_mode {
                 "chat" => "CHAT TURN POLICY: The open note identified above is the default target for every read or question. Answer questions about it directly; do not call search_notes or read_note unless the user explicitly asks about another note, their notes/workspace, or names a different note. Use web/document retrieval only when explicitly requested. Never modify the note for this turn.",
+                "write" => "WRITE TURN POLICY: Perform exactly the requested edit on the armed cursor or selection using the single targeted write tool. Do not target any other location or call an unrelated tool.",
                 "operation" => "OPERATION TURN POLICY: Perform the user's requested operation using the appropriate tool. The open note identified above is the default target.",
                 "edit" => "EDITOR ACTION: Perform exactly this isolated edit with write_note. Return only the replacement or insertion content in the tool call; never reproduce text outside the target.",
                 _ => "AUTO TURN POLICY: Decide whether the user needs a direct answer or an operation.",
@@ -2734,13 +2933,20 @@ Section key: {}
                 && !crate::agent::wants_other_notes(&model_question)
                 && !crate::agent::wants_fetch(&model_question)
                 && !crate::agent::wants_search(&model_question);
-            let turn_conversation = if fast_document_answer {
+            // Targeted Write keeps the same universal conversation memory as
+            // Chat, but only the one relevant prior exchange belongs after
+            // the restored section KV. Replaying the entire tool/history
+            // transcript here would quietly erase the latency benefit of the
+            // dedicated Write prefix, especially after several page changes.
+            let compact_write_conversation = interaction_mode == "write";
+            let turn_conversation = if fast_document_answer || compact_write_conversation {
                 crate::ai_turn::compact_document_conversation(&model_question, &convo)
             } else {
                 convo.clone()
             };
             let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
                 mode: interaction_mode,
+                doc_type: &doc_type,
                 note_title: &note.title,
                 system_context: &stable_context,
                 conversation: &turn_conversation,
@@ -2781,6 +2987,15 @@ Section key: {}
                     .first()
                     .and_then(|message| message["content"].as_str())
                     .unwrap_or_default();
+                let cache_prepare_started = std::time::Instant::now();
+                let _ = self.handle.emit(
+                    "ai://debug_event",
+                    serde_json::json!({
+                        "kind": "cache_prepare",
+                        "msg": format!("profile={} section={} start", interaction_mode, section.key),
+                        "requestId": request_id,
+                    }),
+                );
                 self.prepare_section_slot(
                     &config,
                     &nid,
@@ -2788,9 +3003,22 @@ Section key: {}
                     system,
                     &tools,
                     &template_kwargs,
-                    true,
+                    interaction_mode,
                 )
                 .await;
+                let _ = self.handle.emit(
+                    "ai://debug_event",
+                    serde_json::json!({
+                        "kind": "cache_prepare",
+                        "msg": format!(
+                            "profile={} section={} done in {} ms",
+                            interaction_mode,
+                            section.key,
+                            cache_prepare_started.elapsed().as_millis()
+                        ),
+                        "requestId": request_id,
+                    }),
+                );
             } else {
                 *self.inner.active_slot_cache.lock() = None;
             }
@@ -2838,8 +3066,9 @@ Section key: {}
                 &nid,
                 intent_is_tool,
                 interaction_mode == "chat",
-                interaction_mode == "operation" || isolated_edit,
+                matches!(interaction_mode, "write" | "operation") || isolated_edit,
                 selection.is_some(),
+                interaction_mode == "write",
             )
             .await?;
 
@@ -2881,6 +3110,7 @@ Section key: {}
                     &note_body_excerpt,
                     notebook_cells.as_deref(),
                     interaction_mode,
+                    &doc_type,
                     supports_tools,
                     retrieval_backed,
                     config.verbose_tool_schemas,
@@ -2900,6 +3130,7 @@ Section key: {}
             Ok(())
         }
         .await;
+        self.resume_section_cache_after_turn();
 
         self.clear_latest_chat_question();
         self.clear_current_note_id();
@@ -3810,6 +4041,7 @@ Section key: {}
             .map(section_excerpt)
             .unwrap_or(base_excerpt);
         let interaction_mode = match interaction_mode.as_deref() {
+            Some("write") => "write",
             Some("operation") => "operation",
             Some("edit") => "edit",
             Some("auto") => "auto",
@@ -3839,6 +4071,7 @@ Section key: {}
             &excerpt,
             cells.as_deref(),
             interaction_mode,
+            &doc_type,
             if interaction_mode == "chat" { false } else { supports_tools },
             retrieval_backed,
             config.verbose_tool_schemas,
@@ -3848,7 +4081,7 @@ Section key: {}
         let identity = Self::slot_identity(
             &config,
             ctx_tokens as u32,
-            interaction_mode,
+            if interaction_mode == "chat" { "section" } else { interaction_mode },
             &system,
             &tools_json,
             &template_kwargs,
@@ -3867,7 +4100,7 @@ Section key: {}
                     &system,
                     &tools,
                     &template_kwargs,
-                    false,
+                    interaction_mode,
                 )
                 .await;
                 return Ok(());
@@ -3897,7 +4130,8 @@ Section key: {}
         &self,
         note_id: String,
         sections: Vec<crate::models::ActiveSection>,
-        interaction_mode: Option<String>,
+        active_section_key: Option<String>,
+        _legacy_interaction_mode: Option<String>,
     ) -> Result<()> {
         let sections: Vec<crate::models::ActiveSection> = sections
             .into_iter()
@@ -3913,11 +4147,15 @@ Section key: {}
         // is still coming up.
         let scan_note_id = note_id.clone();
         let scan_total = sections.len();
+        let scan_total_profiles = scan_total.saturating_mul(2);
         let emit_progress = |
             state: &AppState,
             done: usize,
+            section_done: usize,
             label: &str,
+            profile: &str,
             failed: usize,
+            failed_details: &[String],
             finished: bool,
         | {
             let _ = state.handle.emit(
@@ -3925,14 +4163,18 @@ Section key: {}
                 serde_json::json!({
                     "noteId": scan_note_id,
                     "done": done,
-                    "total": scan_total,
+                    "total": scan_total_profiles,
+                    "sectionDone": section_done,
+                    "sectionTotal": scan_total,
                     "label": label,
+                    "profile": profile,
                     "failed": failed,
+                    "failedDetails": failed_details,
                     "finished": finished,
                 }),
             );
         };
-        emit_progress(self, 0, "", 0, false);
+        emit_progress(self, 0, 0, "", "", 0, &[], false);
         // A newer scan supersedes any older one so stale progress (or stale
         // primes) from a previous document never linger over the current view.
         if let Some(handle) = self.inner.section_cache.lock().take() {
@@ -3943,7 +4185,7 @@ Section key: {}
         let configured = match self.ensure_ai_pipeline_ready().await {
             Ok(configured) => configured,
             Err(error) => {
-                emit_progress(self, 0, "", scan_total, true);
+                emit_progress(self, 0, 0, "", "", scan_total_profiles, &[], true);
                 return Err(error);
             }
         };
@@ -3955,13 +4197,13 @@ Section key: {}
             }
         };
         if !config.prompt_cache {
-            emit_progress(self, 0, "", scan_total, true);
+            emit_progress(self, 0, 0, "", "", scan_total_profiles, &[], true);
             return Ok(());
         }
         let note = match self.load_note(note_id.clone()).await {
             Ok(note) => note,
             Err(error) => {
-                emit_progress(self, 0, "", scan_total, true);
+                emit_progress(self, 0, 0, "", "", scan_total_profiles, &[], true);
                 return Err(error);
             }
         };
@@ -3979,12 +4221,6 @@ Section key: {}
         } else {
             None
         };
-        let mode = match interaction_mode.as_deref() {
-            Some("operation") => "operation",
-            Some("edit") => "edit",
-            Some("auto") => "auto",
-            _ => "chat",
-        };
         let model_id = config.model_path.to_string_lossy().to_string();
         let supports_tools = crate::tool_capability::supports_tools(
             &self.inner.llama_client,
@@ -3998,56 +4234,106 @@ Section key: {}
         let template_kwargs = self.openharn_settings().template_kwargs;
         struct SectionProfile {
             section: crate::models::ActiveSection,
+            profile: &'static str,
             system: String,
             tools: Vec<serde_json::Value>,
             identity: String,
             filename: String,
         }
-        let mut profiles: Vec<SectionProfile> = Vec::new();
-        for section in &sections {
+        let active_index = active_section_key
+            .as_deref()
+            .and_then(|key| sections.iter().position(|section| section.key == key))
+            .unwrap_or(0);
+        let mut ordered_sections = Vec::with_capacity(sections.len());
+        ordered_sections.push(sections[active_index].clone());
+        ordered_sections.extend(
+            sections
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != active_index)
+                .map(|(_, section)| section.clone()),
+        );
+        let mut prepared_by_section: std::collections::HashMap<String, u8> =
+            std::collections::HashMap::new();
+        let mut preprepared = 0usize;
+        let mut prefailed = 0usize;
+        let mut prefailed_details = Vec::new();
+
+        // Build the active Chat + Write pair first, then the remaining Chat
+        // profiles, then the remaining Write profiles. The active pair becomes
+        // available quickly while the complete dual-profile scan continues.
+        let mut scheduled = Vec::with_capacity(scan_total_profiles);
+        let mut enqueue = |section: &crate::models::ActiveSection, mode: &'static str, profile: &'static str| {
             let excerpt = section_excerpt(section);
             let (system, tools) = warmup_prefix(
                 &note.title,
                 &excerpt,
                 cells.as_deref(),
                 mode,
-                // Ordinary viewer Chat turns use the tool-free direct profile
-                // (`fast_document_answer`). Preparing the read-only schema
-                // profile would create a valid but unusable KV snapshot.
+                &doc_type,
                 if mode == "chat" { false } else { supports_tools },
                 retrieval_backed,
                 config.verbose_tool_schemas,
             );
             let tools_json = serde_json::to_string(&tools).unwrap_or_default();
+            let identity_mode = if mode == "chat" { "section" } else { mode };
             let identity = Self::slot_identity(
                 &config,
                 ctx_tokens as u32,
-                "section",
+                identity_mode,
                 &system,
                 &tools_json,
                 &template_kwargs,
             );
             let filename = Self::section_slot_filename(&note_id, section, &identity);
-            if self.inner.active_slot_cache.lock().as_ref().is_some_and(|cached| {
-                cached.note_id == note_id
-                    && cached.filename == filename
-                    && cached.identity == identity
-            }) {
-                continue;
+            let valid = Self::slot_file_is_valid(&config, &filename, &identity)
+                || self.inner.active_slot_cache.lock().as_ref().is_some_and(|cached| {
+                    cached.note_id == note_id
+                        && cached.filename == filename
+                        && cached.identity == identity
+                });
+            if valid {
+                preprepared += 1;
+                *prepared_by_section.entry(section.key.clone()).or_default() += 1;
+            } else if mode == "write" && !supports_tools {
+                prefailed += 1;
+                prefailed_details.push(format!(
+                    "{} · Write",
+                    section.label.as_deref().unwrap_or(&section.key)
+                ));
+            } else {
+                scheduled.push(SectionProfile {
+                    section: section.clone(),
+                    profile,
+                    system,
+                    tools,
+                    identity,
+                    filename,
+                });
             }
-            if Self::slot_file_is_valid(&config, &filename, &identity) {
-                continue;
-            }
-            profiles.push(SectionProfile {
-                section: section.clone(),
-                system,
-                tools,
-                identity,
-                filename,
-            });
+        };
+        let active = &ordered_sections[0];
+        enqueue(active, "chat", "chat");
+        enqueue(active, "write", "write");
+        for section in ordered_sections.iter().skip(1) {
+            enqueue(section, "chat", "chat");
         }
-        if profiles.is_empty() {
-            emit_progress(self, scan_total, "", 0, true);
+        for section in ordered_sections.iter().skip(1) {
+            enqueue(section, "write", "write");
+        }
+        drop(enqueue);
+        let section_done = prepared_by_section.values().filter(|count| **count >= 2).count();
+        if scheduled.is_empty() {
+            emit_progress(
+                self,
+                preprepared,
+                section_done,
+                "",
+                "",
+                prefailed,
+                &prefailed_details,
+                true,
+            );
             return Ok(());
         }
 
@@ -4056,32 +4342,38 @@ Section key: {}
         let url = format!("{}/completion", config.base_url());
         let config_for_save = config.clone();
         let handle = tokio::spawn(async move {
-            // Event total stays the section count the user saw at start; skipped
-            // (already cached) sections count as already done.
-            let total = scan_total;
+            let total = scan_total_profiles;
             let scan_note_id = note_id.clone();
-            let emit = |done: usize, label: &str, failed: usize, finished: bool| {
+            let mut prepared_by_section = prepared_by_section;
+            let emit = |done: usize, section_done: usize, label: &str, profile: &str, failed: usize, failed_details: &[String], finished: bool| {
                 let _ = state.handle.emit(
                     "ai://section_cache_progress",
                     serde_json::json!({
                         "noteId": scan_note_id,
                         "done": done,
                         "total": total,
+                        "sectionDone": section_done,
+                        "sectionTotal": scan_total,
                         "label": label,
+                        "profile": profile,
                         "failed": failed,
+                        "failedDetails": failed_details,
                         "finished": finished,
                     }),
                 );
             };
-            let mut prepared = total.saturating_sub(profiles.len());
-            let mut failed = 0usize;
-            let first_label = profiles[0]
-                .section
-                .label
-                .clone()
-                .unwrap_or_default();
-            emit(prepared, &first_label, failed, false);
-            for profile in &profiles {
+            let mut prepared = preprepared;
+            let mut failed = prefailed;
+            let mut failed_details = prefailed_details;
+            emit(prepared, section_done, "", "", failed, &failed_details, false);
+            for profile in &scheduled {
+                while state
+                    .inner
+                    .section_cache_preempt
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
                 // Let an active user turn win before background work claims
                 // slot 0. The request and scan still serialize on the slot
                 // mutex; this check prevents the scan from starting a new
@@ -4089,36 +4381,65 @@ Section key: {}
                 while state.inner.chat_lock.try_lock().is_err() {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
-                // Hold slot 0 for the complete prime + disk-save transaction.
-                // Tokio's FIFO mutex lets a waiting user request take ownership
-                // between pages, keeping this background scan preemptible.
+                if state
+                    .inner
+                    .section_cache_preempt
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    continue;
+                }
+                // Hold the single interactive slot for the complete prime and
+                // disk-save transaction. A real turn wins before this guard is
+                // acquired; preparation resumes when the model is idle.
                 let _slot_guard = state.inner.llama_slot_lock.lock().await;
+                if state
+                    .inner
+                    .section_cache_preempt
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    continue;
+                }
                 let label = profile
                     .section
                     .label
                     .clone()
                     .unwrap_or_default();
-                emit(prepared, &label, failed, false);
-                let body = match section_prime_body(
-                    &client,
-                    &config,
-                    &profile.system,
-                    &profile.tools,
-                    &template_kwargs,
-                )
-                .await
-                {
+                let section_done = prepared_by_section.values().filter(|count| **count >= 2).count();
+                emit(prepared, section_done, &label, profile.profile, failed, &failed_details, false);
+                let body = match tokio::select! {
+                    result = section_prime_body(
+                        &client,
+                        &config,
+                        &profile.system,
+                        &profile.tools,
+                        &template_kwargs,
+                    ) => result,
+                    _ = state.inner.section_cache_resume.notified(),
+                        if state.inner.section_cache_preempt.load(std::sync::atomic::Ordering::SeqCst) =>
+                    {
+                        continue;
+                    }
+                } {
                     Ok(body) => body,
                     Err(error) => {
                         failed += 1;
+                        failed_details.push(format!("{} · {}", label, profile.profile));
                         log::warn!("section cache template render failed: {error}");
                         continue;
                     }
                 };
-                match client.post(&url).json(&body).send().await {
+                let response = tokio::select! {
+                    result = client.post(&url).json(&body).send() => result,
+                    _ = state.inner.section_cache_resume.notified(),
+                        if state.inner.section_cache_preempt.load(std::sync::atomic::Ordering::SeqCst) =>
+                    {
+                        continue;
+                    }
+                };
+                match response {
                     Ok(response) if response.status().is_success() => {
                         if state
-                            .save_slot_file(&config_for_save, &profile.filename, &profile.identity, "section")
+                            .save_slot_file(&config_for_save, &profile.filename, &profile.identity, profile.profile)
                             .await
                         {
                             *state.inner.active_slot_cache.lock() = Some(ActiveSlotCache {
@@ -4127,27 +4448,33 @@ Section key: {}
                                 identity: profile.identity.clone(),
                             });
                             prepared += 1;
+                            *prepared_by_section.entry(profile.section.key.clone()).or_default() += 1;
                             log::info!(
-                                "section cache: cached {label} ({}/{})",
+                                "section cache: cached {label} {} ({}/{})",
+                                profile.profile,
                                 prepared,
                                 total
                             );
                         } else {
                             *state.inner.active_slot_cache.lock() = None;
                             failed += 1;
+                            failed_details.push(format!("{} · {}", label, profile.profile));
                         }
                     }
                     Ok(response) => {
                         failed += 1;
+                        failed_details.push(format!("{} · {}", label, profile.profile));
                         log::warn!("section cache prime returned {}", response.status())
                     }
                     Err(error) => {
                         failed += 1;
+                        failed_details.push(format!("{} · {}", label, profile.profile));
                         log::warn!("section cache prime failed: {error}")
                     }
                 }
             }
-            emit(prepared, "", failed, true);
+            let section_done = prepared_by_section.values().filter(|count| **count >= 2).count();
+            emit(prepared, section_done, "", "", failed, &failed_details, true);
         });
         let mut active_scan = self.inner.section_cache.lock();
         if let Some(handle) = active_scan.take() {
@@ -4261,17 +4588,33 @@ Section key: {}
         identity: &str,
     ) -> bool {
         let slot_path = config.slot_save_path.join(filename);
-        if !slot_path.exists() {
-            return false;
-        }
         let manifest_path = config.slot_save_path.join(format!("{filename}.json"));
-        let manifest = fs::read_to_string(&manifest_path)
+        let manifest_matches = |path: &Path| fs::read_to_string(path)
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-        manifest.as_ref().is_some_and(|value| {
+        if slot_path.exists() && manifest_matches(&manifest_path).as_ref().is_some_and(|value| {
             value["identity"].as_str() == Some(identity)
                 && value["nSaved"].as_u64().is_some_and(|count| count > 0)
-        })
+        }) { return true; }
+
+        // One-time compatibility promotion for caches created before runtime
+        // fingerprint namespaces were introduced. Only promote when the old
+        // manifest has the exact same prompt identity and a complete slot pair;
+        // foreign or ambiguous custom-runtime snapshots are never restored.
+        let Some(slots_root) = config.slot_save_path.parent().and_then(Path::parent) else { return false };
+        let legacy_dir = slots_root.join(&config.inference_engine);
+        let legacy_slot = legacy_dir.join(filename);
+        let legacy_manifest = legacy_dir.join(format!("{filename}.json"));
+        if !legacy_slot.exists() || !manifest_matches(&legacy_manifest).as_ref().is_some_and(|value| {
+            value["identity"].as_str() == Some(identity)
+                && value["nSaved"].as_u64().is_some_and(|count| count > 0)
+        }) { return false; }
+        if fs::create_dir_all(&config.slot_save_path).is_err()
+            || fs::copy(&legacy_slot, &slot_path).is_err()
+            || fs::copy(&legacy_manifest, &manifest_path).is_err()
+        { return false; }
+        log::info!("promoted compatible legacy slot cache {} into {}", legacy_slot.display(), slot_path.display());
+        true
     }
 
     async fn restore_slot_file(
@@ -4363,6 +4706,7 @@ Section key: {}
                 let manifest = serde_json::json!({
                     "identity": identity,
                     "kind": kind,
+                    "profile": kind,
                     "nSaved": n_saved,
                 });
                 if let Err(error) = fs::write(&manifest_tmp, manifest.to_string())
@@ -4391,9 +4735,14 @@ Section key: {}
         }
     }
 
-    /// Make slot 0 contain only the stable system/tools prefix for a viewer
-    /// section. The request is done once per section identity; later turns keep
-    /// the resident slot and append canonical conversation/history normally.
+    /// Make slot 0 contain the stable system/tools prefix for a viewer section.
+    ///
+    /// A resident slot may also contain the canonical conversation appended by
+    /// a completed turn. That is safe to reuse when the section/profile
+    /// identity is unchanged: the next request sends the same prefix and
+    /// llama-server's prompt cache continues from the matching tokens. A clean
+    /// disk restore is needed only when another section/profile has taken the
+    /// slot, or when the resident marker no longer matches this request.
     async fn prepare_section_slot(
         &self,
         config: &llama_server::ResolvedLlamaConfig,
@@ -4402,7 +4751,7 @@ Section key: {}
         system: &str,
         tools: &[serde_json::Value],
         template_kwargs: &Option<String>,
-        force_clean_restore: bool,
+        profile_mode: &str,
     ) {
         if !config.prompt_cache || section.content.trim().is_empty() {
             return;
@@ -4419,28 +4768,32 @@ Section key: {}
         let clean_identity = Self::slot_identity(
             config,
             running_ctx,
-            "section",
+            if profile_mode == "chat" { "section" } else { profile_mode },
             system,
             &tools_json,
             template_kwargs,
         );
         let filename = Self::section_slot_filename(note_id, section, &clean_identity);
-        // A completed model turn appends user/assistant tokens to slot 0. The
-        // resident marker identifies which section owns the slot, not whether
-        // it is still the clean saved prefix. Real user turns therefore always
-        // restore the disk snapshot; only speculative page-change warmups may
-        // skip a redundant restore while the clean prime is still resident.
-        if !force_clean_restore
-            && self.inner.active_slot_cache.lock().as_ref().is_some_and(|cached| {
-                cached.note_id == note_id
-                    && cached.filename == filename
-                    && cached.identity == clean_identity
-            })
-        {
+        // The slot may contain either the clean saved prefix or that prefix
+        // followed by the canonical conversation from the previous turn. In
+        // both cases the request below supplies the complete prompt and
+        // cache_prompt=true lets llama-server reuse the matching prefix. Do
+        // not restore the clean snapshot merely because a turn completed: a
+        // restore would discard the resident conversation and add a costly
+        // disk-to-slot copy on every same-section request.
+        if self.inner.active_slot_cache.lock().as_ref().is_some_and(|cached| {
+            cached.note_id == note_id
+                && cached.filename == filename
+                && cached.identity == clean_identity
+        }) {
+            log::debug!(
+                "section cache resident: profile={profile_mode} file={filename}; reusing active slot"
+            );
             return;
         }
         self.cancel_prompt_warmup().await;
         if self.restore_slot_file(config, &filename, &clean_identity).await {
+            log::info!("section cache hit: profile={profile_mode} file={filename}");
             *self.inner.active_slot_cache.lock() = Some(ActiveSlotCache {
                 note_id: note_id.to_string(),
                 filename,
@@ -4448,6 +4801,8 @@ Section key: {}
             });
             return;
         }
+
+        log::info!("section cache miss: profile={profile_mode} file={filename}; priming synchronously");
 
         let body = match section_prime_body(
             &self.inner.llama_client,
@@ -4467,7 +4822,7 @@ Section key: {}
         let url = format!("{}/completion", config.base_url());
         match self.inner.llama_client.post(url).json(&body).send().await {
             Ok(response) if response.status().is_success() => {
-                if self.save_slot_file(config, &filename, &clean_identity, "section").await {
+                if self.save_slot_file(config, &filename, &clean_identity, profile_mode).await {
                     *self.inner.active_slot_cache.lock() = Some(ActiveSlotCache {
                         note_id: note_id.to_string(),
                         filename,
@@ -5435,6 +5790,33 @@ fn assemble_note_context(title: &str, body_excerpt: &str, notebook_cells: Option
     } else {
         context.push_str(&format!(
             "\n\nHere is the note's CURRENT content. When the user asks you to edit, change, format, fix, clean up, rewrite, shorten, expand, reorder, or remove part of the note, treat this as the text to modify — reproduce the parts that stay, apply the change, and pass the full result to write_note. (When you are only answering a question, use it as reference and do not echo it back verbatim.)\n--- CURRENT NOTE ---\n{body_excerpt}\n--- END CURRENT NOTE ---"
+        ));
+    }
+    context
+}
+
+/// Stable system context for focused Write. The generic note context is
+/// intentionally more permissive for legacy operation turns and tells a model
+/// to regenerate a full note; doing that inside the targeted profile would
+/// contradict the cursor/selection contract and make a valid selection look
+/// like an unsafe whole-note rewrite.
+fn assemble_targeted_write_context(
+    title: &str,
+    body_excerpt: &str,
+    notebook_cells: Option<&str>,
+) -> String {
+    let mut context = format!("The note currently open is titled \"{title}\".");
+    if let Some(cells) = notebook_cells {
+        context.push_str(&format!(
+            "\n\n{cells}\n\nUse these cells only as reference. Preserve notebook syntax and return only the replacement source for the armed cell."
+        ));
+    } else if body_excerpt.trim().is_empty() {
+        context.push_str(
+            "\n\nThe note's CURRENT content is empty. Generate only the requested insertion fragment.",
+        );
+    } else {
+        context.push_str(&format!(
+            "\n\nHere is the note's CURRENT content as reference material. Generate only the requested insertion or replacement fragment for the armed cursor or text selection; never reproduce surrounding content or the full note.\n--- CURRENT NOTE REFERENCE ---\n{body_excerpt}\n--- END CURRENT NOTE REFERENCE ---"
         ));
     }
     context
@@ -6488,7 +6870,8 @@ fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_note_context, assemble_user_content, authorize_tool_policy,
+        assemble_note_context, assemble_targeted_write_context, assemble_user_content,
+        authorize_tool_policy,
         canonical_wire_conversation, chat_history_to_messages, enforce_slot_cache_budget,
         ensure_packages, hashed_embedding, parse_tex_log, slugify, split_frontmatter,
         common_string_prefix, tokenize, unique_pdf_path, warmup_prefix, wrap_bare_latex,
@@ -6597,9 +6980,10 @@ mod tests {
     fn warmup_prefix_matches_real_chat_turn_prefix() {
         let title = "Parity note";
         let excerpt = "some note body text";
-        let (system, tools) = warmup_prefix(title, excerpt, None, "chat", true, false, false);
+        let (system, tools) = warmup_prefix(title, excerpt, None, "chat", "md", true, false, false);
         let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
             mode: "chat",
+            doc_type: "md",
             note_title: title,
             system_context: &assemble_note_context(title, excerpt, None),
             conversation: &[],
@@ -6620,11 +7004,42 @@ mod tests {
     }
 
     #[test]
+    fn warmup_prefix_matches_real_targeted_write_turn_prefix() {
+        let title = "Write parity note";
+        let excerpt = "section source text";
+        let context = assemble_targeted_write_context(title, excerpt, None);
+        let (system, tools) =
+            warmup_prefix(title, excerpt, None, "write", "md", true, false, false);
+        let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
+            mode: "write",
+            doc_type: "md",
+            note_title: title,
+            system_context: &context,
+            conversation: &[],
+            question: "write a replacement",
+            mode_policy: "write policy",
+            turn_instructions: "cursor is armed",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: true,
+            verbose_tool_schemas: false,
+        });
+        assert_eq!(turn.messages[0]["content"].as_str().unwrap(), system);
+        assert_eq!(
+            serde_json::to_string(&turn.tools).unwrap(),
+            serde_json::to_string(&tools).unwrap()
+        );
+        assert!(system.contains("never reproduce surrounding content"));
+    }
+
+    #[test]
     fn warmup_prefix_retrieval_chat_uses_tool_free_profile() {
-        let (system, tools) = warmup_prefix("Big note", "excerpt", None, "chat", false, false, false);
+        let (system, tools) = warmup_prefix("Big note", "excerpt", None, "chat", "md", false, false, false);
         assert!(tools.is_empty());
         let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
             mode: "chat",
+            doc_type: "md",
             note_title: "Big note",
             system_context: &assemble_note_context("Big note", "excerpt", None),
             conversation: &[],

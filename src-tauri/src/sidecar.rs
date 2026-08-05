@@ -263,6 +263,7 @@ pub async fn run_chat(
     // progress/results, while model prose must not become a chat reply.
     suppress_chat_output: bool,
     selection_scoped: bool,
+    targeted_write: bool,
 ) -> Result<Vec<Value>> {
     let base = ensure_sidecar(state).await?;
 
@@ -327,6 +328,7 @@ pub async fn run_chat(
         "slm": false,
         "chat_mode": chat_mode,
         "selection_scoped": selection_scoped,
+        "targeted_write": targeted_write,
         "native_first": !explicit_prompt,
     });
     // Host-computed deterministic intent overrides model-based classification.

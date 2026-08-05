@@ -116,6 +116,20 @@ pub const DIRECT_CHAT_PREAMBLE: &str = concat!(
     "Be concise unless the user asks for detail."
 );
 
+/// Stable system policy for the focused Write profile. The editor supplies an
+/// exact cursor or selection target; the model only has to generate the new
+/// fragment and call the one compatible mutation tool.
+pub const TARGETED_WRITE_PREAMBLE: &str = concat!(
+    "You are Myelin's focused Write editor, powered by a local model. ",
+    "The open note and the active source section are included in the system context. ",
+    "Use the source section as reference and edit only the editor target supplied below.\n\n",
+    "Generate only the requested replacement or insertion content and call the single offered edit tool. ",
+    "Never reproduce surrounding note content, explain the edit in chat, or choose an append, prepend, ",
+    "search, formatting, or unrelated mutation tool. Preserve the document's Markdown, LaTeX, or notebook syntax. ",
+    "For a cursor, insert at that exact position; for a text selection, replace only that selection. ",
+    "Return the real finished text, never a placeholder, punctuation-only content, or protocol markup."
+);
+
 /// Single source of truth for every tool's model-facing contract: name,
 /// description, and argument schema. Drives BOTH the wire path (`tool_specs`:
 /// warm-up request, tool gates, sidecar) and the rig path (each `Tool::definition`
@@ -1088,6 +1102,28 @@ pub fn wants_clear(message: &str) -> bool {
     matched && !is_negated(message, PHRASES)
 }
 
+/// True when a focused Write request explicitly asks to remove the armed
+/// fragment. This is intentionally separate from `wants_clear`, which only
+/// authorizes emptying the entire note.
+fn wants_targeted_deletion(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    wants_clear(message)
+        || [
+            "delete selected",
+            "delete the selected",
+            "remove selected",
+            "remove the selected",
+            "erase selected",
+            "erase the selected",
+            "delete this",
+            "remove this",
+            "erase this",
+            "make this blank",
+        ]
+        .iter()
+        .any(|phrase| m.contains(phrase))
+}
+
 /// True for a request to remove PART of the open note (a paragraph, heading,
 /// section, line, sentence, etc.) and nothing else — as opposed to a whole-note
 /// clear ([`wants_clear`]) or a removal mixed with new content. Used by
@@ -1458,6 +1494,49 @@ pub fn interaction_mode_tools(mode: &str, oversized: bool) -> Vec<Value> {
     }
 }
 
+/// Tool profile for the target-scoped Write mode. Notebook schemas are kept
+/// target-compatible by constraining the operation enum to `edit`.
+pub fn targeted_write_tools(doc_type: &str) -> Vec<Value> {
+    if doc_type.eq_ignore_ascii_case("ipynb") || doc_type.to_ascii_lowercase().ends_with(".ipynb") {
+        let mut specs = specs_for(&["edit_notebook"]);
+        if let Some(function) = specs
+            .first_mut()
+            .and_then(|spec| spec.get_mut("function"))
+        {
+            function["description"] = serde_json::json!(
+                "Edit only the armed notebook cell target. Use operation \"edit\" and return the replacement source in content."
+            );
+        }
+        if let Some(parameters) = specs
+            .first_mut()
+            .and_then(|spec| spec.get_mut("function"))
+            .and_then(|function| function.get_mut("parameters"))
+        {
+            if let Some(operation) = parameters
+                .get_mut("properties")
+                .and_then(|properties| properties.get_mut("operation"))
+            {
+                operation["enum"] = serde_json::json!(["edit"]);
+            }
+        }
+        specs
+    } else {
+        let mut specs = specs_for(&["write_note"]);
+        if let Some(function) = specs
+            .first_mut()
+            .and_then(|spec| spec.get_mut("function"))
+        {
+            function["description"] = serde_json::json!(
+                "Replace only the armed cursor or text selection with the requested finished content. Send only the new fragment in content."
+            );
+            function["parameters"]["properties"]["content"]["description"] = serde_json::json!(
+                "Only the new insertion or replacement fragment; never include surrounding note text."
+            );
+        }
+        specs
+    }
+}
+
 /// Filter the full tool spec list down to a set of tool names.
 fn specs_for(names: &[&str]) -> Vec<Value> {
     tool_specs()
@@ -1677,6 +1756,16 @@ impl Tool for WriteNoteTool {
             });
         }
         let content = clean_note_content(&strip_prompt_markers(&args.content));
+
+        if self.state.targeted_write_active()
+            && content.trim().is_empty()
+            && !wants_targeted_deletion(&self.state.latest_chat_question())
+        {
+            return Err(ToolError {
+                message: "Empty targeted content is allowed only for an explicit deletion request; no changes were made."
+                    .to_string(),
+            });
+        }
 
         let existing = match self.state.resolve_chat_target_note("") {
             Some(n) => n,

@@ -21,6 +21,7 @@ pub struct AiTurn {
 
 pub struct AiTurnInput<'a> {
     pub mode: &'a str,
+    pub doc_type: &'a str,
     pub note_title: &'a str,
     pub system_context: &'a str,
     pub conversation: &'a [Value],
@@ -41,6 +42,7 @@ impl AiTurnBuilder {
         let routed = if input.supports_tools {
             route_tools(
                 input.mode,
+                input.doc_type,
                 input.question,
                 input.has_open_note,
                 input.edit_thread,
@@ -58,7 +60,7 @@ impl AiTurnBuilder {
         // prefix is byte-identical every turn and llama-server can reuse the KV
         // cache), so "tools present" can no longer mean "this is a tool turn".
         let intent_is_tool = match input.mode {
-            "operation" | "edit" => true,
+            "operation" | "write" | "edit" => true,
             // A chat-only model cannot execute a tool. This also covers the
             // retrieval-backed fast path, which deliberately removes the
             // read-only schemas after the host has already fetched evidence.
@@ -70,7 +72,9 @@ impl AiTurnBuilder {
         // tool-less models. The selection depends only on the stable mode+tool
         // capability, never on the current question, so the system message does
         // not flip between turns.
-        let preamble = if input.mode == "chat" && tools.is_empty() {
+        let preamble = if input.mode == "write" {
+            crate::agent::TARGETED_WRITE_PREAMBLE
+        } else if input.mode == "chat" && tools.is_empty() {
             crate::agent::DIRECT_CHAT_PREAMBLE
         } else {
             crate::agent::MYELIN_PREAMBLE
@@ -115,6 +119,7 @@ impl AiTurnBuilder {
 
 fn route_tools(
     mode: &str,
+    doc_type: &str,
     question: &str,
     has_open_note: bool,
     edit_thread: bool,
@@ -122,6 +127,7 @@ fn route_tools(
 ) -> Vec<Value> {
     match mode {
         "chat" => crate::agent::select_chat_tools(question, has_open_note),
+        "write" => crate::agent::targeted_write_tools(doc_type),
         "edit" => crate::agent::interaction_mode_tools("edit", oversized),
         // Operation/Auto prompts are section-cacheable too. Keep their model
         // schema stable across questions; the host still applies deterministic
@@ -570,6 +576,7 @@ mod tests {
     fn build(mode: &str, question: &str) -> AiTurn {
         AiTurnBuilder::build(AiTurnInput {
             mode,
+            doc_type: "md",
             note_title: "Real title",
             system_context: "The note currently open is titled \"Real title\".",
             conversation: &[],
@@ -648,9 +655,65 @@ mod tests {
     }
 
     #[test]
+    fn write_mode_offers_only_the_targeted_note_tool() {
+        let turn = build("write", "based on the active source, write a poem");
+        assert!(turn.intent_is_tool);
+        assert_eq!(names(&turn), vec!["write_note"]);
+        assert!(turn.messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("focused Write editor"));
+    }
+
+    #[test]
+    fn latex_write_mode_still_offers_only_the_targeted_note_tool() {
+        let turn = AiTurnBuilder::build(AiTurnInput {
+            mode: "write",
+            doc_type: "tex",
+            note_title: "Paper",
+            system_context: "latex context",
+            conversation: &[],
+            question: "rewrite the selected equation",
+            mode_policy: "write policy",
+            turn_instructions: "selection is armed",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: true,
+            verbose_tool_schemas: false,
+        });
+        assert!(turn.intent_is_tool);
+        assert_eq!(names(&turn), vec!["write_note"]);
+    }
+
+    #[test]
+    fn notebook_write_mode_only_allows_edit_operation() {
+        let turn = AiTurnBuilder::build(AiTurnInput {
+            mode: "write",
+            doc_type: "ipynb",
+            note_title: "Notebook",
+            system_context: "notebook context",
+            conversation: &[],
+            question: "rewrite the selected cell",
+            mode_policy: "write policy",
+            turn_instructions: "cell 2 is armed",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: true,
+            verbose_tool_schemas: false,
+        });
+        assert!(turn.intent_is_tool);
+        assert_eq!(names(&turn), vec!["edit_notebook"]);
+        let operation = &turn.tools[0]["function"]["parameters"]["properties"]["operation"]["enum"];
+        assert_eq!(operation, &serde_json::json!(["edit"]));
+    }
+
+    #[test]
     fn oversized_note_keeps_chat_read_only_schema() {
         let turn = AiTurnBuilder::build(AiTurnInput {
             mode: "chat",
+            doc_type: "md",
             note_title: "Large",
             system_context: "retrieval-backed",
             conversation: &[],
@@ -687,6 +750,7 @@ mod tests {
 
         let tool_less = AiTurnBuilder::build(AiTurnInput {
             mode: "chat",
+            doc_type: "md",
             note_title: "Real title",
             system_context: "The note currently open is titled \"Real title\".",
             conversation: &[],
@@ -713,6 +777,7 @@ mod tests {
         ];
         let turn = AiTurnBuilder::build(AiTurnInput {
             mode: "chat",
+            doc_type: "md",
             note_title: "Real title",
             system_context: "The note currently open is titled \"Real title\".",
             conversation: &conversation,
@@ -737,6 +802,7 @@ mod tests {
     fn direct_chat_retains_dynamic_retrieval_context() {
         let turn = AiTurnBuilder::build(AiTurnInput {
             mode: "chat",
+            doc_type: "md",
             note_title: "Paper",
             system_context: "retrieval-backed",
             conversation: &[],

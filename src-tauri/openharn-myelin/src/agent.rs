@@ -144,6 +144,11 @@ pub struct Options {
     /// prompt-tools only as a recovery path.
     #[serde(default)]
     pub native_first: bool,
+    /// Focused Write has exactly one target-compatible tool. Prefer native
+    /// function calling even when the user's general setting is prompt-tools;
+    /// prompt-tools remains the bounded fallback if native decoding fails.
+    #[serde(default)]
+    pub targeted_write: bool,
 }
 
 fn default_max_calls() -> usize {
@@ -252,6 +257,7 @@ impl Default for Options {
             selection_scoped: false,
             prefers_prompt_tools: false,
             native_first: false,
+            targeted_write: false,
         }
     }
 }
@@ -488,7 +494,14 @@ pub async fn run_loop(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let model = req.model.clone().unwrap_or_else(|| "myelin".to_string());
     let temperature = req.temperature.unwrap_or(0.2);
-    let max_tokens = req.max_tokens.unwrap_or(4096);
+    // Targeted writes must return a bounded insertion/replacement tool payload.
+    // Reusing the normal 4096-token chat budget lets a model that misses the
+    // tool protocol spend the whole turn reasoning or reproducing the note,
+    // leaving the editor waiting for a terminal tool call.
+    let max_tokens = req
+        .max_tokens
+        .unwrap_or(4096)
+        .min(if req.options.targeted_write { 1024 } else { 4096 });
     let max_turns = req.max_turns.unwrap_or(8).max(1);
     let opts = req.options.clone();
     let _ = tx
@@ -593,11 +606,14 @@ pub async fn run_loop(
     // end of JSON input". In that case, force prompt-tools + strict for ALL
     // tool-bearing requests, not just multi-call ones.
     let stream_note_preview = should_stream_note_preview(user_text, opts.selection_scoped);
+    let targeted_native = opts.targeted_write
+        && has_tools
+        && opts.intent_is_tool == Some(true);
     let mut strict = opts.strict
         || narrow
-        || (!opts.native_first
+        || (!opts.native_first && !targeted_native
             && (plan_len > 1 || (opts.prefers_prompt_tools && plan_len <= 1)));
-    let mut prompt_tools = strict || opts.prompt_tools;
+    let mut prompt_tools = !targeted_native && (strict || opts.prompt_tools);
     let mut no_think = opts.no_think && !strict;
     // Call-only keeps tool requests structured until the authoritative write
     // result completes the operation.
@@ -1014,7 +1030,7 @@ pub async fn run_loop(
         // host suppresses chat output for this mode, so a no-tool completion
         // would otherwise look like a successful operation that did nothing.
         if call_only && tool_calls.is_empty() {
-            if opts.native_first && !prompt_tools {
+            if (opts.native_first || targeted_native) && !prompt_tools {
                 // Native-first operation: retry once with the strict flattened
                 // format when native FC returned prose, an empty response, or
                 // malformed output without a tool call.

@@ -112,6 +112,7 @@ async fn direct_chat_cache(
         .to_string();
     let first = AiTurnBuilder::build(AiTurnInput {
         mode: "chat",
+        doc_type: "md",
         note_title: "Native cache fixture",
         system_context: &context,
         conversation: &[],
@@ -159,6 +160,7 @@ async fn direct_chat_cache(
     ];
     let second = AiTurnBuilder::build(AiTurnInput {
         mode: "chat",
+        doc_type: "md",
         note_title: "Native cache fixture",
         system_context: &context,
         conversation: &conversation,

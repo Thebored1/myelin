@@ -1,4 +1,5 @@
 mod embeddings;
+pub mod ai_config;
 pub mod ai_turn;
 mod gguf;
 pub mod git_history;
@@ -51,6 +52,46 @@ fn quit_app(app: &tauri::AppHandle) {
 #[tauri::command]
 async fn bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     state.bootstrap().await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_ai_config_status(state: State<'_, AppState>) -> crate::ai_config::AiConfigStatus {
+    state.ai_config_status()
+}
+
+#[tauri::command]
+async fn validate_ai_config(state: State<'_, AppState>) -> Result<crate::ai_config::AiConfigStatus, String> {
+    state.validate_ai_config().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn apply_ai_config(state: State<'_, AppState>, candidate_hash: String) -> Result<crate::ai_config::AiConfigStatus, String> {
+    state.apply_ai_config(&candidate_hash).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_ai_config_file(state: State<'_, AppState>) -> Result<String, String> {
+    state.ensure_ai_config().map_err(|e| e.to_string())?;
+    let path = state.ai_config_status().config_path;
+    Ok(path)
+}
+
+#[tauri::command]
+fn read_ai_config(state: State<'_, AppState>) -> Result<String, String> {
+    state.ensure_ai_config().map_err(|e| e.to_string())?;
+    std::fs::read_to_string(state.ai_config_status().config_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_ai_config(state: State<'_, AppState>, contents: String) -> Result<(), String> {
+    state.ensure_ai_config().map_err(|e| e.to_string())?;
+    let config: crate::ai_config::AiConfigFile = serde_json::from_str(&contents).map_err(|e| format!("invalid JSON: {e}"))?;
+    crate::ai_config::write_atomic(std::path::Path::new(&state.ai_config_status().config_path), &config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn install_ai_runtime(state: State<'_, AppState>, runtime_id: String) -> Result<(), String> {
+    state.install_ai_runtime(&runtime_id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -406,10 +447,11 @@ async fn cache_note_sections(
     state: State<'_, AppState>,
     note_id: String,
     sections: Vec<crate::models::ActiveSection>,
+    active_section_key: Option<String>,
     interaction_mode: Option<String>,
 ) -> Result<(), String> {
     state
-        .cache_note_sections(note_id, sections, interaction_mode)
+        .cache_note_sections(note_id, sections, active_section_key, interaction_mode)
         .await
         .map_err(|error| error.to_string())
 }
@@ -813,6 +855,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            get_ai_config_status,
+            validate_ai_config,
+            apply_ai_config,
+            open_ai_config_file,
+            read_ai_config,
+            save_ai_config,
+            install_ai_runtime,
             set_workspace,
             set_llama_model_path,
             set_llama_executable_path,

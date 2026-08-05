@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+use sha2::{Digest, Sha256};
 
 const CONFIG_FILE_NAME: &str = "llama-server.json";
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -165,6 +166,10 @@ fn default_false() -> bool {
 pub struct ResolvedLlamaConfig {
     pub inference_engine: String,
     pub executable_path: PathBuf,
+    /// Stable identity of the executable that produced section KV snapshots.
+    /// This prevents a custom fork from sharing the historical llama_cpp path.
+    #[serde(default)]
+    pub runtime_fingerprint: String,
     pub model_path: PathBuf,
     pub host: String,
     pub port: u16,
@@ -255,6 +260,7 @@ impl ResolvedLlamaConfig {
 
     pub fn matches_runtime(&self, other: &Self) -> bool {
         self.inference_engine == other.inference_engine
+            && self.runtime_fingerprint == other.runtime_fingerprint
             && self.executable_path == other.executable_path
             && self.model_path == other.model_path
             && self.host == other.host
@@ -910,7 +916,7 @@ pub fn inspect_provider(app_data_dir: &Path) -> Result<LlamaProviderInfo> {
 }
 
 pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
-    let app_config = load_config(app_data_dir)?;
+    let app_config = load_active_config(app_data_dir)?;
     let host = app_config
         .host
         .clone()
@@ -932,9 +938,12 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         .unwrap_or("");
     let profile = crate::model_profiles::resolve(app_data_dir, gguf.as_ref(), model_filename);
 
+    let runtime_fingerprint = runtime_fingerprint(&primary.executable_path, &primary.engine)?;
+    let model_fingerprint = model_fingerprint(&model_path);
     Ok(ResolvedLlamaConfig {
         inference_engine: primary.engine.clone(),
         executable_path: primary.executable_path.clone(),
+        runtime_fingerprint: runtime_fingerprint.clone(),
         model_path,
         host,
         port,
@@ -976,9 +985,78 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         slot_save_path: app_data_dir
             .join("llama-cache")
             .join("slots")
-            .join(&primary.engine),
+            .join(&runtime_fingerprint)
+            .join(model_fingerprint),
         candidates,
     })
+}
+
+/// Project the applied schema-backed profile into the legacy launcher shape.
+/// Keeping this projection local lets the existing adaptive backend selection
+/// remain stable while all new runtime identities come from the applied file.
+fn load_active_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
+    let ai_path = crate::ai_config::applied_path(app_data_dir);
+    if ai_path.exists() {
+        let config = crate::ai_config::load(app_data_dir)?;
+        crate::ai_config::require_valid(&config)?;
+        let profile = config.profiles.get(&config.active_profile).ok_or_else(|| anyhow!("active AI profile is missing"))?;
+        let mut legacy = WorkspaceLlamaConfig::default();
+        legacy.model_path = Some(profile.model_path.to_string_lossy().into_owned());
+        legacy.host = Some(profile.server.host.clone());
+        legacy.port = Some(profile.server.port);
+        legacy.context_size = Some(profile.inference.context_size);
+        legacy.gpu_layers = profile.inference.gpu_layers;
+        legacy.threads = profile.inference.threads;
+        legacy.temperature = Some(profile.inference.temperature);
+        legacy.top_p = Some(profile.inference.top_p);
+        legacy.backend_preference = Some(profile.inference.backend.clone());
+        legacy.gpu_device = profile.inference.gpu_device.clone();
+        legacy.thinking = Some(profile.inference.thinking);
+        legacy.auto_offload = Some(profile.inference.auto_offload);
+        legacy.max_turns = Some(profile.inference.max_turns);
+        legacy.chat_format = profile.inference.chat_format.clone();
+        legacy.extra_args = profile.inference.extra_args.clone();
+        match config.runtimes.get(&profile.runtime).map(|r| &r.source) {
+            Some(crate::ai_config::RuntimeSource::Bundled { runtime: crate::ai_config::BuiltinRuntime::Bee }) => legacy.inference_engine = Some("beellama".into()),
+            Some(crate::ai_config::RuntimeSource::Path { executable }) => legacy.executable_path = Some(executable.to_string_lossy().into_owned()),
+            Some(crate::ai_config::RuntimeSource::Download { binary_path, .. }) => {
+                let installed = app_data_dir.join("bin").join("runtimes").join(&profile.runtime);
+                let binary = binary_path.as_ref().map(|p| installed.join(p)).unwrap_or(installed.join(executable_name()));
+                legacy.executable_path = Some(binary.to_string_lossy().into_owned());
+            }
+            _ => {}
+        }
+        legacy.deterministic_tools = Some(config.tools.deterministic);
+        legacy.tool_gating = Some(config.tools.gating);
+        legacy.searxng_url = config.retrieval.searxng_url.clone();
+        legacy.prompt_cache = Some(true);
+        return Ok(legacy);
+    }
+    load_config(app_data_dir)
+}
+
+fn runtime_fingerprint(path: &Path, engine: &str) -> Result<String> {
+    let metadata = fs::metadata(path).with_context(|| format!("failed to inspect runtime {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(engine.as_bytes());
+    hasher.update(metadata.len().to_le_bytes());
+    hasher.update(metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos().to_le_bytes()).unwrap_or_default());
+    // Hash the executable when practical. This runs at configuration/startup
+    // boundaries, never on every request, and gives custom forks isolated KV.
+    if metadata.len() <= 512 * 1024 * 1024 {
+        hasher.update(fs::read(path).with_context(|| format!("failed to fingerprint runtime {}", path.display()))?);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn model_fingerprint(path: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    if let Ok(metadata) = fs::metadata(path) {
+        hasher.update(metadata.len().to_le_bytes());
+        hasher.update(metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos().to_le_bytes()).unwrap_or_default());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 pub async fn health_check(client: &Client, config: &ResolvedLlamaConfig) -> bool {
@@ -1615,6 +1693,8 @@ async fn try_start_candidate(
         command
             .arg("--slot-save-path")
             .arg(&slot_save_path)
+            // `--slots` is a boolean endpoint switch in llama-server, not a
+            // numeric slot count. The slot count is controlled by --parallel.
             .arg("--slots")
             // Reuse stable prompt chunks across successive chat renderings.
             // llama.cpp defaults this to 0 (disabled), even with cache_prompt.
