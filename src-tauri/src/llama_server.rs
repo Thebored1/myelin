@@ -68,11 +68,11 @@ impl GpuBackend {
     }
 }
 
-/// Whether the explicit performance GPU preference should keep MoE experts in
-/// CPU RAM for this backend attempt. CPU fallbacks and the explicit Vulkan/Auto
-/// preferences intentionally do not enable this policy.
+/// Whether an explicitly selected GPU backend should keep MoE experts in CPU
+/// RAM for this backend attempt. `auto` and CPU fallbacks intentionally do not
+/// enable this policy: they should preserve the normal adaptive placement.
 fn gpu_moe_policy_active(config: &ResolvedLlamaConfig, candidate: &BackendCandidate) -> bool {
-    config.backend_preference == "gpu" && candidate.backend.is_gpu()
+    candidate.backend.is_gpu() && config.backend_preference == candidate.backend.label()
 }
 
 /// User-supplied tensor placement always takes precedence over the automatic
@@ -822,12 +822,12 @@ fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -
     roots
 }
 
-/// Normalize a user backend preference to "auto" | "gpu" | "cuda" | "vulkan" |
-/// "metal" | "cpu". "gpu" means "prefer any GPU backend" (see `desired_backends`).
+/// Normalize a user backend preference to `auto`, `cuda`, `vulkan`, `metal`,
+/// or `cpu`. The former generic `gpu` value is accepted only as a compatibility
+/// alias and becomes `auto`; new configuration should name the concrete backend.
 fn normalize_preference(raw: Option<&str>) -> String {
     match raw.map(|p| p.trim().to_lowercase()).as_deref() {
         Some("cpu") => "cpu".into(),
-        Some("gpu") => "gpu".into(),
         Some("cuda") => "cuda".into(),
         Some("vulkan") => "vulkan".into(),
         Some("metal") => "metal".into(),
@@ -851,16 +851,6 @@ fn desired_backends(preference: &str) -> Vec<GpuBackend> {
         "cuda" => vec![GpuBackend::Cuda, GpuBackend::Cpu],
         "vulkan" => vec![GpuBackend::Vulkan, GpuBackend::Cpu],
         "metal" => vec![GpuBackend::Metal, GpuBackend::Cpu],
-        // Generic "GPU": try every GPU backend in order (the matching subfolder
-        // only exists for installed backends, so absent ones are skipped) before
-        // CPU. Does NOT depend on detect_nvidia(), which can fail inside the GUI
-        // process and silently strand the model on CPU.
-        "gpu" => vec![
-            GpuBackend::Cuda,
-            GpuBackend::Vulkan,
-            GpuBackend::Metal,
-            GpuBackend::Cpu,
-        ],
         // "auto": best for the detected hardware.
         _ => {
             if cfg!(target_os = "macos") {
@@ -1009,7 +999,7 @@ fn load_active_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
         legacy.threads = profile.inference.threads;
         legacy.temperature = Some(profile.inference.temperature);
         legacy.top_p = Some(profile.inference.top_p);
-        legacy.backend_preference = Some(profile.inference.backend.clone());
+        legacy.backend_preference = Some(profile.inference.backend.to_string());
         legacy.gpu_device = profile.inference.gpu_device.clone();
         legacy.thinking = Some(profile.inference.thinking);
         legacy.auto_offload = Some(profile.inference.auto_offload);
@@ -2437,6 +2427,20 @@ fn resolve_candidates(
         .as_ref()
         .map(|raw| resolve_input_path(app_data_dir, raw));
 
+    // An explicitly configured executable is an authoritative runtime choice.
+    // Do not let the automatic bundled-backend scan replace a user-selected
+    // fork (for example a CPU-only Maple build) with stock llama.cpp. The
+    // launcher adds the executable's directory to the library search path, so
+    // sibling shared libraries remain available without trying other engines.
+    if let Some(exe) = configured_exe {
+        let exe = validate_existing_file(exe, "configured llama-server")?;
+        return Ok(vec![BackendCandidate {
+            backend: GpuBackend::Custom,
+            executable_path: exe,
+            engine: "llama_cpp".into(),
+        }]);
+    }
+
     // Experimental Bee candidates are isolated under bin/bee and precede stock
     // only when explicitly selected. Stock remains the automatic fallback.
     if normalize_engine(workspace_config.inference_engine.as_deref()) == "beellama" {
@@ -2473,9 +2477,6 @@ fn resolve_candidates(
     // PATH. These are `Custom` (unknown) rather than `Cpu` — a flat extraction
     // may itself be a GPU build, so it keeps the configured gpu_layers and the
     // real backend is detected from the startup log.
-    if let Some(exe) = configured_exe {
-        push(&mut candidates, &mut seen, GpuBackend::Custom, exe, "llama_cpp");
-    }
     for root in &roots {
         push(
             &mut candidates,

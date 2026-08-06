@@ -124,6 +124,7 @@ async fn direct_chat_cache(
         oversized: false,
         supports_tools: true,
         verbose_tool_schemas: false,
+        section_context: false,
     });
     if !first.tools.is_empty() {
         return (
@@ -172,6 +173,7 @@ async fn direct_chat_cache(
         oversized: false,
         supports_tools: true,
         verbose_tool_schemas: false,
+        section_context: false,
     });
     let (_, second_response) = match stream_chat_response(client, base, request(second.messages)).await
     {

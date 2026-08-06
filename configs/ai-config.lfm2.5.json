@@ -1,0 +1,89 @@
+{
+  "$schema": "./ai-config.schema.json",
+  "version": 1,
+  "activeProfile": "lfm2.5",
+  "profiles": {
+    "lfm2.5": {
+      "modelPath": "/home/paper/Downloads/LFM2.5-2.6B-Q4_K_M.gguf",
+      "runtime": "bee",
+      "server": {
+        "host": "127.0.0.1",
+        "port": 39281
+      },
+      "inference": {
+        "contextSize": 32768,
+        "gpuLayers": null,
+        "threads": 4,
+        "backend": "cpu",
+        "gpuDevice": null,
+        "temperature": 0.0,
+        "topP": 0.95,
+        "chatFormat": null,
+        "thinking": false,
+        "autoOffload": true,
+        "maxTurns": 4,
+        "extraArgs": []
+      }
+    }
+  },
+  "runtimes": {
+    "bee": {
+      "displayName": "BeeLlama",
+      "source": {
+        "type": "bundled",
+        "runtime": "bee"
+      },
+      "cacheReuseTokens": 64,
+      "extraArgs": [],
+      "environment": {}
+    },
+    "stock": {
+      "displayName": "Stock llama.cpp",
+      "source": {
+        "type": "bundled",
+        "runtime": "stock"
+      },
+      "cacheReuseTokens": 256,
+      "extraArgs": [],
+      "environment": {}
+    }
+  },
+  "cache": {
+    "maxBytes": 8589934592
+  },
+  "embedding": {
+    "enabled": false,
+    "modelPath": null,
+    "runtime": null,
+    "host": null,
+    "port": null,
+    "contextSize": null
+  },
+  "retrieval": {
+    "searxngUrl": null
+  },
+  "tools": {
+    "deterministic": true,
+    "gating": false
+  },
+  "agent": {
+    "port": null,
+    "binPath": null,
+    "toolMode": "native",
+    "strict": false,
+    "promptTools": false,
+    "callOnly": false,
+    "noThink": true,
+    "narrow": null,
+    "slm": null,
+    "friendlyResults": null,
+    "maxCalls": null,
+    "totalMax": null,
+    "toolTimeoutSecs": null,
+    "generationTimeoutSecs": null,
+    "toolSubset": null,
+    "baseUrlOverride": null,
+    "toolChoice": null,
+    "templateKwargs": null
+  }
+}

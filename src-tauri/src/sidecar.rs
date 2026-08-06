@@ -268,14 +268,32 @@ pub async fn run_chat(
     let base = ensure_sidecar(state).await?;
 
     let oh = state.openharn_settings();
+    let external = oh.external_ready();
     // The sidecar reaches llama-server at this base URL. A Settings override
     // wins (handy if the resolved config's host/port isn't what's listening);
     // otherwise derive it from the llama config (config.base_url() + "/v1").
-    let llama_base = oh
-        .base_url
-        .clone()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| format!("{}/v1", config.base_url()));
+    let llama_base = if external {
+        oh.external_base_url
+            .clone()
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        oh.base_url
+            .clone()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| format!("{}/v1", config.base_url()))
+    };
+    let model = if external {
+        oh.external_model.clone().unwrap_or_default()
+    } else {
+        config.model_name()
+    };
+    let api_key = if external {
+        oh.external_api_key.clone()
+    } else {
+        None
+    };
 
     // Tool format is user-controlled. Auto leaves the Openharn per-request
     // policy in charge; Native always uses the model's native function-call
@@ -330,6 +348,7 @@ pub async fn run_chat(
         "selection_scoped": selection_scoped,
         "targeted_write": targeted_write,
         "native_first": !explicit_prompt,
+        "external": external,
     });
     // Host-computed deterministic intent overrides model-based classification.
     // The sidecar uses this value directly and skips the separate model
@@ -396,7 +415,8 @@ pub async fn run_chat(
     let body = json!({
         "request_id": request_id,
         "base_url": llama_base,
-        "model": config.model_name(),
+        "model": model,
+        "api_key": api_key,
         "temperature": config.temperature,
         "max_tokens": max_output_tokens,
         "max_turns": config.max_turns.max(1) as usize,

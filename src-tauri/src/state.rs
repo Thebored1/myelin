@@ -537,72 +537,46 @@ fn section_excerpt(section: &crate::models::ActiveSection) -> String {
     )
 }
 
-fn common_string_prefix(left: &str, right: &str) -> String {
-    left.chars()
-        .zip(right.chars())
-        .take_while(|(left, right)| left == right)
-        .map(|(ch, _)| ch)
-        .collect()
-}
-
-/// Ask llama-server itself to render two otherwise-identical chat requests
-/// whose user content differs, then keep their exact common prefix. This ends
-/// at the append boundary immediately before user content for any chat
-/// template, without Myelin duplicating Jinja semantics. Evaluating that raw
-/// prefix with `n_predict: 0` creates a clean cache that the real chat request
-/// can extend. A synthetic completed chat turn is not appendable on recurrent
-/// models and caused restored LFM2 slots to be discarded with cached=0.
+/// Ask llama-server itself to render the stable section system message without
+/// a user turn. The resulting prompt ends at the system-message boundary, so
+/// the real Chat or Write request can append its tool block, mode policy,
+/// history, and user content after the restored KV prefix. Keeping this
+/// boundary before the mode-specific system message is what lets one section
+/// cache serve both profiles.
 async fn section_prime_body(
     client: &reqwest::Client,
     config: &llama_server::ResolvedLlamaConfig,
-    system: &str,
-    tools: &[serde_json::Value],
+    common_system: &str,
     template_kwargs: &Option<String>,
 ) -> Result<serde_json::Value> {
-    let render = |sentinel: &str| {
-        let mut body = serde_json::json!({
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": sentinel },
-            ],
-        });
-        if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools);
-        }
-        if let Some(raw) = template_kwargs.as_deref().and_then(|value| {
-            serde_json::from_str::<serde_json::Value>(value).ok()
-        }) {
-            body["chat_template_kwargs"] = raw;
-        }
-        body
-    };
+    let mut body = serde_json::json!({
+        "messages": [
+            { "role": "system", "content": common_system },
+            // An explicit empty assistant message asks llama-server for the
+            // completed system boundary instead of appending its generation
+            // prompt. This is important: a user sentinel would save a user
+            // header that is not present when a Write tool block follows.
+            { "role": "assistant", "content": "" },
+        ],
+    });
+    if let Some(raw) = template_kwargs.as_deref().and_then(|value| {
+        serde_json::from_str::<serde_json::Value>(value).ok()
+    }) {
+        body["chat_template_kwargs"] = raw;
+    }
     let url = format!("{}/apply-template", config.base_url());
-    let first = client
+    let response = client
         .post(&url)
-        // The first character must differ. Any shared sentinel prefix would be
-        // mistaken for stable template text and baked into the saved KV.
-        .json(&render("A_MYELIN_SECTION_BOUNDARY_7F3A"))
+        .json(&body)
         .send()
         .await?
         .error_for_status()?
         .json::<serde_json::Value>()
         .await?;
-    let second = client
-        .post(&url)
-        .json(&render("B_MYELIN_SECTION_BOUNDARY_9C2D"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<serde_json::Value>()
-        .await?;
-    let first = first["prompt"]
+    let prompt = response["prompt"]
         .as_str()
         .ok_or_else(|| anyhow!("llama-server /apply-template omitted prompt"))?;
-    let second = second["prompt"]
-        .as_str()
-        .ok_or_else(|| anyhow!("llama-server /apply-template omitted prompt"))?;
-    let prompt = common_string_prefix(first, second);
-    if prompt.trim().is_empty() || !prompt.contains(system) {
+    if prompt.trim().is_empty() || !prompt.contains(common_system) {
         return Err(anyhow!(
             "llama-server produced no stable section-prefix boundary"
         ));
@@ -897,6 +871,17 @@ pub struct OpenharnSettings {
     /// (e.g. "http://127.0.0.1:39281/v1"). None = derived from the resolved
     /// llama config (config.base_url() + "/v1").
     pub base_url: Option<String>,
+    /// Optional plain OpenAI-compatible endpoint for simple Chat/Write turns.
+    /// When enabled, the sidecar omits llama.cpp slot and prompt-cache fields.
+    #[serde(default)]
+    pub external_enabled: bool,
+    #[serde(default)]
+    pub external_base_url: Option<String>,
+    #[serde(default)]
+    pub external_model: Option<String>,
+    /// Stored locally in settings.json and never included in debug events.
+    #[serde(default)]
+    pub external_api_key: Option<String>,
     /// Force `tool_choice` in native FC mode: "auto" (default), "required"
     /// (server grammar-forces a call in the model's own format — rescues
     /// quant-degraded native FC), "none", or a specific tool name.
@@ -917,6 +902,18 @@ fn default_tool_mode() -> String {
 }
 
 impl OpenharnSettings {
+    pub fn external_ready(&self) -> bool {
+        self.external_enabled
+            && self
+                .external_base_url
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .external_model
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+
     fn is_default(&self) -> bool {
         *self == OpenharnSettings::default()
     }
@@ -1014,14 +1011,40 @@ impl AppState {
         let response = self.inner.llama_client.post(format!("{}/v1/chat/completions", resolved.base_url())).json(&request).send().await?.error_for_status()?;
         let body: serde_json::Value = response.json().await?;
         if body.get("error").is_some() { anyhow::bail!("runtime rejected cached inference probe: {body}") }
-        let save = self.inner.llama_client.post(format!("{}/slots/0?action=save", resolved.base_url())).send().await?.error_for_status()?;
-        let save_body: serde_json::Value = save.json().await?;
-        let saved = save_body.get("n_saved").and_then(|v| v.as_u64()).unwrap_or(0);
-        if saved == 0 { anyhow::bail!("runtime slot save probe returned no saved tokens: {save_body}") }
-        let restore = self.inner.llama_client.post(format!("{}/slots/0?action=restore", resolved.base_url())).send().await?.error_for_status()?;
-        let restore_body: serde_json::Value = restore.json().await?;
-        let restored = restore_body.get("n_restored").and_then(|v| v.as_u64()).unwrap_or(0);
-        if restored != saved { anyhow::bail!("runtime slot restore probe mismatch: saved {saved}, restored {restored}") }
+        // The slot endpoints require a filename in the JSON body. Use a
+        // unique probe name so validation cannot collide with a real section
+        // cache, then remove the temporary file whether the probe succeeds or
+        // fails.
+        let validation_filename = format!("myelin-validation-{}.slot", uuid::Uuid::new_v4());
+        let validation_path = resolved.slot_save_path.join(&validation_filename);
+        let probe_result: anyhow::Result<(u64, u64)> = async {
+            let save = self
+                .inner
+                .llama_client
+                .post(format!("{}/slots/0?action=save", resolved.base_url()))
+                .json(&serde_json::json!({"filename": validation_filename}))
+                .send()
+                .await?
+                .error_for_status()?;
+            let save_body: serde_json::Value = save.json().await?;
+            let saved = save_body.get("n_saved").and_then(|v| v.as_u64()).unwrap_or(0);
+            if saved == 0 { anyhow::bail!("runtime slot save probe returned no saved tokens: {save_body}") }
+
+            let restore = self
+                .inner
+                .llama_client
+                .post(format!("{}/slots/0?action=restore", resolved.base_url()))
+                .json(&serde_json::json!({"filename": validation_filename}))
+                .send()
+                .await?
+                .error_for_status()?;
+            let restore_body: serde_json::Value = restore.json().await?;
+            let restored = restore_body.get("n_restored").and_then(|v| v.as_u64()).unwrap_or(0);
+            if restored != saved { anyhow::bail!("runtime slot restore probe mismatch: saved {saved}, restored {restored}") }
+            Ok((saved, restored))
+        }.await;
+        let _ = fs::remove_file(&validation_path);
+        let (saved, restored) = probe_result?;
         log::info!("runtime validation passed: slot save/restore saved={saved} restored={restored}");
         Ok(self.ai_config_status())
     }
@@ -2460,13 +2483,24 @@ impl AppState {
                     "Place the cursor where you want to write, or select text to rewrite. Then send again."
                 ));
             }
+            let external_settings = self.openharn_settings();
+            if external_settings.external_enabled && !external_settings.external_ready() {
+                return Err(anyhow!(
+                    "External model mode is enabled, but its API base URL and model name are not configured."
+                ));
+            }
 
             // Let the synthetic prefix warm-up overlap document retrieval. It
             // is finalized immediately before model submission, so the first
             // real request can reuse its KV prefix instead of always starting
             // with cached=0.
             let pipeline_started = std::time::Instant::now();
-            let config = self.ensure_ai_pipeline_ready().await?;
+            let external_model = external_settings.external_ready();
+            let config = if external_model {
+                self.ensure_external_pipeline_ready().await?
+            } else {
+                self.ensure_ai_pipeline_ready().await?
+            };
             let _ = self.handle.emit(
                 "ai://debug_event",
                 serde_json::json!({
@@ -2486,10 +2520,13 @@ impl AppState {
             // leaving room for the system prompt, tools, chat history, and the
             // reply. ~4 chars/token → a 32K-token context holds ~65K chars of note,
             // far past the old flat 24K cap.
-            let ctx_tokens = self
-                .running_ctx_size()
-                .await
-                .unwrap_or(config.context_size) as usize;
+            let ctx_tokens = if external_model {
+                config.context_size as usize
+            } else {
+                self.running_ctx_size()
+                    .await
+                    .unwrap_or(config.context_size) as usize
+            };
             let prompt_shape = crate::note_prompt::NotePromptShape::build(
                 &note.body,
                 &note.relative_path,
@@ -2564,14 +2601,7 @@ impl AppState {
             let note_body_excerpt = active_section
                 .as_ref()
                 .filter(|section| !section.content.trim().is_empty())
-                .map(|section| {
-                    let label = section.label.as_deref().unwrap_or("active section");
-                    let content: String = section.content.chars().take(80_000).collect();
-                    format!("[ACTIVE VIEWER SECTION — {label}]
-Section key: {}
-{content}
-[/ACTIVE VIEWER SECTION]", section.key)
-                })
+                .map(section_excerpt)
                 .unwrap_or(base_note_body_excerpt);
             // Give the model the note's CURRENT content as editable text. The old
             // "reference only — do NOT copy" framing (plus a 400-char cap) meant it
@@ -2591,7 +2621,21 @@ Section key: {}
                 None
             };
             let context = if interaction_mode == "write" {
-                assemble_targeted_write_context(
+                if active_section_request {
+                    assemble_section_context(
+                        &note.title,
+                        &note_body_excerpt,
+                        notebook_cells.as_deref(),
+                    )
+                } else {
+                    assemble_targeted_write_context(
+                        &note.title,
+                        &note_body_excerpt,
+                        notebook_cells.as_deref(),
+                    )
+                }
+            } else if active_section_request {
+                assemble_section_context(
                     &note.title,
                     &note_body_excerpt,
                     notebook_cells.as_deref(),
@@ -2859,16 +2903,24 @@ Section key: {}
             // Capability gate: skip tools entirely for a model whose template
             // can't do tool calls (profile-known or probed once + cached), so it
             // works as a chat-only model instead of erroring every turn.
-            let model_id = config.model_path.to_string_lossy().to_string();
-            let supports_tools = crate::tool_capability::supports_tools(
-                &self.inner.llama_client,
-                &config.base_url(),
-                &self.inner.app_data_dir,
-                &config.model_path,
-                &model_id,
-                config.supports_tools,
-            )
-            .await;
+            let supports_tools = if external_model {
+                // The remote provider owns its tool capability. Keep Write
+                // available so the endpoint can accept the normal targeted
+                // write schema; a provider that rejects tools returns a clear
+                // upstream error instead of probing the local runtime.
+                true
+            } else {
+                let model_id = config.model_path.to_string_lossy().to_string();
+                crate::tool_capability::supports_tools(
+                    &self.inner.llama_client,
+                    &config.base_url(),
+                    &self.inner.app_data_dir,
+                    &config.model_path,
+                    &model_id,
+                    config.supports_tools,
+                )
+                .await
+            };
             let _ = self.handle.emit(
                 "ai://debug_event",
                 serde_json::json!({
@@ -2919,7 +2971,9 @@ Section key: {}
                 "edit" => "EDITOR ACTION: Perform exactly this isolated edit with write_note. Return only the replacement or insertion content in the tool call; never reproduce text outside the target.",
                 _ => "AUTO TURN POLICY: Decide whether the user needs a direct answer or an operation.",
             };
-            self.finish_prompt_warmup().await;
+            if !external_model {
+                self.finish_prompt_warmup().await;
+            }
             // From this point through generation and snapshot persistence, the
             // request owns slot 0. Background section primes can finish their
             // current page first, but cannot replace the resident KV mid-turn.
@@ -2958,6 +3012,7 @@ Section key: {}
                 oversized: retrieval_backed,
                 supports_tools: supports_tools && !fast_document_answer,
                 verbose_tool_schemas: config.verbose_tool_schemas,
+                section_context: active_section_request,
             });
             let intent_is_tool = Some(turn.intent_is_tool);
             let user_content = turn
@@ -2982,7 +3037,11 @@ Section key: {}
             // conversation is deliberately not stored in this snapshot; it is
             // appended below by the normal request path.
             let template_kwargs = self.openharn_settings().template_kwargs;
-            if let Some(section) = active_section.as_ref() {
+            if !external_model {
+                if let Some(section) = active_section
+                .as_ref()
+                .filter(|_| active_section_request)
+            {
                 let system = messages
                     .first()
                     .and_then(|message| message["content"].as_str())
@@ -3001,7 +3060,6 @@ Section key: {}
                     &nid,
                     section,
                     system,
-                    &tools,
                     &template_kwargs,
                     interaction_mode,
                 )
@@ -3019,7 +3077,12 @@ Section key: {}
                         "requestId": request_id,
                     }),
                 );
+                }
             } else {
+                // Whole-document/other-page retrieval intentionally does not
+                // claim the visible section's resident slot. Its dynamic
+                // evidence belongs to the request tail and must not replace
+                // the reusable local-section prefix.
                 *self.inner.active_slot_cache.lock() = None;
             }
 
@@ -3088,7 +3151,7 @@ Section key: {}
                 self.save_conversation(&nid, trimmed);
             }
 
-            if turn_contains_note_mutation(&final_messages) {
+            if !external_model && turn_contains_note_mutation(&final_messages) {
                 let state = self.clone();
                 let note_id = nid.clone();
                 let warm_mode = interaction_mode.to_string();
@@ -3100,7 +3163,7 @@ Section key: {}
                         log::debug!("post-write prompt-cache warm-up skipped: {error}");
                     }
                 });
-            } else if config.prompt_cache && active_section.is_none() {
+            } else if !external_model && config.prompt_cache && active_section.is_none() {
                 // Ordinary notes may retain one whole-note resume snapshot.
                 // Viewer sections deliberately never save conversation-bearing
                 // files: their disk snapshots stay clean and universal, while
@@ -4053,6 +4116,35 @@ Section key: {}
         } else {
             None
         };
+        let template_kwargs = self.openharn_settings().template_kwargs;
+        if config.prompt_cache
+            && section_scoped
+            && matches!(interaction_mode, "chat" | "write")
+        {
+            let common_system = assemble_section_context(
+                &note.title,
+                &excerpt,
+                cells.as_deref(),
+            );
+            // Never enqueue synthetic inference while a real chat owns the
+            // slot. This path is only a warm request for the shared prefix.
+            if self.inner.chat_lock.try_lock().is_err() {
+                return Ok(());
+            }
+            let _slot_guard = self.inner.llama_slot_lock.lock().await;
+            if let Some(section) = active_section.as_ref() {
+                self.prepare_section_slot(
+                    &config,
+                    &note_id,
+                    section,
+                    &common_system,
+                    &template_kwargs,
+                    interaction_mode,
+                )
+                .await;
+                return Ok(());
+            }
+        }
         let model_id = config.model_path.to_string_lossy().to_string();
         let supports_tools = crate::tool_capability::supports_tools(
             &self.inner.llama_client,
@@ -4077,7 +4169,6 @@ Section key: {}
             config.verbose_tool_schemas,
         );
         let tools_json = serde_json::to_string(&tools).unwrap_or_default();
-        let template_kwargs = self.openharn_settings().template_kwargs;
         let identity = Self::slot_identity(
             &config,
             ctx_tokens as u32,
@@ -4098,7 +4189,6 @@ Section key: {}
                     &note_id,
                     section,
                     &system,
-                    &tools,
                     &template_kwargs,
                     interaction_mode,
                 )
@@ -4147,7 +4237,10 @@ Section key: {}
         // is still coming up.
         let scan_note_id = note_id.clone();
         let scan_total = sections.len();
-        let scan_total_profiles = scan_total.saturating_mul(2);
+        // One shared section prefix now serves both Chat and Write. The mode
+        // policy and tool schema remain in the live request tail, so there is
+        // only one expensive model priming pass per section.
+        let scan_total_profiles = scan_total;
         let emit_progress = |
             state: &AppState,
             done: usize,
@@ -4207,36 +4300,17 @@ Section key: {}
                 return Err(error);
             }
         };
-        let prompt_shape = crate::note_prompt::NotePromptShape::build(
-            &note.body,
-            &note.relative_path,
-            ctx_tokens,
-        );
-        let attachment_backed = note.source_pdf.is_some();
-        let pdf_only = note.relative_path.to_ascii_lowercase().ends_with(".pdf");
-        let retrieval_backed = prompt_shape.oversized || attachment_backed || pdf_only;
         let doc_type = note.relative_path.to_ascii_lowercase();
         let cells = if doc_type.ends_with(".ipynb") {
             crate::notebook::present(&note.body)
         } else {
             None
         };
-        let model_id = config.model_path.to_string_lossy().to_string();
-        let supports_tools = crate::tool_capability::supports_tools(
-            &self.inner.llama_client,
-            &config.base_url(),
-            &self.inner.app_data_dir,
-            &config.model_path,
-            &model_id,
-            config.supports_tools,
-        )
-        .await;
         let template_kwargs = self.openharn_settings().template_kwargs;
         struct SectionProfile {
             section: crate::models::ActiveSection,
             profile: &'static str,
-            system: String,
-            tools: Vec<serde_json::Value>,
+            common_system: String,
             identity: String,
             filename: String,
         }
@@ -4256,33 +4330,25 @@ Section key: {}
         let mut prepared_by_section: std::collections::HashMap<String, u8> =
             std::collections::HashMap::new();
         let mut preprepared = 0usize;
-        let mut prefailed = 0usize;
-        let mut prefailed_details = Vec::new();
+        let prefailed = 0usize;
+        let prefailed_details = Vec::new();
 
-        // Build the active Chat + Write pair first, then the remaining Chat
-        // profiles, then the remaining Write profiles. The active pair becomes
-        // available quickly while the complete dual-profile scan continues.
+        // Build the active shared prefix first, followed by the remaining
+        // sections. Chat and Write consume the same artifact.
         let mut scheduled = Vec::with_capacity(scan_total_profiles);
-        let mut enqueue = |section: &crate::models::ActiveSection, mode: &'static str, profile: &'static str| {
+        let mut enqueue = |section: &crate::models::ActiveSection| {
             let excerpt = section_excerpt(section);
-            let (system, tools) = warmup_prefix(
+            let common_system = assemble_section_context(
                 &note.title,
                 &excerpt,
                 cells.as_deref(),
-                mode,
-                &doc_type,
-                if mode == "chat" { false } else { supports_tools },
-                retrieval_backed,
-                config.verbose_tool_schemas,
             );
-            let tools_json = serde_json::to_string(&tools).unwrap_or_default();
-            let identity_mode = if mode == "chat" { "section" } else { mode };
             let identity = Self::slot_identity(
                 &config,
                 ctx_tokens as u32,
-                identity_mode,
-                &system,
-                &tools_json,
+                "section-common",
+                &common_system,
+                "",
                 &template_kwargs,
             );
             let filename = Self::section_slot_filename(&note_id, section, &identity);
@@ -4294,35 +4360,22 @@ Section key: {}
                 });
             if valid {
                 preprepared += 1;
-                *prepared_by_section.entry(section.key.clone()).or_default() += 1;
-            } else if mode == "write" && !supports_tools {
-                prefailed += 1;
-                prefailed_details.push(format!(
-                    "{} · Write",
-                    section.label.as_deref().unwrap_or(&section.key)
-                ));
+                prepared_by_section.insert(section.key.clone(), 1);
             } else {
                 scheduled.push(SectionProfile {
                     section: section.clone(),
-                    profile,
-                    system,
-                    tools,
+                    profile: "shared",
+                    common_system,
                     identity,
                     filename,
                 });
             }
         };
-        let active = &ordered_sections[0];
-        enqueue(active, "chat", "chat");
-        enqueue(active, "write", "write");
-        for section in ordered_sections.iter().skip(1) {
-            enqueue(section, "chat", "chat");
-        }
-        for section in ordered_sections.iter().skip(1) {
-            enqueue(section, "write", "write");
+        for section in &ordered_sections {
+            enqueue(section);
         }
         drop(enqueue);
-        let section_done = prepared_by_section.values().filter(|count| **count >= 2).count();
+        let section_done = prepared_by_section.values().filter(|count| **count >= 1).count();
         if scheduled.is_empty() {
             emit_progress(
                 self,
@@ -4404,14 +4457,13 @@ Section key: {}
                     .label
                     .clone()
                     .unwrap_or_default();
-                let section_done = prepared_by_section.values().filter(|count| **count >= 2).count();
+                let section_done = prepared_by_section.values().filter(|count| **count >= 1).count();
                 emit(prepared, section_done, &label, profile.profile, failed, &failed_details, false);
                 let body = match tokio::select! {
                     result = section_prime_body(
                         &client,
                         &config,
-                        &profile.system,
-                        &profile.tools,
+                        &profile.common_system,
                         &template_kwargs,
                     ) => result,
                     _ = state.inner.section_cache_resume.notified(),
@@ -4448,7 +4500,7 @@ Section key: {}
                                 identity: profile.identity.clone(),
                             });
                             prepared += 1;
-                            *prepared_by_section.entry(profile.section.key.clone()).or_default() += 1;
+                            prepared_by_section.insert(profile.section.key.clone(), 1);
                             log::info!(
                                 "section cache: cached {label} {} ({}/{})",
                                 profile.profile,
@@ -4473,7 +4525,7 @@ Section key: {}
                     }
                 }
             }
-            let section_done = prepared_by_section.values().filter(|count| **count >= 2).count();
+            let section_done = prepared_by_section.values().filter(|count| **count >= 1).count();
             emit(prepared, section_done, "", "", failed, &failed_details, true);
         });
         let mut active_scan = self.inner.section_cache.lock();
@@ -4555,11 +4607,16 @@ Section key: {}
         // Bump whenever Myelin changes message serialization independently of
         // the model/template files. This revision removes the managed LFM2
         // closed-think prefill, so older snapshots are not token-compatible.
-        // v4 primes the exact raw chat-template prefix at the user-content
-        // append boundary with sentinels that differ at byte zero. v2 contained
-        // a dummy completed turn; v3 accidentally included a shared sentinel
-        // prefix. Neither is reusable by recurrent/hybrid models.
-        "slot-wire-v4-exact-user-boundary".hash(&mut hasher);
+        // v4 remains the wire revision for ordinary Chat/Write and whole-note
+        // snapshots. Shared viewer sections use a separate revision because
+        // their saved boundary is now the end of the common system message,
+        // before tools and the mode-specific system tail.
+        let wire_revision = if interaction_mode == "section-common" {
+            "slot-wire-v5-shared-section-system-boundary"
+        } else {
+            "slot-wire-v4-exact-user-boundary"
+        };
+        wire_revision.hash(&mut hasher);
         config.chat_template_override.hash(&mut hasher);
         match config.chat_template_override.as_deref() {
             Some("lfm2") => include_str!("../templates/lfm2.jinja").hash(&mut hasher),
@@ -4749,14 +4806,12 @@ Section key: {}
         note_id: &str,
         section: &crate::models::ActiveSection,
         system: &str,
-        tools: &[serde_json::Value],
         template_kwargs: &Option<String>,
         profile_mode: &str,
     ) {
         if !config.prompt_cache || section.content.trim().is_empty() {
             return;
         }
-        let tools_json = serde_json::to_string(tools).unwrap_or_default();
         // The eager scan fingerprints the context size the server actually
         // launched with. Use the same value here: auto-configuration may have
         // changed it from config.context_size, and hashing the configured value
@@ -4768,9 +4823,9 @@ Section key: {}
         let clean_identity = Self::slot_identity(
             config,
             running_ctx,
-            if profile_mode == "chat" { "section" } else { profile_mode },
+            "section-common",
             system,
-            &tools_json,
+            "",
             template_kwargs,
         );
         let filename = Self::section_slot_filename(note_id, section, &clean_identity);
@@ -4808,7 +4863,6 @@ Section key: {}
             &self.inner.llama_client,
             config,
             system,
-            tools,
             template_kwargs,
         )
         .await
@@ -4822,7 +4876,7 @@ Section key: {}
         let url = format!("{}/completion", config.base_url());
         match self.inner.llama_client.post(url).json(&body).send().await {
             Ok(response) if response.status().is_success() => {
-                if self.save_slot_file(config, &filename, &clean_identity, profile_mode).await {
+                if self.save_slot_file(config, &filename, &clean_identity, "shared").await {
                     *self.inner.active_slot_cache.lock() = Some(ActiveSlotCache {
                         note_id: note_id.to_string(),
                         filename,
@@ -4937,6 +4991,57 @@ Section key: {}
             self.save_note_slot(&record.0, &record.1).await;
         })
         .await;
+    }
+
+    /// Start only the sidecar for an external OpenAI-compatible endpoint. The
+    /// local llama runtime is not required for this mode; a resolved local
+    /// config is used only for prompt sizing and compatibility defaults when
+    /// one is available.
+    async fn ensure_external_pipeline_ready(&self) -> Result<llama_server::ResolvedLlamaConfig> {
+        let _pipeline_guard = self.inner.ai_pipeline_lock.lock().await;
+        let config = llama_server::resolve_config(&self.inner.app_data_dir).unwrap_or_else(|_| {
+            let settings = self.openharn_settings();
+            llama_server::ResolvedLlamaConfig {
+                inference_engine: "external".into(),
+                executable_path: PathBuf::new(),
+                runtime_fingerprint: "external-endpoint".into(),
+                model_path: PathBuf::from(
+                    settings
+                        .external_model
+                        .as_deref()
+                        .unwrap_or("external-model"),
+                ),
+                host: "127.0.0.1".into(),
+                port: 0,
+                context_size: 24_096,
+                gpu_layers: None,
+                threads: None,
+                temperature: 0.0,
+                top_p: 0.95,
+                chat_format: None,
+                extra_args: Vec::new(),
+                backend: None,
+                backend_preference: "auto".into(),
+                gpu_device: None,
+                thinking: false,
+                auto_offload: false,
+                max_turns: 4,
+                chat_template_override: None,
+                model_role: "chat".into(),
+                supports_tools: Some(true),
+                prefers_prompt_tools: None,
+                verbose_tool_schemas: false,
+                tool_choice: None,
+                template_kwargs: None,
+                deterministic_tools: false,
+                tool_gating: false,
+                prompt_cache: false,
+                slot_save_path: PathBuf::new(),
+                candidates: Vec::new(),
+            }
+        });
+        crate::sidecar::ensure_sidecar(self).await?;
+        Ok(config)
     }
 
     /// Prepare every process/check that would otherwise delay the first model
@@ -5818,6 +5923,30 @@ fn assemble_targeted_write_context(
         context.push_str(&format!(
             "\n\nHere is the note's CURRENT content as reference material. Generate only the requested insertion or replacement fragment for the armed cursor or text selection; never reproduce surrounding content or the full note.\n--- CURRENT NOTE REFERENCE ---\n{body_excerpt}\n--- END CURRENT NOTE REFERENCE ---"
         ));
+    }
+    context
+}
+
+/// Shared, mode-neutral context for a viewer section. Chat and Write must see
+/// the exact same bytes before their profile-specific system message; this is
+/// the only part that is persisted in the shared section KV snapshot.
+fn assemble_section_context(
+    title: &str,
+    section_excerpt: &str,
+    notebook_cells: Option<&str>,
+) -> String {
+    let mut context = format!("The note currently open is titled \"{title}\".");
+    if let Some(cells) = notebook_cells {
+        context.push_str("\n\n");
+        context.push_str(cells);
+    } else if section_excerpt.trim().is_empty() {
+        context.push_str("\n\nThe active source section is empty.");
+    } else {
+        context.push_str(
+            "\n\nThe active source section is included below as reference material. Preserve its document syntax when answering or writing.\n--- ACTIVE SOURCE SECTION ---\n",
+        );
+        context.push_str(section_excerpt);
+        context.push_str("\n--- END ACTIVE SOURCE SECTION ---");
     }
     context
 }
@@ -6874,19 +7003,9 @@ mod tests {
         authorize_tool_policy,
         canonical_wire_conversation, chat_history_to_messages, enforce_slot_cache_budget,
         ensure_packages, hashed_embedding, parse_tex_log, slugify, split_frontmatter,
-        common_string_prefix, tokenize, unique_pdf_path, warmup_prefix, wrap_bare_latex,
+        tokenize, unique_pdf_path, warmup_prefix, wrap_bare_latex,
     };
     use crate::models::ChatMessage;
-
-    #[test]
-    fn section_cache_boundary_stops_before_dynamic_user_content() {
-        let first = "<system>stable</system><user>ALPHA</user><assistant>";
-        let second = "<system>stable</system><user>BETA</user><assistant>";
-        assert_eq!(
-            common_string_prefix(first, second),
-            "<system>stable</system><user>"
-        );
-    }
 
     #[test]
     fn bare_latex_keeps_partial_preamble_before_document_body() {
@@ -6995,6 +7114,7 @@ mod tests {
             oversized: false,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         assert_eq!(turn.messages[0]["content"].as_str().unwrap(), system);
         assert_eq!(
@@ -7024,6 +7144,7 @@ mod tests {
             oversized: false,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         assert_eq!(turn.messages[0]["content"].as_str().unwrap(), system);
         assert_eq!(
@@ -7051,6 +7172,7 @@ mod tests {
             oversized: false,
             supports_tools: false,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         assert_eq!(turn.messages[0]["content"].as_str().unwrap(), system);
         assert!(turn.tools.is_empty());

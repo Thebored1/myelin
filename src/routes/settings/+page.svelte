@@ -9,7 +9,7 @@
 	import { chatSidebarShortcut } from '$lib/stores';
 	import { prettyShortcut, shortcutFromEvent, shortcutsCollide } from '$lib/keyboardShortcut';
 
-	type BackendPref = 'auto' | 'gpu' | 'vulkan' | 'metal' | 'cpu';
+	type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 
 	let currentModelPath = $state('');
 	let contextSize = $state<number | null>(null);
@@ -182,13 +182,6 @@
 						: 'cpu'
 	);
 
-	// A "GPU" (performance) choice is only distinct from "Vulkan" when there's a
-	// discrete GPU: an NVIDIA card (CUDA), or more than one GPU (a real iGPU +
-	// dGPU split). A single non-NVIDIA GPU is integrated → GPU adds nothing over
-	// Vulkan, so it's disabled. (Robust: no fragile codename matching — lspci
-	// reports APUs under inconsistent names like "Lucienne".)
-	const hasDedicatedGpu = $derived(nvidiaDetected || gpus.length >= 2);
-
 	let statusPoll: ReturnType<typeof setInterval> | undefined;
 	onDestroy(() => {
 		if (statusPoll) clearInterval(statusPoll);
@@ -209,8 +202,10 @@
 				? 'vulkan'
 				: backendPreference === 'metal'
 					? 'metal'
-					: nvidiaDetected
+					: backendPreference === 'cuda'
 						? 'cuda'
+						: nvidiaDetected
+							? 'cuda'
 						: 'vulkan';
 		if (!installedBackends.includes(need)) {
 			return {
@@ -234,6 +229,10 @@
 					: backendPreference === 'metal'
 						? installed('metal')
 							? 'metal'
+							: 'cpu'
+					: backendPreference === 'cuda'
+						? installed('cuda')
+							? 'cuda'
 							: 'cpu'
 						: nvidiaDetected && installed('cuda')
 							? 'cuda'
@@ -303,6 +302,10 @@
 		tool_timeout_secs: number | null;
 		tool_subset: string | null;
 		base_url: string | null;
+		external_enabled: boolean;
+		external_base_url: string | null;
+		external_model: string | null;
+		external_api_key: string | null;
 	};
 	let ohPort = $state<number | null>(null);
 	let ohBinPath = $state('');
@@ -318,6 +321,10 @@
 	let ohTotalMax = $state<number | null>(null);
 	let ohToolTimeout = $state<number | null>(null);
 	let ohBaseUrl = $state('');
+	let externalEnabled = $state(false);
+	let externalBaseUrl = $state('');
+	let externalModel = $state('');
+	let externalApiKey = $state('');
 	let ohSaving = $state(false);
 
 	type AiConfigStatus = {
@@ -484,22 +491,19 @@
 			const status = await loadProviderStatus();
 			downloadableBackends = await invoke<string[]>('downloadable_backends');
 			downloadableBeeBackends = await invoke<string[]>('downloadable_bee_backends');
-			// Auto = let the app pick; GPU = dedicated/fastest; Vulkan = integrated;
-			// CPU = most reliable. Anything unrecognised (or unset) means Auto.
+			// Auto chooses based on hardware; the remaining values name the exact
+			// backend. The retired generic GPU value is treated as Auto.
 			const sp = status.config?.backendPreference;
 			backendPreference =
 				sp === 'cpu'
 					? 'cpu'
 					: sp === 'vulkan'
 						? 'vulkan'
-						: sp === 'metal'
-							? 'metal'
-							: sp === 'gpu'
-								? 'gpu'
-								: 'auto';
-			// No dedicated GPU → the explicit "GPU" choice is meaningless; fall to
-			// Vulkan. (Auto needs no fixup — it adapts on its own.)
-			if (!hasDedicatedGpu && backendPreference === 'gpu') backendPreference = 'vulkan';
+					: sp === 'metal'
+						? 'metal'
+						: sp === 'cuda'
+							? 'cuda'
+							: 'auto';
 			thinking = status.config?.thinking ?? false;
 			autoOffload = status.config?.autoOffload ?? true;
 			deterministicTools = status.config?.deterministicTools ?? true;
@@ -534,6 +538,10 @@
 				ohTotalMax = oh.total_max ?? null;
 				ohToolTimeout = oh.tool_timeout_secs ?? null;
 				ohBaseUrl = oh.base_url ?? '';
+				externalEnabled = oh.external_enabled ?? false;
+				externalBaseUrl = oh.external_base_url ?? '';
+				externalModel = oh.external_model ?? '';
+				externalApiKey = oh.external_api_key ?? '';
 			} catch (e) {
 				console.error('Failed to load openharn settings:', e);
 			}
@@ -823,7 +831,11 @@
 					max_calls: ohMaxCalls || null,
 					total_max: ohTotalMax || null,
 					tool_timeout_secs: ohToolTimeout || null,
-					base_url: ohBaseUrl.trim() || null
+					base_url: ohBaseUrl.trim() || null,
+					external_enabled: externalEnabled,
+					external_base_url: externalBaseUrl.trim() || null,
+					external_model: externalModel.trim() || null,
+					external_api_key: externalApiKey.trim() || null
 				}
 			});
 			saved = true;
@@ -911,6 +923,60 @@
 			</div>
 		</section>
 
+		<section class="settings-section">
+			<h2>External AI Provider</h2>
+			<p class="description">
+				Use a hosted or separately running OpenAI-compatible model for simple Chat and Write requests.
+				This is independent of the local runtime JSON configuration and does not use Myelin's llama.cpp
+				slots or section KV caches.
+			</p>
+			<label class="toggle-row">
+				<input type="checkbox" bind:checked={externalEnabled} onchange={saveOpenharn} />
+				<span class="toggle-text">
+					<strong>Use external model for Chat and Write</strong>
+					<span class="toggle-hint">Turn off to return to the active local model profile.</span>
+				</span>
+			</label>
+			<div class="advanced-grid">
+				<div class="input-group">
+					<label for="external_base_url">API base URL</label>
+					<input
+						type="url"
+						id="external_base_url"
+						bind:value={externalBaseUrl}
+						onchange={saveOpenharn}
+						placeholder="https://api.openai.com/v1"
+					/>
+				</div>
+				<div class="input-group">
+					<label for="external_model">Model name</label>
+					<input
+						type="text"
+						id="external_model"
+						bind:value={externalModel}
+						onchange={saveOpenharn}
+						placeholder="gpt-4o-mini or local-model-name"
+					/>
+				</div>
+				<div class="input-group full-width">
+					<label for="external_api_key">API key</label>
+					<input
+						type="password"
+						id="external_api_key"
+						bind:value={externalApiKey}
+						onchange={saveOpenharn}
+						placeholder="Optional for local compatible servers"
+						autocomplete="off"
+					/>
+					<p class="compute-hint">Stored locally in Myelin's settings.json and omitted from debug prompts.</p>
+				</div>
+			</div>
+			<p class="compute-hint">
+				The base URL should normally end in <code>/v1</code>. Chat works with text-only providers; Write
+				requires compatible tool/function calling.
+			</p>
+		</section>
+
 		<div style="display: none">
 		{#if true}
 		<section class="settings-section">
@@ -974,14 +1040,14 @@
 			<div class="compute-device">
 				<span class="compute-label">Compute device</span>
 				<div class="segmented" role="group" aria-label="Compute device">
-					{#each [{ value: 'auto', label: 'Auto' }, { value: 'gpu', label: 'GPU' }, { value: 'vulkan', label: 'Vulkan' }, ...(downloadableBackends.includes('metal') ? [{ value: 'metal', label: 'Metal' }] : []), { value: 'cpu', label: 'CPU' }] as opt}
-						{@const disabled = opt.value === 'gpu' && !hasDedicatedGpu}
+					{#each [{ value: 'auto', label: 'Auto' }, { value: 'cuda', label: 'CUDA' }, { value: 'vulkan', label: 'Vulkan' }, ...(downloadableBackends.includes('metal') ? [{ value: 'metal', label: 'Metal' }] : []), { value: 'cpu', label: 'CPU' }] as opt}
+						{@const disabled = opt.value !== 'auto' && opt.value !== 'cpu' && !installedBackends.includes(opt.value)}
 						<button
 							type="button"
 							class="segment"
 							class:active={backendPreference === opt.value}
 							{disabled}
-							title={disabled ? 'No dedicated GPU detected on this system' : ''}
+							title={disabled ? `No ${opt.label} build installed` : ''}
 							onclick={() => selectBackend(opt.value as BackendPref)}
 						>
 							{opt.label}
@@ -995,27 +1061,16 @@
 					{:else if backendPreference === 'vulkan'}
 						Power-saving: runs on the integrated GPU via Vulkan. The app still manages offload and
 						falls back to CPU if needed.
+					{:else if backendPreference === 'cuda'}
+						NVIDIA GPU acceleration through CUDA. Requires the installed CUDA backend.
 					{:else if backendPreference === 'metal'}
 						macOS GPU acceleration: runs through Apple Metal. Requires the downloaded Metal backend
 						and falls back to CPU if needed.
-					{:else if backendPreference === 'gpu'}
-						Performance: uses the fastest available GPU (the dedicated GPU where present). Falls
-						back automatically.
 					{:else}
 						Recommended: detects your hardware and picks the fastest backend — dedicated GPU (CUDA),
 						integrated GPU (Vulkan), or CPU — and falls back on its own.
 					{/if}
 				</p>
-
-				{#if !hasDedicatedGpu && backendPreference !== 'cpu' && backendPreference !== 'auto' && backendPreference !== 'metal'}
-					<div class="device-issue warn">
-						<span class="issue-icon">ℹ️</span>
-						<span
-							>No dedicated GPU detected — GPU mode is unavailable. Using the integrated GPU via
-							Vulkan, or switch to CPU for the most reliable output.</span
-						>
-					</div>
-				{/if}
 
 				{#if gpuIssue}
 					<div class="device-issue warn">

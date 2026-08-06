@@ -62,13 +62,44 @@ impl Default for ServerConfig {
     fn default() -> Self { Self { host: "127.0.0.1".into(), port: 39281 } }
 }
 
+/// Concrete llama.cpp compute backends. `gpu` was previously accepted as a
+/// generic preference, but it made it impossible to tell which binary/backend
+/// the user was requesting. Keep it as a deserialization alias for old config
+/// files; it is normalized to `auto` whenever the config is serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputeBackend {
+    #[serde(alias = "gpu")]
+    Auto,
+    Cpu,
+    Cuda,
+    Vulkan,
+    Metal,
+}
+
+impl Default for ComputeBackend {
+    fn default() -> Self { Self::Auto }
+}
+
+impl std::fmt::Display for ComputeBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Vulkan => "vulkan",
+            Self::Metal => "metal",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct InferenceConfig {
     pub context_size: u32,
     pub gpu_layers: Option<i32>,
     pub threads: Option<u32>,
-    pub backend: String,
+    pub backend: ComputeBackend,
     pub gpu_device: Option<String>,
     pub temperature: f32,
     pub top_p: f32,
@@ -82,7 +113,7 @@ pub struct InferenceConfig {
 
 impl Default for InferenceConfig {
     fn default() -> Self {
-        Self { context_size: 24096, gpu_layers: None, threads: None, backend: "auto".into(),
+        Self { context_size: 24096, gpu_layers: None, threads: None, backend: ComputeBackend::Auto,
             gpu_device: None, temperature: 0.0, top_p: 0.95, chat_format: None,
             thinking: false, auto_offload: true, max_turns: 4, extra_args: Vec::new() }
     }

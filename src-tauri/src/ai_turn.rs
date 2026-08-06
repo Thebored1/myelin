@@ -33,6 +33,10 @@ pub struct AiTurnInput<'a> {
     pub oversized: bool,
     pub supports_tools: bool,
     pub verbose_tool_schemas: bool,
+    /// Section-backed viewer turns put the stable document context in its own
+    /// system message.  The mode preamble follows it, so a shared section KV
+    /// snapshot can be reused by Chat and Write before either profile's tail.
+    pub section_context: bool,
 }
 
 pub struct AiTurnBuilder;
@@ -82,10 +86,23 @@ impl AiTurnBuilder {
         // Chat always renders the minimal direct user content (raw question plus
         // any turn-specific context) regardless of the read-only schemas offered.
         let direct_chat = input.mode == "chat";
-        let mut messages = vec![json!({
-            "role": "system",
-            "content": format!("{preamble}\n\n{}", input.system_context),
-        })];
+        let mut messages = if input.section_context {
+            vec![
+                json!({
+                    "role": "system",
+                    "content": input.system_context,
+                }),
+                json!({
+                    "role": "system",
+                    "content": preamble,
+                }),
+            ]
+        } else {
+            vec![json!({
+                "role": "system",
+                "content": format!("{preamble}\n\n{}", input.system_context),
+            })]
+        };
         messages.extend(input.conversation.iter().cloned());
         messages.push(json!({
             "role": "user",
@@ -588,6 +605,7 @@ mod tests {
             oversized: false,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         })
     }
 
@@ -613,6 +631,48 @@ mod tests {
         );
         assert_eq!(turn.messages[1]["metadata"]["interaction_mode"], "chat");
         assert_eq!(turn.messages[1]["content"], "What is this note about?");
+    }
+
+    #[test]
+    fn section_context_is_shared_before_chat_or_write_profile_tail() {
+        let shared = "COMMON SECTION BYTES";
+        let chat = AiTurnBuilder::build(AiTurnInput {
+            mode: "chat",
+            doc_type: "md",
+            note_title: "Section note",
+            system_context: shared,
+            conversation: &[],
+            question: "what is here?",
+            mode_policy: "chat policy",
+            turn_instructions: "",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: false,
+            verbose_tool_schemas: false,
+            section_context: true,
+        });
+        let write = AiTurnBuilder::build(AiTurnInput {
+            mode: "write",
+            doc_type: "md",
+            note_title: "Section note",
+            system_context: shared,
+            conversation: &[],
+            question: "write here",
+            mode_policy: "write policy",
+            turn_instructions: "cursor is armed",
+            has_open_note: true,
+            edit_thread: false,
+            oversized: false,
+            supports_tools: true,
+            verbose_tool_schemas: false,
+            section_context: true,
+        });
+        assert_eq!(chat.messages[0]["content"], shared);
+        assert_eq!(write.messages[0]["content"], shared);
+        assert_ne!(chat.messages[1]["content"], write.messages[1]["content"]);
+        assert_eq!(chat.messages[1]["role"], "system");
+        assert_eq!(write.messages[1]["role"], "system");
     }
 
     #[test]
@@ -681,6 +741,7 @@ mod tests {
             oversized: false,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         assert!(turn.intent_is_tool);
         assert_eq!(names(&turn), vec!["write_note"]);
@@ -702,6 +763,7 @@ mod tests {
             oversized: false,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         assert!(turn.intent_is_tool);
         assert_eq!(names(&turn), vec!["edit_notebook"]);
@@ -725,6 +787,7 @@ mod tests {
             oversized: true,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         let got = names(&turn);
         assert!(got.contains(&"find_in_note"));
@@ -762,6 +825,7 @@ mod tests {
             oversized: false,
             supports_tools: false,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         assert!(tool_less.tools.is_empty());
         let small = tool_less.messages[0]["content"].as_str().unwrap();
@@ -789,6 +853,7 @@ mod tests {
             oversized: false,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         assert_eq!(turn.messages.len(), 4);
         assert_eq!(turn.messages[1]["content"], "first question");
@@ -814,6 +879,7 @@ mod tests {
             oversized: false,
             supports_tools: true,
             verbose_tool_schemas: false,
+            section_context: false,
         });
         let content = turn.messages.last().unwrap()["content"].as_str().unwrap();
         assert!(content.contains("a 2-bit LFM2 model scores 47.5%"));

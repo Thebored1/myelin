@@ -391,7 +391,7 @@
 		sectionDone: number;
 		sectionTotal: number;
 		label: string;
-		profile: 'chat' | 'write' | '';
+		profile: 'shared' | 'chat' | 'write' | '';
 		startedAt: number;
 		finished: boolean;
 		failed: number;
@@ -436,7 +436,7 @@
 		// the elapsed-time clock.
 		sectionCache = {
 			done: 0,
-			total: sections.length * 2,
+			total: sections.length,
 			sectionDone: 0,
 			sectionTotal: sections.length,
 			label: sections[0]?.label ?? '',
@@ -3369,7 +3369,7 @@
 			sectionDone?: number;
 			sectionTotal?: number;
 			label: string;
-			profile?: 'chat' | 'write' | '';
+			profile?: 'shared' | 'chat' | 'write' | '';
 				failed?: number;
 				failedDetails?: string[];
 				finished?: boolean;
@@ -3380,7 +3380,7 @@
 					done,
 					total,
 					sectionDone = 0,
-					sectionTotal = Math.max(1, Math.ceil(total / 2)),
+					sectionTotal = Math.max(1, total),
 					label,
 					profile = '',
 					failed = 0,
@@ -3685,16 +3685,16 @@
 						<span class="section-cache-label">
 							{#if sectionCache.finished && sectionCache.failed > 0}
 								Prepared {sectionCache.sectionDone}/{sectionCache.sectionTotal} sections;
-								{sectionCache.failed} cache profiles failed.
+								{sectionCache.failed} section caches failed.
 								{sectionCache.failedDetails.length > 0 ? ` Failed: ${sectionCache.failedDetails.join(', ')}.` : ''}
 								Took {formatSectionCacheDuration(sectionCache.elapsedMs ?? 0)}. Reopen to retry.
 							{:else if sectionCache.finished}
 								Prepared {sectionCache.sectionDone}/{sectionCache.sectionTotal} sections for Chat + Write in
 								{formatSectionCacheDuration(sectionCache.elapsedMs ?? 0)}
 							{:else}
-								Preparing {sectionCache.done}/{sectionCache.total} cache profiles
+								Preparing {sectionCache.done}/{sectionCache.total} shared section caches
 								{sectionCache.label ? ` — ${sectionCache.label}` : ''}
-								{sectionCache.profile ? ` · ${sectionCache.profile}` : ''}…
+								{sectionCache.profile === 'shared' ? ' · Chat + Write' : sectionCache.profile ? ` · ${sectionCache.profile}` : ''}…
 							{/if}
 						</span>
 					</div>

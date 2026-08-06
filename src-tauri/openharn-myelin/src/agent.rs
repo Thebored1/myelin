@@ -149,6 +149,10 @@ pub struct Options {
     /// prompt-tools remains the bounded fallback if native decoding fails.
     #[serde(default)]
     pub targeted_write: bool,
+    /// Use a plain OpenAI-compatible endpoint. Do not send llama.cpp-specific
+    /// slot or prompt-cache fields when this is enabled.
+    #[serde(default)]
+    pub external: bool,
 }
 
 fn default_max_calls() -> usize {
@@ -258,6 +262,7 @@ impl Default for Options {
             prefers_prompt_tools: false,
             native_first: false,
             targeted_write: false,
+            external: false,
         }
     }
 }
@@ -597,8 +602,11 @@ pub async fn run_loop(
 
     // strict grammar implies prompt-tools (text-form calls); mirror openharn.
     // Per-request policy: only use prompt-tools + strict for multi-call requests
-    // (plan_len > 1). Single-call requests use native FC, which scores ~80% vs
-    // 29.5% for forced prompt-tools (paper Table 1).
+    // (plan_len > 1). Single-call requests use native FC by default, but an
+    // explicit profile preference must also apply to focused Write. LFM2's
+    // low-quant native calls are unreliable, while Maple TQ2 works better with
+    // native calls. The armed target still limits the offered schema to exactly
+    // one mutation tool; it does not override the selected wire format.
     //
     // Exception: when the model profile says `prefers_prompt_tools` (e.g. LFM2
     // at Q2_K_XL), native FC is unreliable — the model emits empty/incomplete
@@ -613,7 +621,7 @@ pub async fn run_loop(
         || narrow
         || (!opts.native_first && !targeted_native
             && (plan_len > 1 || (opts.prefers_prompt_tools && plan_len <= 1)));
-    let mut prompt_tools = !targeted_native && (strict || opts.prompt_tools);
+    let mut prompt_tools = strict || opts.prompt_tools;
     let mut no_think = opts.no_think && !strict;
     // Call-only keeps tool requests structured until the authoritative write
     // result completes the operation.
@@ -694,9 +702,11 @@ pub async fn run_loop(
             "max_tokens": max_tokens,
             "stream": true,
             "stream_options": { "include_usage": true },
-            "cache_prompt": true,
-            "id_slot": req.session.slot_id,
         });
+        if !opts.external {
+            body["cache_prompt"] = json!(true);
+            body["id_slot"] = json!(req.session.slot_id);
+        }
         if has_tools {
             body["tools"] = effective_schemas.clone();
             body["tool_choice"] = json!("none");
@@ -805,9 +815,11 @@ pub async fn run_loop(
             "max_tokens": max_tokens,
             "stream": true,
             "stream_options": { "include_usage": true },
-            "cache_prompt": true,
-            "id_slot": req.session.slot_id,
         });
+        if !opts.external {
+            body["cache_prompt"] = json!(true);
+            body["id_slot"] = json!(req.session.slot_id);
+        }
         if chat_lookup_completed && !prompt_tools {
             // Keep the identical native schema rendering on the retrieval
             // follow-up. Removing `tools` here changes the fixed prefix and
@@ -1072,10 +1084,12 @@ pub async fn run_loop(
                 "max_tokens": max_tokens,
                 "stream": true,
                 "stream_options": { "include_usage": true },
-                "cache_prompt": true,
-                "id_slot": req.session.slot_id,
                 "grammar": json!(harness::tool_grammar(&effective_schemas, "call")),
             });
+            if !opts.external {
+                fb_body["cache_prompt"] = json!(true);
+                fb_body["id_slot"] = json!(req.session.slot_id);
+            }
             if let Some(kw) = &opts.template_kwargs {
                 if let Ok(v) = serde_json::from_str::<Value>(kw) {
                     fb_body["chat_template_kwargs"] = v;

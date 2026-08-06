@@ -134,6 +134,30 @@ npm run build:sidecar
 npm run tauri build
 ```
 
+## External OpenAI-compatible models
+
+Myelin can send ordinary Chat and targeted Write requests to a local or remote
+OpenAI-compatible endpoint. This mode is intentionally separate from Myelin's
+local llama-server runtime: it does not send llama.cpp slot, KV-cache, or
+`cache_prompt` fields and does not prepare document section slots.
+
+Configure it in **Settings → Agent (openharn) → External OpenAI-compatible
+model**:
+
+- Enable **Use external model for Chat and Write**.
+- Set the API base URL, including the `/v1` API prefix when required, for
+  example `https://api.openai.com/v1` or `http://127.0.0.1:1234/v1`.
+- Set the provider's model name.
+- Optionally set an API key. It is stored locally in Myelin's `settings.json`
+  and is not included in AI debug prompts.
+
+The endpoint must support streaming OpenAI-compatible chat completions. Chat
+works with text-only providers; Write also requires compatible tool/function
+calling because edits are applied through Myelin's guarded write tools. Disable
+external mode to return to the configured local runtime and section KV-cache
+behavior. See [`notes/external-model-endpoints.md`](notes/external-model-endpoints.md)
+for the implementation details and tradeoffs.
+
 For troubleshooting and platform-specific details, see
 [`docs/openharn-sidecar.md`](docs/openharn-sidecar.md).
 
