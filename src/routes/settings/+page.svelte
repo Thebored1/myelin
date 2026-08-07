@@ -1933,16 +1933,16 @@
 	}
 	.config-modal {
 		width: min(900px, 95vw); height: min(760px, 90vh); display: flex; flex-direction: column;
-		background: var(--background-primary, #171717); border: 1px solid var(--border-default);
+		background: var(--bg-modal); color: var(--text-primary); border: 1px solid var(--border-default);
 		border-radius: 8px; box-shadow: 0 24px 80px rgba(0,0,0,.5); padding: 1rem;
 	}
 	.config-modal-header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
 	.config-modal-header h2 { margin: 0; }
 	.config-modal-header p { margin: .35rem 0 1rem; color: var(--text-secondary); font-size: .8rem; word-break: break-all; }
-	.config-editor { flex: 1; width: 100%; resize: none; box-sizing: border-box; padding: 1rem; color: var(--text-primary); background: #0d0d0d; border: 1px solid var(--border-default); border-radius: 5px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+	.config-editor { flex: 1; width: 100%; resize: none; box-sizing: border-box; padding: 1rem; color: var(--text-primary); background: var(--bg-input); border: 1px solid var(--border-default); border-radius: 5px; caret-color: var(--accent-100); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 	.config-search-row { display: flex; align-items: center; gap: .6rem; margin-bottom: .6rem; color: var(--text-secondary); font-size: .8rem; }
-	.config-search { flex: 1; padding: .5rem .65rem; color: var(--text-primary); background: #0d0d0d; border: 1px solid var(--border-default); border-radius: 4px; }
-	.config-nav-btn { min-width: 2rem; padding: .35rem .55rem; color: var(--text-primary); background: var(--background-secondary, #242424); border: 1px solid var(--border-default); border-radius: 4px; cursor: pointer; }
+	.config-search { flex: 1; padding: .5rem .65rem; color: var(--text-primary); background: var(--bg-input); border: 1px solid var(--border-default); border-radius: 4px; }
+	.config-nav-btn { min-width: 2rem; padding: .35rem .55rem; color: var(--text-primary); background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: 4px; cursor: pointer; }
 	.config-nav-btn:disabled { opacity: .4; cursor: default; }
 	.config-modal-actions { display: flex; justify-content: flex-end; gap: .6rem; padding-top: 1rem; }
 	.config-modal-actions .primary { background: var(--accent-100); color: #fff; }

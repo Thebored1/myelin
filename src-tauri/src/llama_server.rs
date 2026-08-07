@@ -987,7 +987,8 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
 fn load_active_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
     let ai_path = crate::ai_config::applied_path(app_data_dir);
     if ai_path.exists() {
-        let config = crate::ai_config::load(app_data_dir)?;
+        let config = crate::ai_config::load_applied(app_data_dir)?
+            .ok_or_else(|| anyhow!("applied AI configuration disappeared while loading"))?;
         crate::ai_config::require_valid(&config)?;
         let profile = config.profiles.get(&config.active_profile).ok_or_else(|| anyhow!("active AI profile is missing"))?;
         let mut legacy = WorkspaceLlamaConfig::default();

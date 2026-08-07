@@ -919,6 +919,36 @@ impl OpenharnSettings {
     }
 }
 
+/// Project the applied schema-backed agent settings into the live sidecar
+/// settings. Legacy external-endpoint fields are intentionally preserved: they
+/// are still stored in settings.json and are not part of the managed runtime
+/// configuration schema.
+fn project_ai_agent_settings(
+    legacy: &OpenharnSettings,
+    agent: &crate::ai_config::AgentConfig,
+) -> OpenharnSettings {
+    let mut settings = legacy.clone();
+    if let Some(value) = agent.port { settings.port = Some(value); }
+    if let Some(value) = agent.bin_path.clone() { settings.bin_path = Some(value); }
+    if let Some(value) = agent.tool_mode.clone() { settings.tool_mode = value; }
+    if let Some(value) = agent.strict { settings.strict = value; }
+    if let Some(value) = agent.prompt_tools { settings.prompt_tools = value; }
+    if let Some(value) = agent.call_only { settings.call_only = value; }
+    if let Some(value) = agent.no_think { settings.no_think = value; }
+    if let Some(value) = agent.narrow { settings.narrow = value; }
+    if let Some(value) = agent.slm { settings.slm = value; }
+    if let Some(value) = agent.friendly_results { settings.friendly_results = value; }
+    if let Some(value) = agent.max_calls { settings.max_calls = Some(value); }
+    if let Some(value) = agent.total_max { settings.total_max = Some(value); }
+    if let Some(value) = agent.tool_timeout_secs { settings.tool_timeout_secs = Some(value); }
+    if let Some(value) = agent.generation_timeout_secs { settings.generation_timeout_secs = Some(value); }
+    if let Some(value) = agent.tool_subset.clone() { settings.tool_subset = Some(value); }
+    if let Some(value) = agent.base_url_override.clone() { settings.base_url = Some(value); }
+    if let Some(value) = agent.tool_choice.clone() { settings.tool_choice = Some(value); }
+    if let Some(value) = agent.template_kwargs.clone() { settings.template_kwargs = Some(value); }
+    settings
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Frontmatter {
     id: Option<String>,
@@ -1059,6 +1089,18 @@ impl AppState {
         let actual = crate::ai_config::canonical_hash(&config)?;
         if actual != candidate_hash { anyhow::bail!("AI configuration changed after validation; validate it again") }
         crate::ai_config::write_atomic(&crate::ai_config::applied_path(&self.inner.app_data_dir), &config)?;
+        // Apply changes to the in-memory sidecar settings as part of the same
+        // lifecycle transition. Without this projection, the next request
+        // continued using the legacy settings.json values until process exit,
+        // which made a correctly applied native TQ2 profile still log as
+        // prompt-mode.
+        let projected = project_ai_agent_settings(&self.openharn_settings(), &config.agent);
+        *self.inner.openharn_settings.lock() = projected;
+        self.invalidate_ai_pipeline();
+        if let Ok(mut guard) = self.inner.sidecar.try_lock() {
+            *guard = None;
+        }
+        *self.inner.active_slot_cache.lock() = None;
         Ok(self.ai_config_status())
     }
 
@@ -1095,7 +1137,14 @@ impl AppState {
 
         let settings = load_settings(&app_data_dir)?;
         let workspace_path = settings.workspace_path.map(PathBuf::from);
-        let openharn_settings = settings.openharn.clone();
+        // The applied schema-backed config is authoritative for managed
+        // OpenHarn settings. Fall back to the legacy mirror only when no valid
+        // applied config exists, preserving compatibility during migration.
+        let openharn_settings = match crate::ai_config::load_applied(&app_data_dir) {
+            Ok(Some(config)) if crate::ai_config::require_valid(&config).is_ok() =>
+                project_ai_agent_settings(&settings.openharn, &config.agent),
+            _ => settings.openharn.clone(),
+        };
         let background_settings = settings.background.clone();
 
         Ok(Self {
@@ -2643,7 +2692,10 @@ impl AppState {
             } else {
                 assemble_note_context(&note.title, &note_body_excerpt, notebook_cells.as_deref())
             };
-            let stable_context = context.clone();
+            let stable_context = add_no_think_directive(
+                &context,
+                self.openharn_settings().no_think,
+            );
             let mut turn_instructions = String::new();
             // Viewer chat is section-scoped by default. Whole-document and
             // explicitly different-page questions leave this fast path and use
@@ -4121,10 +4173,13 @@ impl AppState {
             && section_scoped
             && matches!(interaction_mode, "chat" | "write")
         {
-            let common_system = assemble_section_context(
-                &note.title,
-                &excerpt,
-                cells.as_deref(),
+            let common_system = add_no_think_directive(
+                &assemble_section_context(
+                    &note.title,
+                    &excerpt,
+                    cells.as_deref(),
+                ),
+                self.openharn_settings().no_think,
             );
             // Never enqueue synthetic inference while a real chat owns the
             // slot. This path is only a warm request for the shared prefix.
@@ -4338,10 +4393,13 @@ impl AppState {
         let mut scheduled = Vec::with_capacity(scan_total_profiles);
         let mut enqueue = |section: &crate::models::ActiveSection| {
             let excerpt = section_excerpt(section);
-            let common_system = assemble_section_context(
-                &note.title,
-                &excerpt,
-                cells.as_deref(),
+            let common_system = add_no_think_directive(
+                &assemble_section_context(
+                    &note.title,
+                    &excerpt,
+                    cells.as_deref(),
+                ),
+                self.openharn_settings().no_think,
             );
             let identity = Self::slot_identity(
                 &config,
@@ -5949,6 +6007,19 @@ fn assemble_section_context(
         context.push_str("\n--- END ACTIVE SOURCE SECTION ---");
     }
     context
+}
+
+/// Maple/TQ2's template does not reliably honor llama.cpp's reasoning switch
+/// or `enable_thinking:false` for tool-bearing requests. Its in-prompt control
+/// is `/no_think`. Keep the directive in the stable system prefix whenever
+/// thinking is explicitly disabled, so live requests and saved section KV
+/// snapshots remain byte-compatible.
+fn add_no_think_directive(system: &str, enabled: bool) -> String {
+    if enabled && !system.trim_start().starts_with("/no_think") {
+        format!("/no_think\n{system}")
+    } else {
+        system.to_string()
+    }
 }
 
 #[cfg(test)]

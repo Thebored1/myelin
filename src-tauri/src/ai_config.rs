@@ -260,6 +260,23 @@ pub fn load(app_data: &Path) -> Result<AiConfigFile> {
     serde_json::from_str(&text).with_context(|| format!("invalid AI config JSON at {}", path.display()))
 }
 
+/// Load the last explicitly applied configuration.
+///
+/// The candidate file is user-editable and may contain unapplied changes. Runtime
+/// startup and live settings must never accidentally consume those changes, so
+/// callers that need the active configuration use this separate loader.
+pub fn load_applied(app_data: &Path) -> Result<Option<AiConfigFile>> {
+    let path = applied_path(app_data);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("failed reading {}", path.display()))?;
+    let config = serde_json::from_str(&text)
+        .with_context(|| format!("invalid applied AI config JSON at {}", path.display()))?;
+    Ok(Some(config))
+}
+
 pub fn write_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path.parent().ok_or_else(|| anyhow!("configuration has no parent directory"))?;
     fs::create_dir_all(parent)?;

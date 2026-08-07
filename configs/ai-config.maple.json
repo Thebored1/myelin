@@ -93,7 +93,7 @@
     "generationTimeoutSecs": null,
     "toolSubset": null,
     "baseUrlOverride": null,
-    "toolChoice": null,
+    "toolChoice": "required",
     "templateKwargs": "{\"enable_thinking\":false}"
   }
 }
