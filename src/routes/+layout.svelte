@@ -9,6 +9,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { providerAiStatus, type AiStatus } from '$lib/aiStatus';
+	import '@fontsource-variable/inter';
+	import '@fontsource-variable/jetbrains-mono';
 
 	let { children } = $props();
 
@@ -181,12 +183,6 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<link rel="preconnect" href="https://fonts.googleapis.com" />
-	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
-	<link
-		href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
-		rel="stylesheet"
-	/>
 </svelte:head>
 
 {#if $page.url.pathname === '/quick'}
@@ -413,8 +409,9 @@
 		--bg-panel: #101010;
 		--bg-code: #1f1d1c;
 		--bg-selection: var(--accent-100);
-		--font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-		--font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+		--font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
+		--font-mono:
+			'JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
 		--space-1: 0.25rem;
 		--space-2: 0.5rem;
 		--space-3: 0.75rem;

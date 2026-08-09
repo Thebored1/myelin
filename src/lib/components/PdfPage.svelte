@@ -94,7 +94,10 @@
 
 			const renderContext = {
 				canvasContext: canvas.getContext('2d') as CanvasRenderingContext2D,
-				viewport: viewport
+				viewport: viewport,
+				// The app draws its own trusted annotation layer below. Do not ask
+				// PDF.js to process embedded PDF annotations or their actions.
+				annotationMode: pdfjsLib.AnnotationMode.DISABLE
 			};
 
 			renderTask = page.render(renderContext);

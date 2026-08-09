@@ -17,6 +17,7 @@
 	import { noteOpened, noteClosed } from '$lib/llamaWarm';
 	import { chatSidebarShortcut, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
 	import { shortcutMatches } from '$lib/keyboardShortcut';
+	import { formatBacklinkContext } from '$lib/backlinkContext';
 	import { theme } from '$lib/theme';
 	import type Vditor from 'vditor';
 	import 'mathlive/fonts.css';
@@ -2065,25 +2066,6 @@
 		if (vditorInstance) vditorInstance.setTheme(skin);
 	});
 
-	function parseBacklinkContext(context: string): string {
-		if (!context) return '';
-		let html = context;
-		// Strip markdown links but keep text and make it look like a link
-		html = html.replace(
-			/\[([^\]]+)\]\([^)]+\)/g,
-			'<span style="color: var(--accent-200); font-weight: 500;">$1</span>'
-		);
-		// Strip transclusion syntax
-		html = html.replace(
-			/\(\([a-fA-F0-9]{6}\)\)/g,
-			'<span style="color: var(--text-secondary);">(Block Link)</span>'
-		);
-		// Bold and italic
-		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-		html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-		return html;
-	}
-
 	function scanForTransclusions() {
 		if (!vditorContainer) return;
 		const links = vditorContainer.querySelectorAll('[data-type="a"]:not(.transclusion-wrapper)');
@@ -3985,7 +3967,7 @@
 												class="context-excerpt"
 												style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.4;"
 											>
-												{@html parseBacklinkContext(link.contextExcerpt)}
+												{@html formatBacklinkContext(link.contextExcerpt)}
 											</p>
 										</li>
 									{/each}
@@ -5204,7 +5186,7 @@
 	/* Main Pane */
 	.main-pane {
 		flex: 1;
-		min-width: 26rem;
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		background: var(--bg-page);
@@ -5268,6 +5250,43 @@
 
 	:global(.vditor-reset) {
 		padding-top: var(--space-6) !important;
+	}
+
+	/* Vditor ships light Markdown table colors that otherwise override the app
+	   theme inside the editor and preview panes. Keep normal content wrapping,
+	   but let wide tables scroll instead of forcing their cells to wrap. */
+	:global(.vditor-reset table) {
+		display: block !important;
+		width: max-content !important;
+		min-width: 0 !important;
+		max-width: 100% !important;
+		overflow: auto !important;
+		white-space: nowrap !important;
+		border: 1px solid var(--border-default) !important;
+		border-collapse: collapse !important;
+		background: var(--bg-panel) !important;
+		color: var(--text-primary) !important;
+	}
+	:global(.vditor-reset table tr) {
+		background: var(--bg-panel) !important;
+		border-top: 1px solid var(--border-default) !important;
+	}
+	:global(.vditor-reset table tbody tr:nth-child(2n)) {
+		background: var(--overlay-faint) !important;
+	}
+	:global(.vditor-reset table td),
+	:global(.vditor-reset table th) {
+		border: 1px solid var(--border-default) !important;
+		color: var(--text-primary) !important;
+		background: transparent !important;
+		white-space: nowrap !important;
+		word-break: normal !important;
+		overflow-wrap: normal !important;
+		max-width: none !important;
+	}
+	:global(.vditor-reset table th) {
+		background: var(--bg-code) !important;
+		font-weight: 600 !important;
 	}
 
 	.toolbar-note-actions-container {
@@ -5420,10 +5439,12 @@
 		-ms-overflow-style: none !important;
 	}
 
-	/* The editor's usable text width is exactly 120 monospace characters. */
+	/* Keep the editor content readable on wide windows while allowing it to
+	   shrink below that cap in a narrow pane so prose can wrap. */
 	:global(.vditor-reset) {
-		width: min(100%, calc(120ch + 2 * var(--space-8))) !important;
-		max-width: none !important;
+		width: 100% !important;
+		min-width: 0 !important;
+		max-width: calc(120ch + 2 * var(--space-8)) !important;
 		margin: 0 auto !important;
 		padding-left: var(--space-8) !important;
 		padding-right: var(--space-8) !important;
@@ -5551,7 +5572,7 @@
 			transform: none;
 			margin-right: calc(var(--sidebar-width, 20rem) * -1);
 			/* Docking is allowed only when the editor can retain its pane minimum. */
-			max-width: min(calc(100% - 26rem), 42rem);
+			max-width: min(calc(100% - 20rem), 42rem);
 			box-shadow: none;
 			flex-shrink: 0;
 		}
@@ -5710,6 +5731,15 @@
 	}
 	.related-list a:hover {
 		color: var(--accent-100);
+	}
+
+	.context-excerpt :global(.backlink-link-label) {
+		color: var(--accent-200);
+		font-weight: 500;
+	}
+
+	.context-excerpt :global(.backlink-block-label) {
+		color: var(--text-secondary);
 	}
 
 	@keyframes fade-in {
@@ -6316,6 +6346,48 @@
 	.chat-message.assistant .chat-bubble {
 		background: var(--bg-panel);
 		color: var(--text-primary);
+	}
+	/* Markdown tables rendered inside assistant messages need an explicit
+	   surface and text palette; otherwise WebKit falls back to a white table
+	   while the surrounding chat bubble remains themed. */
+	:global(.chat-bubble .selectable-content) {
+		min-width: 0;
+		overflow-x: auto;
+	}
+	:global(.chat-bubble table) {
+		width: 100%;
+		min-width: 24rem;
+		overflow-x: auto;
+		margin: var(--space-3) 0;
+		border: 1px solid var(--border-default);
+		border-collapse: collapse;
+		background: var(--bg-panel);
+		color: var(--text-secondary);
+		font-size: 0.8rem;
+		line-height: 1.45;
+	}
+	:global(.chat-bubble thead) {
+		background: var(--bg-code);
+	}
+	:global(.chat-bubble th),
+	:global(.chat-bubble td) {
+		padding: var(--space-2) var(--space-3);
+		border: 1px solid var(--border-default);
+		text-align: left;
+		vertical-align: top;
+		white-space: nowrap;
+		word-break: normal;
+		overflow-wrap: normal;
+	}
+	:global(.chat-bubble th) {
+		color: var(--text-primary);
+		font-weight: 600;
+	}
+	:global(.chat-bubble tbody tr:nth-child(even)) {
+		background: var(--overlay-faint);
+	}
+	:global(.chat-bubble tbody tr:hover) {
+		background: var(--hover-overlay-strong);
 	}
 	.chat-message.tool-only .chat-bubble {
 		padding-top: var(--space-1);

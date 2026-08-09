@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
-	import { listen } from '@tauri-apps/api/event';
+	import { emit, listen } from '@tauri-apps/api/event';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { open } from '@tauri-apps/plugin-dialog';
@@ -58,6 +58,8 @@
 	let dashTasks = $state<TaskItem[]>([]);
 	let expandedTaskId = $state<number | null>(null);
 	let currentWorkspaceForTasks = $state<string | null>(null);
+	let suppressNextTaskBroadcast = 0;
+	let lastTaskJson = '';
 	let pinnedNoteIds = $state<string[]>([]);
 	let showTimeline = $state(true);
 	let tasksCollapsed = $state(false);
@@ -112,6 +114,19 @@
 		const toSave = JSON.stringify(dashTasks);
 		if (currentWorkspaceForTasks) {
 			localStorage.setItem(`tasks_${currentWorkspaceForTasks}`, toSave);
+			if (toSave !== lastTaskJson) {
+				lastTaskJson = toSave;
+				if (suppressNextTaskBroadcast > 0) {
+					suppressNextTaskBroadcast -= 1;
+				} else {
+					queueMicrotask(() =>
+						void emit('tasks://sync', {
+							workspacePath: currentWorkspaceForTasks,
+							source: 'main'
+						})
+					);
+				}
+			}
 			localStorage.setItem(`pinned_${currentWorkspaceForTasks}`, JSON.stringify(pinnedNoteIds));
 			localStorage.setItem(`timeline_${currentWorkspaceForTasks}`, showTimeline.toString());
 			localStorage.setItem(`taskscollapsed_${currentWorkspaceForTasks}`, tasksCollapsed.toString());
@@ -629,12 +644,19 @@
 						message = '';
 						indexing = false;
 						void refreshApp();
+					} else if (event.payload === 'failed') {
+						message = 'Indexing failed. Try rebuilding the index.';
+						indexing = false;
+						void refreshApp();
 					}
 				}),
-				listen('tasks://added', () => {
+				listen<{ workspacePath?: string; source?: string }>('tasks://sync', (event) => {
 					const ws = currentWorkspaceForTasks ?? app?.workspacePath;
 					if (!ws) return;
+					if (event.payload?.workspacePath && event.payload.workspacePath !== ws) return;
+					if (event.payload?.source === 'main') return;
 					try {
+						suppressNextTaskBroadcast += 1;
 						const stored = localStorage.getItem(`tasks_${ws}`);
 						dashTasks = stored ? JSON.parse(stored) : [];
 					} catch {

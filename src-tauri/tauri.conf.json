@@ -16,7 +16,7 @@
 				"title": "myelin",
 				"width": 1440,
 				"height": 900,
-				"minWidth": 950,
+				"minWidth": 600,
 				"minHeight": 480,
 				"resizable": true,
 				"fullscreen": false,
@@ -24,7 +24,36 @@
 			}
 		],
 		"security": {
-			"csp": null
+			"csp": {
+				"default-src": "'self'",
+				"connect-src": "'self' ipc: http://ipc.localhost asset: http://asset.localhost https://asset.localhost blob: data: https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"script-src": "'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"worker-src": "'self' blob: https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"style-src": "'self' 'unsafe-inline' blob: data:",
+				"font-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data:",
+				"img-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data:",
+				"media-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data:",
+				"frame-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data:",
+				"object-src": "'none'",
+				"base-uri": "'none'",
+				"form-action": "'self'",
+				"frame-ancestors": "'none'"
+			},
+			"devCsp": {
+				"default-src": "'self' http://localhost:1420",
+				"connect-src": "'self' ipc: http://ipc.localhost asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420 ws://localhost:1420 https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"script-src": "'self' http://localhost:1420 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"worker-src": "'self' blob: http://localhost:1420 https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"style-src": "'self' 'unsafe-inline' blob: data: http://localhost:1420",
+				"font-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420",
+				"img-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420",
+				"media-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420",
+				"frame-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420",
+				"object-src": "'none'",
+				"base-uri": "'none'",
+				"form-action": "'self'",
+				"frame-ancestors": "'none'"
+			}
 		}
 	},
 	"bundle": {

@@ -62,6 +62,8 @@
 
 	let tasks = $state<TaskItem[]>([]);
 	let activeFilter = $state<'all' | 'active' | 'done'>('all');
+	let suppressNextTaskBroadcast = 0;
+	let lastTaskJson = '';
 
 	let filteredTasks = $derived.by(() => {
 		if (activeFilter === 'active') return tasks.filter((t) => !t.done);
@@ -81,7 +83,7 @@
 	function saveTasks() {
 		if (!workspacePath) return;
 		localStorage.setItem(`tasks_${workspacePath}`, JSON.stringify(tasks));
-		emit('tasks://added');
+		void emit('tasks://sync', { workspacePath, source: 'quick' });
 	}
 
 	async function loadWorkspace() {
@@ -125,8 +127,21 @@
 
 	$effect(() => {
 		if (workspacePath) {
-			localStorage.setItem(`tasks_${workspacePath}`, JSON.stringify(tasks));
-			emit('tasks://added');
+			const toSave = JSON.stringify(tasks);
+			localStorage.setItem(`tasks_${workspacePath}`, toSave);
+			if (toSave !== lastTaskJson) {
+				lastTaskJson = toSave;
+				if (suppressNextTaskBroadcast > 0) {
+					suppressNextTaskBroadcast -= 1;
+				} else {
+					queueMicrotask(() =>
+						void emit('tasks://sync', {
+							workspacePath,
+							source: 'quick'
+						})
+					);
+				}
+			}
 		}
 	});
 
@@ -210,6 +225,16 @@
 		shownAt = Date.now();
 		void loadWorkspace();
 		setTimeout(() => inputEl?.focus(), 30);
+		const unlistenTasks = listen<{ workspacePath?: string; source?: string }>(
+			'tasks://sync',
+			(event) => {
+				if (!workspacePath) return;
+				if (event.payload?.workspacePath && event.payload.workspacePath !== workspacePath) return;
+				if (event.payload?.source === 'quick') return;
+				suppressNextTaskBroadcast += 1;
+				loadTasks();
+			}
+		);
 
 		// Each time the global shortcut re-shows the window, clear + refocus.
 		const un = listen('quick://focus', () => {
@@ -250,6 +275,7 @@
 		return () => {
 			ro.disconnect();
 			document.documentElement.classList.remove('quick-window');
+			void unlistenTasks.then((f) => f());
 			void un.then((f) => f());
 			void unfocus.then((f) => f());
 		};

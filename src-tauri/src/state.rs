@@ -40,6 +40,9 @@ const TABLE_NAME: &str = "notes";
 const NOTE_INGEST_MANIFEST: &str = "note-ingestion.json";
 const QUERY_EMBEDDING_CACHE: &str = "query-embeddings.json";
 const NOTE_CHUNKER_VERSION: &str = "words-192-overlap-32-gte-small-v2";
+const NATIVE_METADATA_DIR: &str = "native-metadata";
+const EMPTY_IPYNB: &str = "{\n  \"cells\": [],\n  \"metadata\": {},\n  \"nbformat\": 4,\n  \"nbformat_minor\": 5\n}\n";
+const INDEX_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 // Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
 // We pin that package cache to a directory we own under app data so it lands in
 // a known place we can measure, pre-warm from Settings, and report on.
@@ -156,11 +159,11 @@ fn wrap_bare_latex(body: &str) -> TexTransform {
 }
 
 /// Faithful test entrypoint mirroring [`AppState::compile_latex`]'s transform
-/// (frontmatter strip → preamble wrap / package injection → compile) for a raw
-/// note file. Used by the `texcheck` diagnostic bin. Returns PDF bytes or the
-/// first-line error message.
+/// (legacy-frontmatter migration → preamble wrap / package injection → compile)
+/// for a raw note file. Used by the `texcheck` diagnostic bin. Returns PDF bytes
+/// or the first-line error message.
 pub fn compile_tex_source(raw: &str) -> std::result::Result<Vec<u8>, String> {
-    let body = split_frontmatter(raw).1;
+    let body = split_legacy_native_frontmatter(raw).1;
     if body.trim().is_empty() {
         return Err("This note is empty — add some LaTeX before compiling.".to_string());
     }
@@ -669,11 +672,132 @@ pub struct AppState {
     pub(crate) inner: Arc<InnerState>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingIndexRequest {
+    generation: u64,
+    workspace: PathBuf,
+    debounce: bool,
+}
+
+#[derive(Debug)]
+struct IndexCompletion {
+    generation: u64,
+    error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct IndexScheduler {
+    next_generation: u64,
+    next_worker_id: u64,
+    pending: Option<PendingIndexRequest>,
+    in_flight: Option<PendingIndexRequest>,
+    worker_running: bool,
+    active_worker_id: Option<u64>,
+    last_completion: Option<IndexCompletion>,
+}
+
+#[derive(Debug)]
+struct IndexRequestReceipt {
+    generation: u64,
+    spawn_worker: bool,
+    worker_id: Option<u64>,
+}
+
+impl IndexScheduler {
+    fn request(
+        &mut self,
+        workspace: PathBuf,
+        debounce: bool,
+    ) -> IndexRequestReceipt {
+        self.next_generation = self.next_generation.saturating_add(1);
+        let generation = self.next_generation;
+        if let Some(pending) = self.pending.as_mut() {
+            pending.generation = generation;
+            pending.workspace = workspace;
+            // Once any caller asks for an immediate pass, later filesystem
+            // noise must not turn that batch back into a delayed one.
+            pending.debounce &= debounce;
+        } else {
+            self.pending = Some(PendingIndexRequest {
+                generation,
+                workspace,
+                debounce,
+            });
+        }
+
+        let spawn_worker = !self.worker_running;
+        let worker_id = if spawn_worker {
+            self.worker_running = true;
+            self.next_worker_id = self.next_worker_id.saturating_add(1);
+            self.active_worker_id = Some(self.next_worker_id);
+            self.active_worker_id
+        } else {
+            None
+        };
+
+        IndexRequestReceipt {
+            generation,
+            spawn_worker,
+            worker_id,
+        }
+    }
+
+    fn take_pending(&mut self) -> Option<PendingIndexRequest> {
+        let request = self.pending.take()?;
+        self.in_flight = Some(request.clone());
+        Some(request)
+    }
+
+    fn finish_pass(&mut self, generation: u64, error: Option<String>) -> bool {
+        self.in_flight = None;
+        self.last_completion = Some(IndexCompletion { generation, error });
+        let has_pending_rerun = self.pending.is_some();
+        if !has_pending_rerun {
+            self.worker_running = false;
+            self.active_worker_id = None;
+        }
+        has_pending_rerun
+    }
+
+    fn completion_for(&self, generation: u64) -> Option<Result<(), String>> {
+        let completion = self.last_completion.as_ref()?;
+        if completion.generation < generation {
+            return None;
+        }
+        Some(match &completion.error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        })
+    }
+
+    fn abort_worker(&mut self, worker_id: u64, message: &str) -> bool {
+        if !self.worker_running || self.active_worker_id != Some(worker_id) {
+            return false;
+        }
+        self.worker_running = false;
+        self.active_worker_id = None;
+        // A cancelled worker may have already claimed the only dirty request.
+        // Put it back unless a newer pending full scan already covers it.
+        if self.pending.is_none() {
+            self.pending = self.in_flight.take();
+        } else {
+            self.in_flight = None;
+        }
+        self.last_completion = Some(IndexCompletion {
+            generation: self.next_generation,
+            error: Some(message.to_string()),
+        });
+        true
+    }
+}
+
 pub(crate) struct InnerState {
     app_data_dir: PathBuf,
     runtime: RwLock<RuntimeState>,
     watcher: Mutex<Option<RecommendedWatcher>>,
     index_lock: AsyncMutex<()>,
+    index_scheduler: Mutex<IndexScheduler>,
+    index_completion: tokio::sync::Notify,
     // Serialises Tectonic runs: concurrent compiles share one format-cache dir and
     // would corrupt it if they built the format at the same time.
     tectonic_lock: AsyncMutex<()>,
@@ -757,6 +881,40 @@ pub(crate) struct InnerState {
     /// messages instead of being flattened to a vague summary and lost. Re-sent each
     /// turn so llama-server reuses the cached prefix (KV cache). Keyed by note id.
     conversations: Mutex<HashMap<String, Vec<serde_json::Value>>>,
+}
+
+/// Makes cancellation or an unexpected worker exit observable to generation
+/// waiters instead of leaving them asleep forever. Pending dirty work remains in
+/// the scheduler so a later request can restart it.
+struct IndexWorkerGuard {
+    inner: Arc<InnerState>,
+    worker_id: u64,
+    armed: bool,
+}
+
+impl IndexWorkerGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for IndexWorkerGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let aborted = self
+            .inner
+            .index_scheduler
+            .lock()
+            .abort_worker(
+                self.worker_id,
+                "index worker stopped before completing its queued work",
+            );
+        if aborted {
+            self.inner.index_completion.notify_waiters();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -957,6 +1115,16 @@ struct Frontmatter {
     created_at: Option<String>,
     updated_at: Option<String>,
     source_pdf: Option<String>,
+}
+
+/// Metadata for formats whose native grammar cannot contain YAML frontmatter.
+/// The path is included for diagnostics and to make an accidental hash collision
+/// fail closed when the sidecar is read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NativeMetadataSidecar {
+    #[serde(flatten)]
+    metadata: Frontmatter,
+    relative_path: String,
 }
 
 impl AppState {
@@ -1164,6 +1332,8 @@ impl AppState {
                 }),
                 watcher: Mutex::new(None),
                 index_lock: AsyncMutex::new(()),
+                index_scheduler: Mutex::new(IndexScheduler::default()),
+                index_completion: tokio::sync::Notify::new(),
                 tectonic_lock: AsyncMutex::new(()),
                 llama_server: AsyncMutex::new(None),
                 ai_pipeline_lock: AsyncMutex::new(()),
@@ -1525,12 +1695,7 @@ impl AppState {
             // Startup only needs enough data to open notes. Keep the expensive
             // embedding and LanceDB work off the first-paint path; reindex emits a
             // status event as soon as parsed notes are available.
-            let state = self.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = state.reindex_workspace(workspace).await {
-                    log::error!("startup workspace index failed: {error}");
-                }
-            });
+            let _ = self.request_reindex(workspace, false);
         }
         Ok(self.snapshot())
     }
@@ -1866,12 +2031,16 @@ impl AppState {
         };
         let path = unique_note_path(&target_dir, &file_name);
         let relative_path = relative_to_workspace(&workspace, &path);
+        // A newly-created notebook must be a valid nbformat document from its
+        // first byte on disk. The editor treats the same shape as an empty
+        // notebook, and subsequent saves preserve its raw JSON representation.
+        let body = initial_note_body(&path);
 
         let document = NoteDocument {
             id,
             title: unique_title,
             tags: Vec::new(),
-            body: String::new(),
+            body,
             relative_path,
             created_at: now.clone(),
             updated_at: now,
@@ -1915,11 +2084,9 @@ impl AppState {
             &format!("Create note: {}", document.title),
         )?;
 
-        let state = self.clone();
-        let workspace_clone = workspace.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = state.reindex_workspace(workspace_clone).await;
-        });
+        // The watcher will usually report this same write. Both paths only mark
+        // the shared scheduler dirty, so they collapse into one debounced pass.
+        let _ = self.request_reindex(workspace.clone(), true);
 
         Ok(document)
     }
@@ -2006,6 +2173,8 @@ impl AppState {
                 .cloned()
                 .ok_or_else(|| anyhow!("note not found"))?
         };
+        let path = workspace.join(&existing.document.relative_path);
+        validate_native_body(&path, &body)?;
         let prompt_changed = existing.document.body != body
             || existing.document.title != title
             || existing.document.source_pdf != source_pdf;
@@ -2030,7 +2199,6 @@ impl AppState {
             chat_history: existing.document.chat_history,
         };
 
-        let path = workspace.join(&updated.relative_path);
         if prompt_changed {
             let slot = self.inner.app_data_dir.join("llama-cache").join("slots")
                 .join(Self::slot_filename(&note_id));
@@ -2078,11 +2246,9 @@ impl AppState {
             log::warn!("saved note but could not create Git history entry: {error}");
         }
 
-        let state = self.clone();
-        let workspace_clone = workspace.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = state.reindex_workspace(workspace_clone).await;
-        });
+        // Explicitly mark the index dirty in case the platform watcher drops or
+        // coalesces its event. The scheduler merges the duplicate watcher signal.
+        let _ = self.request_reindex(workspace.clone(), true);
         let ingest_state = self.clone();
         let ingest_note = updated.clone();
         tauri::async_runtime::spawn(async move {
@@ -2133,6 +2299,7 @@ impl AppState {
         // keyed by note id and would otherwise orphan in the workspace data dir
         // (stale sessions lingering after the note is gone).
         let data_dir = self.workspace_data_dir(&workspace);
+        remove_native_metadata_sidecar(&workspace, &data_dir, &path);
         let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.json")));
         let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.tmp")));
         let _ = fs::remove_file(
@@ -2151,7 +2318,7 @@ impl AppState {
         }
 
         crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace_after_change(workspace).await?;
         Ok(self.snapshot())
     }
 
@@ -2169,7 +2336,14 @@ impl AppState {
         let now = timestamp_now();
         let duplicate_id = Uuid::new_v4().to_string();
         let duplicate_title = format!("{} Copy", source.document.title);
-        let file_name = format!("{}--{}.md", slugify(&duplicate_title), &duplicate_id[..8]);
+        let source_path = workspace.join(&source.document.relative_path);
+        let duplicate_extension = duplicate_note_extension(&source_path);
+        let file_name = format!(
+            "{}--{}.{}",
+            slugify(&duplicate_title),
+            &duplicate_id[..8],
+            duplicate_extension
+        );
         let path = unique_note_path(
             &workspace.join(folder_to_relative_path(&folder_from_relative_path(
                 &source.document.relative_path,
@@ -2200,7 +2374,7 @@ impl AppState {
             &workspace,
             &format!("Duplicate note: {}", document.title),
         )?;
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace_after_change(workspace).await?;
         self.load_note(duplicate_id).await
     }
 
@@ -2225,24 +2399,41 @@ impl AppState {
         fs::create_dir_all(&target_base)
             .with_context(|| format!("failed to create target folder {}", target_base.display()))?;
         let target_path = unique_note_path(&target_base, file_name);
-        fs::rename(&source_path, &target_path).with_context(|| {
-            format!(
-                "failed to move {} to {}",
-                source_path.display(),
-                target_path.display()
-            )
-        })?;
+        let data_dir = self.workspace_data_dir(&workspace);
+        if is_native_text_file(&source_path) {
+            // The sidecar key is derived from the relative path. Prepare the new
+            // key before moving the source, then remove it again if the file move
+            // fails so the two operations cannot leave a phantom note metadata
+            // record behind.
+            write_native_metadata_sidecar(
+                &workspace,
+                &data_dir,
+                &target_path,
+                &source.document,
+            )?;
+        }
+        if let Err(error) = fs::rename(&source_path, &target_path) {
+            remove_native_metadata_sidecar(&workspace, &data_dir, &target_path);
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to move {} to {}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            });
+        }
+        remove_native_metadata_sidecar(&workspace, &data_dir, &source_path);
         crate::git_history::commit_changes(
             &workspace,
             &format!("Move note: {}", source.document.title),
         )?;
 
-        self.reindex_workspace(workspace).await?;
+        self.reindex_workspace_after_change(workspace).await?;
         self.load_note(note_id).await
     }
 
     pub async fn reorder_note(&self, note_id: String, direction: String) -> Result<AppSnapshot> {
-        let workspace = self.require_workspace()?;
+        self.require_workspace()?;
         let normalized_direction = direction.trim().to_lowercase();
         if normalized_direction != "up" && normalized_direction != "down" {
             return Err(anyhow!("direction must be 'up' or 'down'"));
@@ -2270,7 +2461,6 @@ impl AppState {
         }
 
         self.persist_runtime_settings()?;
-        self.reindex_workspace(workspace).await?;
         Ok(self.snapshot())
     }
 
@@ -3387,7 +3577,7 @@ impl AppState {
         fs::copy(&src, &dest)
             .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
 
-        self.reindex_workspace(workspace.clone()).await?;
+        self.reindex_workspace_after_change(workspace.clone()).await?;
 
         let rel_path = relative_to_workspace(&workspace, &dest);
         let runtime = self.inner.runtime.read();
@@ -3436,7 +3626,7 @@ impl AppState {
         fs::copy(&source_path, &dest)
             .map_err(|e| anyhow!("failed to copy PDF for attachment: {}", e))?;
 
-        self.reindex_workspace(workspace.clone()).await?;
+        self.reindex_workspace_after_change(workspace.clone()).await?;
         let rel_path = relative_to_workspace(&workspace, &dest);
         let runtime = self.inner.runtime.read();
         runtime
@@ -3615,10 +3805,10 @@ impl AppState {
             };
             fs::read_to_string(&path)?
         };
-        // The .tex file on disk carries YAML frontmatter (id/title/tags/…). Strip
-        // it before compiling — otherwise that metadata block is text BEFORE
-        // \documentclass and LaTeX fails with "Missing \begin{document}" at line 1.
-        let tex_content = split_frontmatter(&raw).1;
+        // Current .tex files are raw source. Strip only a recognized Myelin YAML
+        // wrapper left by an older release; arbitrary TeX beginning with `---`
+        // remains untouched.
+        let tex_content = split_legacy_native_frontmatter(&raw).1;
         if tex_content.trim().is_empty() {
             return Err(anyhow!(
                 "This note is empty — add some LaTeX before compiling."
@@ -3834,12 +4024,15 @@ impl AppState {
                     return;
                 }
 
-                let cloned_state = state.clone();
-                let watched_workspace = workspace_path.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = cloned_state.handle.emit("index://changed", "filesystem");
-                    let _ = cloned_state.reindex_workspace(watched_workspace).await;
-                });
+                if let Some(receipt) =
+                    state.request_reindex(workspace_path.clone(), true)
+                {
+                    // A burst only needs one UI invalidation. Further events are
+                    // folded into the pending generation or the single dirty rerun.
+                    if receipt.spawn_worker {
+                        let _ = state.handle.emit("index://changed", "filesystem");
+                    }
+                }
             }
         })?;
 
@@ -3848,8 +4041,133 @@ impl AppState {
         Ok(())
     }
 
+    /// Enqueue one full-workspace refresh. All callers share one worker and one
+    /// pending slot, so event bursts cannot build an unbounded queue of scans.
+    /// Holding the runtime read guard through scheduler insertion prevents a
+    /// late event from an old watcher replacing a newer workspace request.
+    fn request_reindex(
+        &self,
+        workspace: PathBuf,
+        debounce: bool,
+    ) -> Option<IndexRequestReceipt> {
+        let runtime = self.inner.runtime.read();
+        if runtime.workspace_path.as_ref() != Some(&workspace) {
+            return None;
+        }
+        let receipt = self
+            .inner
+            .index_scheduler
+            .lock()
+            .request(workspace, debounce);
+        drop(runtime);
+
+        if receipt.spawn_worker {
+            let worker_id = receipt
+                .worker_id
+                .expect("a spawned index worker must have an id");
+            let state = self.clone();
+            // Construct the guard before handing the future to the runtime. If
+            // shutdown drops an unpolled task, generation waiters still fail
+            // promptly instead of waiting on a worker that never started.
+            let exit_guard = IndexWorkerGuard {
+                inner: self.inner.clone(),
+                worker_id,
+                armed: true,
+            };
+            tauri::async_runtime::spawn(async move {
+                state.run_index_worker(exit_guard).await;
+            });
+        }
+        Some(receipt)
+    }
+
+    async fn wait_for_index_generation(&self, generation: u64) -> Result<()> {
+        loop {
+            // Register before checking the predicate so a completion between the
+            // check and await cannot strand this waiter.
+            let mut notified = Box::pin(self.inner.index_completion.notified());
+            let _ = notified.as_mut().enable();
+            if let Some(completion) = self
+                .inner
+                .index_scheduler
+                .lock()
+                .completion_for(generation)
+            {
+                return completion.map_err(anyhow::Error::msg);
+            }
+            notified.await;
+        }
+    }
+
+    async fn run_index_worker(&self, mut exit_guard: IndexWorkerGuard) {
+        loop {
+            let Some(mut request) = self.inner.index_scheduler.lock().take_pending() else {
+                log::error!("index worker started without pending work");
+                return;
+            };
+
+            // Trailing-edge debounce: each filesystem event restarts the quiet
+            // period. An explicit/manual request upgrades the batch to immediate.
+            while request.debounce {
+                tokio::time::sleep(INDEX_DEBOUNCE).await;
+                let newer = self.inner.index_scheduler.lock().take_pending();
+                match newer {
+                    Some(pending) => request = pending,
+                    None => break,
+                }
+            }
+
+            let generation = request.generation;
+            let result = self.reindex_workspace_once(request.workspace).await;
+            let error = result.as_ref().err().map(ToString::to_string);
+            if let Some(error) = &error {
+                log::error!("workspace index failed: {error}");
+                {
+                    let mut runtime = self.inner.runtime.write();
+                    runtime.index_state.is_indexing = false;
+                }
+                let _ = self.handle.emit("index://status", "failed");
+            }
+
+            let mut scheduler = self.inner.index_scheduler.lock();
+            let has_pending_rerun = scheduler.finish_pass(generation, error);
+            if !has_pending_rerun {
+                // Disarm while the scheduler lock is still held. Otherwise a
+                // new request could start worker B before this worker's guard is
+                // dropped, and worker A's guard could mistake B for its own run.
+                exit_guard.disarm();
+            }
+            drop(scheduler);
+            self.inner.index_completion.notify_waiters();
+            if !has_pending_rerun {
+                return;
+            }
+        }
+    }
+
     async fn reindex_workspace(&self, workspace: PathBuf) -> Result<()> {
+        let receipt = self
+            .request_reindex(workspace, false)
+            .ok_or_else(|| anyhow!("workspace changed before indexing could start"))?;
+        self.wait_for_index_generation(receipt.generation).await
+    }
+
+    /// Mutations that need indexed data before returning still wait for their
+    /// generation, but allow the platform watcher's duplicate event to join the
+    /// same quiet-period batch instead of forcing a second scan.
+    async fn reindex_workspace_after_change(&self, workspace: PathBuf) -> Result<()> {
+        let receipt = self
+            .request_reindex(workspace, true)
+            .ok_or_else(|| anyhow!("workspace changed before indexing could start"))?;
+        self.wait_for_index_generation(receipt.generation).await
+    }
+
+    async fn reindex_workspace_once(&self, workspace: PathBuf) -> Result<()> {
         let _guard = self.inner.index_lock.lock().await;
+
+        if self.inner.runtime.read().workspace_path.as_ref() != Some(&workspace) {
+            return Ok(());
+        }
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -3865,6 +4183,10 @@ impl AppState {
         })
         .await
         .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
+
+        if self.inner.runtime.read().workspace_path.as_ref() != Some(&workspace) {
+            return Ok(());
+        }
 
         // Publish parsed notes before the secondary index work begins. This makes
         // the library and first note available while embeddings and LanceDB finish
@@ -3952,10 +4274,16 @@ impl AppState {
             }
         }
 
+        if self.inner.runtime.read().workspace_path.as_ref() != Some(&workspace) {
+            return Ok(());
+        }
         let table = rebuild_lancedb(&self.index_dir(), &notes).await?;
 
         {
             let mut runtime = self.inner.runtime.write();
+            if runtime.workspace_path.as_ref() != Some(&workspace) {
+                return Ok(());
+            }
             // Notes can be edited, created, or deleted while the expensive vector
             // work runs. Preserve that live state; the watcher queues a follow-up
             // reindex to refresh any vectors affected by concurrent edits.
@@ -6274,6 +6602,206 @@ fn parse_pdf_file(
     })
 }
 
+fn frontmatter_from_document(document: &NoteDocument) -> Frontmatter {
+    Frontmatter {
+        id: Some(document.id.clone()),
+        title: Some(document.title.clone()),
+        tags: Some(document.tags.clone()),
+        created_at: Some(document.created_at.clone()),
+        updated_at: Some(document.updated_at.clone()),
+        source_pdf: document.source_pdf.clone(),
+    }
+}
+
+fn frontmatter_has_myelin_metadata(metadata: &Frontmatter) -> bool {
+    metadata.id.is_some()
+        || metadata.title.is_some()
+        || metadata.tags.is_some()
+        || metadata.created_at.is_some()
+        || metadata.updated_at.is_some()
+        || metadata.source_pdf.is_some()
+}
+
+/// Detect the legacy representation without mistaking ordinary TeX that starts
+/// with horizontal-rule-like text for a Myelin wrapper.
+fn split_legacy_native_frontmatter(raw: &str) -> (Option<Frontmatter>, String, bool) {
+    let (frontmatter, body) = split_frontmatter(raw);
+    let metadata = frontmatter
+        .as_deref()
+        .and_then(|value| serde_yaml::from_str::<Frontmatter>(value).ok())
+        .filter(frontmatter_has_myelin_metadata);
+    if metadata.is_some() {
+        (metadata, body, true)
+    } else {
+        (None, raw.to_string(), false)
+    }
+}
+
+fn initial_note_body(path: &Path) -> String {
+    if extension_is(path, "ipynb") {
+        EMPTY_IPYNB.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn duplicate_note_extension(path: &Path) -> &str {
+    if is_native_text_file(path) {
+        path.extension().and_then(OsStr::to_str).unwrap_or("md")
+    } else {
+        "md"
+    }
+}
+
+fn validate_native_body(path: &Path, body: &str) -> Result<()> {
+    if extension_is(path, "ipynb") {
+        let notebook = serde_json::from_str::<serde_json::Value>(body).with_context(|| {
+            format!(
+                "notebook {} must contain valid JSON before it can be saved",
+                path.display()
+            )
+        })?;
+        let object = notebook.as_object().ok_or_else(|| {
+            anyhow!(
+                "notebook {} must be a JSON object",
+                path.display()
+            )
+        })?;
+        if !object.get("cells").is_some_and(serde_json::Value::is_array) {
+            return Err(anyhow!(
+                "notebook {} must contain a cells array",
+                path.display()
+            ));
+        }
+        if !object
+            .get("nbformat")
+            .is_some_and(serde_json::Value::is_number)
+        {
+            return Err(anyhow!(
+                "notebook {} must contain a numeric nbformat",
+                path.display()
+            ));
+        }
+        if !object
+            .get("nbformat_minor")
+            .is_some_and(serde_json::Value::is_number)
+        {
+            return Err(anyhow!(
+                "notebook {} must contain a numeric nbformat_minor",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_raw_document(path: &Path, contents: &str) -> Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("document");
+    let temp_path = path.with_file_name(format!(".{file_name}.myelin.tmp"));
+    fs::write(&temp_path, contents)
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "failed to move {} to {}",
+            temp_path.display(),
+            path.display()
+        )
+    })
+}
+
+fn native_metadata_file_name(workspace: &Path, path: &Path) -> String {
+    let relative_path = relative_to_workspace(workspace, path);
+    let mut hasher = Sha256::new();
+    hasher.update(relative_path.as_bytes());
+    format!("{:x}.metadata.json", hasher.finalize())
+}
+
+fn native_metadata_app_path(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+) -> PathBuf {
+    workspace_data_dir
+        .join(NATIVE_METADATA_DIR)
+        .join(native_metadata_file_name(workspace, path))
+}
+
+fn read_native_metadata_sidecar(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+) -> Option<Frontmatter> {
+    let file_name = native_metadata_file_name(workspace, path);
+    let metadata_path = sidecar_path(
+        workspace,
+        workspace_data_dir,
+        NATIVE_METADATA_DIR,
+        &file_name,
+    );
+    let sidecar = fs::read_to_string(metadata_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<NativeMetadataSidecar>(&raw).ok())?;
+    let relative_path = relative_to_workspace(workspace, path);
+    (sidecar.relative_path == relative_path).then_some(sidecar.metadata)
+}
+
+fn write_native_metadata_sidecar(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+    document: &NoteDocument,
+) -> Result<()> {
+    if !is_native_text_file(path) {
+        return Ok(());
+    }
+    let metadata_path = native_metadata_app_path(workspace, workspace_data_dir, path);
+    let metadata_dir = metadata_path
+        .parent()
+        .ok_or_else(|| anyhow!("native metadata path has no parent"))?;
+    fs::create_dir_all(metadata_dir).with_context(|| {
+        format!(
+            "failed to create native metadata directory {}",
+            metadata_dir.display()
+        )
+    })?;
+    let sidecar = NativeMetadataSidecar {
+        metadata: frontmatter_from_document(document),
+        relative_path: relative_to_workspace(workspace, path),
+    };
+    let temp_path = metadata_path.with_extension("tmp");
+    fs::write(&temp_path, serde_json::to_vec_pretty(&sidecar)?)
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    fs::rename(&temp_path, &metadata_path).with_context(|| {
+        format!(
+            "failed to move {} to {}",
+            temp_path.display(),
+            metadata_path.display()
+        )
+    })
+}
+
+fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_dir: &Path, path: &Path) {
+    if !is_native_text_file(path) {
+        return;
+    }
+    let file_name = native_metadata_file_name(workspace, path);
+    let app_path = native_metadata_app_path(workspace, workspace_data_dir, path);
+    let _ = fs::remove_file(&app_path);
+    let _ = fs::remove_file(app_path.with_extension("tmp"));
+
+    // Remove a portable legacy fallback too if one exists. Current writes never
+    // place metadata inside the workspace.
+    let legacy_path = workspace
+        .join(".myelin")
+        .join(NATIVE_METADATA_DIR)
+        .join(file_name);
+    let _ = fs::remove_file(&legacy_path);
+    let _ = fs::remove_file(legacy_path.with_extension("tmp"));
+}
+
 fn parse_note_file(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -6281,20 +6809,37 @@ fn parse_note_file(
 ) -> Result<NoteDocument> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let (frontmatter, body) = split_frontmatter(&raw);
-    let metadata = frontmatter
-        .as_deref()
-        .and_then(|frontmatter| serde_yaml::from_str::<Frontmatter>(frontmatter).ok())
+    let native = is_native_text_file(path);
+    let (legacy_metadata, body, legacy_wrapped) = if native {
+        split_legacy_native_frontmatter(&raw)
+    } else {
+        let (frontmatter, body) = split_frontmatter(&raw);
+        let metadata = frontmatter
+            .as_deref()
+            .and_then(|frontmatter| serde_yaml::from_str::<Frontmatter>(frontmatter).ok());
+        (metadata, body, false)
+    };
+    validate_native_body(path, &body)?;
+
+    let stored_metadata = if native {
+        read_native_metadata_sidecar(workspace, workspace_data_dir, path)
+    } else {
+        None
+    };
+    let metadata = stored_metadata
+        .clone()
+        .or(legacy_metadata)
         .unwrap_or_default();
 
     let title = metadata
         .title
+        .clone()
         .unwrap_or_else(|| first_heading(&body).unwrap_or_else(|| default_title_from_path(path)));
 
     let (file_created, file_updated) = get_file_timestamps(path);
-    let created_at = metadata.created_at.unwrap_or(file_created);
-    let updated_at = metadata.updated_at.unwrap_or(file_updated);
-    let id = metadata.id.unwrap_or_else(|| stable_id_from_path(path));
+    let created_at = metadata.created_at.clone().unwrap_or(file_created);
+    let updated_at = metadata.updated_at.clone().unwrap_or(file_updated);
+    let id = metadata.id.clone().unwrap_or_else(|| stable_id_from_path(path));
 
     let annotations = {
         let annotations_path = sidecar_path(
@@ -6312,15 +6857,15 @@ fn parse_note_file(
         }
     };
 
-    Ok(NoteDocument {
+    let document = NoteDocument {
         id: id.clone(),
         title,
-        tags: metadata.tags.unwrap_or_default(),
+        tags: metadata.tags.clone().unwrap_or_default(),
         body,
         relative_path: relative_to_workspace(workspace, path),
         created_at,
         updated_at,
-        source_pdf: metadata.source_pdf,
+        source_pdf: metadata.source_pdf.clone(),
         annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
         chat_history: {
@@ -6335,11 +6880,26 @@ fn parse_note_file(
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default()
         },
-    })
+    };
+
+    if native {
+        let app_sidecar = native_metadata_app_path(workspace, workspace_data_dir, path);
+        if stored_metadata.is_none() || !app_sidecar.exists() || legacy_wrapped {
+            write_native_metadata_sidecar(workspace, workspace_data_dir, path, &document)?;
+        }
+        if legacy_wrapped {
+            // Older Myelin builds wrote YAML ahead of TeX/JSON. Once its fields
+            // have safely reached app data, atomically replace the legacy file
+            // with its native body so other TeX/Jupyter tools can open it.
+            write_raw_document(path, &document.body)?;
+        }
+    }
+
+    Ok(document)
 }
 
 fn write_note_file(
-    _workspace: &Path,
+    workspace: &Path,
     workspace_data_dir: &Path,
     path: &Path,
     document: &NoteDocument,
@@ -6347,6 +6907,9 @@ fn write_note_file(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+    }
+    if !is_binary_document(path) {
+        validate_native_body(path, &document.body)?;
     }
 
     if !document.annotations.is_empty() {
@@ -6371,36 +6934,21 @@ fn write_note_file(
         fs::rename(&tmp_chat_path, &chats_path)?;
     }
 
-    if path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_lowercase())
-        == Some("pdf".to_string())
-    {
+    // Viewer-only document formats are never rewritten. Annotations and chat
+    // still live in their dedicated app-data sidecars above.
+    if is_binary_document(path) {
         return Ok(());
     }
 
-    let frontmatter = Frontmatter {
-        id: Some(document.id.clone()),
-        title: Some(document.title.clone()),
-        tags: Some(document.tags.clone()),
-        created_at: Some(document.created_at.clone()),
-        updated_at: Some(document.updated_at.clone()),
-        source_pdf: document.source_pdf.clone(),
-    };
+    if is_native_text_file(path) {
+        write_native_metadata_sidecar(workspace, workspace_data_dir, path, document)?;
+        return write_raw_document(path, &document.body);
+    }
+
+    let frontmatter = frontmatter_from_document(document);
     let yaml = serde_yaml::to_string(&frontmatter)?.trim().to_string();
     let rendered = format!("---\n{yaml}\n---\n\n{}", document.body.trim_end());
-    let temp_path = path.with_extension("tmp");
-
-    fs::write(&temp_path, rendered)
-        .with_context(|| format!("failed to write {}", temp_path.display()))?;
-    fs::rename(&temp_path, path).with_context(|| {
-        format!(
-            "failed to move {} to {}",
-            temp_path.display(),
-            path.display()
-        )
-    })
+    write_raw_document(path, &rendered)
 }
 
 async fn rebuild_lancedb(index_dir: &Path, notes: &[IndexedNote]) -> Result<Table> {
@@ -6728,10 +7276,16 @@ fn get_file_timestamps(path: &Path) -> (String, String) {
 
 fn excerpt(body: &str) -> String {
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.len() > 400 {
-        format!("{}...", &flat[..400])
+    // `len()` counts bytes, but Rust string slices must end on a UTF-8
+    // character boundary. Workspace notes can contain emoji and other
+    // multibyte characters, so truncate by characters instead of slicing at
+    // an arbitrary byte offset.
+    let mut chars = flat.chars();
+    let excerpt: String = chars.by_ref().take(400).collect();
+    if chars.next().is_some() {
+        format!("{excerpt}...")
     } else {
-        flat
+        excerpt
     }
 }
 
@@ -6892,9 +7446,23 @@ fn unique_pdf_path(workspace: &Path, file_name: &OsStr) -> PathBuf {
     workspace.join(format!("{stem} {}.{}", Uuid::new_v4(), extension))
 }
 
+fn extension_is(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
+
+fn is_native_text_file(path: &Path) -> bool {
+    extension_is(path, "tex") || extension_is(path, "ipynb")
+}
+
+fn is_binary_document(path: &Path) -> bool {
+    extension_is(path, "pdf") || extension_is(path, "epub")
+}
+
 fn is_note_file(path: &Path) -> bool {
     path.extension()
-        .and_then(std::ffi::OsStr::to_str)
+        .and_then(OsStr::to_str)
         .map(|extension| {
             extension.eq_ignore_ascii_case("md")
                 || extension.eq_ignore_ascii_case("pdf")
@@ -7073,10 +7641,103 @@ mod tests {
         assemble_note_context, assemble_targeted_write_context, assemble_user_content,
         authorize_tool_policy,
         canonical_wire_conversation, chat_history_to_messages, enforce_slot_cache_budget,
-        ensure_packages, hashed_embedding, parse_tex_log, slugify, split_frontmatter,
-        tokenize, unique_pdf_path, warmup_prefix, wrap_bare_latex,
+        duplicate_note_extension, ensure_packages, hashed_embedding, initial_note_body,
+        native_metadata_app_path, parse_note_file, parse_tex_log, remove_native_metadata_sidecar,
+        slugify, split_frontmatter, tokenize, unique_pdf_path, validate_native_body, warmup_prefix,
+        wrap_bare_latex, write_native_metadata_sidecar, write_note_file, IndexScheduler,
+        EMPTY_IPYNB,
     };
-    use crate::models::ChatMessage;
+    use crate::models::{ChatMessage, NoteDocument};
+
+    #[test]
+    fn index_scheduler_coalesces_a_burst_and_keeps_one_dirty_rerun() {
+        let workspace = std::path::PathBuf::from("/workspace");
+        let mut scheduler = IndexScheduler::default();
+
+        let first = scheduler.request(workspace.clone(), true);
+        let second = scheduler.request(workspace.clone(), true);
+        assert!(first.spawn_worker);
+        assert!(!second.spawn_worker);
+
+        let active = scheduler.take_pending().expect("coalesced pass");
+        assert_eq!(active.generation, second.generation);
+        assert!(active.debounce);
+
+        // An event that arrives after the pass was claimed becomes one dirty
+        // rerun, regardless of how many more events join it.
+        let dirty = scheduler.request(workspace.clone(), true);
+        let latest = scheduler.request(workspace, true);
+        assert!(!dirty.spawn_worker);
+        assert!(!latest.spawn_worker);
+        assert!(scheduler.finish_pass(active.generation, None));
+
+        let rerun = scheduler.take_pending().expect("dirty rerun");
+        assert_eq!(rerun.generation, latest.generation);
+        assert!(!scheduler.finish_pass(rerun.generation, None));
+        assert!(!scheduler.worker_running);
+    }
+
+    #[test]
+    fn index_scheduler_immediate_request_dominates_debounce() {
+        let workspace = std::path::PathBuf::from("/workspace");
+        let mut scheduler = IndexScheduler::default();
+
+        scheduler.request(workspace.clone(), true);
+        let immediate = scheduler.request(workspace.clone(), false);
+        scheduler.request(workspace, true);
+
+        let pending = scheduler.take_pending().expect("pending pass");
+        assert!(pending.generation > immediate.generation);
+        assert!(!pending.debounce);
+    }
+
+    #[test]
+    fn index_scheduler_abort_completes_waiters_and_can_restart() {
+        let workspace = std::path::PathBuf::from("/workspace");
+        let mut scheduler = IndexScheduler::default();
+
+        let first = scheduler.request(workspace.clone(), false);
+        let first_worker_id = first.worker_id.expect("first worker id");
+        let _active = scheduler.take_pending().expect("active pass");
+        let queued = scheduler.request(workspace.clone(), true);
+        assert!(scheduler.abort_worker(first_worker_id, "cancelled"));
+        assert_eq!(
+            scheduler.completion_for(first.generation),
+            Some(Err("cancelled".to_string()))
+        );
+        assert_eq!(
+            scheduler.completion_for(queued.generation),
+            Some(Err("cancelled".to_string()))
+        );
+
+        let restarted = scheduler.request(workspace, true);
+        assert!(restarted.spawn_worker);
+        assert_eq!(
+            scheduler.take_pending().expect("restart pass").generation,
+            restarted.generation
+        );
+    }
+
+    #[test]
+    fn index_scheduler_completed_worker_cannot_abort_a_new_worker_on_drop() {
+        let workspace = std::path::PathBuf::from("/workspace");
+        let mut scheduler = IndexScheduler::default();
+
+        let first = scheduler.request(workspace.clone(), false);
+        let first_worker_id = first.worker_id.expect("first worker id");
+        let pass = scheduler.take_pending().expect("first pass");
+        assert!(!scheduler.finish_pass(pass.generation, None));
+
+        let second = scheduler.request(workspace, false);
+        let second_worker_id = second.worker_id.expect("second worker id");
+        assert_ne!(first_worker_id, second_worker_id);
+        // This models worker A's Drop running after worker B has started. The
+        // old lease must not cancel or complete B's generation.
+        assert!(!scheduler.abort_worker(first_worker_id, "stale worker drop"));
+        assert!(scheduler.worker_running);
+        assert_eq!(scheduler.active_worker_id, Some(second_worker_id));
+        assert_eq!(scheduler.completion_for(second.generation), None);
+    }
 
     #[test]
     fn bare_latex_keeps_partial_preamble_before_document_body() {
@@ -7272,6 +7933,187 @@ mod tests {
         assert_eq!(body, "# Hello");
     }
 
+    fn disk_test_document(relative_path: &str, body: &str) -> NoteDocument {
+        NoteDocument {
+            id: "native-note-id".to_string(),
+            title: "Native title".to_string(),
+            tags: vec!["format-safe".to_string()],
+            body: body.to_string(),
+            relative_path: relative_path.to_string(),
+            created_at: "2026-08-08T10:00:00Z".to_string(),
+            updated_at: "2026-08-08T11:00:00Z".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn new_ipynb_body_is_a_canonical_valid_notebook() {
+        let body = initial_note_body(std::path::Path::new("new.ipynb"));
+        assert_eq!(body, EMPTY_IPYNB);
+        validate_native_body(std::path::Path::new("new.ipynb"), &body).unwrap();
+        let notebook: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(notebook["cells"], serde_json::json!([]));
+        assert_eq!(notebook["metadata"], serde_json::json!({}));
+        assert_eq!(notebook["nbformat"], 4);
+        assert_eq!(notebook["nbformat_minor"], 5);
+        assert!(initial_note_body(std::path::Path::new("new.tex")).is_empty());
+    }
+
+    #[test]
+    fn duplicate_extension_preserves_native_formats_only() {
+        assert_eq!(duplicate_note_extension(std::path::Path::new("paper.tex")), "tex");
+        assert_eq!(
+            duplicate_note_extension(std::path::Path::new("analysis.IPYNB")),
+            "IPYNB"
+        );
+        assert_eq!(duplicate_note_extension(std::path::Path::new("note.md")), "md");
+        assert_eq!(duplicate_note_extension(std::path::Path::new("paper.pdf")), "md");
+    }
+
+    #[test]
+    fn tex_disk_round_trip_keeps_native_source_and_app_data_metadata() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("paper.tex");
+        let body = "\\documentclass{article}\n\\begin{document}\nHello\n\\end{document}\n";
+        let document = disk_test_document("paper.tex", body);
+
+        write_note_file(workspace.path(), app_data.path(), &path, &document).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        assert!(native_metadata_app_path(workspace.path(), app_data.path(), &path).is_file());
+        let loaded = parse_note_file(workspace.path(), app_data.path(), &path).unwrap();
+        assert_eq!(loaded.id, document.id);
+        assert_eq!(loaded.title, document.title);
+        assert_eq!(loaded.tags, document.tags);
+        assert_eq!(loaded.body, body);
+    }
+
+    #[test]
+    fn legacy_wrapped_ipynb_migrates_to_raw_json_and_round_trips_metadata() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("legacy.ipynb");
+        let body = r#"{"cells":[{"cell_type":"markdown","metadata":{},"source":["hello"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
+        let document = disk_test_document("legacy.ipynb", body);
+        let metadata = super::frontmatter_from_document(&document);
+        let yaml = serde_yaml::to_string(&metadata).unwrap();
+        std::fs::write(&path, format!("---\n{}\n---\n\n{body}", yaml.trim_end())).unwrap();
+
+        let migrated = parse_note_file(workspace.path(), app_data.path(), &path).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap();
+        assert_eq!(raw, body);
+        assert_eq!(migrated.id, document.id);
+        assert_eq!(migrated.title, document.title);
+        assert_eq!(migrated.tags, document.tags);
+        assert!(native_metadata_app_path(workspace.path(), app_data.path(), &path).is_file());
+
+        let loaded_again = parse_note_file(workspace.path(), app_data.path(), &path).unwrap();
+        assert_eq!(loaded_again.id, document.id);
+        assert_eq!(loaded_again.body, body);
+    }
+
+    #[test]
+    fn legacy_wrapped_tex_migrates_without_changing_tex_body() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("legacy.tex");
+        let body = "\\section{Legacy}\nBody with trailing newline.\n";
+        let document = disk_test_document("legacy.tex", body);
+        let metadata = super::frontmatter_from_document(&document);
+        let yaml = serde_yaml::to_string(&metadata).unwrap();
+        std::fs::write(&path, format!("---\n{}\n---\n\n{body}", yaml.trim_end())).unwrap();
+
+        let migrated = parse_note_file(workspace.path(), app_data.path(), &path).unwrap();
+
+        assert_eq!(migrated.id, document.id);
+        assert_eq!(migrated.body, body);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        assert!(native_metadata_app_path(workspace.path(), app_data.path(), &path).is_file());
+    }
+
+    #[test]
+    fn markdown_disk_round_trip_retains_yaml_frontmatter_behavior() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("note.md");
+        let document = disk_test_document("note.md", "# Heading\n\nMarkdown body\n");
+
+        write_note_file(workspace.path(), app_data.path(), &path, &document).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.starts_with("---\n"));
+        assert!(raw.contains("title: Native title"));
+        let loaded = parse_note_file(workspace.path(), app_data.path(), &path).unwrap();
+        assert_eq!(loaded.id, document.id);
+        assert_eq!(loaded.title, document.title);
+        // Markdown writes historically trim trailing whitespace; keep that
+        // behavior while native formats preserve their bodies byte-for-byte.
+        assert_eq!(loaded.body, document.body.trim_end());
+    }
+
+    #[test]
+    fn ipynb_writer_rejects_invalid_json_without_touching_disk() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("notebook.ipynb");
+        std::fs::write(&path, EMPTY_IPYNB).unwrap();
+        for invalid in [
+            "{ invalid json",
+            "[]",
+            r#"{"nbformat":4,"nbformat_minor":5}"#,
+            r#"{"cells":[],"nbformat":"four","nbformat_minor":5}"#,
+        ] {
+            let document = disk_test_document("notebook.ipynb", invalid);
+            assert!(write_note_file(workspace.path(), app_data.path(), &path, &document).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), EMPTY_IPYNB);
+            assert!(!native_metadata_app_path(workspace.path(), app_data.path(), &path).exists());
+        }
+    }
+
+    #[test]
+    fn pdf_and_epub_writes_never_replace_binary_payloads() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        for extension in ["pdf", "epub"] {
+            let path = workspace.path().join(format!("source.{extension}"));
+            let payload = [0_u8, 159, 255, 13, 10, 42];
+            std::fs::write(&path, payload).unwrap();
+            let document = disk_test_document(
+                path.file_name().unwrap().to_str().unwrap(),
+                "replacement text",
+            );
+
+            write_note_file(workspace.path(), app_data.path(), &path, &document).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn native_metadata_sidecar_tracks_path_lifecycle() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("source.tex");
+        let target = workspace.path().join("folder").join("target.tex");
+        let document = disk_test_document("source.tex", "Body");
+
+        write_native_metadata_sidecar(workspace.path(), app_data.path(), &source, &document)
+            .unwrap();
+        let source_sidecar = native_metadata_app_path(workspace.path(), app_data.path(), &source);
+        assert!(source_sidecar.is_file());
+
+        write_native_metadata_sidecar(workspace.path(), app_data.path(), &target, &document)
+            .unwrap();
+        remove_native_metadata_sidecar(workspace.path(), app_data.path(), &source);
+        assert!(!source_sidecar.exists());
+        assert!(native_metadata_app_path(workspace.path(), app_data.path(), &target).is_file());
+
+        remove_native_metadata_sidecar(workspace.path(), app_data.path(), &target);
+        assert!(!native_metadata_app_path(workspace.path(), app_data.path(), &target).exists());
+    }
+
     #[test]
     fn embedding_is_stable() {
         assert_eq!(
@@ -7279,6 +8121,15 @@ mod tests {
             hashed_embedding("alpha beta")
         );
         assert_eq!(tokenize("Alpha, beta!").len(), 2);
+    }
+
+    #[test]
+    fn excerpt_truncates_multibyte_text_on_character_boundaries() {
+        let body = format!("{}✅ trailing text", "word ".repeat(100));
+        let result = super::excerpt(&body);
+        assert!(result.ends_with("..."));
+        assert!(result.is_char_boundary(result.len() - 3));
+        assert_eq!(result.chars().count(), 403);
     }
 
     #[test]

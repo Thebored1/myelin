@@ -1,6 +1,6 @@
 # Myelin
 
-Cross-platform local-first AI notes app built with Tauri 2, SvelteKit, and a Rust-first core. Myelin is built for students, researchers, and developers, seamlessly supporting multiple document types with zero external dependencies.
+Cross-platform local-first AI notes app built with Tauri 2, SvelteKit, and a Rust-first core. Myelin is built for students, researchers, and developers, with support for multiple document types and locally managed data.
 
 ## Key Features
 
@@ -26,11 +26,11 @@ The test never changes user notes. `write_note`, `read_note`, and `search_notes`
 
 ## Setup and Development
 
-Myelin relies heavily on native Rust libraries (like Tectonic) to achieve a zero-dependency runtime.
+Myelin relies heavily on native Rust libraries such as Tectonic. Building from source requires the platform and native-library prerequisites listed below, and some optional features download runtime assets on first use.
 
 ### Prerequisites (All Platforms)
 
-1. **Node.js** (v21.7.3+) and **npm** (v10.5.0+). The current dependency lockfile requires these minimum versions.
+1. **Node.js** (v22.13.0+ on Node 22, or v24+) and **npm** (v10.5.0+). The current dependency lockfile requires these minimum versions.
 2. **Rust** (stable toolchain) and Cargo.
 3. **Tauri native build prerequisites** (C++ Build Tools on Windows, Xcode tools on macOS, WebKitGTK development headers on Linux).
 4. **Protocol Buffers compiler (`protoc`)**. It is required by LanceDB's `lance-encoding` dependency during the Rust build.

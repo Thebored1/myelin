@@ -792,12 +792,20 @@ pub fn run() {
             app.handle().plugin(tauri_plugin_autostart::Builder::new().args(["--background"]).build())?;
             app.handle().plugin(tauri_plugin_dialog::init())?;
 
+            // Set the generated app icon explicitly on the native window. Linux
+            // window managers otherwise may fall back to Tauri's development icon.
+            let app_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+            let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/internal-tray.png"))?;
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_icon(app_icon.clone())?;
+            }
+
             let show = MenuItem::with_id(app, "show", "Show Myelin", true, None::<&str>)?;
             let quick = MenuItem::with_id(app, "quick", "Quick Capture", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quick, &quit])?;
             TrayIconBuilder::new().menu(&menu).tooltip("Myelin")
-                .icon(app.default_window_icon().cloned().ok_or("missing app icon")?)
+                .icon(tray_icon)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => { if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); } }
                     "quick" => toggle_quick_window(app),
@@ -840,7 +848,18 @@ pub fn run() {
                 // plugin can't fire there — go through the xdg-desktop-portal
                 // GlobalShortcuts interface instead. Everywhere else, the plugin works.
                 #[cfg(target_os = "linux")]
-                wayland_shortcut::spawn(app.handle().clone(), sc, app.config().identifier.clone());
+                // The host portal resolves this value against the desktop entry. Tauri's
+                // Linux bundle installs `myelin.desktop` (product name), while the Tauri
+                // runtime identifier is `com.paper.myelin`; passing the latter makes the
+                // portal reject the registration with "App info not found".
+                wayland_shortcut::spawn(
+                    app.handle().clone(),
+                    sc,
+                    app.config()
+                        .product_name
+                        .clone()
+                        .unwrap_or_else(|| "myelin".to_string()),
+                );
                 #[cfg(not(target_os = "linux"))]
                 {
                     use tauri_plugin_global_shortcut::GlobalShortcutExt;

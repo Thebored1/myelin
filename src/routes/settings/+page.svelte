@@ -1643,8 +1643,9 @@
 				<div>
 					<h3 style="margin: 0; font-size: 1rem;">Jupyter Code Execution</h3>
 					<p class="description" style="margin-top: 4px;">
-						Allow execution of Python code cells within `.ipynb` notebooks using your local Python
-						installation.
+						Runs Python code cells in <code>.ipynb</code> notebooks in-browser via Pyodide
+						(WebAssembly). The first execution downloads the Pyodide runtime (~14&nbsp;MB) from
+						the web; a network connection is required only for that first run.
 					</p>
 				</div>
 				<button class="browse-btn" onclick={toggleJupyterExecution}>

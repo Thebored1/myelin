@@ -167,6 +167,10 @@
 		const generation = ++loadGeneration;
 		try {
 			errorMessage = '';
+			// PDF.js enables document scripts through its viewer-layer
+			// PDFScriptingManager, not through getDocument. This custom reader uses
+			// only the display and text APIs and deliberately never creates that
+			// manager or an annotation layer (equivalent to enableScripting: false).
 			const loadingTask = pdfjsLib.getDocument({ data: pdfBytes });
 			const doc = await loadingTask.promise;
 

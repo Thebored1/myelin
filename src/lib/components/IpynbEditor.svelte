@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { loadPyodide } from 'pyodide';
+	import { version as pyodideVersion } from 'pyodide/package.json';
 
 	interface Props {
 		value: string;
@@ -90,6 +91,13 @@
 	let pyodideInstance: any = null;
 	let pyodideLoading = $state(false);
 
+	// The loader ships with the package; the WASM assets must come from the exact
+	// same version. jsDelivr serves this npm package's artifacts at this path, so
+	// the two can never drift apart again (they did once: loader 314.0.0 + v0.25.0
+	// CDN assets, which are incompatible). Keep tauri.conf.json's CSP in sync with
+	// the package version when bumping it.
+	const PYODIDE_INDEX_URL = `https://cdn.jsdelivr.net/npm/pyodide@${pyodideVersion}/`;
+
 	async function getPyodide() {
 		if (pyodideInstance) return pyodideInstance;
 		if (pyodideLoading)
@@ -98,7 +106,7 @@
 		pyodideLoading = true;
 		try {
 			pyodideInstance = await loadPyodide({
-				indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/'
+				indexURL: PYODIDE_INDEX_URL
 			});
 			return pyodideInstance;
 		} finally {
@@ -166,6 +174,12 @@
 		<div class="error">{parseError}</div>
 	{:else}
 		<div class="cells">
+			{#if pyodideLoading}
+				<div class="pyodide-banner">
+					Downloading the Pyodide Python runtime (~14&nbsp;MB) — first run only. A network
+					connection is required; afterwards it runs fully offline.
+				</div>
+			{/if}
 			{#each notebook.cells as cell, i}
 				<div class="cell {cell.cell_type}">
 					<div class="cell-header">
@@ -224,6 +238,15 @@
 		border-radius: var(--radius-sm);
 		background: var(--bg-panel);
 		overflow: hidden;
+	}
+	.pyodide-banner {
+		margin-bottom: 1rem;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: var(--bg-body);
+		color: var(--text-secondary);
+		font-size: 0.8rem;
 	}
 	.cell-header {
 		padding: 0.25rem 0.5rem;
