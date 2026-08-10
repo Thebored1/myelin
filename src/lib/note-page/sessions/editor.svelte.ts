@@ -8,12 +8,19 @@ import { parseBlocks } from '../model/links';
 
 /** Owns the lazy Vditor lifecycle and the DOM-only transclusion decoration. */
 export function createEditorSession(ctx: Record<string, any>) {
+	let initGeneration = 0;
+
 	function initVditor() {
 		if (!ctx.VditorConstructor || !ctx.vditorContainer || ctx.vditorInstance) return;
 
+		const generation = ++initGeneration;
+		const container = ctx.vditorContainer;
+		const isCurrentInitialization = () =>
+			generation === initGeneration && ctx.vditorContainer === container;
+
 		try {
 			const cdn = ctx.localVditorCdn();
-			ctx.vditorInstance = new ctx.VditorConstructor(ctx.vditorContainer, {
+			const instance = new ctx.VditorConstructor(container, {
 				value: ctx.draftBody,
 				cdn,
 				_lutePath: `${cdn}/dist/js/lute/lute.min.js`,
@@ -63,6 +70,7 @@ export function createEditorSession(ctx: Record<string, any>) {
 					{ name: 'more', toolbar: ['both', 'code-theme', 'content-theme', 'outline', 'devtools', 'info', 'help'] }
 				],
 				after: () => {
+					if (!isCurrentInitialization()) return;
 					const toolbar = ctx.vditorContainer?.querySelector('.vditor-toolbar');
 					if (toolbar) {
 						ctx.toolbarResizeObserver = new ResizeObserver(() => {
@@ -104,7 +112,17 @@ export function createEditorSession(ctx: Record<string, any>) {
 					ctx.triggerAutoSave();
 				}
 			});
+			if (!isCurrentInitialization()) {
+				try {
+					instance.destroy();
+				} catch (error) {
+					console.warn('Stale Vditor destroy error:', error);
+				}
+				return;
+			}
+			ctx.vditorInstance = instance;
 		} catch (e: any) {
+			if (!isCurrentInitialization()) return;
 			ctx.message = 'Vditor Error: ' + (e?.message || String(e));
 		}
 	}
@@ -199,9 +217,22 @@ export function createEditorSession(ctx: Record<string, any>) {
 	}
 
 	function dispose() {
+		invalidateInitialization();
 		ctx.toolbarResizeObserver?.disconnect();
 		ctx.transclusionObserver?.disconnect();
 	}
 
-	return { initVditor, scanForTransclusions, setupTransclusionObserver, fetchRelatedNotes, dispose, parseBlocks };
+	function invalidateInitialization() {
+		initGeneration += 1;
+	}
+
+	return {
+		initVditor,
+		scanForTransclusions,
+		setupTransclusionObserver,
+		fetchRelatedNotes,
+		dispose,
+		invalidateInitialization,
+		parseBlocks
+	};
 }

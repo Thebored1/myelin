@@ -262,6 +262,7 @@ export function createNotePageController() {
 		let shouldInitEditor = $derived(note !== null && (!isSourceMaterial || showAttachedNote));
 		let loadedRouteNoteId = $state('');
 		let saveNote: () => Promise<void> = async () => {};
+		let invalidateVditorInitialization = () => {};
 		const editorState = createEditorStateSession({
 			get showAttachedNote() { return showAttachedNote; },
 			set showAttachedNote(value) { showAttachedNote = value; },
@@ -273,6 +274,7 @@ export function createNotePageController() {
 			set saveStatus(value) { saveStatus = value; },
 			get saveTimer() { return saveTimer; },
 			set saveTimer(value) { saveTimer = value; },
+			invalidateVditorInitialization: () => invalidateVditorInitialization(),
 			saveNote: () => saveNote()
 		});
 		const { appendToNoteBody, destroyEditorInstance, triggerAutoSave } = editorState;
@@ -438,6 +440,7 @@ export function createNotePageController() {
 			sendChatMessage, sendChatText, rewindToSnapshot, retryMessage, mergeChatTools, reconcileRequestNote,
 			finishStreamingChatMessage, extractChatErrorMessage, failStreamingChatMessage, resolveApproval, aiEventContext
 		} = graph;
+		invalidateVditorInitialization = editorSession.invalidateInitialization;
 		const dialogs = createNotePageDialogs({
 			get deleteMainNoteDialog() { return deleteMainNoteDialog; },
 			get deleteAttachedNoteDialog() { return deleteAttachedNoteDialog; },
@@ -485,6 +488,7 @@ export function createNotePageController() {
 			get toolbarResizeObserver() { return toolbarResizeObserver; },
 			editorSession,
 			sourceSession,
+			destroyEditorInstance,
 			get vditorInstance() { return vditorInstance; },
 			get loadedRouteNoteId() { return loadedRouteNoteId; },
 			set loadedRouteNoteId(value) { loadedRouteNoteId = value; },

@@ -54,7 +54,7 @@ export function createNotePageLifecycle(ctx: Record<string, any>) {
 		if (ctx.toolbarResizeObserver) ctx.toolbarResizeObserver.disconnect();
 		ctx.editorSession.dispose();
 		ctx.sourceSession.dispose();
-		if (ctx.vditorInstance) ctx.vditorInstance.destroy();
+		ctx.destroyEditorInstance();
 	});
 
 	$effect(() => {

@@ -12,6 +12,7 @@ export function createEditorStateSession(ctx: Record<string, any>) {
 	}
 
 	function destroyEditorInstance() {
+		ctx.invalidateVditorInitialization?.();
 		if (!ctx.vditorInstance) return;
 		try {
 			ctx.vditorInstance.destroy();
