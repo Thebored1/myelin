@@ -3,7 +3,7 @@ pub mod ai_config;
 pub mod ai_turn;
 mod gguf;
 pub mod git_history;
-mod llama_server;
+pub mod llama_server;
 mod model_profiles;
 mod models;
 mod notebook;
