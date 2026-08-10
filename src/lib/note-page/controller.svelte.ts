@@ -51,6 +51,7 @@ import { createLatexSession } from './sessions/latex.svelte';
 import { createDocumentSession } from './sessions/document.svelte';
 import { createStreamingSession } from './sessions/streaming.svelte';
 import { createEditorSession } from './sessions/editor.svelte';
+import { createEditorInteractionSession } from './sessions/editor-interaction.svelte';
 import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
@@ -296,56 +297,20 @@ export function createNotePageController() {
 		let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
 		let isSidebarResizing = $state(false);
 	
-		function focusEditor() {
-			if (!vditorInstance || !vditorContainer) return;
-			vditorInstance.focus();
-			const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
-			editorEl?.focus();
-		}
-	
-		function refocusEditorSoon() {
-			shouldRefocusEditor = false;
-			setTimeout(() => {
-				focusEditor();
-			}, 0);
-		}
-	
-		function captureShortcutEditorTarget() {
-			if (workingDocType !== 'md' || !vditorContainer) return;
-			const editorEl = vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
-			const selection = window.getSelection();
-			if (!editorEl || !selection || selection.rangeCount === 0) return;
-			const range = selection.getRangeAt(0);
-			if (!editorEl.contains(range.commonAncestorContainer)) return;
-			shortcutEditorRange = range.cloneRange();
-			// Capture synchronously, before focusing the textarea changes the browser
-			// selection, so write operations retain their cursor/selection target.
-			captureEditorSelection();
-		}
-	
-		function restoreShortcutEditorFocus() {
-			if (workingDocType === 'tex') {
-				texEditorInstance?.focusEditor?.();
-				return;
-			}
-			if (workingDocType === 'ipynb') {
-				ipynbEditorInstance?.focusEditor?.();
-				return;
-			}
-			focusEditor();
-			const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-			const selection = window.getSelection();
-			if (
-				editorEl &&
-				selection &&
-				shortcutEditorRange &&
-				editorEl.contains(shortcutEditorRange.commonAncestorContainer)
-			) {
-				selection.removeAllRanges();
-				selection.addRange(shortcutEditorRange);
-			}
-			shortcutEditorRange = null;
-		}
+		let selectionSession: ReturnType<typeof createSelectionSession>;
+		const editorInteraction = createEditorInteractionSession({
+			get vditorInstance() { return vditorInstance; },
+			get vditorContainer() { return vditorContainer; },
+			get workingDocType() { return workingDocType; },
+			get texEditorInstance() { return texEditorInstance; },
+			get ipynbEditorInstance() { return ipynbEditorInstance; },
+			get shortcutEditorRange() { return shortcutEditorRange; },
+			set shortcutEditorRange(value) { shortcutEditorRange = value; },
+			get shouldRefocusEditor() { return shouldRefocusEditor; },
+			set shouldRefocusEditor(value) { shouldRefocusEditor = value; },
+			captureEditorSelection: () => selectionSession.captureEditorSelection()
+		});
+		const { focusEditor, refocusEditorSoon, captureShortcutEditorTarget, restoreShortcutEditorFocus } = editorInteraction;
 	
 		let userScrolledUp = false;
 		let blockCache: Record<string, string> = {};
@@ -638,7 +603,7 @@ export function createNotePageController() {
 		const parseLatexError = latexSession.parseLatexError;
 		const closeTexPreview = latexSession.closeTexPreview;
 
-		const selectionSession = createSelectionSession({
+		selectionSession = createSelectionSession({
 			get vditorInstance() { return vditorInstance; },
 			get vditorContainer() { return vditorContainer; },
 			get armedSelection() { return armedSelection; },
