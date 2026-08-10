@@ -1,7 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
 
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
-
 import { goto } from '$app/navigation';
 
 import { base, resolve } from '$app/paths';
@@ -170,20 +168,6 @@ export function createNotePageController() {
 			return segs.length > 1 ? segs[0] : null;
 		}
 	
-		// Upload button: attach a document (becomes a note via the PDF/EPUB import).
-		async function attachFile() {
-			const picked = await openFileDialog({
-				multiple: false,
-				filters: [{ name: 'Documents', extensions: ['pdf', 'epub'] }]
-			});
-			if (typeof picked === 'string') {
-				try {
-					await invoke('import_pdf_file', { filePath: picked, notebook: openNoteNotebook() });
-				} catch (e) {
-					console.error('attach failed', e);
-				}
-			}
-		}
 		let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
 		let chatMessagesEl: HTMLDivElement | undefined = $state();
 		let currentTime = $state(Date.now());
@@ -890,6 +874,7 @@ export function createNotePageController() {
 		const confirmDetachPdf = sourceSession.confirmDetachPdf;
 		const browseAndAttachPdf = sourceSession.browseAndAttachPdf;
 		const handlePdfSearchKeydown = sourceSession.handlePdfSearchKeydown;
+		const attachFile = sourceSession.attachFile;
 		const chatContext: Record<string, any> = {
 			get activeChatRequestId() { return activeChatRequestId; },
 			set activeChatRequestId(value) { activeChatRequestId = value; },

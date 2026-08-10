@@ -5,6 +5,19 @@ import { noteOpened } from '$lib/llamaWarm';
 
 /** Owns source-document, scratchpad, ingestion, and attachment workflows. */
 export function createSourceSession(ctx: Record<string, any>) {
+	async function attachFile() {
+		const picked = await openFileDialog({
+			multiple: false,
+			filters: [{ name: 'Documents', extensions: ['pdf', 'epub'] }]
+		});
+		if (typeof picked !== 'string') return;
+		try {
+			await invoke('import_pdf_file', { filePath: picked, notebook: ctx.openNoteNotebook() });
+		} catch (error) {
+			console.error('attach failed', error);
+		}
+	}
+
 	async function handleSectionsReady(sections: any[]) {
 		if (!sections.length) return;
 		const aiNoteId = ctx.activeAiNoteId();
@@ -231,6 +244,7 @@ export function createSourceSession(ctx: Record<string, any>) {
 	function dispose() { ctx.pdfIngestionPromise = null; }
 
 	return {
+		attachFile,
 		handleSectionsReady, formatSectionCacheDuration, openAttachedNote, handlePdfQuote,
 		handleAnnotationsChange, handleImageExtract, handlePdfTextExtracted,
 		openAttachPdfDialog, attachPdf, requestDetachPdf, confirmDetachPdf, browseAndAttachPdf,
