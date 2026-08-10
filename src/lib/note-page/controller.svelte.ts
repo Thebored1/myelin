@@ -10,7 +10,6 @@ import { page } from '$app/state';
 
 import type {
 		NoteDocument,
-		SearchResponse,
 		NoteSummary,
 		PdfAnnotation,
 		GitCommit,
@@ -27,8 +26,6 @@ import { chatSidebarShortcut, showSidebarToggle, noteSidebarOpen } from '$lib/st
 import { shortcutMatches } from '$lib/keyboardShortcut';
 
 import { formatBacklinkContext } from '$lib/backlinkContext';
-
-import { theme } from '$lib/theme';
 
 import type Vditor from 'vditor';
 
@@ -50,9 +47,6 @@ import { marked } from 'marked';
 
 import DOMPurify from 'dompurify';
 
-import { vditorI18n } from '$lib/vditorI18n';
-
-import { parseBlocks } from './model/links';
 import type { BlockItem } from './types';
 import { installAiEventBridge } from './sessions/aiEvents.svelte';
 import { createLinkingSession } from './sessions/linking.svelte';
@@ -60,6 +54,7 @@ import { createSelectionSession } from './sessions/selection.svelte';
 import { createLatexSession } from './sessions/latex.svelte';
 import { createDocumentSession } from './sessions/document.svelte';
 import { createStreamingSession } from './sessions/streaming.svelte';
+import { createEditorSession } from './sessions/editor.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -854,292 +849,6 @@ export function createNotePageController() {
 				vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 			}
 			mathDialog?.close();
-		}
-	
-		// A live note stream is starting (whole-body replace). Keep the existing note
-		// visible until the first real content arrives; clearing here made fast tool
-		// calls flash an empty editor before the authoritative write landed.
-		function initVditor() {
-			if (!VditorConstructor || !vditorContainer || vditorInstance) return;
-	
-			try {
-				const cdn = localVditorCdn();
-				vditorInstance = new VditorConstructor(vditorContainer, {
-					value: draftBody,
-					cdn,
-					_lutePath: `${cdn}/dist/js/lute/lute.min.js`,
-					placeholder: isSourceMaterial ? 'Scratchpad for notes...' : 'Start typing here...',
-					mode: 'ir',
-					// Vditor ships its own skin; 'classic' is its light theme. We mirror the
-					// app theme here and keep it in sync via the $effect below. Pass only the
-					// skin (no content/code theme) so Vditor doesn't fetch theme CSS from a CDN
-					// — the editor's bg/text colors come from our own var overrides anyway.
-					theme: get(theme) === 'light' ? 'classic' : 'dark',
-					icon: 'material',
-					lang: 'en_US',
-					i18n: vditorI18n,
-					tab: '\t',
-					cache: { enable: false },
-					toolbarConfig: { pin: true },
-					toolbar: [
-						{
-							name: 'attach-pdf',
-							tipPosition: 'n',
-							tip: 'Attach PDF',
-							icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>',
-							click: () => {
-								openAttachPdfDialog();
-							}
-						},
-						'|',
-						'emoji',
-						'headings',
-						'bold',
-						'italic',
-						'strike',
-						'link',
-						'|',
-						'list',
-						'ordered-list',
-						'check',
-						'outdent',
-						'indent',
-						'|',
-						'quote',
-						'line',
-						'code',
-						'inline-code',
-						'insert-before',
-						'insert-after',
-						'|',
-						{
-							name: 'mathlive',
-							tipPosition: 'n',
-							tip: 'MathLive Editor',
-							icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4H6l6 8-6 8h12"></path></svg>',
-							click: () => {
-								void openMathDialog();
-							}
-						},
-						{
-							name: 'link-note',
-							tipPosition: 'n',
-							tip: 'Link to Note',
-							icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
-							click: () => {
-								saveCursorPosition();
-									linkingSession.linkSearchQuery = '';
-									linkingSession.linkSearchResults = [];
-									linkingSession.linkNoteDialog?.showModal();
-								setTimeout(() => {
-									const input = linkingSession.linkNoteDialog?.querySelector(
-										'.link-search-input'
-									) as HTMLInputElement;
-									if (input) input.focus();
-								}, 50);
-							}
-						},
-						{
-							name: 'search-blocks',
-							tipPosition: 'n',
-							tip: 'Search Global Blocks',
-							icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
-							click: () => {
-								linkingSession.openGlobalBlockSearch();
-							}
-						},
-						'|',
-						'upload',
-						'record',
-						'table',
-						'|',
-						'undo',
-						'redo',
-						'|',
-						'fullscreen',
-						'edit-mode',
-						{
-							name: 'more',
-							toolbar: ['both', 'code-theme', 'content-theme', 'outline', 'devtools', 'info', 'help']
-						}
-					],
-					after: () => {
-						const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
-						if (toolbar) {
-							toolbarResizeObserver = new ResizeObserver(() => {
-								if (toolbar.scrollHeight > 55) {
-									toolbarNeedsToggle = true;
-								} else {
-									toolbarNeedsToggle = false;
-									toolbarExpanded = false;
-								}
-								updateToolbarOverflow();
-							});
-							toolbarResizeObserver.observe(toolbar);
-							if (toolbar.scrollHeight > 55) {
-								toolbarNeedsToggle = true;
-							}
-							updateToolbarOverflow();
-	
-							const fsBtn = toolbar.querySelector('button[data-type="fullscreen"]');
-							if (fsBtn) {
-								const label = fsBtn.getAttribute('aria-label') || '';
-								const match = label.match(/<([^>]+)>/);
-								if (match) {
-									fullscreenShortcut = match[1];
-								}
-							}
-						}
-						setTimeout(() => {
-							scanForTransclusions();
-						}, 100);
-						setupTransclusionObserver();
-					},
-					keydown: (e: KeyboardEvent) => {
-						if ((e.ctrlKey || e.metaKey) && e.code === 'Comma') {
-							e.preventDefault();
-							if (e.shiftKey) {
-								const globalSearchBtn = vditorContainer?.querySelector(
-									'button[data-type="search-blocks"]'
-								) as HTMLButtonElement | null;
-								if (globalSearchBtn) globalSearchBtn.click();
-							} else {
-								const linkBtn = vditorContainer?.querySelector(
-									'button[data-type="link-note"]'
-								) as HTMLButtonElement | null;
-								if (linkBtn) linkBtn.click();
-							}
-							return;
-						}
-						if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
-							e.preventDefault();
-							const redoBtn = vditorContainer?.querySelector(
-								'button[data-type="redo"]'
-							) as HTMLButtonElement | null;
-							if (redoBtn) redoBtn.click();
-						}
-					},
-					input: (value: string) => {
-						draftBody = value;
-						triggerAutoSave();
-					}
-				});
-			} catch (e: any) {
-				message = 'Vditor Error: ' + (e?.message || String(e));
-			}
-		}
-	
-		$effect(() => {
-			if (!toolsReady || !shouldInitEditor || !vditorContainer || vditorInstance) return;
-			if (!VditorConstructor && !vditorLoading) {
-				vditorLoading = true;
-				Promise.all([import('vditor'), import('vditor/dist/index.css')])
-					.then(([{ default: component }]) => {
-						VditorConstructor = component;
-						vditorLoading = false;
-						initVditor();
-					})
-					.catch((error) => {
-						vditorLoading = false;
-						message = 'Could not load the Markdown editor.';
-						console.error('Failed to load Vditor', error);
-					});
-			} else if (VditorConstructor) {
-				initVditor();
-			}
-		});
-	
-		// Keep Vditor's skin in sync when the app theme is toggled while a note is open.
-		$effect(() => {
-		const skin = get(theme) === 'light' ? 'classic' : 'dark';
-			if (vditorInstance) vditorInstance.setTheme(skin);
-		});
-	
-		function scanForTransclusions() {
-			if (!vditorContainer) return;
-			const links = vditorContainer.querySelectorAll('[data-type="a"]:not(.transclusion-wrapper)');
-			links.forEach((linkWrapper) => {
-				const irLink = linkWrapper.querySelector('.vditor-ir__link');
-				if (!irLink) return;
-				const text = irLink.textContent || '';
-				const blockMatch = text.match(/^\(\(([a-fA-F0-9]{6})\)\)$/);
-				if (!blockMatch) return;
-	
-				const blockId = blockMatch[1];
-				const fullText = linkWrapper.textContent || '';
-				const urlMatch = fullText.match(/\]\(\/notes\/([^#]+)#([a-fA-F0-9]{6})\)$/);
-				if (!urlMatch) return;
-	
-				const targetNoteId = urlMatch[1];
-				linkWrapper.classList.add('transclusion-wrapper');
-	
-				// Load block content for the tooltip and CSS rendering — no DOM injection
-				const cacheKey = `${targetNoteId}#${blockId}`;
-				if (blockCache[cacheKey]) {
-					const plainText = blockCache[cacheKey].replace(/<[^>]+>/g, '');
-					(linkWrapper as HTMLElement).title = plainText;
-					(linkWrapper as HTMLElement).setAttribute('data-block-content', plainText);
-				} else {
-					invoke<NoteDocument>('load_note', { noteId: targetNoteId })
-						.then((n) => {
-							const blocks = parseBlocks(n.body);
-							const targetBlock = blocks.find((b) => b.id === blockId);
-							if (targetBlock) {
-								const rawMd = targetBlock.original.replace(/\s*\(\([a-fA-F0-9]+\)\)$/, '').trim();
-								let htmlText = rawMd;
-								htmlText = htmlText.replace(
-									/\[([^\]]+)\]\(([^)]+)\)/g,
-									'<span class="mock-link">$1</span>'
-								);
-								htmlText = htmlText.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-								htmlText = htmlText.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-								blockCache[cacheKey] = htmlText;
-								// Set plain-text tooltip and data attribute
-								const plainText = htmlText.replace(/<[^>]+>/g, '');
-								(linkWrapper as HTMLElement).title = plainText;
-								(linkWrapper as HTMLElement).setAttribute('data-block-content', plainText);
-							}
-						})
-						.catch(() => {});
-				}
-			});
-		}
-	
-		function setupTransclusionObserver() {
-			if (!vditorContainer) return;
-			if (transclusionObserver) transclusionObserver.disconnect();
-	
-			transclusionObserver = new MutationObserver(() => {
-				// Streaming setValue rebuilds the entire IR DOM every frame; the
-				// observer is disconnected for the whole stream (see beginNoteStream)
-				// and re-armed when it settles, so scanning only runs on real edits.
-				scanForTransclusions();
-			});
-	
-			transclusionObserver.observe(vditorContainer, {
-				childList: true,
-				subtree: true,
-				characterData: true
-			});
-		}
-	
-		async function fetchRelatedNotes() {
-			if (!draftTags.trim()) {
-				relatedNotes = [];
-				return;
-			}
-			try {
-				const query = draftTags.split(',')[0].trim();
-				if (query) {
-					const res = await invoke<SearchResponse>('search_notes', { query });
-					relatedNotes = res.results
-						.map((r) => r.note)
-						.filter((n) => n.id !== note?.id)
-						.slice(0, 5);
-				}
-			} catch (e) {
-				console.error(e);
-			}
 		}
 	
 		function handleAnnotationsChange(anns: PdfAnnotation[]) {
@@ -2182,7 +1891,7 @@ export function createNotePageController() {
 			set scratchpadSavedId(value) { scratchpadSavedId = value; },
 			get message() { return message; },
 			set message(value) { message = value; },
-			fetchRelatedNotes,
+			fetchRelatedNotes: () => editorSession.fetchRelatedNotes(),
 			get vditorInstance() { return vditorInstance; }
 		});
 		const loadCurrentNote = documentSession.loadCurrentNote;
@@ -2208,7 +1917,7 @@ export function createNotePageController() {
 			set note(value) { note = value; },
 			getSelectionTextOffset,
 			restoreSelectionTextOffset,
-			setupTransclusionObserver
+			setupTransclusionObserver: () => editorSession.setupTransclusionObserver()
 		});
 		const beginNoteStream = streamingSession.beginNoteStream;
 		const scheduleNoteStreamFlush = streamingSession.scheduleNoteStreamFlush;
@@ -2238,6 +1947,57 @@ export function createNotePageController() {
 			focusEditor,
 			restoreSelectionTextOffset
 		});
+		const editorSession = createEditorSession({
+			get VditorConstructor() { return VditorConstructor; },
+			set VditorConstructor(value) { VditorConstructor = value; },
+			get vditorContainer() { return vditorContainer; },
+			get vditorInstance() { return vditorInstance; },
+			set vditorInstance(value) { vditorInstance = value; },
+			get vditorLoading() { return vditorLoading; },
+			set vditorLoading(value) { vditorLoading = value; },
+			get toolsReady() { return toolsReady; },
+			get shouldInitEditor() { return shouldInitEditor; },
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get isSourceMaterial() { return isSourceMaterial; },
+			get message() { return message; },
+			set message(value) { message = value; },
+			get toolbarResizeObserver() { return toolbarResizeObserver; },
+			set toolbarResizeObserver(value) { toolbarResizeObserver = value; },
+			get toolbarNeedsToggle() { return toolbarNeedsToggle; },
+			set toolbarNeedsToggle(value) { toolbarNeedsToggle = value; },
+			get toolbarExpanded() { return toolbarExpanded; },
+			set toolbarExpanded(value) { toolbarExpanded = value; },
+			get fullscreenShortcut() { return fullscreenShortcut; },
+			set fullscreenShortcut(value) { fullscreenShortcut = value; },
+			get blockCache() { return blockCache; },
+			get transclusionObserver() { return transclusionObserver; },
+			set transclusionObserver(value) { transclusionObserver = value; },
+			get draftTags() { return draftTags; },
+			get relatedNotes() { return relatedNotes; },
+			set relatedNotes(value) { relatedNotes = value; },
+			get note() { return note; },
+			localVditorCdn,
+			openAttachPdfDialog,
+			openMathDialog,
+			openLinkDialog: () => {
+				saveCursorPosition();
+				linkingSession.linkSearchQuery = '';
+				linkingSession.linkSearchResults = [];
+				linkingSession.linkNoteDialog?.showModal();
+				setTimeout(() => {
+					const input = linkingSession.linkNoteDialog?.querySelector('.link-search-input') as HTMLInputElement;
+					input?.focus();
+				}, 50);
+			},
+			linkingSession,
+			updateToolbarOverflow,
+			triggerAutoSave
+		});
+		const initVditor = editorSession.initVditor;
+		const scanForTransclusions = editorSession.scanForTransclusions;
+		const setupTransclusionObserver = editorSession.setupTransclusionObserver;
+		const fetchRelatedNotes = editorSession.fetchRelatedNotes;
 
 		const aiEventContext: Record<string, any> = {
 			get note() { return note; },
@@ -2343,6 +2103,7 @@ export function createNotePageController() {
 			if (aiNoteId && chatMessages.length) void persistChatHistory(aiNoteId, chatMessages);
 			noteClosed();
 			if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
+			editorSession.dispose();
 			if (vditorInstance) vditorInstance.destroy();
 			if (typeof document !== 'undefined') {
 				document.removeEventListener('selectionchange', handleGlobalSelectionChange);
@@ -2675,7 +2436,7 @@ export function createNotePageController() {
 		compileTex,
 		parseLatexError,
 		closeTexPreview,
-		parseBlocks,
+		parseBlocks: editorSession.parseBlocks,
 		...linkingSession,
 		loadCurrentNote,
 		refreshCurrentNoteFromBackend,
