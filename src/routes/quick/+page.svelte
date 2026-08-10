@@ -1,10 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { invoke } from '@tauri-apps/api/core';
-	import { emit, listen } from '@tauri-apps/api/event';
+	import { listen } from '@tauri-apps/api/event';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 	import { LogicalSize } from '@tauri-apps/api/dpi';
 	import NotebookSelect from '$lib/components/NotebookSelect.svelte';
+	import { createTaskController } from '$lib/tasks/controller.svelte';
+	import type { TaskItem, TaskSubtask } from '$lib/tasks/types';
+	import type { StorageIssue } from '$lib/types';
 
 	let text = $state('');
 	let workspacePath = $state<string | null>(null);
@@ -41,29 +44,11 @@
 				).filter(Boolean) as string[])
 			: []
 	);
-	let expandedTaskId = $state<number | null>(null);
-
-	interface TaskSubtask {
-		id: number;
-		text: string;
-		done: boolean;
-	}
-
-	interface TaskItem {
-		id: number;
-		text: string;
-		done: boolean;
-		details?: string;
-		dueDate?: string;
-		dueTime?: string;
-		notebook?: string;
-		subtasks?: TaskSubtask[];
-	}
-
+	let expandedTaskId = $state<string | number | null>(null);
 	let tasks = $state<TaskItem[]>([]);
+	let tasksLoadedWorkspace = $state<string | null>(null);
 	let activeFilter = $state<'all' | 'active' | 'done'>('all');
-	let suppressNextTaskBroadcast = 0;
-	let lastTaskJson = '';
+	const taskController = createTaskController();
 
 	let filteredTasks = $derived.by(() => {
 		if (activeFilter === 'active') return tasks.filter((t) => !t.done);
@@ -71,33 +56,40 @@
 		return tasks;
 	});
 
-	function loadTasks() {
+	async function loadTasks() {
 		if (!workspacePath) return;
-		try {
-			tasks = JSON.parse(localStorage.getItem(`tasks_${workspacePath}`) || '[]');
-		} catch {
-			tasks = [];
-		}
+		tasks = await taskController.load(workspacePath);
+		tasksLoadedWorkspace = workspacePath;
 	}
 
 	function saveTasks() {
 		if (!workspacePath) return;
-		localStorage.setItem(`tasks_${workspacePath}`, JSON.stringify(tasks));
-		void emit('tasks://sync', { workspacePath, source: 'quick' });
+		taskController.scheduleSave(workspacePath, tasks);
+	}
+
+	async function removeTask(id: string | number) {
+		if (!workspacePath) return;
+		const previous = tasks;
+		tasks = tasks.filter((task) => task.id !== id);
+		if (!(await taskController.remove(workspacePath, id))) {
+			tasks = previous;
+			await loadTasks();
+		}
 	}
 
 	async function loadWorkspace() {
 		try {
 			const snap = await invoke<{ workspacePath?: string }>('get_snapshot');
 			workspacePath = snap.workspacePath ?? null;
-			loadTasks();
+			tasksLoadedWorkspace = null;
+			await loadTasks();
 			notebooks = await invoke<string[]>('list_notebooks');
 		} catch {
 			/* ignore */
 		}
 	}
 
-	function addTask() {
+	async function addTask() {
 		const t = text.trim();
 		if (!t || !workspacePath) return;
 
@@ -119,29 +111,18 @@
 		draftNotebook = '';
 		draftSubtasks = [];
 
-		saved = true;
-		setTimeout(() => {
-			saved = false;
-		}, 1000);
+		const persisted = await taskController.save(workspacePath, tasks);
+		if (persisted) {
+			saved = true;
+			setTimeout(() => {
+				saved = false;
+			}, 1000);
+		}
 	}
 
 	$effect(() => {
-		if (workspacePath) {
-			const toSave = JSON.stringify(tasks);
-			localStorage.setItem(`tasks_${workspacePath}`, toSave);
-			if (toSave !== lastTaskJson) {
-				lastTaskJson = toSave;
-				if (suppressNextTaskBroadcast > 0) {
-					suppressNextTaskBroadcast -= 1;
-				} else {
-					queueMicrotask(() =>
-						void emit('tasks://sync', {
-							workspacePath,
-							source: 'quick'
-						})
-					);
-				}
-			}
+		if (workspacePath && tasksLoadedWorkspace === workspacePath) {
+			saveTasks();
 		}
 	});
 
@@ -231,10 +212,16 @@
 				if (!workspacePath) return;
 				if (event.payload?.workspacePath && event.payload.workspacePath !== workspacePath) return;
 				if (event.payload?.source === 'quick') return;
-				suppressNextTaskBroadcast += 1;
-				loadTasks();
+				void loadTasks();
 			}
 		);
+		const unlistenStorageIssues = listen<StorageIssue[]>('storage://issues', (event) => {
+			const taskIssue = event.payload.find(
+				(issue) => issue.code.startsWith('task-') || issue.code === 'duplicate-task'
+			);
+			if (taskIssue) taskController.issue = taskIssue.message;
+			else if (taskController.issue && taskController.issue.startsWith('A task')) taskController.issue = '';
+		});
 
 		// Each time the global shortcut re-shows the window, clear + refocus.
 		const un = listen('quick://focus', () => {
@@ -275,9 +262,11 @@
 		return () => {
 			ro.disconnect();
 			document.documentElement.classList.remove('quick-window');
-			void unlistenTasks.then((f) => f());
+				void unlistenTasks.then((f) => f());
+				void unlistenStorageIssues.then((f) => f());
 			void un.then((f) => f());
 			void unfocus.then((f) => f());
+			taskController.dispose();
 		};
 	});
 </script>
@@ -320,6 +309,9 @@
 				<kbd>Enter</kbd> to add · <kbd>Esc</kbd> to close
 			{/if}
 		</div>
+		{#if taskController.issue}
+			<div class="task-error" role="alert">{taskController.issue}</div>
+		{/if}
 	</div>
 
 	{#if workspacePath}
@@ -487,13 +479,13 @@
 									bind:value={task.text}
 									onfocus={() => (expandedTaskId = task.id)}
 								></textarea>
-								<button
-									class="task-remove"
-									tabindex="-1"
-									onclick={(e) => {
-										e.preventDefault();
-										tasks = tasks.filter((t) => t.id !== task.id);
-									}}>&times;</button
+				<button
+					class="task-remove"
+					tabindex="-1"
+					onclick={(e) => {
+						e.preventDefault();
+						void removeTask(task.id);
+					}}>&times;</button
 								>
 							</div>
 							{#if expandedTaskId === task.id}

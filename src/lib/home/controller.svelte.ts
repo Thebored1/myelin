@@ -1,12 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
 import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
 import { open } from '@tauri-apps/plugin-dialog';
 import { appCache } from '$lib/appCache';
-import type { AppSnapshot, NoteDocument, NoteSummary, ProviderStatus, SearchResponse } from '$lib/types';
+import type { AppSnapshot, NoteDocument, NoteSummary, ProviderStatus, SearchResponse, StorageIssue } from '$lib/types';
 import { NOTE_GROUP, DOCUMENT_GROUP as DOC_GROUP, noteType } from '$lib/home/model';
 import { createHomeLifecycle } from './lifecycle.svelte';
+import { createTaskController } from '$lib/tasks/controller.svelte';
+import type { TaskItem } from '$lib/tasks/types';
+import { readBrowserStorage } from './storage';
 
 export function createHomeController() {
 	let appVersion = $state('');
@@ -30,49 +32,50 @@ export function createHomeController() {
 	let notebookDialog: HTMLDialogElement | undefined = $state();
 	let newNotebookName = $state('');
 
-	interface TaskSubtask {
-		id: number;
-		text: string;
-		done: boolean;
-	}
-
-	interface TaskItem {
-		id: number;
-		text: string;
-		done: boolean;
-		details?: string;
-		dueDate?: string;
-		dueTime?: string;
-		notebook?: string;
-		subtasks?: TaskSubtask[];
-	}
-
 	let dashTasks = $state<TaskItem[]>([]);
-	let expandedTaskId = $state<number | null>(null);
+	let expandedTaskId = $state<string | number | null>(null);
 	let currentWorkspaceForTasks = $state<string | null>(null);
-	let suppressNextTaskBroadcast = 0;
-	let lastTaskJson = '';
+	let tasksLoadedWorkspace = $state<string | null>(null);
+	const taskController = createTaskController();
 	let pinnedNoteIds = $state<string[]>([]);
 	let showTimeline = $state(true);
 	let tasksCollapsed = $state(false);
+	let browserStorageIssues = $state<StorageIssue[]>([]);
+
+	function reportBrowserStorageIssue(issueOrKey: StorageIssue | string, error: unknown) {
+		const issue: StorageIssue = typeof issueOrKey === 'string' ? {
+			code: 'browser-storage', severity: 'warning', path: issueOrKey,
+			message: 'A browser preference could not be saved; the rest of the library remains available.',
+			recoverable: true
+		} : issueOrKey;
+		if (!browserStorageIssues.some((existing) => existing.path === issue.path)) {
+			browserStorageIssues = [...browserStorageIssues, issue];
+		}
+		console.warn(`Could not persist browser preference ${issue.path}`, error);
+	}
 
 	$effect(() => {
 		if (app?.workspacePath && app.workspacePath !== currentWorkspaceForTasks) {
 			currentWorkspaceForTasks = app.workspacePath;
+			browserStorageIssues = [];
+			tasksLoadedWorkspace = null;
 			activeTag = null;
 			selectedNote = null;
 			activeNotebook = null;
-			const stored = localStorage.getItem(`tasks_${app.workspacePath}`);
-			if (stored) {
-				try {
-					dashTasks = JSON.parse(stored);
-				} catch {
+			void taskController
+				.load(app.workspacePath)
+				.then((tasks) => {
+					if (currentWorkspaceForTasks === app?.workspacePath) {
+						dashTasks = tasks;
+						tasksLoadedWorkspace = app.workspacePath;
+					}
+				})
+				.catch((error) => {
+					message = String(error);
 					dashTasks = [];
-				}
-			} else {
-				dashTasks = [];
-			}
-			const storedPinned = localStorage.getItem(`pinned_${app.workspacePath}`);
+				});
+			const pinnedKey = `pinned_${app.workspacePath}`;
+			const storedPinned = readBrowserStorage(pinnedKey, reportBrowserStorageIssue);
 			if (storedPinned) {
 				try {
 					pinnedNoteIds = JSON.parse(storedPinned);
@@ -82,13 +85,14 @@ export function createHomeController() {
 			} else {
 				pinnedNoteIds = [];
 			}
-			const storedTimeline = localStorage.getItem(`timeline_${app.workspacePath}`);
+			const timelineKey = `timeline_${app.workspacePath}`;
+			const storedTimeline = readBrowserStorage(timelineKey, reportBrowserStorageIssue);
 			if (storedTimeline !== null) {
 				showTimeline = storedTimeline === 'true';
 			} else {
 				showTimeline = true;
 			}
-			tasksCollapsed = localStorage.getItem(`taskscollapsed_${app.workspacePath}`) === 'true';
+			tasksCollapsed = readBrowserStorage(`taskscollapsed_${app.workspacePath}`, reportBrowserStorageIssue) === 'true';
 		}
 	});
 
@@ -103,25 +107,20 @@ export function createHomeController() {
 	}
 
 	$effect(() => {
-		const toSave = JSON.stringify(dashTasks);
-		if (currentWorkspaceForTasks) {
-			localStorage.setItem(`tasks_${currentWorkspaceForTasks}`, toSave);
-			if (toSave !== lastTaskJson) {
-				lastTaskJson = toSave;
-				if (suppressNextTaskBroadcast > 0) {
-					suppressNextTaskBroadcast -= 1;
-				} else {
-					queueMicrotask(() =>
-						void emit('tasks://sync', {
-							workspacePath: currentWorkspaceForTasks,
-							source: 'main'
-						})
-					);
+		if (currentWorkspaceForTasks && tasksLoadedWorkspace === currentWorkspaceForTasks) {
+			taskController.scheduleSave(currentWorkspaceForTasks, dashTasks);
+			const writes = [
+				[`pinned_${currentWorkspaceForTasks}`, JSON.stringify(pinnedNoteIds)],
+				[`timeline_${currentWorkspaceForTasks}`, showTimeline.toString()],
+				[`taskscollapsed_${currentWorkspaceForTasks}`, tasksCollapsed.toString()]
+			] as const;
+			for (const [key, value] of writes) {
+				try {
+					localStorage.setItem(key, value);
+				} catch (error) {
+					reportBrowserStorageIssue(key, error);
 				}
 			}
-			localStorage.setItem(`pinned_${currentWorkspaceForTasks}`, JSON.stringify(pinnedNoteIds));
-			localStorage.setItem(`timeline_${currentWorkspaceForTasks}`, showTimeline.toString());
-			localStorage.setItem(`taskscollapsed_${currentWorkspaceForTasks}`, tasksCollapsed.toString());
 		}
 	});
 
@@ -153,8 +152,15 @@ export function createHomeController() {
 			newTaskText = '';
 		}
 	}
-	function removeTask(id: number) {
+	async function removeTask(id: string | number) {
+		const previous = dashTasks;
 		dashTasks = dashTasks.filter((t) => t.id !== id);
+		if (!currentWorkspaceForTasks) return;
+		const removed = await taskController.remove(currentWorkspaceForTasks, id);
+		if (!removed) {
+			dashTasks = previous;
+			dashTasks = await taskController.load(currentWorkspaceForTasks).catch(() => previous);
+		}
 	}
 
 	let visibleNotes = $derived.by(() => {
@@ -603,6 +609,16 @@ export function createHomeController() {
 		return normalized.split('/').pop() || path;
 	}
 
+	async function reloadTasks() {
+		if (!currentWorkspaceForTasks) return;
+		try {
+			dashTasks = await taskController.load(currentWorkspaceForTasks);
+			tasksLoadedWorkspace = currentWorkspaceForTasks;
+		} catch (error) {
+			message = String(error);
+		}
+	}
+
 	createHomeLifecycle({
 		get app() { return app; },
 		set app(value) { app = value; },
@@ -619,8 +635,8 @@ export function createHomeController() {
 		get currentWorkspaceForTasks() { return currentWorkspaceForTasks; },
 		get dashTasks() { return dashTasks; },
 		set dashTasks(value) { dashTasks = value; },
-		get suppressNextTaskBroadcast() { return suppressNextTaskBroadcast; },
-		set suppressNextTaskBroadcast(value) { suppressNextTaskBroadcast = value; },
+		reloadTasks,
+		disposeTasks: () => taskController.dispose(),
 		refreshApp
 	});
 
@@ -705,6 +721,7 @@ export function createHomeController() {
 		get pinnedNoteIds() { return pinnedNoteIds; }, set pinnedNoteIds(value) { pinnedNoteIds = value; },
 		get showTimeline() { return showTimeline; }, set showTimeline(value) { showTimeline = value; },
 		get tasksCollapsed() { return tasksCollapsed; }, set tasksCollapsed(value) { tasksCollapsed = value; },
+		get storageIssues() { return [...(app?.storageIssues ?? []), ...browserStorageIssues]; },
 		get newTaskText() { return newTaskText; }, set newTaskText(value) { newTaskText = value; },
 		get isClusterDialogOpen() { return isClusterDialogOpen; }, set isClusterDialogOpen(value) { isClusterDialogOpen = value; },
 		get selectedCluster() { return selectedCluster; }, set selectedCluster(value) { selectedCluster = value; },

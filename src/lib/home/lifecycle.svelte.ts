@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
 import { appCache } from '$lib/appCache';
+import type { StorageIssue } from '$lib/types';
 
 /** Owns Home's bootstrap and event subscriptions. */
 export function createHomeLifecycle(ctx: Record<string, any>) {
@@ -10,6 +11,7 @@ export function createHomeLifecycle(ctx: Record<string, any>) {
 		let unlistenChanged = () => {};
 		let unlistenStatus = () => {};
 		let unlistenTasks = () => {};
+		let unlistenIssues = () => {};
 
 		// Paint instantly from the last-known snapshot so coming back from a note
 		// doesn't blank the UI while the backend responds.
@@ -24,7 +26,7 @@ export function createHomeLifecycle(ctx: Record<string, any>) {
 		void (async () => {
 			// Listen before bootstrap: startup indexing emits `notes_ready` as soon as
 			// parsed notes can be opened, long before semantic indexing finishes.
-			[unlistenChanged, unlistenStatus, unlistenTasks] = await Promise.all([
+			[unlistenChanged, unlistenStatus, unlistenTasks, unlistenIssues] = await Promise.all([
 				listen('index://changed', () => {
 					ctx.message = 'Reindexing…';
 				}),
@@ -51,13 +53,10 @@ export function createHomeLifecycle(ctx: Record<string, any>) {
 					if (!ws) return;
 					if (event.payload?.workspacePath && event.payload.workspacePath !== ws) return;
 					if (event.payload?.source === 'main') return;
-					try {
-						ctx.suppressNextTaskBroadcast += 1;
-						const stored = localStorage.getItem(`tasks_${ws}`);
-						ctx.dashTasks = stored ? JSON.parse(stored) : [];
-					} catch {
-						/* ignore */
-					}
+					void ctx.reloadTasks?.();
+				}),
+				listen<StorageIssue[]>('storage://issues', (event) => {
+					if (ctx.app) ctx.app = { ...ctx.app, storageIssues: event.payload };
 				})
 			]);
 
@@ -103,6 +102,8 @@ export function createHomeLifecycle(ctx: Record<string, any>) {
 			unlistenChanged();
 			unlistenStatus();
 			unlistenTasks();
+			unlistenIssues();
+			ctx.disposeTasks?.();
 		};
 	});
 }
