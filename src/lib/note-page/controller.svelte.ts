@@ -55,6 +55,7 @@ import { createLatexSession } from './sessions/latex.svelte';
 import { createDocumentSession } from './sessions/document.svelte';
 import { createStreamingSession } from './sessions/streaming.svelte';
 import { createEditorSession } from './sessions/editor.svelte';
+import { createChatSession } from './sessions/chat.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -1008,365 +1009,6 @@ export function createNotePageController() {
 			}
 		}
 	
-		async function stopActiveChat(): Promise<boolean> {
-			if (!activeChatRequestId && !isChatStreaming) return true;
-			try {
-				await invoke('cancel_ai');
-			} catch (error) {
-				console.error('Failed to stop AI:', error);
-				return false;
-			}
-	
-			// cancel_ai is cooperative: wait until the backend emits done/error and
-			// clears the active request before retrying or restoring a snapshot.
-			const deadline = Date.now() + 10_000;
-			while ((activeChatRequestId || isChatStreaming) && Date.now() < deadline) {
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
-			if (activeChatRequestId || isChatStreaming) {
-				console.error('AI request did not stop within 10 seconds');
-				return false;
-			}
-			return true;
-		}
-	
-		function stopChat() {
-			if (!isChatStreaming && !activeChatRequestId) return;
-			void stopActiveChat();
-		}
-	
-		function beginAiRequest(
-			requestId: string,
-			composerMode: 'chat' | 'editor',
-			statusText: string,
-			aiNoteId: string
-		): number {
-			const startTime = Date.now();
-			pendingDebugTrace = [
-				{ time: startTime, msg: 'Request sent', kind: 'send' },
-				{ time: startTime, msg: `Composer mode: ${composerMode}`, kind: 'config' }
-			];
-			debugInfo = showDebugWindow
-				? {
-						requestStart: startTime,
-						firstChunk: null,
-						generationStart: null,
-						generationEnd: null,
-						done: null,
-						promptTokens: 0,
-						completionTokens: 0,
-						totalTokens: 0,
-						turnCount: 0,
-						replyChars: 0,
-						trace: pendingDebugTrace
-					}
-				: null;
-			chatMessages = [
-				...chatMessages,
-				{ role: 'assistant', content: '', isStreaming: true, startTime, statusText }
-			];
-			activeAiComposerMode = composerMode;
-			activeChatRequestId = requestId;
-			activeChatNoteId = aiNoteId;
-			setTimeout(() => scrollChatToBottom(true), 50);
-			return startTime;
-		}
-	
-		async function sendChatMessage() {
-			if (!note || !chatInput.trim() || isChatStreaming) return;
-			if (aiInteractionMode === 'write' && !armedEditTarget()) {
-				writeTargetNotice = true;
-				return;
-			}
-			const userText = chatInput.trim();
-			chatInput = '';
-			if (chatTextareaEl) chatTextareaEl.style.height = 'auto';
-			await sendChatText(userText);
-		}
-	
-		async function sendChatText(userText: string) {
-			if (!note) return;
-			const editorTarget = armedEditTarget();
-			if (aiInteractionMode === 'write' && !editorTarget) {
-				writeTargetNotice = true;
-				if (!chatInput.trim()) chatInput = userText;
-				await tick();
-				if (chatTextareaEl) {
-					chatTextareaEl.style.height = 'auto';
-					chatTextareaEl.style.height = `${Math.min(chatTextareaEl.scrollHeight + 2, 150)}px`;
-					chatTextareaEl.focus();
-				}
-				return;
-			}
-			if ((isSourceMaterial && showAttachedNote) || saveStatus !== 'saved') {
-				await saveNote();
-			}
-			if (pdfIngestionPromise) await pdfIngestionPromise;
-			const aiNoteId = activeAiNoteId();
-			if (!aiNoteId) {
-				message = 'Open or create the attached note before asking the AI to edit it.';
-				return;
-			}
-			const requestId = Date.now().toString();
-			const composerMode = aiInteractionMode === 'write' ? 'editor' : 'chat';
-			const selection =
-				composerMode === 'editor' ? editorTarget : editorTarget?.cursor ? null : editorTarget;
-			activeAiEditTarget = composerMode === 'editor' ? selection : null;
-			const snapshot: NoteSnapshot = {
-				noteBody: draftBody,
-				draftTitle: draftTitle,
-				draftTags: draftTags,
-				chatLength: chatMessages.length
-			};
-			chatMessages = [
-				...chatMessages,
-				{ role: 'user', content: userText, snapshotId: requestId, snapshot }
-			];
-			beginAiRequest(
-				requestId,
-				composerMode,
-				composerMode === 'editor' ? 'Preparing note edit…' : 'Retrieving note and PDF context…',
-				aiNoteId
-			);
-			checkpointChatHistory(0);
-			try {
-					await invoke('ask_ai_stream', {
-					noteId: aiNoteId,
-					question: userText,
-					requestId,
-					// Working-doc type so the model edits as LaTeX / notebook, not Markdown.
-					docType: workingDocType,
-						selection,
-						interactionMode: aiInteractionMode,
-						activeSection
-				});
-			} catch (e) {
-				console.error('AI Error:', e);
-				failStreamingChatMessage(requestId, extractChatErrorMessage(e));
-			}
-		}
-	
-		async function rewindToSnapshot(snapshot?: NoteSnapshot, fillInput?: string) {
-			if (!snapshot || !note) return;
-			const aiNoteId = activeAiNoteId();
-			if (!aiNoteId) return;
-			if (!(await stopActiveChat())) return;
-			chatMessages = chatMessages.slice(0, snapshot.chatLength);
-			draftBody = snapshot.noteBody;
-			draftTitle = snapshot.draftTitle;
-			draftTags = snapshot.draftTags;
-			if (note) note = { ...note, body: snapshot.noteBody, title: snapshot.draftTitle };
-			if (vditorInstance) vditorInstance.setValue(snapshot.noteBody);
-			if (fillInput !== undefined) {
-				chatInput = fillInput;
-				await tick();
-				if (chatTextareaEl) {
-					chatTextareaEl.style.height = 'auto';
-					chatTextareaEl.style.height = `${Math.min(chatTextareaEl.scrollHeight, 200)}px`;
-					chatTextareaEl.focus();
-				}
-			}
-	
-			isBusy = true;
-			try {
-				await invoke('save_note', {
-					noteId: aiNoteId,
-					title: snapshot.draftTitle,
-					tags: snapshot.draftTags
-						.split(',')
-						.map((t: string) => t.trim())
-						.filter(Boolean),
-					body: snapshot.noteBody,
-					sourcePdf: activeSourceId,
-					annotations: isSourceMaterial ? [] : note.annotations
-				});
-				await invoke('save_chat_history', { noteId: aiNoteId, chatHistory: chatMessages });
-				// The backend conversation includes tool calls/results that are not
-				// represented in the UI history. Clear it after a rewind so the next
-				// retry rebuilds from the newly persisted authoritative history.
-				await invoke('clear_ai_conversation', { noteId: aiNoteId });
-			} catch (err) {
-				console.error('Failed to rewind:', err);
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		async function retryMessage(snapshot: NoteSnapshot, userText: string) {
-			await rewindToSnapshot(snapshot);
-			await sendChatText(userText);
-		}
-	
-		function mergeChatTools(
-			existing: { name: string; details: string }[] = [],
-			incoming: { name: string; details: string }[] = []
-		) {
-			const merged = [...existing];
-			for (const tool of incoming) {
-				if (!merged.some((entry) => entry.name === tool.name && entry.details === tool.details)) {
-					merged.push(tool);
-				}
-			}
-			return merged;
-		}
-	
-		async function reconcileRequestNote(expectedNoteId: string) {
-			if (!canApplyReconciledNote(expectedNoteId, activeAiNoteId())) return;
-			const refreshed = await invoke<NoteDocument>('load_note', { noteId: expectedNoteId });
-			// Loading is asynchronous. Re-check after it completes so navigation during
-			// the request cannot let a late completion overwrite the newly opened note.
-			if (!canApplyReconciledNote(expectedNoteId, activeAiNoteId())) return;
-			if (!isSourceMaterial) {
-				note = { ...refreshed, chatHistory: chatMessages };
-				draftTitle = refreshed.title;
-				draftBody = refreshed.body;
-				draftTags = refreshed.tags.join(', ');
-				if (
-					workingDocType === 'md' &&
-					vditorInstance &&
-					editorNeedsAuthoritativeBody(vditorInstance.getValue(), refreshed.body)
-				) {
-					vditorInstance.setValue(refreshed.body);
-				}
-			} else {
-				draftTitle = refreshed.title;
-				draftBody = refreshed.body;
-				draftTags = refreshed.tags.join(', ');
-				if (
-					vditorInstance &&
-					editorNeedsAuthoritativeBody(vditorInstance.getValue(), refreshed.body)
-				) {
-					vditorInstance.setValue(refreshed.body);
-				}
-			}
-			void fetchRelatedNotes();
-		}
-	
-		async function finishStreamingChatMessage(
-			requestId: string,
-			tools: { name: string; details: string }[] = []
-		) {
-			// Tauri events are global. Ignore a late completion from an older request;
-			// otherwise it can close the current bubble while its sidecar stream is
-			// still running and allow another request to race with it.
-			if (activeChatRequestId !== requestId) return;
-			// Flush any chat deltas still buffered for the next frame so the final
-			// token(s) are part of the finished bubble before it's marked done.
-			flushChatChunks();
-			const requestNoteId = activeChatNoteId;
-			// A cancelled request can still arrive as chat_done. Revert any speculative
-			// editor preview unless note_written already committed the authoritative body.
-			cancelNoteStream();
-			chatMessages = chatMessages.map((m) => {
-				if (m.isStreaming)
-					return {
-						...m,
-						isStreaming: false,
-						statusText: undefined,
-						endTime: Date.now(),
-						debugTrace: pendingDebugTrace
-					};
-				return m;
-			});
-			// Keep the request marked active until persistence completes. Rewind/retry
-			// waits on this flag; otherwise its newer history can race an older save.
-			if (chatPersistTimer) {
-				clearTimeout(chatPersistTimer);
-				chatPersistTimer = undefined;
-			}
-			if (requestNoteId) await persistChatHistory(requestNoteId, chatMessages);
-			if (requestNoteId && hasNoteMutation(tools)) {
-				try {
-					await reconcileRequestNote(requestNoteId);
-				} catch (error) {
-					console.error('Failed to reconcile completed note mutation:', error);
-				}
-			}
-			activeChatRequestId = null;
-			activeAiComposerMode = null;
-			activeAiEditTarget = null;
-			activeChatNoteId = null;
-		}
-	
-		function extractChatErrorMessage(error: unknown): string {
-			if (typeof error === 'string' && error.trim()) return error;
-			if (
-				error &&
-				typeof error === 'object' &&
-				'message' in error &&
-				typeof error.message === 'string' &&
-				error.message.trim()
-			) {
-				return error.message;
-			}
-			return 'Failed to generate response.';
-		}
-	
-		function failStreamingChatMessage(
-			requestId: string,
-			errorMsg: string,
-			tools: { name: string; details: string }[] = []
-		) {
-			// Tauri events are global; do not let an older request fail the current
-			// assistant bubble.
-			if (activeChatRequestId !== requestId) return;
-			const previewWasReverted = noteStreaming;
-			if (previewWasReverted && !errorMsg.includes('Live preview reverted; no changes were saved.')) {
-				errorMsg += ' Live preview reverted; no changes were saved.';
-			}
-			if (showDebugWindow && debugInfo) {
-				const finishedAt = Date.now();
-				debugInfo = {
-					...debugInfo,
-					done: finishedAt,
-					generationEnd: debugInfo.generationStart ? finishedAt : debugInfo.generationEnd,
-					trace: [...debugInfo.trace, { time: finishedAt, msg: `Error: ${errorMsg}`, kind: 'error' }]
-				};
-			}
-			activeChatRequestId = null;
-			activeChatNoteId = null;
-			activeAiComposerMode = null;
-			// If a live note stream was interrupted, the note was never saved —
-			// restore the pre-stream content rather than leaving a partial draft.
-			cancelNoteStream();
-			activeAiEditTarget = null;
-			chatMessages = chatMessages.map((m) => {
-				if (m.isStreaming) {
-					return {
-						...m,
-						isStreaming: false,
-						statusText: undefined,
-						error: true,
-						content: m.content + '\n\n' + errorMsg,
-						tools,
-						endTime: Date.now()
-					};
-				}
-				return m;
-			});
-			if (chatPersistTimer) {
-				clearTimeout(chatPersistTimer);
-				chatPersistTimer = undefined;
-			}
-			const aiNoteId = activeAiNoteId();
-			if (aiNoteId) void persistChatHistory(aiNoteId, chatMessages);
-		}
-	
-		async function resolveApproval(id: string, approved: boolean) {
-			const timeout = approvalTimeouts.get(id);
-			if (timeout) {
-				clearTimeout(timeout);
-				approvalTimeouts.delete(id);
-			}
-			chatMessages = chatMessages.map((m) => {
-				if (m.isApprovalRequest && m.approvalId === id) {
-					return { ...m, approvalStatus: approved ? 'approved' : 'rejected' };
-				}
-				return m;
-			});
-			await invoke('resolve_tool_approval', { id, approved });
-		}
-	
 		async function fetchNoteHistory() {
 			if (!note) return;
 			isBusy = true;
@@ -1998,6 +1640,80 @@ export function createNotePageController() {
 		const scanForTransclusions = editorSession.scanForTransclusions;
 		const setupTransclusionObserver = editorSession.setupTransclusionObserver;
 		const fetchRelatedNotes = editorSession.fetchRelatedNotes;
+		const chatContext: Record<string, any> = {
+			get activeChatRequestId() { return activeChatRequestId; },
+			set activeChatRequestId(value) { activeChatRequestId = value; },
+			get isChatStreaming() { return isChatStreaming; },
+			get pendingDebugTrace() { return pendingDebugTrace; },
+			set pendingDebugTrace(value) { pendingDebugTrace = value; },
+			get debugInfo() { return debugInfo; },
+			set debugInfo(value) { debugInfo = value; },
+			get showDebugWindow() { return showDebugWindow; },
+			get chatMessages() { return chatMessages; },
+			set chatMessages(value) { chatMessages = value; },
+			get activeAiComposerMode() { return activeAiComposerMode; },
+			set activeAiComposerMode(value) { activeAiComposerMode = value; },
+			get activeChatNoteId() { return activeChatNoteId; },
+			set activeChatNoteId(value) { activeChatNoteId = value; },
+			get chatInput() { return chatInput; },
+			set chatInput(value) { chatInput = value; },
+			get chatTextareaEl() { return chatTextareaEl; },
+			get note() { return note; },
+			set note(value) { note = value; },
+			get aiInteractionMode() { return aiInteractionMode; },
+			get writeTargetNotice() { return writeTargetNotice; },
+			set writeTargetNotice(value) { writeTargetNotice = value; },
+			get isSourceMaterial() { return isSourceMaterial; },
+			get showAttachedNote() { return showAttachedNote; },
+			get saveStatus() { return saveStatus; },
+			get pdfIngestionPromise() { return pdfIngestionPromise; },
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get draftTitle() { return draftTitle; },
+			set draftTitle(value) { draftTitle = value; },
+			get draftTags() { return draftTags; },
+			set draftTags(value) { draftTags = value; },
+			get workingDocType() { return workingDocType; },
+			get activeSection() { return activeSection; },
+			get activeSourceId() { return activeSourceId; },
+			get vditorInstance() { return vditorInstance; },
+			get isBusy() { return isBusy; },
+			set isBusy(value) { isBusy = value; },
+			get chatPersistTimer() { return chatPersistTimer; },
+			set chatPersistTimer(value) { chatPersistTimer = value; },
+			get noteStreaming() { return noteStreaming; },
+			get activeAiEditTarget() { return activeAiEditTarget; },
+			set activeAiEditTarget(value) { activeAiEditTarget = value; },
+			get approvalTimeouts() { return approvalTimeouts; },
+			activeAiNoteId,
+			armedEditTarget,
+			tick,
+			saveNote,
+			checkpointChatHistory,
+			persistChatHistory,
+			flushChatChunks,
+			scrollChatToBottom,
+			cancelNoteStream,
+			fetchRelatedNotes,
+			beginNoteStream,
+			appendNoteStream,
+			applyNoteWrite
+		};
+		const chatSession = createChatSession(chatContext);
+		chatContext.failStreamingChatMessage = chatSession.failStreamingChatMessage;
+		const stopActiveChat = chatSession.stopActiveChat;
+		const stopChat = chatSession.stopChat;
+		const beginAiRequest = chatSession.beginAiRequest;
+		const sendChatMessage = chatSession.sendChatMessage;
+		const sendChatText = chatSession.sendChatText;
+		const rewindToSnapshot = chatSession.rewindToSnapshot;
+		const retryMessage = chatSession.retryMessage;
+		const mergeChatTools = chatSession.mergeChatTools;
+		const reconcileRequestNote = chatSession.reconcileRequestNote;
+		const finishStreamingChatMessage = chatSession.finishStreamingChatMessage;
+		const extractChatErrorMessage = chatSession.extractChatErrorMessage;
+		const failStreamingChatMessage = chatSession.failStreamingChatMessage;
+		const resolveApproval = chatSession.resolveApproval;
 
 		const aiEventContext: Record<string, any> = {
 			get note() { return note; },
