@@ -401,63 +401,6 @@ export function createNotePageController() {
 			}, 1000);
 		}
 	
-		async function saveNote() {
-			if (!note) return;
-			isBusy = true;
-			saveStatus = 'saving';
-			try {
-				let targetId = note.id;
-				if (isSourceMaterial) {
-					if (!scratchpadSavedId) {
-						const newNote = await invoke<NoteDocument>('create_note', {
-							title: draftTitle,
-							sourcePdf: activeSourceId,
-							notebook: openNoteNotebook()
-						});
-						scratchpadSavedId = newNote.id;
-					}
-					targetId = scratchpadSavedId;
-				}
-	
-				const sentTitle = draftTitle;
-				const saved = await invoke<NoteDocument>('save_note', {
-					noteId: targetId,
-					title: sentTitle,
-					tags: draftTags
-						.split(',')
-						.map((tag) => tag.trim())
-						.filter(Boolean),
-					body: draftBody,
-					sourcePdf: activeSourceId,
-					// For Source Material main notes, annotations belong to the source note, not the scratchpad
-					annotations: isSourceMaterial ? [] : note.annotations
-				});
-	
-				if (isSourceMaterial && note.annotations.length > 0) {
-					await invoke('save_pdf_annotations', { noteId: note.id, annotations: note.annotations });
-				}
-	
-				if (!isSourceMaterial) {
-					note = saved;
-				}
-	
-				if (draftTitle === sentTitle) {
-					draftTitle = saved.title;
-				}
-	
-				saveStatus = 'saved';
-				void fetchRelatedNotes();
-				if (activeSidebarTab === 'versions') {
-					void fetchNoteHistory();
-				}
-			} catch (err) {
-				console.error('Save error:', err);
-				saveStatus = 'unsaved';
-				message = `Save failed: ${err}`;
-			} finally {
-				isBusy = false;
-			}
-		}
 	
 		function requestDeleteAttachedNote() {
 			deleteAttachedNoteDialog?.showModal();
@@ -559,6 +502,7 @@ export function createNotePageController() {
 			});
 		}
 	
+		let saveNote: () => Promise<void> = async () => {};
 		const latexSession = createLatexSession({
 			get note() { return note; },
 			get texCompileError() { return texCompileError; },
@@ -723,6 +667,10 @@ export function createNotePageController() {
 			set scratchpadSavedId(value) { scratchpadSavedId = value; },
 			get message() { return message; },
 			set message(value) { message = value; },
+			openNoteNotebook,
+			get saveStatus() { return saveStatus; },
+			set saveStatus(value) { saveStatus = value; },
+			fetchNoteHistory: () => navigationSession.fetchNoteHistory(),
 			fetchRelatedNotes: () => editorSession.fetchRelatedNotes(),
 			get vditorInstance() { return vditorInstance; },
 			get isBusy() { return isBusy; },
@@ -732,6 +680,7 @@ export function createNotePageController() {
 		});
 		const loadCurrentNote = documentSession.loadCurrentNote;
 		const refreshCurrentNoteFromBackend = documentSession.refreshCurrentNoteFromBackend;
+		saveNote = documentSession.saveNote;
 		const deleteNote = documentSession.deleteCurrent;
 		const duplicateNote = documentSession.duplicateCurrent;
 		const streamingSession = createStreamingSession({

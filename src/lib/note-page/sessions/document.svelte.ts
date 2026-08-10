@@ -153,6 +153,52 @@ export function createDocumentSession(ctx: Record<string, any>) {
 		void ctx.fetchRelatedNotes();
 	}
 
+	async function saveNote() {
+		if (!ctx.note) return;
+		ctx.isBusy = true;
+		ctx.saveStatus = 'saving';
+		try {
+			let targetId = ctx.note.id;
+			if (ctx.isSourceMaterial) {
+				if (!ctx.scratchpadSavedId) {
+					const newNote = await invoke<NoteDocument>('create_note', {
+						title: ctx.draftTitle,
+						sourcePdf: ctx.activeSourceId,
+						notebook: ctx.openNoteNotebook()
+					});
+					ctx.scratchpadSavedId = newNote.id;
+				}
+				targetId = ctx.scratchpadSavedId;
+			}
+
+			const sentTitle = ctx.draftTitle;
+			const saved = await invoke<NoteDocument>('save_note', {
+				noteId: targetId,
+				title: sentTitle,
+				tags: ctx.draftTags.split(',').map((tag: string) => tag.trim()).filter(Boolean),
+				body: ctx.draftBody,
+				sourcePdf: ctx.activeSourceId,
+				// For source material main notes, annotations belong to the source note, not the scratchpad.
+				annotations: ctx.isSourceMaterial ? [] : ctx.note.annotations
+			});
+
+			if (ctx.isSourceMaterial && ctx.note.annotations.length > 0) {
+				await invoke('save_pdf_annotations', { noteId: ctx.note.id, annotations: ctx.note.annotations });
+			}
+			if (!ctx.isSourceMaterial) ctx.note = saved;
+			if (ctx.draftTitle === sentTitle) ctx.draftTitle = saved.title;
+			ctx.saveStatus = 'saved';
+			void ctx.fetchRelatedNotes();
+			if (ctx.activeSidebarTab === 'versions') void ctx.fetchNoteHistory();
+		} catch (error) {
+			console.error('Save error:', error);
+			ctx.saveStatus = 'unsaved';
+			ctx.message = `Save failed: ${error}`;
+		} finally {
+			ctx.isBusy = false;
+		}
+	}
+
 	async function deleteCurrent() {
 		if (!ctx.note) return;
 		ctx.isBusy = true;
@@ -174,5 +220,5 @@ export function createDocumentSession(ctx: Record<string, any>) {
 			ctx.isBusy = false;
 		}
 	}
-	return { loadCurrentNote, refreshCurrentNoteFromBackend, deleteCurrent, duplicateCurrent };
+	return { loadCurrentNote, refreshCurrentNoteFromBackend, saveNote, deleteCurrent, duplicateCurrent };
 }
