@@ -50,6 +50,7 @@ import { createDocumentSession } from './sessions/document.svelte';
 import { createStreamingSession } from './sessions/streaming.svelte';
 import { createEditorSession } from './sessions/editor.svelte';
 import { createEditorInteractionSession } from './sessions/editor-interaction.svelte';
+import { createEditorStateSession } from './sessions/editor-state.svelte';
 import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
@@ -327,6 +328,21 @@ export function createNotePageController() {
 		let shouldRenderEditor = $derived(note !== null && (!isSourceMaterial || showAttachedNote));
 		let shouldInitEditor = $derived(note !== null && (!isSourceMaterial || showAttachedNote));
 		let loadedRouteNoteId = $state('');
+		let saveNote: () => Promise<void> = async () => {};
+		const editorState = createEditorStateSession({
+			get showAttachedNote() { return showAttachedNote; },
+			set showAttachedNote(value) { showAttachedNote = value; },
+			get vditorInstance() { return vditorInstance; },
+			set vditorInstance(value) { vditorInstance = value; },
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get saveStatus() { return saveStatus; },
+			set saveStatus(value) { saveStatus = value; },
+			get saveTimer() { return saveTimer; },
+			set saveTimer(value) { saveTimer = value; },
+			saveNote: () => saveNote()
+		});
+		const { appendToNoteBody, destroyEditorInstance, triggerAutoSave } = editorState;
 	
 		$effect(() => {
 			if (sourceMaterialType === 'pdf' && !PdfViewerComponent) {
@@ -356,34 +372,6 @@ export function createNotePageController() {
 			}
 		});
 	
-		function appendToNoteBody(content: string) {
-			showAttachedNote = true;
-			if (vditorInstance) {
-				vditorInstance.insertValue(content);
-				draftBody = vditorInstance.getValue();
-			} else {
-				draftBody = `${draftBody}${content}`;
-			}
-			triggerAutoSave();
-		}
-	
-		function destroyEditorInstance() {
-			if (!vditorInstance) return;
-			try {
-				vditorInstance.destroy();
-			} catch (e) {
-				console.warn('Vditor destroy error:', e);
-			}
-			vditorInstance = null;
-		}
-	
-		function triggerAutoSave() {
-			if (saveStatus !== 'saving') saveStatus = 'unsaved';
-			if (saveTimer) clearTimeout(saveTimer);
-			saveTimer = setTimeout(() => {
-				void saveNote();
-			}, 1000);
-		}
 	
 	
 		function requestDeleteAttachedNote() {
@@ -454,7 +442,6 @@ export function createNotePageController() {
 			updateToolbarOverflow();
 		});
 	
-		let saveNote: () => Promise<void> = async () => {};
 		const latexSession = createLatexSession({
 			get note() { return note; },
 			get texCompileError() { return texCompileError; },
