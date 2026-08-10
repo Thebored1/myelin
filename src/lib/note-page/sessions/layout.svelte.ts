@@ -37,7 +37,12 @@ export function createLayoutSession(ctx: Record<string, any>) {
 		ctx.isResizing = false;
 		if (ctx.isSidebarResizing) {
 			ctx.isSidebarResizing = false;
-			localStorage.setItem('myelin_sidebar_width', ctx.sidebarWidth.toString());
+			try {
+				localStorage.setItem('myelin_sidebar_width', ctx.sidebarWidth.toString());
+			} catch (error) {
+				ctx.message = 'Sidebar width could not be saved; it will reset on the next launch.';
+				console.warn('Could not save sidebar width', error);
+			}
 		}
 		if (ctx.vditorInstance) setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
 	}

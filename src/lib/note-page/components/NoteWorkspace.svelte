@@ -66,6 +66,11 @@
 					> Saved
 				{/if}
 			</div>
+			{#if notePage.saveStatus === 'unsaved'}
+				<button class="retry-save" onclick={() => void notePage.saveNote()} disabled={notePage.isBusy}>
+					Retry save
+				</button>
+			{/if}
 		</div>
 	</header>
 
@@ -343,4 +348,3 @@
 	{/if}
 	</div>
 </div>
-

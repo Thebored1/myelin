@@ -71,6 +71,7 @@ export function createNotePageController() {
 		let versionPreviewDialog: HTMLDialogElement | undefined = $state();
 		type NoteSnapshot = import('$lib/types').NoteSnapshot;
 		let chatMessages = $state<ChatMessage[]>([]);
+		let chatPersistenceError = $state<string | null>(null);
 		let chatInput = $state('');
 		let copiedIdx = $state<number | null>(null);
 		// Coalesce the per-token ai://chat_chunk events into one chatMessages update
@@ -82,9 +83,20 @@ export function createNotePageController() {
 		// Debug window state for AI performance metrics. Off by default — it renders
 		// a live per-request trace (including full model prompts) that churns the
 		// page for every user if left on.
-		let showDebugWindow = $state(localStorage.getItem('myelin_debug_window') === 'true');
+		let showDebugWindow = $state(false);
+		try {
+			showDebugWindow = localStorage.getItem('myelin_debug_window') === 'true';
+		} catch (error) {
+			message = 'Browser preferences could not be read; changes remain available for this session.';
+			console.warn('Could not read debug-window preference', error);
+		}
 		$effect(() => {
-			localStorage.setItem('myelin_debug_window', String(showDebugWindow));
+			try {
+				localStorage.setItem('myelin_debug_window', String(showDebugWindow));
+			} catch (error) {
+				message = 'Debug-window preference could not be saved; it will reset on the next launch.';
+				console.warn('Could not save debug-window preference', error);
+			}
 		});
 		type DebugTraceEntry = { time: number; msg: string; kind: string };
 		// Keep the trace bounded: full model prompts are multi-KB and would otherwise
@@ -339,6 +351,7 @@ export function createNotePageController() {
 			get chatTextareaEl() { return chatTextareaEl; },
 			get chatMessagesEl() { return chatMessagesEl; },
 			get chatMessages() { return chatMessages; },
+			get chatPersistenceError() { return chatPersistenceError; }, set chatPersistenceError(value) { chatPersistenceError = value; },
 			get userScrolledUp() { return userScrolledUp; }, set userScrolledUp(value) { userScrolledUp = value; },
 			captureShortcutEditorTarget,
 			restoreShortcutEditorFocus,
@@ -374,6 +387,7 @@ export function createNotePageController() {
 			get showAttachedNote() { return showAttachedNote; }, set showAttachedNote(value) { showAttachedNote = value; },
 			get note() { return note; }, set note(value) { note = value; },
 			get chatMessages() { return chatMessages; }, set chatMessages(value) { chatMessages = value; },
+			get chatPersistenceError() { return chatPersistenceError; }, set chatPersistenceError(value) { chatPersistenceError = value; },
 			get noteHistory() { return noteHistory; }, set noteHistory(value) { noteHistory = value; },
 			get versionPreviewContent() { return versionPreviewContent; }, set versionPreviewContent(value) { versionPreviewContent = value; },
 			get activeSidebarTab() { return activeSidebarTab; }, set activeSidebarTab(value) { activeSidebarTab = value; },
@@ -554,6 +568,8 @@ export function createNotePageController() {
 		set versionPreviewDialog(value: typeof versionPreviewDialog) { versionPreviewDialog = value; },
 		get chatMessages() { return chatMessages; },
 		set chatMessages(value: typeof chatMessages) { chatMessages = value; },
+		get chatPersistenceError() { return chatPersistenceError; },
+		set chatPersistenceError(value: typeof chatPersistenceError) { chatPersistenceError = value; },
 		get chatInput() { return chatInput; },
 		set chatInput(value: typeof chatInput) { chatInput = value; },
 		get copiedIdx() { return copiedIdx; },

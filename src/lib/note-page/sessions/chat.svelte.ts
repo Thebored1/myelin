@@ -20,7 +20,9 @@ export function createChatSession(ctx: Record<string, any>) {
 		if (!noteId) return;
 		try {
 			await invoke('save_chat_history', { noteId, chatHistory: persistableChatHistory(messages) });
+			ctx.chatPersistenceError = null;
 		} catch (error) {
+			ctx.chatPersistenceError = 'Chat history is not saved.';
 			console.error('Failed to persist chat history:', error);
 		}
 	}
@@ -69,7 +71,12 @@ export function createChatSession(ctx: Record<string, any>) {
 	function setAiInteractionMode(mode: 'chat' | 'write') {
 		ctx.aiInteractionMode = mode;
 		if (mode === 'chat') ctx.writeTargetNotice = false;
-		localStorage.setItem('myelin_ai_interaction_mode', mode);
+		try {
+			localStorage.setItem('myelin_ai_interaction_mode', mode);
+		} catch (error) {
+			ctx.message = 'AI interaction preference could not be saved; it will reset on the next launch.';
+			console.warn('Could not save AI interaction mode', error);
+		}
 		if (mode === 'write' && ctx.activeSection) {
 			const aiNoteId = ctx.activeAiNoteId();
 			if (aiNoteId) void invoke('warm_llama_server', { noteId: aiNoteId, interactionMode: mode, activeSection: ctx.activeSection }).catch((error) => console.debug('Write profile warm-up skipped:', error));

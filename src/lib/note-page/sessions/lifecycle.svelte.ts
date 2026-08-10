@@ -9,9 +9,16 @@ export function createNotePageLifecycle(ctx: Record<string, any>) {
 	let debugTraceEl = $state<HTMLDivElement | undefined>();
 
 	onMount(() => {
-		const savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
+		let savedInteractionMode: string | null = null;
+		let savedSidebarWidth: string | null = null;
+		try {
+			savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
+			savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
+		} catch (error) {
+			ctx.message = 'Browser preferences could not be read; changes remain available for this session.';
+			console.warn('Could not read note preferences', error);
+		}
 		ctx.aiInteractionMode = savedInteractionMode === 'operation' || savedInteractionMode === 'write' ? 'write' : 'chat';
-		const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
 			if (!isNaN(parsed)) {

@@ -8,8 +8,14 @@
 </script>
 
 
-						<div class="chat-container">
-							<div class="chat-messages" bind:this={notePage.chatMessagesEl} onscroll={notePage.handleChatScroll}>
+		<style>
+			.chat-persistence-error { margin: 0.35rem 0.5rem; padding: 0.45rem 0.6rem; border: 1px solid var(--text-error, #b33); border-radius: 0.35rem; color: var(--text-error, #b33); font-size: 0.78rem; }
+		</style>
+		<div class="chat-container">
+			{#if notePage.chatPersistenceError}
+				<div class="chat-persistence-error" role="alert">{notePage.chatPersistenceError}</div>
+			{/if}
+			<div class="chat-messages" bind:this={notePage.chatMessagesEl} onscroll={notePage.handleChatScroll}>
 								{#if notePage.chatMessages.length === 0}
 									<p class="empty-state">Ask me anything about this note or your library!</p>
 								{:else}

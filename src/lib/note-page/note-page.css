@@ -126,6 +126,21 @@
 		background: var(--neutral-400);
 	}
 
+	.retry-save {
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--danger, #ef4444);
+		padding: 0.25rem 0.5rem;
+		font: 0.7rem var(--font-mono);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		cursor: pointer;
+	}
+	.retry-save:hover {
+		border-color: currentColor;
+	}
+
 	.spinner {
 		animation: spin 1s linear infinite;
 	}
