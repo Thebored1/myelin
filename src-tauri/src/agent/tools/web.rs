@@ -1,0 +1,151 @@
+use super::*;
+use crate::state::AppState;
+use futures_util::StreamExt;
+use rig_core::client::CompletionClient;
+use rig_core::completion::ToolDefinition;
+use rig_core::tool::Tool;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::Emitter;
+#[derive(Deserialize, JsonSchema)]
+pub struct WebSearchArgs {
+    query: String,
+    #[serde(default)]
+    count: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct WebSearchTool {
+    pub state: AppState,
+}
+
+impl Tool for WebSearchTool {
+    const NAME: &'static str = "web_search";
+
+    type Error = ToolError;
+    type Args = WebSearchArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("web_search").expect("web_search contract");
+        ToolDefinition {
+            name: "web_search".to_string(),
+            description: description.to_string(),
+            parameters: params(),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let count = args.count.unwrap_or(5).clamp(1, 10) as usize;
+        self.state
+            .record_chat_tool("Web Search", args.query.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Web Search", "details": args.query.clone() }),
+        );
+        let searxng = self.state.searxng_url();
+        match crate::web_search::web_search(&args.query, count, searxng.as_deref()).await {
+            Ok(results) => Ok(crate::web_search::format_results(&args.query, &results)),
+            Err(e) => Ok(format!("Web search failed: {e}")),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SearchNotesTool {
+    pub state: AppState,
+}
+
+impl Tool for SearchNotesTool {
+    const NAME: &'static str = "search_notes";
+
+    type Error = ToolError;
+    type Args = SearchNotesArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let (_, description, params) = tool_contract("search_notes").expect("search_notes contract");
+        ToolDefinition {
+            name: "search_notes".to_string(),
+            description: description.to_string(),
+            parameters: params(),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.state
+            .record_chat_tool("Search Notes", args.query.clone());
+        let _ = self.state.handle.emit(
+            "ai://chat_tool",
+            serde_json::json!({ "tool": "Search Notes", "details": args.query }),
+        );
+        let results = self
+            .state
+            .search_notes(args.query)
+            .await
+            .map_err(|e| ToolError {
+                message: e.to_string(),
+            })?;
+        let mut output = String::new();
+        for r in results.results.into_iter().take(5) {
+            output.push_str(&format!(
+                "ID: {} | Title: {}\nSnippet: {}\n\n",
+                r.note.id, r.note.title, r.note.excerpt
+            ));
+        }
+        if output.is_empty() {
+            Ok("No results found.".to_string())
+        } else {
+            Ok(output)
+        }
+    }
+}
+
+pub fn normalize_web_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("URL is required.".to_string());
+    }
+
+    let url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+
+    if !(url.starts_with("http://") || url.starts_with("https://"))
+        || url.contains(char::is_whitespace)
+    {
+        return Err(format!("Invalid web URL: {raw}"));
+    }
+
+    Ok(url)
+}
+
+pub fn html_to_text(raw: &str) -> String {
+    let mut without_scripts = raw.to_string();
+    for pattern in [
+        "(?is)<script[^>]*>.*?</script>",
+        "(?is)<style[^>]*>.*?</style>",
+        "(?is)<noscript[^>]*>.*?</noscript>",
+    ] {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            without_scripts = re.replace_all(&without_scripts, " ").into_owned();
+        }
+    }
+    let without_tags = regex::Regex::new("(?is)<[^>]+>")
+        .map(|re| re.replace_all(&without_scripts, " ").into_owned())
+        .unwrap_or(without_scripts);
+    let decoded = without_tags
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    regex::Regex::new(r"\s+")
+        .map(|re| re.replace_all(&decoded, " ").trim().to_string())
+        .unwrap_or_else(|_| decoded.trim().to_string())
+}
+
