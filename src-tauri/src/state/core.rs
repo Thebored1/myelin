@@ -6,6 +6,8 @@ pub(super) mod types;
 pub(super) mod context;
 #[path = "documents/helpers.rs"]
 pub(super) mod documents_helpers;
+#[path = "documents/persistence.rs"]
+pub(super) mod documents_persistence;
 #[path = "search.rs"]
 pub(super) mod search;
 #[cfg(test)]
@@ -16,6 +18,7 @@ pub(crate) use latex_support::*;
 pub(crate) use types::*;
 pub(crate) use context::*;
 pub(crate) use documents_helpers::*;
+pub(crate) use documents_persistence::*;
 pub(crate) use search::*;
 
 pub use types::{

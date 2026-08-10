@@ -8,6 +8,7 @@ mod model_profiles;
 mod models;
 mod notebook;
 mod note_prompt;
+mod persistence;
 mod rag;
 mod sidecar;
 pub mod state;

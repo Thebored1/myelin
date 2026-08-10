@@ -46,8 +46,7 @@ pub(crate) fn load_settings(app_data_dir: &Path) -> Result<PersistedSettings> {
 
 pub(crate) fn save_settings(app_data_dir: &Path, settings: &PersistedSettings) -> Result<()> {
     let settings_path = app_data_dir.join(SETTINGS_FILE_NAME);
-    let raw = serde_json::to_string_pretty(settings)?;
-    fs::write(&settings_path, raw)
+    crate::persistence::atomic_write_json(&settings_path, settings)
         .with_context(|| format!("failed to write settings at {}", settings_path.display()))
 }
 

@@ -126,6 +126,18 @@ pub struct AppSnapshot {
     pub library_facets: LibraryFacets,
     pub provider_status: ProviderStatus,
     pub index_state: IndexState,
+    #[serde(default)]
+    pub storage_issues: Vec<StorageIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageIssue {
+    pub code: String,
+    pub severity: String,
+    pub path: Option<String>,
+    pub message: String,
+    pub recoverable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -355,8 +355,180 @@ pub(crate) fn sidecar_path(
     workspace.join(".myelin").join(kind).join(file_name)
 }
 
-pub(crate) fn workspace_storage_key(workspace: &Path) -> String {
+pub(crate) fn legacy_workspace_storage_key(workspace: &Path) -> String {
     slugify(&workspace.to_string_lossy())
+}
+
+pub(crate) fn workspace_storage_key(workspace: &Path) -> String {
+    let identity = canonical_workspace_identity(workspace).unwrap_or_else(|_| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            workspace.as_os_str().as_bytes().to_vec()
+        }
+        #[cfg(not(unix))]
+        {
+            workspace.to_string_lossy().as_bytes().to_vec()
+        }
+    });
+    format!("ws-v2-{:x}", Sha256::digest(identity))
+}
+
+fn canonical_workspace_identity(workspace: &Path) -> Result<Vec<u8>> {
+    let canonical = fs::canonicalize(workspace)
+        .with_context(|| format!("failed to canonicalize workspace {}", workspace.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(canonical.as_os_str().as_bytes().to_vec())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        Ok(canonical
+            .as_os_str()
+            .encode_wide()
+            .map(|unit| {
+                let unit = if unit == b'\\' as u16 { b'/' as u16 } else { unit };
+                if (b'A' as u16..=b'Z' as u16).contains(&unit) {
+                    unit + 32
+                } else {
+                    unit
+                }
+            })
+            .flat_map(u16::to_le_bytes)
+            .collect())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(canonical.to_string_lossy().as_bytes().to_vec())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceManifest {
+    schema_version: u32,
+    canonical_identity: String,
+    display_path: String,
+    legacy_key: String,
+    migrated_at: String,
+}
+
+pub(crate) fn prepare_workspace_data_dir(app_data_dir: &Path, workspace: &Path) -> Result<PathBuf> {
+    let workspaces = app_data_dir.join("workspaces");
+    fs::create_dir_all(&workspaces)?;
+    let key = workspace_storage_key(workspace);
+    let target = workspaces.join(&key);
+    if target.exists() {
+        for error in crate::persistence::recover_transactions(&target)? {
+            log::error!("workspace persistence recovery issue: {error}");
+        }
+        return Ok(target);
+    }
+
+    let staging = workspaces.join(format!(".{key}.staging-{}", Uuid::new_v4()));
+    fs::create_dir_all(&staging)?;
+    let legacy_key = legacy_workspace_storage_key(workspace);
+    let mut sources = Vec::new();
+    let mut owned_sources = Vec::new();
+    let legacy = workspaces.join(&legacy_key);
+    if legacy.exists() { sources.push((legacy, false)); }
+    let quarantine = workspaces.join("_legacy-quarantine");
+    if quarantine.exists() {
+        let mut entries = fs::read_dir(&quarantine)
+            .with_context(|| format!("failed to scan {}", quarantine.display()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.file_name().and_then(OsStr::to_str).is_some_and(|name| name.starts_with(&format!("{legacy_key}-"))))
+            .map(|path| (path, true))
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        sources.extend(entries);
+    }
+    for (source, quarantined) in sources {
+        copy_workspace_data(&source, &staging, &source.file_name().and_then(OsStr::to_str).unwrap_or("legacy"))?;
+        if !quarantined {
+            let ownership = source.join("workspace.json");
+            let owned = fs::read_to_string(&ownership)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<WorkspaceManifest>(&raw).ok())
+                .is_some_and(|manifest| manifest.canonical_identity == canonical_identity_string(workspace));
+            if owned {
+                // Keep the source until the v2 directory has been installed.
+                // If the final rename fails, the next startup can retry from
+                // the still-authoritative legacy copy.
+                owned_sources.push(source);
+            } else {
+                let quarantine_dir = workspaces.join("_legacy-quarantine");
+                fs::create_dir_all(&quarantine_dir)?;
+                let destination = quarantine_dir.join(format!("{}-{}", legacy_key, Uuid::new_v4()));
+                fs::rename(&source, destination)?;
+            }
+        }
+    }
+    let manifest = WorkspaceManifest {
+        schema_version: 2,
+        canonical_identity: canonical_identity_string(workspace),
+        display_path: workspace.to_string_lossy().into_owned(),
+        legacy_key,
+        migrated_at: Utc::now().to_rfc3339(),
+    };
+    crate::persistence::atomic_write_json(&staging.join("workspace.json"), &manifest)?;
+    fs::rename(&staging, &target).with_context(|| format!("failed to install workspace data {}", target.display()))?;
+    for source in owned_sources {
+        if let Err(error) = fs::remove_dir_all(&source) {
+            log::warn!("verified legacy workspace data remains at {}: {error}", source.display());
+        }
+    }
+    Ok(target)
+}
+
+pub(crate) fn workspace_storage_issues(data_dir: &Path) -> Vec<StorageIssue> {
+    let conflicts = data_dir.join("conflicts");
+    if !conflicts.exists() { return Vec::new(); }
+    walkdir::WalkDir::new(&conflicts)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| StorageIssue {
+            code: "workspace-storage-conflict".into(),
+            severity: "error".into(),
+            path: Some(entry.path().display().to_string()),
+            message: "A legacy workspace sidecar conflicted during migration and was preserved under conflicts.".into(),
+            recoverable: true,
+        })
+        .collect()
+}
+
+fn canonical_identity_string(workspace: &Path) -> String {
+    let bytes = canonical_workspace_identity(workspace).unwrap_or_else(|_| workspace.to_string_lossy().as_bytes().to_vec());
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn copy_workspace_data(source: &Path, target: &Path, source_id: &str) -> Result<()> {
+    for entry in walkdir::WalkDir::new(source).into_iter().filter_map(|entry| entry.ok()) {
+        let relative = entry.path().strip_prefix(source).unwrap_or(entry.path());
+        if relative.as_os_str().is_empty() { continue; }
+        // The v2 manifest is authoritative. Legacy ownership manifests are
+        // inspected before copying and must not overwrite the new manifest.
+        if relative == Path::new("workspace.json") { continue; }
+        let destination = target.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&destination)?;
+            continue;
+        }
+        if destination.exists() {
+            if fs::read(&destination)? != fs::read(entry.path())? {
+                let conflict = target.join("conflicts").join(source_id).join(relative);
+                if let Some(parent) = conflict.parent() { fs::create_dir_all(parent)?; }
+                fs::copy(entry.path(), conflict)?;
+            }
+            continue;
+        }
+        if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+        fs::copy(entry.path(), &destination)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {

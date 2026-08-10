@@ -30,7 +30,6 @@ pub(crate) use uuid::Uuid;
 // GTE-small width. Notes use real embeddings when an embed model is
 
 use super::*;
-
 pub(crate) fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     if entry.depth() > 0 && name.starts_with('.') {
@@ -39,13 +38,30 @@ pub(crate) fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     name == "node_modules" || name == "target" || name == "dist" || name == "build"
 }
 
-pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) -> Result<Vec<IndexedNote>> {
+pub(crate) struct WorkspaceScanResult {
+    pub(crate) notes: Vec<IndexedNote>,
+    pub(crate) issues: Vec<StorageIssue>,
+}
+pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) -> Result<WorkspaceScanResult> {
     let mut notes = Vec::new();
+    let mut issues = Vec::new();
     for entry in walkdir::WalkDir::new(workspace)
         .into_iter()
         .filter_entry(|e| !is_hidden_or_ignored(e))
-        .filter_map(|entry| entry.ok())
     {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                issues.push(StorageIssue {
+                    code: "workspace-traversal".into(),
+                    severity: "error".into(),
+                    path: error.path().map(|path| path.display().to_string()),
+                    message: "A workspace file or directory could not be scanned.".into(),
+                    recoverable: true,
+                });
+                continue;
+            }
+        };
         if entry.file_type().is_file() && is_note_file(entry.path()) {
             if let Some(extension) = entry.path().extension().and_then(std::ffi::OsStr::to_str) {
                 let doc_result = if extension.eq_ignore_ascii_case("pdf")
@@ -56,21 +72,40 @@ pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) 
                     parse_note_file(workspace, workspace_data_dir, entry.path())
                 };
 
-                if let Ok(document) = doc_result {
-                    let vector = hashed_embedding(&format!(
-                        "{}\n{}\n{}",
-                        document.title,
-                        document.tags.join(" "),
-                        document.body
-                    ));
-                    notes.push(IndexedNote { document, vector });
+                match doc_result {
+                    Ok(document) => {
+                        if let Some(existing) = notes.iter().find(|note: &&IndexedNote| note.document.id == document.id) {
+                            issues.push(StorageIssue {
+                                code: "duplicate-note-id".into(),
+                                severity: "error".into(),
+                                path: Some(entry.path().display().to_string()),
+                                message: format!("Note ID conflicts with {}.", existing.document.relative_path),
+                                recoverable: false,
+                            });
+                            continue;
+                        }
+                        let vector = hashed_embedding(&format!(
+                            "{}\n{}\n{}",
+                            document.title,
+                            document.tags.join(" "),
+                            document.body
+                        ));
+                        notes.push(IndexedNote { document, vector });
+                    }
+                    Err(error) => issues.push(StorageIssue {
+                        code: "note-parse".into(),
+                        severity: "error".into(),
+                        path: Some(entry.path().display().to_string()),
+                        message: format!("This note could not be loaded: {error}"),
+                        recoverable: true,
+                    }),
                 }
             }
         }
     }
 
-    notes.sort_by(|left, right| right.document.updated_at.cmp(&left.document.updated_at));
-    Ok(notes)
+    notes.sort_by(|left, right| left.document.relative_path.cmp(&right.document.relative_path));
+    Ok(WorkspaceScanResult { notes, issues })
 }
 
 pub(crate) fn parse_pdf_file(
@@ -78,9 +113,25 @@ pub(crate) fn parse_pdf_file(
     workspace_data_dir: &Path,
     path: &Path,
 ) -> Result<NoteDocument> {
-    let title = default_title_from_path(path);
+    let stored_metadata = read_document_metadata_sidecar(workspace, workspace_data_dir, path)?;
+    let fallback_title = default_title_from_path(path);
     let (created_at, updated_at) = get_file_timestamps(path);
-    let id = stable_id_from_path(path);
+    let id = stored_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.id.clone())
+        .unwrap_or_else(|| stable_id_from_path(path));
+    let title = stored_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.title.clone())
+        .unwrap_or(fallback_title);
+    let created_at = stored_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.created_at.clone())
+        .unwrap_or(created_at);
+    let updated_at = stored_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.updated_at.clone())
+        .unwrap_or(updated_at);
 
     let annotations = {
         let annotations_path = sidecar_path(
@@ -90,15 +141,14 @@ pub(crate) fn parse_pdf_file(
             &format!("{}.annotations.json", id),
         );
         if annotations_path.exists() {
-            fs::read_to_string(&annotations_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-        } else {
-            None
-        }
+            let raw = fs::read_to_string(&annotations_path)
+                .with_context(|| format!("failed to read annotations {}", annotations_path.display()))?;
+            Some(serde_json::from_str(&raw)
+                .with_context(|| format!("annotations are invalid at {}", annotations_path.display()))?)
+        } else { None }
     };
 
-    Ok(NoteDocument {
+    let document = NoteDocument {
         id: id.clone(),
         title,
         tags: Vec::new(),
@@ -106,7 +156,7 @@ pub(crate) fn parse_pdf_file(
         relative_path: relative_to_workspace(workspace, path),
         created_at,
         updated_at,
-        source_pdf: None,
+        source_pdf: stored_metadata.and_then(|metadata| metadata.source_pdf),
         annotations: annotations.unwrap_or_default(),
         backlinks: Vec::new(),
         chat_history: {
@@ -116,12 +166,18 @@ pub(crate) fn parse_pdf_file(
                 "chats",
                 &format!("{}.chat.json", id),
             );
-            fs::read_to_string(&chats_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
+            if chats_path.exists() {
+                let raw = fs::read_to_string(&chats_path)
+                    .with_context(|| format!("failed to read chat history {}", chats_path.display()))?;
+                serde_json::from_str(&raw)
+                    .with_context(|| format!("chat history is invalid at {}", chats_path.display()))?
+            } else { Vec::new() }
         },
-    })
+    };
+    if !native_metadata_app_path(workspace, workspace_data_dir, path).exists() {
+        write_document_metadata_sidecar(workspace, workspace_data_dir, path, &document)?;
+    }
+    Ok(document)
 }
 
 pub(crate) fn frontmatter_from_document(document: &NoteDocument) -> Frontmatter {
@@ -218,20 +274,8 @@ pub(crate) fn validate_native_body(path: &Path, body: &str) -> Result<()> {
 }
 
 pub(crate) fn write_raw_document(path: &Path, contents: &str) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("document");
-    let temp_path = path.with_file_name(format!(".{file_name}.myelin.tmp"));
-    fs::write(&temp_path, contents)
-        .with_context(|| format!("failed to write {}", temp_path.display()))?;
-    fs::rename(&temp_path, path).with_context(|| {
-        format!(
-            "failed to move {} to {}",
-            temp_path.display(),
-            path.display()
-        )
-    })
+    crate::persistence::atomic_write(path, contents.as_bytes())
+        .with_context(|| format!("failed to persist {}", path.display()))
 }
 
 pub(crate) fn native_metadata_file_name(workspace: &Path, path: &Path) -> String {
@@ -255,7 +299,7 @@ pub(crate) fn read_native_metadata_sidecar(
     workspace: &Path,
     workspace_data_dir: &Path,
     path: &Path,
-) -> Option<Frontmatter> {
+) -> Result<Option<Frontmatter>> {
     let file_name = native_metadata_file_name(workspace, path);
     let metadata_path = sidecar_path(
         workspace,
@@ -263,11 +307,26 @@ pub(crate) fn read_native_metadata_sidecar(
         NATIVE_METADATA_DIR,
         &file_name,
     );
-    let sidecar = fs::read_to_string(metadata_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<NativeMetadataSidecar>(&raw).ok())?;
+    if !metadata_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("failed to read native metadata {}", metadata_path.display()))?;
+    let sidecar = serde_json::from_str::<DocumentMetadataSidecar>(&raw)
+        .with_context(|| format!("native metadata is invalid at {}", metadata_path.display()))?;
     let relative_path = relative_to_workspace(workspace, path);
-    (sidecar.relative_path == relative_path).then_some(sidecar.metadata)
+    if sidecar.relative_path != relative_path {
+        return Err(anyhow!("native metadata path does not match {}", path.display()));
+    }
+    Ok(Some(sidecar.metadata))
+}
+
+pub(crate) fn read_document_metadata_sidecar(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+) -> Result<Option<Frontmatter>> {
+    read_native_metadata_sidecar(workspace, workspace_data_dir, path)
 }
 
 pub(crate) fn write_native_metadata_sidecar(
@@ -290,19 +349,34 @@ pub(crate) fn write_native_metadata_sidecar(
         )
     })?;
     let sidecar = NativeMetadataSidecar {
+        schema_version: 2,
         metadata: frontmatter_from_document(document),
         relative_path: relative_to_workspace(workspace, path),
     };
-    let temp_path = metadata_path.with_extension("tmp");
-    fs::write(&temp_path, serde_json::to_vec_pretty(&sidecar)?)
-        .with_context(|| format!("failed to write {}", temp_path.display()))?;
-    fs::rename(&temp_path, &metadata_path).with_context(|| {
-        format!(
-            "failed to move {} to {}",
-            temp_path.display(),
-            metadata_path.display()
-        )
-    })
+    crate::persistence::atomic_write_json(&metadata_path, &sidecar)
+        .with_context(|| format!("failed to persist native metadata {}", metadata_path.display()))
+}
+
+pub(crate) fn write_document_metadata_sidecar(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+    document: &NoteDocument,
+) -> Result<()> {
+    if !is_metadata_document(path) {
+        return Ok(());
+    }
+    let metadata_path = native_metadata_app_path(workspace, workspace_data_dir, path);
+    let sidecar = DocumentMetadataSidecar {
+        schema_version: 2,
+        metadata: frontmatter_from_document(document),
+        relative_path: relative_to_workspace(workspace, path),
+    };
+    crate::persistence::atomic_write_json(&metadata_path, &sidecar)
+}
+
+pub(crate) fn is_metadata_document(path: &Path) -> bool {
+    is_native_text_file(path) || is_binary_document(path)
 }
 
 pub(crate) fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_dir: &Path, path: &Path) {
@@ -311,8 +385,7 @@ pub(crate) fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_di
     }
     let file_name = native_metadata_file_name(workspace, path);
     let app_path = native_metadata_app_path(workspace, workspace_data_dir, path);
-    let _ = fs::remove_file(&app_path);
-    let _ = fs::remove_file(app_path.with_extension("tmp"));
+    let _ = crate::persistence::atomic_remove(&app_path);
 
     // Remove a portable legacy fallback too if one exists. Current writes never
     // place metadata inside the workspace.
@@ -320,8 +393,7 @@ pub(crate) fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_di
         .join(".myelin")
         .join(NATIVE_METADATA_DIR)
         .join(file_name);
-    let _ = fs::remove_file(&legacy_path);
-    let _ = fs::remove_file(legacy_path.with_extension("tmp"));
+    let _ = crate::persistence::atomic_remove(&legacy_path);
 }
 
 pub(crate) fn parse_note_file(
@@ -338,13 +410,15 @@ pub(crate) fn parse_note_file(
         let (frontmatter, body) = split_frontmatter(&raw);
         let metadata = frontmatter
             .as_deref()
-            .and_then(|frontmatter| serde_yaml::from_str::<Frontmatter>(frontmatter).ok());
+            .map(serde_yaml::from_str::<Frontmatter>)
+            .transpose()
+            .with_context(|| format!("frontmatter is invalid at {}", path.display()))?;
         (metadata, body, false)
     };
     validate_native_body(path, &body)?;
 
     let stored_metadata = if native {
-        read_native_metadata_sidecar(workspace, workspace_data_dir, path)
+        read_native_metadata_sidecar(workspace, workspace_data_dir, path)?
     } else {
         None
     };
@@ -371,12 +445,11 @@ pub(crate) fn parse_note_file(
             &format!("{}.annotations.json", id),
         );
         if annotations_path.exists() {
-            fs::read_to_string(&annotations_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-        } else {
-            None
-        }
+            let raw = fs::read_to_string(&annotations_path)
+                .with_context(|| format!("failed to read annotations {}", annotations_path.display()))?;
+            Some(serde_json::from_str(&raw)
+                .with_context(|| format!("annotations are invalid at {}", annotations_path.display()))?)
+        } else { None }
     };
 
     let document = NoteDocument {
@@ -397,10 +470,14 @@ pub(crate) fn parse_note_file(
                 "chats",
                 &format!("{}.chat.json", id),
             );
-            fs::read_to_string(&chats_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
+            if chats_path.exists() {
+                let raw = fs::read_to_string(&chats_path)
+                    .with_context(|| format!("failed to read chat history {}", chats_path.display()))?;
+                serde_json::from_str(&raw)
+                    .with_context(|| format!("chat history is invalid at {}", chats_path.display()))?
+            } else {
+                Vec::new()
+            }
         },
     };
 
@@ -418,59 +495,6 @@ pub(crate) fn parse_note_file(
     }
 
     Ok(document)
-}
-
-pub(crate) fn write_note_file(
-    workspace: &Path,
-    workspace_data_dir: &Path,
-    path: &Path,
-    document: &NoteDocument,
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
-    if !is_binary_document(path) {
-        validate_native_body(path, &document.body)?;
-    }
-
-    if !document.annotations.is_empty() {
-        let annotations = &document.annotations;
-        let annotations_dir = workspace_data_dir.join("annotations");
-        fs::create_dir_all(&annotations_dir)?;
-        let annotations_path = annotations_dir.join(format!("{}.annotations.json", document.id));
-        let tmp_ann_path = annotations_dir.join(format!("{}.annotations.tmp", document.id));
-        fs::write(&tmp_ann_path, serde_json::to_string(annotations)?)?;
-        fs::rename(&tmp_ann_path, &annotations_path)?;
-    }
-
-    if !document.chat_history.is_empty() {
-        let chats_dir = workspace_data_dir.join("chats");
-        fs::create_dir_all(&chats_dir)?;
-        let chats_path = chats_dir.join(format!("{}.chat.json", document.id));
-        let tmp_chat_path = chats_dir.join(format!("{}.chat.tmp", document.id));
-        fs::write(
-            &tmp_chat_path,
-            serde_json::to_string(&document.chat_history)?,
-        )?;
-        fs::rename(&tmp_chat_path, &chats_path)?;
-    }
-
-    // Viewer-only document formats are never rewritten. Annotations and chat
-    // still live in their dedicated app-data sidecars above.
-    if is_binary_document(path) {
-        return Ok(());
-    }
-
-    if is_native_text_file(path) {
-        write_native_metadata_sidecar(workspace, workspace_data_dir, path, document)?;
-        return write_raw_document(path, &document.body);
-    }
-
-    let frontmatter = frontmatter_from_document(document);
-    let yaml = serde_yaml::to_string(&frontmatter)?.trim().to_string();
-    let rendered = format!("---\n{yaml}\n---\n\n{}", document.body.trim_end());
-    write_raw_document(path, &rendered)
 }
 
 pub(crate) async fn rebuild_lancedb(index_dir: &Path, notes: &[IndexedNote]) -> Result<Table> {
@@ -625,7 +649,6 @@ pub(crate) fn task_dir_for(workspace: &Path, notebook: Option<&str>) -> PathBuf 
     }
 }
 
-/// True for a `.../tasks/<name>.json` file (a task file we own).
 pub(crate) fn is_task_file(path: &Path) -> bool {
     let is_json = path
         .extension()
@@ -641,7 +664,6 @@ pub(crate) fn is_task_file(path: &Path) -> bool {
     is_json && in_tasks_dir
 }
 
-/// Notebook a task file belongs to, derived from its path. None = root tasks.
 pub(crate) fn notebook_from_task_path(workspace: &Path, path: &Path) -> Option<String> {
     let holder = path.parent()?.parent()?; // the folder that contains the `tasks` dir
     let rel = relative_to_workspace(workspace, holder);
@@ -652,22 +674,20 @@ pub(crate) fn notebook_from_task_path(workspace: &Path, path: &Path) -> Option<S
     }
 }
 
-/// Delete every `<id>.json` task file across the workspace except `keep`.
-pub(crate) fn remove_task_files(workspace: &Path, id: &str, keep: Option<&Path>) {
+pub(crate) fn task_files_for(workspace: &Path, id: &str) -> Vec<PathBuf> {
     let target = format!("{id}.json");
-    for entry in walkdir::WalkDir::new(workspace)
+    let mut paths = walkdir::WalkDir::new(workspace)
         .into_iter()
         .filter_entry(|e| !is_hidden_or_ignored(e))
         .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if is_task_file(path)
-            && path.file_name().and_then(OsStr::to_str) == Some(target.as_str())
-            && keep != Some(path)
-        {
-            let _ = fs::remove_file(path);
-        }
-    }
+        .map(|entry| entry.into_path())
+        .filter(|path| {
+            is_task_file(path)
+                && path.file_name().and_then(OsStr::to_str) == Some(target.as_str())
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
 }
 
 pub(crate) fn validate_task_id(id: &str) -> Result<()> {

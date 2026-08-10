@@ -260,6 +260,20 @@ fn config_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(CONFIG_FILE_NAME)
 }
 
+fn update_config(
+    app_data_dir: &Path,
+    update: impl FnOnce(&mut WorkspaceLlamaConfig) -> Result<()>,
+) -> Result<()> {
+    let mut config = load_config(app_data_dir)?;
+    update(&mut config)?;
+    if config.context_size == Some(0) || config.max_turns == Some(0) {
+        bail!("llama configuration contains an invalid zero-sized runtime setting");
+    }
+    let path = config_path(app_data_dir);
+    crate::persistence::atomic_write_json(&path, &config)
+        .with_context(|| format!("failed to persist llama configuration at {}", path.display()))
+}
+
 pub(super) fn load_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
     let path = config_path(app_data_dir);
     if !path.exists() {
@@ -272,17 +286,10 @@ pub(super) fn load_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
 }
 
 pub fn set_model_path(app_data_dir: &Path, model_path: String) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.model_path = Some(model_path);
-
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let raw = serde_json::to_string_pretty(&config)?;
-    fs::write(&path, raw)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.model_path = Some(model_path);
+        Ok(())
+    })
 }
 
 /// The configured SearXNG base URL for web search, if set and non-empty.
@@ -296,14 +303,10 @@ pub fn searxng_url(app_data_dir: &Path) -> Option<String> {
 
 /// Set (or clear, when empty) the SearXNG base URL for web search.
 pub fn set_searxng_url(app_data_dir: &Path, url: Option<String>) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.searxng_url = url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.searxng_url = url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        Ok(())
+    })
 }
 
 /// Path to the configured embedding model GGUF, if set and non-empty.
@@ -327,88 +330,53 @@ pub fn quick_capture_shortcut(app_data_dir: &Path) -> String {
 
 /// Set the quick-capture global shortcut string.
 pub fn set_quick_capture_shortcut(app_data_dir: &Path, shortcut: String) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.quick_capture_shortcut = Some(shortcut.trim().to_string()).filter(|s| !s.is_empty());
-    let cfg_path = config_path(app_data_dir);
-    if let Some(parent) = cfg_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&cfg_path, serde_json::to_string_pretty(&config)?)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.quick_capture_shortcut = Some(shortcut.trim().to_string()).filter(|s| !s.is_empty());
+        Ok(())
+    })
 }
 
 /// Set (or clear, when empty) the embedding model GGUF path.
 pub fn set_embed_model_path(app_data_dir: &Path, path: Option<String>) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.embed_model_path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let cfg_path = config_path(app_data_dir);
-    if let Some(parent) = cfg_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&cfg_path, serde_json::to_string_pretty(&config)?)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.embed_model_path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        Ok(())
+    })
 }
 
 pub fn set_deterministic_tools(app_data_dir: &Path, enabled: bool) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.deterministic_tools = Some(enabled);
-
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let raw = serde_json::to_string_pretty(&config)?;
-    fs::write(&path, raw)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.deterministic_tools = Some(enabled);
+        Ok(())
+    })
 }
 
 pub fn set_tool_gating(app_data_dir: &Path, enabled: bool) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.tool_gating = Some(enabled);
-
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let raw = serde_json::to_string_pretty(&config)?;
-    fs::write(&path, raw)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.tool_gating = Some(enabled);
+        Ok(())
+    })
 }
 
 pub fn set_prompt_cache(app_data_dir: &Path, enabled: bool) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.prompt_cache = Some(enabled);
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_string_pretty(&config)?)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.prompt_cache = Some(enabled);
+        Ok(())
+    })
 }
 
 pub fn set_inference_engine(app_data_dir: &Path, engine: String) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.inference_engine = Some(normalize_engine(Some(&engine)));
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_string_pretty(&config)?)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.inference_engine = Some(normalize_engine(Some(&engine)));
+        Ok(())
+    })
 }
 
 pub fn set_executable_path(app_data_dir: &Path, executable_path: String) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    config.executable_path = Some(executable_path);
-
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let raw = serde_json::to_string_pretty(&config)?;
-    fs::write(&path, raw)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        config.executable_path = Some(executable_path);
+        Ok(())
+    })
 }
 
 pub fn set_advanced_config(
@@ -425,52 +393,20 @@ pub fn set_advanced_config(
     auto_offload: Option<bool>,
     max_turns: Option<u32>,
 ) -> Result<()> {
-    let mut config = load_config(app_data_dir).unwrap_or_default();
-    if let Some(cs) = context_size {
-        config.context_size = Some(cs);
-    }
-    if let Some(gl) = gpu_layers {
-        config.gpu_layers = Some(gl);
-    }
-    if let Some(t) = threads {
-        config.threads = Some(t);
-    }
-    if let Some(temp) = temperature {
-        config.temperature = Some(temp);
-    }
-    if let Some(tp) = top_p {
-        config.top_p = Some(tp);
-    }
-    if let Some(ea) = extra_args {
-        config.extra_args = ea;
-    }
-    if let Some(bp) = backend_preference {
-        config.backend_preference = Some(normalize_preference(Some(&bp)));
-    }
-    if let Some(dev) = gpu_device {
-        // Empty string clears the pin (back to automatic device choice).
-        config.gpu_device = if dev.trim().is_empty() {
-            None
-        } else {
-            Some(dev)
-        };
-    }
-    if let Some(t) = thinking {
-        config.thinking = Some(t);
-    }
-    if let Some(ao) = auto_offload {
-        config.auto_offload = Some(ao);
-    }
-    if let Some(mt) = max_turns {
-        config.max_turns = Some(mt.clamp(1, 12));
-    }
-
-    let path = config_path(app_data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let raw = serde_json::to_string_pretty(&config)?;
-    fs::write(&path, raw)?;
-    Ok(())
+    update_config(app_data_dir, |config| {
+        if let Some(cs) = context_size { config.context_size = Some(cs); }
+        if let Some(gl) = gpu_layers { config.gpu_layers = Some(gl); }
+        if let Some(t) = threads { config.threads = Some(t); }
+        if let Some(temp) = temperature { config.temperature = Some(temp); }
+        if let Some(tp) = top_p { config.top_p = Some(tp); }
+        if let Some(ea) = extra_args { config.extra_args = ea; }
+        if let Some(bp) = backend_preference { config.backend_preference = Some(normalize_preference(Some(&bp))); }
+        if let Some(dev) = gpu_device {
+            config.gpu_device = if dev.trim().is_empty() { None } else { Some(dev) };
+        }
+        if let Some(t) = thinking { config.thinking = Some(t); }
+        if let Some(ao) = auto_offload { config.auto_offload = Some(ao); }
+        if let Some(mt) = max_turns { config.max_turns = Some(mt.clamp(1, 12)); }
+        Ok(())
+    })
 }

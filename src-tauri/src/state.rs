@@ -11,3 +11,5 @@ mod indexing;
 mod ai;
 
 pub use core::*;
+pub use crate::models::StorageIssue;
+pub(crate) use crate::persistence::{FileMutation, FileTransaction, MutationRoot};

@@ -136,11 +136,18 @@ impl AppState {
 
         let workspace_clone = workspace.clone();
         let workspace_data_dir = self.workspace_data_dir(&workspace);
-        let mut notes = tauri::async_runtime::spawn_blocking(move || {
+        let scan = tauri::async_runtime::spawn_blocking(move || {
             read_workspace_notes(&workspace_clone, &workspace_data_dir)
         })
         .await
         .map_err(|e| anyhow!("spawn_blocking failed: {}", e))??;
+        let mut notes = scan.notes;
+        self.replace_storage_issues_matching(scan.issues, |issue| {
+            matches!(
+                issue.code.as_str(),
+                "workspace-traversal" | "note-parse" | "duplicate-note-id"
+            )
+        });
 
         if self.inner.runtime.read().workspace_path.as_ref() != Some(&workspace) {
             return Ok(());

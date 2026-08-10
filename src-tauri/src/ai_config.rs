@@ -278,13 +278,8 @@ pub fn load_applied(app_data: &Path) -> Result<Option<AiConfigFile>> {
 }
 
 pub fn write_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| anyhow!("configuration has no parent directory"))?;
-    fs::create_dir_all(parent)?;
-    let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(value)?;
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path).with_context(|| format!("failed replacing {}", path.display()))?;
-    Ok(())
+    crate::persistence::atomic_write_json(path, value)
+        .with_context(|| format!("failed replacing {}", path.display()))
 }
 
 pub fn canonical_hash(config: &AiConfigFile) -> Result<String> {

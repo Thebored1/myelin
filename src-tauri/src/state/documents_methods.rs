@@ -1,6 +1,7 @@
 use super::core::*;
 use ::anyhow::{anyhow, Context, Result};
 use super::*;
+use crate::persistence::{FileMutation, FileTransaction, MutationRoot};
 
 impl AppState {
     pub(crate) fn ensure_unique_title(&self, requested_title: &str, current_note_id: Option<&str>) -> String {
@@ -89,6 +90,13 @@ impl AppState {
             )
             .await;
 
+        let _persistence_guard = self.inner.persistence_lock.lock();
+        write_note_file(
+            &workspace,
+            &self.workspace_data_dir(&workspace),
+            &path,
+            &document,
+        )?;
         {
             let mut runtime = self.inner.runtime.write();
             runtime.notes.insert(
@@ -99,17 +107,12 @@ impl AppState {
                 },
             );
         }
-
-        write_note_file(
-            &workspace,
-            &self.workspace_data_dir(&workspace),
-            &path,
-            &document,
-        )?;
-        crate::git_history::commit_changes(
+        if let Err(error) = crate::git_history::commit_changes(
             &workspace,
             &format!("Create note: {}", document.title),
-        )?;
+        ) {
+            log::warn!("created note but could not create Git history entry: {error}");
+        }
 
         // The watcher will usually report this same write. Both paths only mark
         // the shared scheduler dirty, so they collapse into one debounced pass.
@@ -245,6 +248,13 @@ impl AppState {
             )
             .await;
 
+        let _persistence_guard = self.inner.persistence_lock.lock();
+        write_note_file(
+            &workspace,
+            &self.workspace_data_dir(&workspace),
+            &path,
+            &updated,
+        )?;
         {
             let mut runtime = self.inner.runtime.write();
             runtime.notes.insert(
@@ -255,13 +265,6 @@ impl AppState {
                 },
             );
         }
-
-        write_note_file(
-            &workspace,
-            &self.workspace_data_dir(&workspace),
-            &path,
-            &updated,
-        )?;
         // Version history is useful, but it must never make a successfully
         // persisted Markdown edit look like a failed note write. A workspace may
         // have an inaccessible Git index or an unsupported file type; keep the
@@ -320,20 +323,17 @@ impl AppState {
                 .ok_or_else(|| anyhow!("note not found"))?
         };
 
-        fs::remove_file(&path).with_context(|| format!("failed to delete {}", path.display()))?;
-
-        // Delete the note's sidecars too — the chat session and annotations are
-        // keyed by note id and would otherwise orphan in the workspace data dir
-        // (stale sessions lingering after the note is gone).
         let data_dir = self.workspace_data_dir(&workspace);
-        remove_native_metadata_sidecar(&workspace, &data_dir, &path);
-        let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.json")));
-        let _ = fs::remove_file(data_dir.join("chats").join(format!("{note_id}.chat.tmp")));
-        let _ = fs::remove_file(
-            data_dir
-                .join("annotations")
-                .join(format!("{note_id}.annotations.json")),
-        );
+        {
+            let _persistence_guard = self.inner.persistence_lock.lock();
+            FileTransaction::new(
+                &workspace,
+                &data_dir,
+                note_delete_plan(&workspace, &data_dir, &path, &note_id)?,
+            )?
+            .commit()?;
+        }
+        self.inner.runtime.write().notes.remove(&note_id);
         // Drop any RAG chunks ingested for this note from the document store.
         let _ = self.delete_document(&note_id).await;
         {
@@ -344,8 +344,12 @@ impl AppState {
             }
         }
 
-        crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))?;
-        self.reindex_workspace_after_change(workspace).await?;
+        if let Err(error) = crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id)) {
+            log::warn!("deleted note but could not create Git history entry: {error}");
+        }
+        if let Err(error) = self.reindex_workspace_after_change(workspace).await {
+            log::warn!("deleted note but reindexing failed: {error}");
+        }
         Ok(self.snapshot())
     }
 
@@ -391,18 +395,35 @@ impl AppState {
             chat_history: source.document.chat_history.clone(),
         };
 
-        write_note_file(
-            &workspace,
-            &self.workspace_data_dir(&workspace),
-            &path,
-            &document,
-        )?;
-        crate::git_history::commit_changes(
+        {
+            let _persistence_guard = self.inner.persistence_lock.lock();
+            write_note_file(
+                &workspace,
+                &self.workspace_data_dir(&workspace),
+                &path,
+                &document,
+            )?;
+        }
+        if let Err(error) = crate::git_history::commit_changes(
             &workspace,
             &format!("Duplicate note: {}", document.title),
-        )?;
-        self.reindex_workspace_after_change(workspace).await?;
-        self.load_note(duplicate_id).await
+        ) {
+            log::warn!("duplicated note but could not create Git history entry: {error}");
+        }
+        {
+            let mut runtime = self.inner.runtime.write();
+            runtime.notes.insert(
+                duplicate_id.clone(),
+                IndexedNote {
+                    document: document.clone(),
+                    vector: source.vector.clone(),
+                },
+            );
+        }
+        if let Err(error) = self.reindex_workspace_after_change(workspace).await {
+            log::warn!("duplicated note but reindexing failed: {error}");
+        }
+        Ok(document)
     }
 
     pub async fn move_note(&self, note_id: String, target_folder: String) -> Result<NoteDocument> {
@@ -423,40 +444,66 @@ impl AppState {
             .and_then(OsStr::to_str)
             .ok_or_else(|| anyhow!("invalid note filename"))?;
         let target_base = workspace.join(folder_to_relative_path(&target_folder));
-        fs::create_dir_all(&target_base)
-            .with_context(|| format!("failed to create target folder {}", target_base.display()))?;
         let target_path = unique_note_path(&target_base, file_name);
         let data_dir = self.workspace_data_dir(&workspace);
-        if is_native_text_file(&source_path) {
+        let mut mutations = vec![FileMutation::Move {
+            root: MutationRoot::Workspace,
+            from: PathBuf::from(relative_to_workspace(&workspace, &source_path)),
+            to: PathBuf::from(relative_to_workspace(&workspace, &target_path)),
+        }];
+        if is_metadata_document(&source_path) {
             // The sidecar key is derived from the relative path. Prepare the new
             // key before moving the source, then remove it again if the file move
             // fails so the two operations cannot leave a phantom note metadata
             // record behind.
-            write_native_metadata_sidecar(
-                &workspace,
-                &data_dir,
-                &target_path,
-                &source.document,
-            )?;
-        }
-        if let Err(error) = fs::rename(&source_path, &target_path) {
-            remove_native_metadata_sidecar(&workspace, &data_dir, &target_path);
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to move {} to {}",
-                    source_path.display(),
-                    target_path.display()
-                )
+            let metadata_path = native_metadata_app_path(&workspace, &data_dir, &target_path);
+            let sidecar = NativeMetadataSidecar {
+                schema_version: 2,
+                metadata: frontmatter_from_document(&source.document),
+                relative_path: relative_to_workspace(&workspace, &target_path),
+            };
+            mutations.push(FileMutation::Write {
+                root: MutationRoot::WorkspaceData,
+                relative_path: metadata_path.strip_prefix(&data_dir).map(PathBuf::from)?,
+                bytes: serde_json::to_vec_pretty(&sidecar)?,
+            });
+            mutations.push(FileMutation::Delete {
+                root: MutationRoot::WorkspaceData,
+                relative_path: native_metadata_app_path(&workspace, &data_dir, &source_path)
+                    .strip_prefix(&data_dir)
+                    .map(PathBuf::from)?,
             });
         }
-        remove_native_metadata_sidecar(&workspace, &data_dir, &source_path);
-        crate::git_history::commit_changes(
+        {
+            let _persistence_guard = self.inner.persistence_lock.lock();
+            FileTransaction::new(&workspace, &data_dir, mutations)?.commit()?;
+        }
+        if let Err(error) = crate::git_history::commit_changes(
             &workspace,
             &format!("Move note: {}", source.document.title),
-        )?;
+        ) {
+            log::warn!("moved note but could not create Git history entry: {error}");
+        }
 
-        self.reindex_workspace_after_change(workspace).await?;
-        self.load_note(note_id).await
+        let moved = NoteDocument {
+            relative_path: relative_to_workspace(&workspace, &target_path),
+            ..source.document.clone()
+        };
+        {
+            let mut runtime = self.inner.runtime.write();
+            runtime.notes.insert(
+                note_id.clone(),
+                IndexedNote {
+                    document: moved.clone(),
+                    vector: source.vector.clone(),
+                },
+            );
+        }
+
+        if let Err(error) = self.reindex_workspace_after_change(workspace).await {
+            log::warn!("moved note but reindexing failed: {error}");
+        }
+        Ok(moved)
     }
 
     pub async fn reorder_note(&self, note_id: String, direction: String) -> Result<AppSnapshot> {

@@ -8,10 +8,11 @@ impl AppState {
     }
 
     pub(crate) fn workspace_data_dir(&self, workspace: &Path) -> PathBuf {
-        self.inner
-            .app_data_dir
-            .join("workspaces")
-            .join(workspace_storage_key(workspace))
+        crate::state::prepare_workspace_data_dir(&self.inner.app_data_dir, workspace)
+            .unwrap_or_else(|error| {
+                log::error!("failed to prepare workspace sidecar storage: {error}");
+                self.inner.app_data_dir.join("workspaces").join(workspace_storage_key(workspace))
+            })
     }
 
     pub(crate) fn persist_runtime_settings(&self) -> Result<()> {

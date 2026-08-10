@@ -3,6 +3,46 @@ use super::core::*;
 use super::*;
 
 impl AppState {
+    pub(crate) fn replace_storage_issues(&self, issues: Vec<StorageIssue>) {
+        let changed = {
+            let mut runtime = self.inner.runtime.write();
+            if runtime.storage_issues == issues {
+                false
+            } else {
+                runtime.storage_issues = issues.clone();
+                true
+            }
+        };
+        if changed {
+            let _ = self.handle.emit("storage://issues", issues);
+        }
+    }
+
+    pub(crate) fn record_storage_issues(&self, issues: impl IntoIterator<Item = StorageIssue>) {
+        let mut current = self.inner.runtime.write().storage_issues.clone();
+        for issue in issues {
+            if !current.iter().any(|existing| existing == &issue) {
+                current.push(issue);
+            }
+        }
+        self.replace_storage_issues(current);
+    }
+
+    pub(crate) fn replace_storage_issues_matching(
+        &self,
+        issues: Vec<StorageIssue>,
+        matches: impl Fn(&StorageIssue) -> bool,
+    ) {
+        let mut current = self.inner.runtime.read().storage_issues.clone();
+        current.retain(|issue| !matches(issue));
+        for issue in issues {
+            if !current.iter().any(|existing| existing == &issue) {
+                current.push(issue);
+            }
+        }
+        self.replace_storage_issues(current);
+    }
+
     pub fn new(handle: AppHandle) -> Result<Self> {
         let app_data_dir = handle
             .path()
@@ -34,7 +74,19 @@ impl AppState {
         let resource_bin = handle.path().resource_dir().ok().map(|dir| dir.join("bin"));
         crate::llama_server::set_resource_bin_dir(resource_bin);
 
-        let settings = load_settings(&app_data_dir)?;
+        let (settings, startup_issues) = match load_settings(&app_data_dir) {
+            Ok(settings) => (settings, Vec::new()),
+            Err(error) => (
+                PersistedSettings::default(),
+                vec![StorageIssue {
+                    code: "settings-corrupt".into(),
+                    severity: "error".into(),
+                    path: Some(app_data_dir.join(SETTINGS_FILE_NAME).display().to_string()),
+                    message: format!("Settings could not be loaded: {error}"),
+                    recoverable: true,
+                }],
+            ),
+        };
         let workspace_path = settings.workspace_path.map(PathBuf::from);
         // The applied schema-backed config is authoritative for managed
         // OpenHarn settings. Fall back to the legacy mirror only when no valid
@@ -50,6 +102,7 @@ impl AppState {
             handle,
             inner: Arc::new(InnerState {
                 app_data_dir,
+                persistence_lock: Mutex::new(()),
                 runtime: RwLock::new(RuntimeState {
                     workspace_path,
                     notes: HashMap::new(),
@@ -60,6 +113,7 @@ impl AppState {
                         note_count: 0,
                         backend: "lancedb".into(),
                     },
+                    storage_issues: startup_issues,
                 }),
                 watcher: Mutex::new(None),
                 index_lock: AsyncMutex::new(()),
@@ -118,6 +172,11 @@ impl AppState {
         let workspace = self.inner.runtime.read().workspace_path.clone();
         if let Some(workspace) = workspace {
             crate::git_history::init_repo(&workspace)?;
+            let data_dir = prepare_workspace_data_dir(&self.inner.app_data_dir, &workspace)?;
+            self.replace_storage_issues_matching(
+                workspace_storage_issues(&data_dir),
+                |issue| issue.code == "workspace-storage-conflict",
+            );
             self.start_watcher(&workspace)?;
             {
                 let mut runtime = self.inner.runtime.write();
@@ -137,6 +196,11 @@ impl AppState {
         fs::create_dir_all(&workspace)
             .with_context(|| format!("failed to create workspace at {}", workspace.display()))?;
         crate::git_history::init_repo(&workspace)?;
+        let data_dir = prepare_workspace_data_dir(&self.inner.app_data_dir, &workspace)?;
+        self.replace_storage_issues_matching(
+            workspace_storage_issues(&data_dir),
+            |issue| issue.code == "workspace-storage-conflict",
+        );
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -177,16 +241,14 @@ impl AppState {
         annotations: Vec<crate::models::PdfAnnotation>,
     ) -> Result<()> {
         let workspace = self.require_workspace()?;
+        let _persistence_guard = self.inner.persistence_lock.lock();
         let workspace_data_dir = self.workspace_data_dir(&workspace);
         let annotations_dir = workspace_data_dir.join("annotations");
-        fs::create_dir_all(&annotations_dir)?;
         let annotations_path = annotations_dir.join(format!("{}.annotations.json", note_id));
         if annotations.is_empty() {
-            let _ = fs::remove_file(&annotations_path);
+            crate::persistence::atomic_remove(&annotations_path)?;
         } else {
-            let tmp_path = annotations_dir.join(format!("{}.annotations.tmp", note_id));
-            fs::write(&tmp_path, serde_json::to_string(&annotations)?)?;
-            fs::rename(&tmp_path, &annotations_path)?;
+            crate::persistence::atomic_write_json(&annotations_path, &annotations)?;
         }
         {
             let mut runtime = self.inner.runtime.write();
@@ -300,6 +362,24 @@ impl AppState {
             .collect::<Vec<_>>();
         let custom_note_order = normalized_custom_order(&runtime.custom_note_order, &runtime.notes);
         let notes = sort_summaries_by_custom_order(note_summaries, &custom_note_order);
+        let mut storage_issues = runtime.storage_issues.clone();
+        for file_name in ["llama-server.json", "ai-config.json", "ai-config.applied.json"] {
+            let path = self.inner.app_data_dir.join(file_name);
+            if path.exists() {
+                let malformed = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).err());
+                if malformed.is_some() && !storage_issues.iter().any(|issue| issue.path.as_deref() == Some(path.to_string_lossy().as_ref())) {
+                    storage_issues.push(StorageIssue {
+                        code: "configuration-corrupt".into(),
+                        severity: "error".into(),
+                        path: Some(path.display().to_string()),
+                        message: "A configuration file is malformed and was left untouched; repair it before saving settings.".into(),
+                        recoverable: true,
+                    });
+                }
+            }
+        }
 
         AppSnapshot {
             workspace_path: runtime
@@ -311,6 +391,7 @@ impl AppState {
             library_facets: build_library_facets(runtime.notes.values().map(|note| &note.document)),
             provider_status: default_provider_status(&self.inner.app_data_dir),
             index_state: runtime.index_state.clone(),
+            storage_issues,
         }
     }
 

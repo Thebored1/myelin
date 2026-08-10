@@ -9,6 +9,7 @@ impl AppState {
         chat_history: Vec<crate::models::ChatMessage>,
     ) -> Result<()> {
         let workspace = self.require_workspace()?;
+        let _persistence_guard = self.inner.persistence_lock.lock();
         let mut document = {
             let runtime = self.inner.runtime.read();
             runtime
@@ -22,14 +23,8 @@ impl AppState {
         document.chat_history = chat_history;
 
         let chats_dir = self.workspace_data_dir(&workspace).join("chats");
-        fs::create_dir_all(&chats_dir)?;
         let chats_path = chats_dir.join(format!("{}.chat.json", document.id));
-        let tmp_chat_path = chats_dir.join(format!("{}.chat.tmp", document.id));
-        fs::write(
-            &tmp_chat_path,
-            serde_json::to_string(&document.chat_history)?,
-        )?;
-        fs::rename(&tmp_chat_path, &chats_path)?;
+        crate::persistence::atomic_write_json(&chats_path, &document.chat_history)?;
 
         {
             let mut runtime = self.inner.runtime.write();

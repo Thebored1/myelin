@@ -611,7 +611,9 @@ impl AppState {
                 }));
                 convo.extend(final_messages.iter().cloned());
                 let trimmed = trim_conversation(convo, MAX_LIVE_CONVERSATION_CHARS);
-                self.save_conversation(&nid, trimmed);
+                if let Err(error) = self.save_conversation(&nid, trimmed) {
+                    log::warn!("chat response retained in memory but conversation persistence failed: {error}");
+                }
             }
             if !external_model && turn_contains_note_mutation(&final_messages) {
                 let state = self.clone();

@@ -1,7 +1,7 @@
 pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
 pub(crate) use crate::models::{
     AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult, Task,
+    ProviderStatus, SearchResponse, SearchResult, StorageIssue, Task,
 };
 pub(crate) use crate::sidecar::ManagedSidecar;
 pub(crate) use anyhow::{anyhow, Context, Result};
@@ -159,6 +159,7 @@ impl IndexScheduler {
 
 pub(crate) struct InnerState {
     pub(crate) app_data_dir: PathBuf,
+    pub(crate) persistence_lock: Mutex<()>,
     pub(crate) runtime: RwLock<RuntimeState>,
     pub(crate) watcher: Mutex<Option<RecommendedWatcher>>,
     pub(crate) index_lock: AsyncMutex<()>,
@@ -289,6 +290,7 @@ pub(crate) struct RuntimeState {
     pub(crate) notes: HashMap<String, IndexedNote>,
     pub(crate) custom_note_order: Vec<String>,
     pub(crate) index_state: IndexState,
+    pub(crate) storage_issues: Vec<StorageIssue>,
 }
 
 #[derive(Clone)]
@@ -487,8 +489,14 @@ pub(crate) struct Frontmatter {
 /// The path is included for diagnostics and to make an accidental hash collision
 /// fail closed when the sidecar is read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct NativeMetadataSidecar {
+pub(crate) struct DocumentMetadataSidecar {
+    #[serde(default = "metadata_schema_version")]
+    pub(crate) schema_version: u32,
     #[serde(flatten)]
     pub(crate) metadata: Frontmatter,
     pub(crate) relative_path: String,
 }
+
+fn metadata_schema_version() -> u32 { 2 }
+
+pub(crate) type NativeMetadataSidecar = DocumentMetadataSidecar;

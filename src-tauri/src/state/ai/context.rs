@@ -109,10 +109,27 @@ impl AppState {
                 .app_data_dir
                 .join("conversations")
                 .join(format!("{note_id}.json"));
-            if let Ok(raw) = fs::read_to_string(path) {
-                if let Ok(messages) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
-                    conversations.insert(note_id.to_string(), canonical_wire_conversation(messages));
-                }
+            match fs::read_to_string(&path) {
+                Ok(raw) => match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                    Ok(messages) => {
+                        conversations.insert(note_id.to_string(), canonical_wire_conversation(messages));
+                    }
+                    Err(error) => self.record_storage_issues([StorageIssue {
+                        code: "conversation-parse".into(),
+                        severity: "error".into(),
+                        path: Some(path.display().to_string()),
+                        message: format!("A saved chat conversation is malformed and was left untouched: {error}"),
+                        recoverable: true,
+                    }]),
+                },
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => self.record_storage_issues([StorageIssue {
+                    code: "conversation-read".into(),
+                    severity: "error".into(),
+                    path: Some(path.display().to_string()),
+                    message: "A saved chat conversation could not be read and was left untouched.".into(),
+                    recoverable: true,
+                }]),
+                Err(_) => {}
             }
         }
         conversations
@@ -123,20 +140,35 @@ impl AppState {
     }
 
     /// Replace a note's live conversation after a turn (already trimmed by caller).
-    pub fn save_conversation(&self, note_id: &str, msgs: Vec<serde_json::Value>) {
+    pub fn save_conversation(&self, note_id: &str, msgs: Vec<serde_json::Value>) -> Result<()> {
         let messages = canonical_wire_conversation(msgs);
+        let dir = self.inner.app_data_dir.join("conversations");
+        let path = dir.join(format!("{note_id}.json"));
+        if let Err(error) = fs::create_dir_all(&dir) {
+            self.record_storage_issues([StorageIssue {
+                code: "conversation-write".into(),
+                severity: "error".into(),
+                path: Some(path.display().to_string()),
+                message: "Chat conversation could not be saved; the in-memory conversation remains available.".into(),
+                recoverable: true,
+            }]);
+            return Err(error.into());
+        }
+        crate::persistence::atomic_write_json(&path, &messages).map_err(|error| {
+            self.record_storage_issues([StorageIssue {
+                code: "conversation-write".into(),
+                severity: "error".into(),
+                path: Some(path.display().to_string()),
+                message: "Chat conversation could not be saved; the in-memory conversation remains available.".into(),
+                recoverable: true,
+            }]);
+            error
+        })?;
         self.inner
             .conversations
             .lock()
-            .insert(note_id.to_string(), messages.clone());
-        let dir = self.inner.app_data_dir.join("conversations");
-        if fs::create_dir_all(&dir).is_ok() {
-            let path = dir.join(format!("{note_id}.json"));
-            let tmp = dir.join(format!("{note_id}.tmp"));
-            if let Ok(raw) = serde_json::to_string(&messages) {
-                let _ = fs::write(&tmp, raw).and_then(|_| fs::rename(&tmp, &path));
-            }
-        }
+            .insert(note_id.to_string(), messages);
+        Ok(())
     }
 
     /// Forget a note's live conversation (e.g. when the user clears chat).
@@ -147,7 +179,16 @@ impl AppState {
             .app_data_dir
             .join("conversations")
             .join(format!("{note_id}.json"));
-        let _ = fs::remove_file(path);
+        if let Err(error) = crate::persistence::atomic_remove(&path) {
+            self.record_storage_issues([StorageIssue {
+                code: "conversation-delete".into(),
+                severity: "warning".into(),
+                path: Some(path.display().to_string()),
+                message: "Saved chat conversation could not be removed.".into(),
+                recoverable: true,
+            }]);
+            log::warn!("could not remove saved conversation {}: {error}", path.display());
+        }
         *self.inner.active_slot_cache.lock() = None;
     }
 
