@@ -1,11 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
-
 import { goto } from '$app/navigation';
-
 import { resolve } from '$app/paths';
-
 import { page } from '$app/state';
-
 import type {
 		NoteDocument,
 		NoteSummary,
@@ -13,32 +9,21 @@ import type {
 		GitCommit,
 		ChatMessage
 	} from '$lib/types';
-
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
-
 import { noteOpened } from '$lib/llamaWarm';
-
 import { chatSidebarShortcut, noteSidebarOpen } from '$lib/stores';
-
 import { shortcutMatches } from '$lib/keyboardShortcut';
-
 import { formatBacklinkContext } from '$lib/backlinkContext';
-
 import type Vditor from 'vditor';
-
 import 'mathlive/fonts.css';
-
 import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
-
 import { hideThinkingContent } from '$lib/chatContent';
-
 import {
 		canApplyReconciledNote,
 		editorNeedsAuthoritativeBody,
 		hasNoteMutation
 	} from '$lib/noteMutation';
-
 import type { BlockItem } from './types';
 import { createNotePageLifecycle } from './sessions/lifecycle.svelte';
 import { createLinkingSession } from './sessions/linking.svelte';
@@ -54,7 +39,7 @@ import { createSourceSession } from './sessions/source.svelte';
 import { createNotePageGraph } from './sessions/graph.svelte';
 import { createNotePageUtilities } from './sessions/utilities.svelte';
 import { createNotePageDialogs } from './sessions/dialogs.svelte';
-
+import { createNotePageActions } from './sessions/actions.svelte';
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
 		let note = $state<NoteDocument | null>(null);
@@ -79,14 +64,12 @@ export function createNotePageController() {
 			[]
 		);
 		let texAutoTimer: ReturnType<typeof setTimeout> | undefined;
-	
 		let activeSidebarTab = $state<'info' | 'chat' | 'versions'>('info');
 		let noteHistory = $state<GitCommit[]>([]);
 		let versionPreviewContent = $state<string | null>(null);
 		let versionPreviewHash = $state<string | null>(null);
 		let versionPreviewDialog: HTMLDialogElement | undefined = $state();
 		type NoteSnapshot = import('$lib/types').NoteSnapshot;
-	
 		let chatMessages = $state<ChatMessage[]>([]);
 		let chatInput = $state('');
 		let copiedIdx = $state<number | null>(null);
@@ -96,7 +79,6 @@ export function createNotePageController() {
 		let chatChunkBuf = '';
 		let chatChunkFlushPending = false;
 		let chatPersistTimer: ReturnType<typeof setTimeout> | undefined;
-	
 		// Debug window state for AI performance metrics. Off by default — it renders
 		// a live per-request trace (including full model prompts) that churns the
 		// page for every user if left on.
@@ -114,7 +96,6 @@ export function createNotePageController() {
 		let activeChatNoteId: string | null = null;
 		type AiInteractionMode = 'chat' | 'write';
 		let aiInteractionMode = $state<AiInteractionMode>('chat');
-	
 		let debugInfo = $state<{
 			requestStart: number | null;
 			firstChunk: number | null;
@@ -128,7 +109,6 @@ export function createNotePageController() {
 			replyChars: number;
 			trace: DebugTraceEntry[];
 		} | null>(null);
-	
 		// The editor selection the user has "armed" for the AI. Persists across sends
 		// (cleared only by the ✕ pill or by deselecting inside the editor). Captured in
 		// source-markdown coordinates with surrounding context so the backend can pin
@@ -152,13 +132,11 @@ export function createNotePageController() {
 		};
 		let activeAiEditTarget: AiEditTarget | null = null;
 		let writeTargetNotice = $state(false);
-	
 		// A chat turn is in flight while the last assistant bubble is still streaming.
 		// Sending is blocked until it finishes, but the textarea stays editable so you
 		// can compose your next prompt while the model is still answering.
 		let activeChatRequestId: string | null = null;
 		let isChatStreaming = $derived(chatMessages.some((m) => m.isStreaming));
-	
 		let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
 		let chatMessagesEl: HTMLDivElement | undefined = $state();
 		let currentTime = $state(Date.now());
@@ -173,15 +151,12 @@ export function createNotePageController() {
 			}, 100);
 			return () => clearInterval(ticker);
 		});
-	
 		let backUrl = $derived(page.url.searchParams.get('returnTo') || '/');
-	
 		let relatedNotes = $state<NoteSummary[]>([]);
 		let vditorContainer: HTMLElement | undefined = $state();
 		let vditorInstance: Vditor | null = null;
 		let VditorConstructor = $state<any>(null);
 		let vditorLoading = $state(false);
-	
 		// Keep the note render separate from the editor/tool bundle. The bundle is
 		// requested only after the note has had a chance to paint.
 		let toolsReady = $state(false);
@@ -204,7 +179,6 @@ export function createNotePageController() {
 		let savedEditorRange: Range | null = null;
 		let shortcutEditorRange: Range | null = null;
 		let shouldRefocusEditor = false;
-	
 		let isSourceMaterial = $state(false);
 		let sourceMaterialType = $state<'pdf' | 'epub' | 'html' | null>(null);
 		let workingDocType = $state<'md' | 'tex' | 'ipynb'>('md');
@@ -242,16 +216,13 @@ export function createNotePageController() {
 		);
 		let pdfIngestionError = $state<string | null>(null);
 		let pdfIngestionPromise: Promise<void> | null = null;
-	
 		let splitRatio = $state(50);
 		let isResizing = $state(false);
 		let mainLayoutEl: HTMLElement | undefined = $state();
-	
 		const PANE_MIN_WIDTH = 26 * 16;
 		const SIDEBAR_MIN_WIDTH = 320;
 		let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
 		let isSidebarResizing = $state(false);
-	
 		let selectionSession: Record<string, any>;
 		const editorInteraction = createEditorInteractionSession({
 			get vditorInstance() { return vditorInstance; },
@@ -266,22 +237,18 @@ export function createNotePageController() {
 			captureEditorSelection: () => selectionSession.captureEditorSelection()
 		});
 		const { focusEditor, refocusEditorSoon, captureShortcutEditorTarget, restoreShortcutEditorFocus } = editorInteraction;
-	
 		let userScrolledUp = false;
 		let blockCache: Record<string, string> = {};
 		let transclusionObserver: MutationObserver | null = null;
-	
 		let toolbarExpanded = $state(false);
 		let toolbarNeedsToggle = $state(false);
 		let toolbarResizeObserver: ResizeObserver | null = null;
-	
 		let saveStatus = $state<'saved' | 'saving' | 'unsaved'>('saved');
 		let saveTimer: ReturnType<typeof setTimeout> | null = null;
 		let navigationWarningDialog: HTMLDialogElement | undefined = $state();
 		let deleteAttachedNoteDialog: HTMLDialogElement | undefined = $state();
 		let deleteMainNoteDialog: HTMLDialogElement | undefined = $state();
 		let detachPdfDialog: HTMLDialogElement | undefined = $state();
-	
 		let attachPdfDialog: HTMLDialogElement | undefined = $state();
 		let pdfSearchQuery = $state('');
 		let pdfNotesList = $state<NoteDocument[]>([]);
@@ -309,7 +276,6 @@ export function createNotePageController() {
 			saveNote: () => saveNote()
 		});
 		const { appendToNoteBody, destroyEditorInstance, triggerAutoSave } = editorState;
-	
 		const utilities = createNotePageUtilities({
 			get note() { return note; },
 			get isSourceMaterial() { return isSourceMaterial; },
@@ -327,7 +293,6 @@ export function createNotePageController() {
 			get toolbarExpanded() { return toolbarExpanded; }
 		});
 		const { openNoteNotebook, localVditorCdn, activeAiNoteId, updateToolbarOverflow } = utilities;
-	
 	
 		const inputGraph = createNoteInputGraph({
 			get note() { return note; },
@@ -497,7 +462,6 @@ export function createNotePageController() {
 			requestDeleteMainNote, requestDeleteAttachedNote, confirmDeleteAttachedNote,
 			cancelDeleteAttachedNote, buildPreviewExpandHref, expandPreviewNoteDirect
 		} = dialogs;
-
 		const lifecycle = createNotePageLifecycle({
 			get aiInteractionMode() { return aiInteractionMode; },
 			set aiInteractionMode(value) { aiInteractionMode = value; },
@@ -800,75 +764,16 @@ export function createNotePageController() {
 		set shouldInitEditor(value: typeof shouldInitEditor) { shouldInitEditor = value; },
 		get loadedRouteNoteId() { return loadedRouteNoteId; },
 		set loadedRouteNoteId(value: typeof loadedRouteNoteId) { loadedRouteNoteId = value; },
-		appendToNoteBody,
-		destroyEditorInstance,
-		triggerAutoSave,
-		pickLatexImage,
-		compileTex,
-		parseLatexError,
-		closeTexPreview,
-		parseBlocks: editorSession.parseBlocks,
-		...linkingSession,
-		loadCurrentNote,
-		refreshCurrentNoteFromBackend,
-		beginNoteStream,
-		scheduleNoteStreamFlush,
-		flushNoteStream,
-		appendNoteStream,
-		cancelNoteStream,
-		applyNoteWrite,
-		initVditor,
-		scanForTransclusions,
-		setupTransclusionObserver,
-		fetchRelatedNotes,
-		handleAnnotationsChange,
-		handleImageExtract,
-		handlePdfTextExtracted,
-		saveNote,
-		deleteNote,
-		duplicateNote,
-		stopActiveChat,
-		stopChat,
-		beginAiRequest,
-		sendChatMessage,
-		sendChatText,
-		rewindToSnapshot,
-		retryMessage,
-		mergeChatTools,
-		reconcileRequestNote,
-		finishStreamingChatMessage,
-		extractChatErrorMessage,
-		failStreamingChatMessage,
-		resolveApproval,
-		fetchNoteHistory,
-		previewVersion,
-		restoreVersion,
-		get pendingNavigationUrl() { return navigationSession.pendingNavigationUrl; },
-		set pendingNavigationUrl(value) { navigationSession.pendingNavigationUrl = value; },
-		get pendingBack() { return navigationSession.pendingBack; },
-		set pendingBack(value) { navigationSession.pendingBack = value; },
-		get isProgrammaticNavigation() { return navigationSession.isProgrammaticNavigation; },
-		set isProgrammaticNavigation(value) { navigationSession.isProgrammaticNavigation = value; },
-		safeNavigate,
-		goBack,
-		navigateBack,
-		requestDeleteAttachedNote,
-		confirmDeleteAttachedNote,
-		cancelDeleteAttachedNote,
-		openAttachPdfDialog,
-		attachPdf,
-		requestDetachPdf,
-		confirmDetachPdf,
-		browseAndAttachPdf,
-		handlePdfSearchKeydown,
-		buildPreviewExpandHref,
-		expandPreviewNoteDirect,
-		handleBeforeUnload,
-		confirmNavigation,
-		cancelNavigation,
-		updateToolbarOverflow,
-		handleGlobalSelectionChange,
+		...createNotePageActions({
+			...inputGraph,
+			...graph,
+			...dialogs,
+			editorSession,
+			navigationSession,
+			linkingSession,
+			saveNote,
+			updateToolbarOverflow
+		}),
 	};
 }
-
 export type NotePageController = ReturnType<typeof createNotePageController>;
