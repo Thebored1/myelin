@@ -14,6 +14,7 @@
 		ProviderStatus,
 		SearchResponse
 	} from '$lib/types';
+	import { NOTE_GROUP, DOCUMENT_GROUP as DOC_GROUP, noteType } from '$lib/home/model';
 	import { onMount } from 'svelte';
 	import { getVersion } from '@tauri-apps/api/app';
 	import NotebookSelect from '$lib/components/NotebookSelect.svelte';
@@ -187,16 +188,6 @@
 	// available through the explicit documents tab and sidebar filter.
 	let activeTypeFilter = $state<NbFilter>('notes');
 
-	function noteType(n: NoteSummary): 'md' | 'pdf' | 'tex' | 'ipynb' | 'epub' {
-		const rel = n.relativePath.toLowerCase();
-		if (rel.endsWith('.pdf')) return 'pdf';
-		if (rel.endsWith('.epub')) return 'epub';
-		if (rel.endsWith('.tex')) return 'tex';
-		if (rel.endsWith('.ipynb')) return 'ipynb';
-		return 'md';
-	}
-	const NOTE_GROUP = ['md', 'tex', 'ipynb'];
-	const DOC_GROUP = ['pdf', 'epub'];
 
 	// Sidebar "notes" / "documents" groups. "notes" = editable working docs (right
 	// editor pane); "documents" = uploaded source material (left pane).
