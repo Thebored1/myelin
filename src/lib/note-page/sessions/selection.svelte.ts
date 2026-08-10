@@ -286,6 +286,22 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		ctx.draftBody = ctx.vditorInstance.getValue();
 		ctx.triggerAutoSave();
 	}
+
+	function handleGlobalSelectionChange() {
+		// Streaming rebuilds the editor DOM and restores the caret programmatically,
+		// which fires selectionchange; skip the expensive capture until it settles.
+		if (ctx.noteStreaming || !ctx.vditorContainer) return;
+		const selection = window.getSelection();
+		ctx.vditorContainer.querySelectorAll('.force-expand').forEach((element: Element) => {
+			element.classList.remove('force-expand');
+		});
+		if (!selection || selection.rangeCount === 0) return;
+		onSelectionChange();
+		if (selection.isCollapsed) return;
+		ctx.vditorContainer.querySelectorAll('[data-type="a"]').forEach((link: Element) => {
+			if (selection.containsNode(link, true)) link.classList.add('force-expand');
+		});
+	}
 	
 
 	return {
@@ -303,6 +319,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		onSelectionChange,
 		restoreSelectionTextOffset,
 		saveCursorPosition,
-		insertAtSavedCursor
+		insertAtSavedCursor,
+		handleGlobalSelectionChange
 	};
 }

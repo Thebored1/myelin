@@ -454,38 +454,6 @@ export function createNotePageController() {
 			updateToolbarOverflow();
 		});
 	
-		function handleGlobalSelectionChange() {
-			// Streaming rebuilds the editor DOM and restores the caret programmatically,
-			// which fires selectionchange; running the full querySelectorAll + onSelection
-			// capture (including a full vditorInstance.getValue()) every ~120ms during
-			// a note stream is wasted work. Skip until the stream settles.
-			if (noteStreaming) return;
-			if (!vditorContainer) return;
-			const sel = window.getSelection();
-	
-			// Clean up previous expansion
-			vditorContainer.querySelectorAll('.force-expand').forEach((el) => {
-				el.classList.remove('force-expand');
-			});
-	
-			if (!sel || sel.rangeCount === 0) return;
-	
-			// Arm cursor and selection targets for Write mode (debounced so the
-			// browser has committed the final drag/caret position).
-			onSelectionChange();
-	
-			// Link expansion is only relevant for a non-empty selection.
-			if (sel.isCollapsed) return;
-	
-			// Expand links that intersect the current selection
-			const links = vditorContainer.querySelectorAll('[data-type="a"]');
-			links.forEach((link) => {
-				if (sel.containsNode(link, true)) {
-					link.classList.add('force-expand');
-				}
-			});
-		}
-	
 		let saveNote: () => Promise<void> = async () => {};
 		const latexSession = createLatexSession({
 			get note() { return note; },
@@ -544,6 +512,7 @@ export function createNotePageController() {
 			set savedEditorRange(value) { savedEditorRange = value; },
 			get draftBody() { return draftBody; },
 			set draftBody(value) { draftBody = value; },
+			get noteStreaming() { return noteStreaming; },
 			triggerAutoSave,
 			focusEditor
 		});
@@ -559,6 +528,7 @@ export function createNotePageController() {
 		const reselectAfterEdit = selectionSession.reselectAfterEdit;
 		const armedEditTarget = selectionSession.armedEditTarget;
 		const onSelectionChange = selectionSession.onSelectionChange;
+		const handleGlobalSelectionChange = selectionSession.handleGlobalSelectionChange;
 		const restoreSelectionTextOffset = selectionSession.restoreSelectionTextOffset;
 		const saveCursorPosition = selectionSession.saveCursorPosition;
 		const insertAtSavedCursor = selectionSession.insertAtSavedCursor;
