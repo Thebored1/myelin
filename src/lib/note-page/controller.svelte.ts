@@ -44,8 +44,7 @@ import {
 import type { BlockItem } from './types';
 import { createNotePageLifecycle } from './sessions/lifecycle.svelte';
 import { createLinkingSession } from './sessions/linking.svelte';
-import { createSelectionSession } from './sessions/selection.svelte';
-import { createLatexSession } from './sessions/latex.svelte';
+import { createNoteInputGraph } from './sessions/input-graph.svelte';
 import { createDocumentSession } from './sessions/document.svelte';
 import { createStreamingSession } from './sessions/streaming.svelte';
 import { createEditorSession } from './sessions/editor.svelte';
@@ -54,8 +53,6 @@ import { createEditorStateSession } from './sessions/editor-state.svelte';
 import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
-import { createLayoutSession } from './sessions/layout.svelte';
-import { createMathSession } from './sessions/math.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -282,7 +279,7 @@ export function createNotePageController() {
 		let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
 		let isSidebarResizing = $state(false);
 	
-		let selectionSession: ReturnType<typeof createSelectionSession>;
+		let selectionSession: Record<string, any>;
 		const editorInteraction = createEditorInteractionSession({
 			get vditorInstance() { return vditorInstance; },
 			get vditorContainer() { return vditorContainer; },
@@ -442,118 +439,64 @@ export function createNotePageController() {
 			updateToolbarOverflow();
 		});
 	
-		const latexSession = createLatexSession({
+		const inputGraph = createNoteInputGraph({
 			get note() { return note; },
-			get texCompileError() { return texCompileError; },
-			set texCompileError(value) { texCompileError = value; },
-			get texPreviewStatus() { return texPreviewStatus; },
-			set texPreviewStatus(value) { texPreviewStatus = value; },
-			get texCacheWarmed() { return texCacheWarmed; },
-			set texCacheWarmed(value) { texCacheWarmed = value; },
-			get texCompiling() { return texCompiling; },
-			set texCompiling(value) { texCompiling = value; },
-			get texCompileQueued() { return texCompileQueued; },
-			set texCompileQueued(value) { texCompileQueued = value; },
-			get isBusy() { return isBusy; },
-			set isBusy(value) { isBusy = value; },
-			get texRevision() { return texRevision; },
-			set texRevision(value) { texRevision = value; },
+			get texCompileError() { return texCompileError; }, set texCompileError(value) { texCompileError = value; },
+			get texPreviewStatus() { return texPreviewStatus; }, set texPreviewStatus(value) { texPreviewStatus = value; },
+			get texCacheWarmed() { return texCacheWarmed; }, set texCacheWarmed(value) { texCacheWarmed = value; },
+			get texCompiling() { return texCompiling; }, set texCompiling(value) { texCompiling = value; },
+			get texCompileQueued() { return texCompileQueued; }, set texCompileQueued(value) { texCompileQueued = value; },
+			get isBusy() { return isBusy; }, set isBusy(value) { isBusy = value; },
+			get texRevision() { return texRevision; }, set texRevision(value) { texRevision = value; },
 			get draftBody() { return draftBody; },
-			get activeSourceBytes() { return activeSourceBytes; },
-			set activeSourceBytes(value) { activeSourceBytes = value; },
-			get sourceMaterialType() { return sourceMaterialType; },
-			set sourceMaterialType(value) { sourceMaterialType = value; },
-			get showAttachedNote() { return showAttachedNote; },
-			set showAttachedNote(value) { showAttachedNote = value; },
-			get texDiagnostics() { return texDiagnostics; },
-			set texDiagnostics(value) { texDiagnostics = value; },
-			get latexDownloadMsg() { return latexDownloadMsg; },
-			set latexDownloadMsg(value) { latexDownloadMsg = value; },
-			get activeSection() { return activeSection; },
-			set activeSection(value) { activeSection = value; },
-			get sectionCache() { return sectionCache; },
-			set sectionCache(value) { sectionCache = value; },
+			get activeSourceBytes() { return activeSourceBytes; }, set activeSourceBytes(value) { activeSourceBytes = value; },
+			get sourceMaterialType() { return sourceMaterialType; }, set sourceMaterialType(value) { sourceMaterialType = value; },
+			get showAttachedNote() { return showAttachedNote; }, set showAttachedNote(value) { showAttachedNote = value; },
+			get texDiagnostics() { return texDiagnostics; }, set texDiagnostics(value) { texDiagnostics = value; },
+			get latexDownloadMsg() { return latexDownloadMsg; }, set latexDownloadMsg(value) { latexDownloadMsg = value; },
+			get activeSection() { return activeSection; }, set activeSection(value) { activeSection = value; },
+			get sectionCache() { return sectionCache; }, set sectionCache(value) { sectionCache = value; },
 			get workingDocType() { return workingDocType; },
-			get lastTexBody() { return lastTexBody; },
-			set lastTexBody(value) { lastTexBody = value; },
+			get lastTexBody() { return lastTexBody; }, set lastTexBody(value) { lastTexBody = value; },
 			get texAutoCompile() { return texAutoCompile; },
-			get texAutoTimer() { return texAutoTimer; },
-			set texAutoTimer(value) { texAutoTimer = value; },
-			saveNote
-		});
-		const pickLatexImage = latexSession.pickLatexImage;
-		const compileTex = latexSession.compileTex;
-		const parseLatexError = latexSession.parseLatexError;
-		const closeTexPreview = latexSession.closeTexPreview;
-
-		selectionSession = createSelectionSession({
+			get texAutoTimer() { return texAutoTimer; }, set texAutoTimer(value) { texAutoTimer = value; },
+			saveNote: () => saveNote(),
 			get vditorInstance() { return vditorInstance; },
 			get vditorContainer() { return vditorContainer; },
-			get armedSelection() { return armedSelection; },
-			set armedSelection(value) { armedSelection = value; },
-			get writeTargetNotice() { return writeTargetNotice; },
-			set writeTargetNotice(value) { writeTargetNotice = value; },
-			get selDebounce() { return selDebounce; },
-			set selDebounce(value) { selDebounce = value; },
-			get savedEditorRange() { return savedEditorRange; },
-			set savedEditorRange(value) { savedEditorRange = value; },
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
+			get armedSelection() { return armedSelection; }, set armedSelection(value) { armedSelection = value; },
+			get writeTargetNotice() { return writeTargetNotice; }, set writeTargetNotice(value) { writeTargetNotice = value; },
+			get selDebounce() { return selDebounce; }, set selDebounce(value) { selDebounce = value; },
+			get savedEditorRange() { return savedEditorRange; }, set savedEditorRange(value) { savedEditorRange = value; },
 			get noteStreaming() { return noteStreaming; },
 			triggerAutoSave,
-			focusEditor
-		});
-		const getSelectionTextOffset = selectionSession.getSelectionTextOffset;
-		const textOffsetOf = selectionSession.textOffsetOf;
-		const nearestIndexOf = selectionSession.nearestIndexOf;
-		const computeSourceSelection = selectionSession.computeSourceSelection;
-		const computeSourceCursor = selectionSession.computeSourceCursor;
-		const clearArmedSelection = selectionSession.clearArmedSelection;
-		const onDocMouseDown = selectionSession.onDocMouseDown;
-		const captureEditorSelection = selectionSession.captureEditorSelection;
-		const captureExternalTarget = selectionSession.captureExternalTarget;
-		const reselectAfterEdit = selectionSession.reselectAfterEdit;
-		const armedEditTarget = selectionSession.armedEditTarget;
-		const onSelectionChange = selectionSession.onSelectionChange;
-		const handleGlobalSelectionChange = selectionSession.handleGlobalSelectionChange;
-		const restoreSelectionTextOffset = selectionSession.restoreSelectionTextOffset;
-		const saveCursorPosition = selectionSession.saveCursorPosition;
-		const insertAtSavedCursor = selectionSession.insertAtSavedCursor;
-		const mathSession = createMathSession({ get vditorInstance() { return vditorInstance; } });
-		const openMathDialog = mathSession.openMathDialog;
-		const insertMath = mathSession.insertMath;
-		const layoutSession = createLayoutSession({
+			focusEditor,
+			setSelectionSession: (value: any) => { selectionSession = value; },
 			PANE_MIN_WIDTH,
 			SIDEBAR_MIN_WIDTH,
-			get splitRatio() { return splitRatio; },
-			set splitRatio(value) { splitRatio = value; },
-			get isResizing() { return isResizing; },
-			set isResizing(value) { isResizing = value; },
+			get splitRatio() { return splitRatio; }, set splitRatio(value) { splitRatio = value; },
+			get isResizing() { return isResizing; }, set isResizing(value) { isResizing = value; },
 			get mainLayoutEl() { return mainLayoutEl; },
-			get sidebarWidth() { return sidebarWidth; },
-			set sidebarWidth(value) { sidebarWidth = value; },
-			get isSidebarResizing() { return isSidebarResizing; },
-			set isSidebarResizing(value) { isSidebarResizing = value; },
-			get vditorInstance() { return vditorInstance; },
-			get note() { return note; },
-			get activeSidebarTab() { return activeSidebarTab; },
-			set activeSidebarTab(value) { activeSidebarTab = value; },
+			get sidebarWidth() { return sidebarWidth; }, set sidebarWidth(value) { sidebarWidth = value; },
+			get isSidebarResizing() { return isSidebarResizing; }, set isSidebarResizing(value) { isSidebarResizing = value; },
+			get activeSidebarTab() { return activeSidebarTab; }, set activeSidebarTab(value) { activeSidebarTab = value; },
 			get chatTextareaEl() { return chatTextareaEl; },
 			get chatMessagesEl() { return chatMessagesEl; },
 			get chatMessages() { return chatMessages; },
-			get userScrolledUp() { return userScrolledUp; },
-			set userScrolledUp(value) { userScrolledUp = value; },
+			get userScrolledUp() { return userScrolledUp; }, set userScrolledUp(value) { userScrolledUp = value; },
 			captureShortcutEditorTarget,
 			restoreShortcutEditorFocus,
 			tick
 		});
-		const startSidebarResizing = layoutSession.startSidebarResizing;
-		const startResizing = layoutSession.startResizing;
-		const handleGlobalMouseMove = layoutSession.handleGlobalMouseMove;
-		const stopResizing = layoutSession.stopResizing;
-		const handleChatSidebarShortcut = layoutSession.handleChatSidebarShortcut;
-		const handleChatScroll = layoutSession.handleChatScroll;
-		const scrollChatToBottom = layoutSession.scrollChatToBottom;
+		const {
+			latexSession, pickLatexImage, compileTex, parseLatexError, closeTexPreview,
+			getSelectionTextOffset, textOffsetOf, nearestIndexOf,
+			computeSourceSelection, computeSourceCursor, clearArmedSelection, onDocMouseDown,
+			captureEditorSelection, captureExternalTarget, reselectAfterEdit, armedEditTarget,
+			onSelectionChange, handleGlobalSelectionChange, restoreSelectionTextOffset,
+			saveCursorPosition, insertAtSavedCursor, mathSession, openMathDialog, insertMath,
+			layoutSession, startSidebarResizing, startResizing, handleGlobalMouseMove,
+			stopResizing, handleChatSidebarShortcut, handleChatScroll, scrollChatToBottom
+		} = inputGraph;
 		let chatSession: ReturnType<typeof createChatSession>;
 		const persistChatHistory = (...args: any[]) => chatSession.persistChatHistory(...args);
 		const checkpointChatHistory = (delay = 250) => chatSession.checkpointChatHistory(delay);
