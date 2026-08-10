@@ -1,6 +1,7 @@
 
 <script lang="ts">
 	import type { NotePageController } from '$lib/note-page/controller.svelte';
+	import type { ChatMessage } from '$lib/types';
 	import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 	import { hideThinkingContent } from '$lib/chatContent';
 	let { notePage }: { notePage: NotePageController } = $props();
@@ -116,9 +117,9 @@
 								{/if}
 							</div>
 
-							{#if notePage.chatMessages.find((m) => m.isApprovalRequest && m.approvalStatus === 'pending')}
+								{#if notePage.chatMessages.find((m: ChatMessage) => m.isApprovalRequest && m.approvalStatus === 'pending')}
 								{@const pendingReq = notePage.chatMessages.find(
-									(m) => m.isApprovalRequest && m.approvalStatus === 'pending'
+									(m: ChatMessage) => m.isApprovalRequest && m.approvalStatus === 'pending'
 								)}
 								<div class="pending-approval-bar">
 									<div class="pending-info">
@@ -401,4 +402,3 @@
 								</div>
 							</div>
 						</div>
-

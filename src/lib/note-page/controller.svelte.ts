@@ -53,6 +53,7 @@ import { createEditorStateSession } from './sessions/editor-state.svelte';
 import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
+import { createNotePageGraph } from './sessions/graph.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -497,424 +498,92 @@ export function createNotePageController() {
 			layoutSession, startSidebarResizing, startResizing, handleGlobalMouseMove,
 			stopResizing, handleChatSidebarShortcut, handleChatScroll, scrollChatToBottom
 		} = inputGraph;
-		let chatSession: ReturnType<typeof createChatSession>;
-		const persistChatHistory = (...args: any[]) => chatSession.persistChatHistory(...args);
-		const checkpointChatHistory = (delay = 250) => chatSession.checkpointChatHistory(delay);
-		const flushChatChunks = () => chatSession.flushChatChunks();
-
-		const documentSession = createDocumentSession({
-			get isLoadingNote() { return isLoadingNote; },
-			set isLoadingNote(value) { isLoadingNote = value; },
-			get toolsReady() { return toolsReady; },
-			set toolsReady(value) { toolsReady = value; },
-			clearArmedSelection,
-			get writeTargetNotice() { return writeTargetNotice; },
-			set writeTargetNotice(value) { writeTargetNotice = value; },
-			get chatPersistTimer() { return chatPersistTimer; },
-			set chatPersistTimer(value) { chatPersistTimer = value; },
-			activeAiNoteId,
-			persistChatHistory,
-			destroyEditorInstance,
-			get activeSourceBytes() { return activeSourceBytes; },
-			set activeSourceBytes(value) { activeSourceBytes = value; },
-			get activeSourceId() { return activeSourceId; },
-			set activeSourceId(value) { activeSourceId = value; },
-			get activeSection() { return activeSection; },
-			set activeSection(value) { activeSection = value; },
-			get sectionCache() { return sectionCache; },
-			set sectionCache(value) { sectionCache = value; },
-			get showAttachedNote() { return showAttachedNote; },
-			set showAttachedNote(value) { showAttachedNote = value; },
-			get note() { return note; },
-			set note(value) { note = value; },
-			get chatMessages() { return chatMessages; },
-			set chatMessages(value) { chatMessages = value; },
-			get noteHistory() { return noteHistory; },
-			set noteHistory(value) { noteHistory = value; },
-			get versionPreviewContent() { return versionPreviewContent; },
-			set versionPreviewContent(value) { versionPreviewContent = value; },
-			get activeSidebarTab() { return activeSidebarTab; },
-			set activeSidebarTab(value) { activeSidebarTab = value; },
-			get isSourceMaterial() { return isSourceMaterial; },
-			set isSourceMaterial(value) { isSourceMaterial = value; },
-			get sourceMaterialType() { return sourceMaterialType; },
-			set sourceMaterialType(value) { sourceMaterialType = value; },
-			get workingDocType() { return workingDocType; },
-			set workingDocType(value) { workingDocType = value; },
-			get draftTitle() { return draftTitle; },
-			set draftTitle(value) { draftTitle = value; },
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
-			get draftTags() { return draftTags; },
-			set draftTags(value) { draftTags = value; },
-			get scratchpadSavedId() { return scratchpadSavedId; },
-			set scratchpadSavedId(value) { scratchpadSavedId = value; },
-			get message() { return message; },
-			set message(value) { message = value; },
-			openNoteNotebook,
-			get saveStatus() { return saveStatus; },
-			set saveStatus(value) { saveStatus = value; },
-			fetchNoteHistory: () => navigationSession.fetchNoteHistory(),
-			fetchRelatedNotes: () => editorSession.fetchRelatedNotes(),
-			get vditorInstance() { return vditorInstance; },
-			get isBusy() { return isBusy; },
-			set isBusy(value) { isBusy = value; },
-			goToHome: () => goto(resolve('/')),
-			safeNavigate: (url: string) => navigationSession.safeNavigate(url)
-		});
-		const loadCurrentNote = documentSession.loadCurrentNote;
-		const refreshCurrentNoteFromBackend = documentSession.refreshCurrentNoteFromBackend;
-		saveNote = documentSession.saveNote;
-		const deleteNote = documentSession.deleteCurrent;
-		const duplicateNote = documentSession.duplicateCurrent;
-		const streamingSession = createStreamingSession({
-			get noteStreamBackup() { return noteStreamBackup; },
-			set noteStreamBackup(value) { noteStreamBackup = value; },
-			get noteStreamBuf() { return noteStreamBuf; },
-			set noteStreamBuf(value) { noteStreamBuf = value; },
-			get noteStreaming() { return noteStreaming; },
-			set noteStreaming(value) { noteStreaming = value; },
-			get transclusionObserver() { return transclusionObserver; },
-			get activeAiEditTarget() { return activeAiEditTarget; },
-			get noteStreamSpan() { return noteStreamSpan; },
-			set noteStreamSpan(value) { noteStreamSpan = value; },
-			get noteStreamFlushPending() { return noteStreamFlushPending; },
-			set noteStreamFlushPending(value) { noteStreamFlushPending = value; },
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
-			get vditorInstance() { return vditorInstance; },
-			get vditorContainer() { return vditorContainer; },
-			get note() { return note; },
-			set note(value) { note = value; },
-			getSelectionTextOffset,
-			restoreSelectionTextOffset,
-			setupTransclusionObserver: () => editorSession.setupTransclusionObserver()
-		});
-		const beginNoteStream = streamingSession.beginNoteStream;
-		const scheduleNoteStreamFlush = streamingSession.scheduleNoteStreamFlush;
-		const flushNoteStream = streamingSession.flushNoteStream;
-		const appendNoteStream = streamingSession.appendNoteStream;
-		const cancelNoteStream = streamingSession.cancelNoteStream;
-		const applyNoteWrite = streamingSession.applyNoteWrite;
-
-		const linkingSession = createLinkingSession({
-			get isBusy() { return isBusy; },
-			set isBusy(value) { isBusy = value; },
-			get VditorConstructor() { return VditorConstructor; },
-			localVditorCdn,
-			get shouldRefocusEditor() { return shouldRefocusEditor; },
-			set shouldRefocusEditor(value) { shouldRefocusEditor = value; },
-			insertAtSavedCursor,
-			refocusEditorSoon,
-			get vditorInstance() { return vditorInstance; },
-			get vditorContainer() { return vditorContainer; },
-			getSelectionTextOffset,
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
-			get note() { return note; },
-			get message() { return message; },
-			set message(value) { message = value; },
-			saveCursorPosition,
-			focusEditor,
-			restoreSelectionTextOffset
-		});
-		const editorSession = createEditorSession({
-			get VditorConstructor() { return VditorConstructor; },
-			set VditorConstructor(value) { VditorConstructor = value; },
-			get vditorContainer() { return vditorContainer; },
-			get vditorInstance() { return vditorInstance; },
-			set vditorInstance(value) { vditorInstance = value; },
-			get vditorLoading() { return vditorLoading; },
-			set vditorLoading(value) { vditorLoading = value; },
-			get toolsReady() { return toolsReady; },
-			get shouldInitEditor() { return shouldInitEditor; },
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
-			get isSourceMaterial() { return isSourceMaterial; },
-			get message() { return message; },
-			set message(value) { message = value; },
-			get toolbarResizeObserver() { return toolbarResizeObserver; },
-			set toolbarResizeObserver(value) { toolbarResizeObserver = value; },
-			get toolbarNeedsToggle() { return toolbarNeedsToggle; },
-			set toolbarNeedsToggle(value) { toolbarNeedsToggle = value; },
-			get toolbarExpanded() { return toolbarExpanded; },
-			set toolbarExpanded(value) { toolbarExpanded = value; },
-			get fullscreenShortcut() { return fullscreenShortcut; },
-			set fullscreenShortcut(value) { fullscreenShortcut = value; },
-			get blockCache() { return blockCache; },
-			get transclusionObserver() { return transclusionObserver; },
-			set transclusionObserver(value) { transclusionObserver = value; },
-			get draftTags() { return draftTags; },
-			get relatedNotes() { return relatedNotes; },
-			set relatedNotes(value) { relatedNotes = value; },
-			get note() { return note; },
-			localVditorCdn,
-			openAttachPdfDialog: () => sourceSession.openAttachPdfDialog(),
-			openMathDialog,
-			openLinkDialog: () => {
-				saveCursorPosition();
-				linkingSession.linkSearchQuery = '';
-				linkingSession.linkSearchResults = [];
-				linkingSession.linkNoteDialog?.showModal();
-				setTimeout(() => {
-					const input = linkingSession.linkNoteDialog?.querySelector('.link-search-input') as HTMLInputElement;
-					input?.focus();
-				}, 50);
-			},
-			linkingSession,
-			updateToolbarOverflow,
-			triggerAutoSave
-		});
-		const initVditor = editorSession.initVditor;
-		const scanForTransclusions = editorSession.scanForTransclusions;
-		const setupTransclusionObserver = editorSession.setupTransclusionObserver;
-		const fetchRelatedNotes = editorSession.fetchRelatedNotes;
-		const navigationSession = createNavigationSession({
-			get note() { return note; },
-			get isBusy() { return isBusy; },
-			set isBusy(value) { isBusy = value; },
-			get noteHistory() { return noteHistory; },
-			set noteHistory(value) { noteHistory = value; },
-			get versionPreviewContent() { return versionPreviewContent; },
-			set versionPreviewContent(value) { versionPreviewContent = value; },
-			get versionPreviewHash() { return versionPreviewHash; },
-			set versionPreviewHash(value) { versionPreviewHash = value; },
-			get versionPreviewDialog() { return versionPreviewDialog; },
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
-			get vditorInstance() { return vditorInstance; },
-			get activeSidebarTab() { return activeSidebarTab; },
-			set activeSidebarTab(value) { activeSidebarTab = value; },
-			get navigationWarningDialog() { return navigationWarningDialog; },
-			get saveStatus() { return saveStatus; },
-			hasReturnTo: () => page.url.searchParams.has('returnTo'),
-			get backUrl() { return backUrl; },
-			triggerAutoSave
-		});
-		const fetchNoteHistory = navigationSession.fetchNoteHistory;
-		const previewVersion = navigationSession.previewVersion;
-		const restoreVersion = navigationSession.restoreVersion;
-		const safeNavigate = navigationSession.safeNavigate;
-		const goBack = navigationSession.goBack;
-		const navigateBack = navigationSession.navigateBack;
-		const handleBeforeUnload = navigationSession.handleBeforeUnload;
-		const confirmNavigation = navigationSession.confirmNavigation;
-		const cancelNavigation = navigationSession.cancelNavigation;
-		const sourceSession = createSourceSession({
-			get note() { return note; },
-			set note(value) { note = value; },
-			get isSourceMaterial() { return isSourceMaterial; },
-			activeAiNoteId,
-			get activeSection() { return activeSection; },
-			get sectionCache() { return sectionCache; },
-			set sectionCache(value) { sectionCache = value; },
-			get scratchpadSavedId() { return scratchpadSavedId; },
-			set scratchpadSavedId(value) { scratchpadSavedId = value; },
-			get draftTitle() { return draftTitle; },
-			set draftTitle(value) { draftTitle = value; },
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
-			get draftTags() { return draftTags; },
-			set draftTags(value) { draftTags = value; },
-			get chatMessages() { return chatMessages; },
-			set chatMessages(value) { chatMessages = value; },
-			get showAttachedNote() { return showAttachedNote; },
-			set showAttachedNote(value) { showAttachedNote = value; },
-			get activeSourceId() { return activeSourceId; },
-			set activeSourceId(value) { activeSourceId = value; },
-			get activeSourceBytes() { return activeSourceBytes; },
-			set activeSourceBytes(value) { activeSourceBytes = value; },
-			get sourceMaterialType() { return sourceMaterialType; },
-			set sourceMaterialType(value) { sourceMaterialType = value; },
-			set activeSection(value) { activeSection = value; },
-			get pendingDebugTrace() { return pendingDebugTrace; },
-			set pendingDebugTrace(value) { pendingDebugTrace = value; },
-			get debugInfo() { return debugInfo; },
-			set debugInfo(value) { debugInfo = value; },
-			get showDebugWindow() { return showDebugWindow; },
-			set showDebugWindow(value) { showDebugWindow = value; },
-			get pdfIngestionStatus() { return pdfIngestionStatus; },
-			set pdfIngestionStatus(value) { pdfIngestionStatus = value; },
-			get pdfIngestionError() { return pdfIngestionError; },
-			set pdfIngestionError(value) { pdfIngestionError = value; },
-			get pdfIngestionPromise() { return pdfIngestionPromise; },
-			set pdfIngestionPromise(value) { pdfIngestionPromise = value; },
-			get pdfSearchQuery() { return pdfSearchQuery; },
-			set pdfSearchQuery(value) { pdfSearchQuery = value; },
-			get pdfSelectedIndex() { return pdfSelectedIndex; },
-			set pdfSelectedIndex(value) { pdfSelectedIndex = value; },
-			get pdfNotesList() { return pdfNotesList; },
-			set pdfNotesList(value) { pdfNotesList = value; },
-			get filteredPdfs() { return filteredPdfs; },
-			get attachPdfDialog() { return attachPdfDialog; },
-			get detachPdfDialog() { return detachPdfDialog; },
-			get message() { return message; },
-			set message(value) { message = value; },
-			get isBusy() { return isBusy; },
-			set isBusy(value) { isBusy = value; },
-			get saveStatus() { return saveStatus; },
-			set saveStatus(value) { saveStatus = value; },
-			openNoteNotebook,
-			tick,
-			appendToNoteBody: (value: string) => appendToNoteBody(value),
-			triggerAutoSave,
-			destroyEditorInstance,
-			initVditor: () => editorSession.initVditor()
-		});
-		const handleSectionsReady = sourceSession.handleSectionsReady;
-		const formatSectionCacheDuration = sourceSession.formatSectionCacheDuration;
-		const openAttachedNote = sourceSession.openAttachedNote;
-		const handlePdfQuote = sourceSession.handlePdfQuote;
-		const handleAnnotationsChange = sourceSession.handleAnnotationsChange;
-		const handleImageExtract = sourceSession.handleImageExtract;
-		const handlePdfTextExtracted = sourceSession.handlePdfTextExtracted;
-		const openAttachPdfDialog = sourceSession.openAttachPdfDialog;
-		const attachPdf = sourceSession.attachPdf;
-		const requestDetachPdf = sourceSession.requestDetachPdf;
-		const confirmDetachPdf = sourceSession.confirmDetachPdf;
-		const browseAndAttachPdf = sourceSession.browseAndAttachPdf;
-		const handlePdfSearchKeydown = sourceSession.handlePdfSearchKeydown;
-		const attachFile = sourceSession.attachFile;
-		const chatContext: Record<string, any> = {
-			get activeChatRequestId() { return activeChatRequestId; },
-			set activeChatRequestId(value) { activeChatRequestId = value; },
-			get isChatStreaming() { return isChatStreaming; },
-			get pendingDebugTrace() { return pendingDebugTrace; },
-			set pendingDebugTrace(value) { pendingDebugTrace = value; },
-			get debugInfo() { return debugInfo; },
-			set debugInfo(value) { debugInfo = value; },
-			get showDebugWindow() { return showDebugWindow; },
-			get chatMessages() { return chatMessages; },
-			set chatMessages(value) { chatMessages = value; },
-			get activeAiComposerMode() { return activeAiComposerMode; },
-			set activeAiComposerMode(value) { activeAiComposerMode = value; },
-			get activeChatNoteId() { return activeChatNoteId; },
-			set activeChatNoteId(value) { activeChatNoteId = value; },
-			get chatInput() { return chatInput; },
-			set chatInput(value) { chatInput = value; },
-			get chatTextareaEl() { return chatTextareaEl; },
-			get note() { return note; },
-			set note(value) { note = value; },
-			get aiInteractionMode() { return aiInteractionMode; },
-			set aiInteractionMode(value) { aiInteractionMode = value; },
-			get activeSection() { return activeSection; },
-			set activeSection(value) { activeSection = value; },
-			get requireToolApproval() { return requireToolApproval; },
-			set requireToolApproval(value) { requireToolApproval = value; },
-			get writeTargetNotice() { return writeTargetNotice; },
-			set writeTargetNotice(value) { writeTargetNotice = value; },
-			get isSourceMaterial() { return isSourceMaterial; },
-			get showAttachedNote() { return showAttachedNote; },
-			get saveStatus() { return saveStatus; },
-			get pdfIngestionPromise() { return pdfIngestionPromise; },
-			get draftBody() { return draftBody; },
-			set draftBody(value) { draftBody = value; },
-			get draftTitle() { return draftTitle; },
-			set draftTitle(value) { draftTitle = value; },
-			get draftTags() { return draftTags; },
-			set draftTags(value) { draftTags = value; },
-			get workingDocType() { return workingDocType; },
-			get activeSourceId() { return activeSourceId; },
-			get vditorInstance() { return vditorInstance; },
-			get chatMessagesEl() { return chatMessagesEl; },
-			get copiedIdx() { return copiedIdx; },
-			set copiedIdx(value) { copiedIdx = value; },
-			get chatChunkBuf() { return chatChunkBuf; },
-			set chatChunkBuf(value) { chatChunkBuf = value; },
-			get MAX_DEBUG_MSG_CHARS() { return MAX_DEBUG_MSG_CHARS; },
-			get isBusy() { return isBusy; },
-			set isBusy(value) { isBusy = value; },
-			get chatPersistTimer() { return chatPersistTimer; },
-			set chatPersistTimer(value) { chatPersistTimer = value; },
-			get noteStreaming() { return noteStreaming; },
-			get activeAiEditTarget() { return activeAiEditTarget; },
-			set activeAiEditTarget(value) { activeAiEditTarget = value; },
-			get approvalTimeouts() { return approvalTimeouts; },
-			activeAiNoteId,
-			armedEditTarget,
-			tick,
-			saveNote,
-			checkpointChatHistory,
-			persistChatHistory,
-			flushChatChunks,
-			scrollChatToBottom,
-			cancelNoteStream,
-			fetchRelatedNotes,
-			beginNoteStream,
-			appendNoteStream,
-			applyNoteWrite
-		};
-		chatSession = createChatSession(chatContext);
-		chatContext.failStreamingChatMessage = chatSession.failStreamingChatMessage;
-		const persistableChatHistory = chatSession.persistableChatHistory;
-		const makeDebugTraceEntry = chatSession.makeDebugTraceEntry;
-		const renderChatContent = chatSession.renderChatContent;
-		const setAiInteractionMode = chatSession.setAiInteractionMode;
-		const handleActiveSectionChange = chatSession.handleActiveSectionChange;
-		const setToolApproval = chatSession.setToolApproval;
-		const setStreamingStatus = chatSession.setStreamingStatus;
-		const visibleAiStatus = chatSession.visibleAiStatus;
-		const copyMessage = chatSession.copyMessage;
-		const stopActiveChat = chatSession.stopActiveChat;
-		const stopChat = chatSession.stopChat;
-		const beginAiRequest = chatSession.beginAiRequest;
-		const sendChatMessage = chatSession.sendChatMessage;
-		const sendChatText = chatSession.sendChatText;
-		const rewindToSnapshot = chatSession.rewindToSnapshot;
-		const retryMessage = chatSession.retryMessage;
-		const mergeChatTools = chatSession.mergeChatTools;
-		const reconcileRequestNote = chatSession.reconcileRequestNote;
-		const finishStreamingChatMessage = chatSession.finishStreamingChatMessage;
-		const extractChatErrorMessage = chatSession.extractChatErrorMessage;
-		const failStreamingChatMessage = chatSession.failStreamingChatMessage;
-		const resolveApproval = chatSession.resolveApproval;
-
-		const aiEventContext: Record<string, any> = {
-			get note() { return note; },
-			set note(value) { note = value; },
-			get message() { return message; },
-			set message(value) { message = value; },
-			get latexDownloadMsg() { return latexDownloadMsg; },
-			set latexDownloadMsg(value) { latexDownloadMsg = value; },
-			get texCacheWarmed() { return texCacheWarmed; },
-			set texCacheWarmed(value) { texCacheWarmed = value; },
-			get chatMessages() { return chatMessages; },
-			set chatMessages(value) { chatMessages = value; },
-			get chatChunkBuf() { return chatChunkBuf; },
-			set chatChunkBuf(value) { chatChunkBuf = value; },
-			get chatChunkFlushPending() { return chatChunkFlushPending; },
-			set chatChunkFlushPending(value) { chatChunkFlushPending = value; },
-			get showDebugWindow() { return showDebugWindow; },
-			get pendingDebugTrace() { return pendingDebugTrace; },
-			set pendingDebugTrace(value) { pendingDebugTrace = value; },
-			get activeAiComposerMode() { return activeAiComposerMode; },
-			get debugInfo() { return debugInfo; },
-			set debugInfo(value) { debugInfo = value; },
+		const graph = createNotePageGraph({
+			createDocumentSession,
+			createStreamingSession,
+			createLinkingSession,
+			createEditorSession,
+			createNavigationSession,
+			createSourceSession,
+			createChatSession,
+			get isLoadingNote() { return isLoadingNote; }, set isLoadingNote(value) { isLoadingNote = value; },
+			get toolsReady() { return toolsReady; }, set toolsReady(value) { toolsReady = value; },
+			clearArmedSelection, get writeTargetNotice() { return writeTargetNotice; }, set writeTargetNotice(value) { writeTargetNotice = value; },
+			get chatPersistTimer() { return chatPersistTimer; }, set chatPersistTimer(value) { chatPersistTimer = value; },
+			activeAiNoteId, destroyEditorInstance,
+			get activeSourceBytes() { return activeSourceBytes; }, set activeSourceBytes(value) { activeSourceBytes = value; },
+			get activeSourceId() { return activeSourceId; }, set activeSourceId(value) { activeSourceId = value; },
+			get activeSection() { return activeSection; }, set activeSection(value) { activeSection = value; },
+			get sectionCache() { return sectionCache; }, set sectionCache(value) { sectionCache = value; },
+			get showAttachedNote() { return showAttachedNote; }, set showAttachedNote(value) { showAttachedNote = value; },
+			get note() { return note; }, set note(value) { note = value; },
+			get chatMessages() { return chatMessages; }, set chatMessages(value) { chatMessages = value; },
+			get noteHistory() { return noteHistory; }, set noteHistory(value) { noteHistory = value; },
+			get versionPreviewContent() { return versionPreviewContent; }, set versionPreviewContent(value) { versionPreviewContent = value; },
+			get activeSidebarTab() { return activeSidebarTab; }, set activeSidebarTab(value) { activeSidebarTab = value; },
+			get isSourceMaterial() { return isSourceMaterial; }, set isSourceMaterial(value) { isSourceMaterial = value; },
+			get sourceMaterialType() { return sourceMaterialType; }, set sourceMaterialType(value) { sourceMaterialType = value; },
+			get workingDocType() { return workingDocType; }, set workingDocType(value) { workingDocType = value; },
+			get draftTitle() { return draftTitle; }, set draftTitle(value) { draftTitle = value; },
+			get draftBody() { return draftBody; }, set draftBody(value) { draftBody = value; },
+			get draftTags() { return draftTags; }, set draftTags(value) { draftTags = value; },
+			get scratchpadSavedId() { return scratchpadSavedId; }, set scratchpadSavedId(value) { scratchpadSavedId = value; },
+			get message() { return message; }, set message(value) { message = value; },
+			openNoteNotebook, get saveStatus() { return saveStatus; }, set saveStatus(value) { saveStatus = value; },
+			get vditorInstance() { return vditorInstance; }, get isBusy() { return isBusy; }, set isBusy(value) { isBusy = value; },
+			goToHome: () => goto(resolve('/')), get saveNote() { return saveNote; }, setSaveNote: (value: () => Promise<void>) => { saveNote = value; },
+			get noteStreamBackup() { return noteStreamBackup; }, set noteStreamBackup(value) { noteStreamBackup = value; },
+			get noteStreamBuf() { return noteStreamBuf; }, set noteStreamBuf(value) { noteStreamBuf = value; },
+			get noteStreaming() { return noteStreaming; }, set noteStreaming(value) { noteStreaming = value; },
+			get transclusionObserver() { return transclusionObserver; }, get activeAiEditTarget() { return activeAiEditTarget; },
+			get noteStreamSpan() { return noteStreamSpan; }, set noteStreamSpan(value) { noteStreamSpan = value; },
+			get noteStreamFlushPending() { return noteStreamFlushPending; }, set noteStreamFlushPending(value) { noteStreamFlushPending = value; },
+			getSelectionTextOffset, restoreSelectionTextOffset, get vditorContainer() { return vditorContainer; },
+			get VditorConstructor() { return VditorConstructor; }, set VditorConstructor(value) { VditorConstructor = value; },
+			localVditorCdn, get shouldRefocusEditor() { return shouldRefocusEditor; }, set shouldRefocusEditor(value) { shouldRefocusEditor = value; },
+			insertAtSavedCursor, refocusEditorSoon, get vditorLoading() { return vditorLoading; }, set vditorLoading(value) { vditorLoading = value; },
+			get shouldInitEditor() { return shouldInitEditor; }, get toolbarResizeObserver() { return toolbarResizeObserver; }, set toolbarResizeObserver(value) { toolbarResizeObserver = value; },
+			get toolbarNeedsToggle() { return toolbarNeedsToggle; }, set toolbarNeedsToggle(value) { toolbarNeedsToggle = value; },
+			get toolbarExpanded() { return toolbarExpanded; }, set toolbarExpanded(value) { toolbarExpanded = value; },
+			get fullscreenShortcut() { return fullscreenShortcut; }, set fullscreenShortcut(value) { fullscreenShortcut = value; },
+			get blockCache() { return blockCache; }, get relatedNotes() { return relatedNotes; }, set relatedNotes(value) { relatedNotes = value; },
+			openMathDialog, saveCursorPosition, focusEditor, updateToolbarOverflow, triggerAutoSave,
+			get versionPreviewHash() { return versionPreviewHash; }, set versionPreviewHash(value) { versionPreviewHash = value; },
+			get versionPreviewDialog() { return versionPreviewDialog; }, get navigationWarningDialog() { return navigationWarningDialog; },
+		hasReturnTo: () => page.url.searchParams.has('returnTo'), get backUrl() { return backUrl; },
+			get pendingDebugTrace() { return pendingDebugTrace; }, set pendingDebugTrace(value) { pendingDebugTrace = value; },
+			get debugInfo() { return debugInfo; }, set debugInfo(value) { debugInfo = value; }, get showDebugWindow() { return showDebugWindow; },
+			get pdfIngestionStatus() { return pdfIngestionStatus; }, set pdfIngestionStatus(value) { pdfIngestionStatus = value; },
+			get pdfIngestionError() { return pdfIngestionError; }, set pdfIngestionError(value) { pdfIngestionError = value; },
+			get pdfIngestionPromise() { return pdfIngestionPromise; }, set pdfIngestionPromise(value) { pdfIngestionPromise = value; },
+			get pdfSearchQuery() { return pdfSearchQuery; }, set pdfSearchQuery(value) { pdfSearchQuery = value; },
+			get pdfSelectedIndex() { return pdfSelectedIndex; }, set pdfSelectedIndex(value) { pdfSelectedIndex = value; },
+			get pdfNotesList() { return pdfNotesList; }, set pdfNotesList(value) { pdfNotesList = value; }, get filteredPdfs() { return filteredPdfs; },
+			get attachPdfDialog() { return attachPdfDialog; }, get detachPdfDialog() { return detachPdfDialog; },
+			tick, appendToNoteBody, get requireToolApproval() { return requireToolApproval; }, set requireToolApproval(value) { requireToolApproval = value; },
+			get isChatStreaming() { return isChatStreaming; }, get activeAiComposerMode() { return activeAiComposerMode; }, set activeAiComposerMode(value) { activeAiComposerMode = value; },
+			get activeChatNoteId() { return activeChatNoteId; }, set activeChatNoteId(value) { activeChatNoteId = value; }, get activeChatRequestId() { return activeChatRequestId; }, set activeChatRequestId(value) { activeChatRequestId = value; },
+			get chatInput() { return chatInput; }, set chatInput(value) { chatInput = value; }, get chatTextareaEl() { return chatTextareaEl; }, get chatMessagesEl() { return chatMessagesEl; },
+			get copiedIdx() { return copiedIdx; }, set copiedIdx(value) { copiedIdx = value; }, get chatChunkBuf() { return chatChunkBuf; }, set chatChunkBuf(value) { chatChunkBuf = value; },
+			get chatChunkFlushPending() { return chatChunkFlushPending; }, set chatChunkFlushPending(value) { chatChunkFlushPending = value; },
+			get MAX_DEBUG_MSG_CHARS() { return MAX_DEBUG_MSG_CHARS; }, get MAX_DEBUG_TRACE() { return MAX_DEBUG_TRACE; }, get approvalTimeouts() { return approvalTimeouts; },
 			get armedSelection() { return armedSelection; },
-			get activeChatRequestId() { return activeChatRequestId; },
-			get chatMessagesEl() { return chatMessagesEl; },
-			get workingDocType() { return workingDocType; },
-			get sectionCache() { return sectionCache; },
-			set sectionCache(value) { sectionCache = value; },
-			APPROVAL_TIMEOUT_MS,
-			approvalTimeouts,
-			MAX_DEBUG_TRACE,
-			activeAiNoteId,
-			flushChatChunks,
-			makeDebugTraceEntry,
-			setStreamingStatus,
-			visibleAiStatus,
-			scrollChatToBottom,
-			clearArmedSelection,
-			reselectAfterEdit,
-			beginNoteStream,
-			appendNoteStream,
-			cancelNoteStream,
-			applyNoteWrite,
-			finishStreamingChatMessage,
-			failStreamingChatMessage,
-			resolveApproval
-		};
+			armedEditTarget, reselectAfterEdit, scrollChatToBottom, APPROVAL_TIMEOUT_MS
+		});
+		const {
+			chatSession, documentSession, streamingSession, linkingSession, editorSession, navigationSession, sourceSession,
+			persistChatHistory, checkpointChatHistory, flushChatChunks, loadCurrentNote, refreshCurrentNoteFromBackend,
+			deleteNote, duplicateNote, beginNoteStream, scheduleNoteStreamFlush, flushNoteStream, appendNoteStream,
+			cancelNoteStream, applyNoteWrite, initVditor, scanForTransclusions, setupTransclusionObserver, fetchRelatedNotes,
+			fetchNoteHistory, previewVersion, restoreVersion, safeNavigate, goBack, navigateBack, handleBeforeUnload,
+			confirmNavigation, cancelNavigation, handleSectionsReady, formatSectionCacheDuration, openAttachedNote,
+			handlePdfQuote, handleAnnotationsChange, handleImageExtract, handlePdfTextExtracted, openAttachPdfDialog,
+			attachPdf, requestDetachPdf, confirmDetachPdf, browseAndAttachPdf, handlePdfSearchKeydown, attachFile,
+			persistableChatHistory, makeDebugTraceEntry, renderChatContent, setAiInteractionMode, handleActiveSectionChange,
+			setToolApproval, setStreamingStatus, visibleAiStatus, copyMessage, stopActiveChat, stopChat, beginAiRequest,
+			sendChatMessage, sendChatText, rewindToSnapshot, retryMessage, mergeChatTools, reconcileRequestNote,
+			finishStreamingChatMessage, extractChatErrorMessage, failStreamingChatMessage, resolveApproval, aiEventContext
+		} = graph;
 
 		const lifecycle = createNotePageLifecycle({
 			get aiInteractionMode() { return aiInteractionMode; },
