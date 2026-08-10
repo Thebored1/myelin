@@ -54,6 +54,7 @@ import { createEditorSession } from './sessions/editor.svelte';
 import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
+import { createLayoutSession } from './sessions/layout.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -294,60 +295,6 @@ export function createNotePageController() {
 		let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
 		let isSidebarResizing = $state(false);
 	
-		function startSidebarResizing(e: MouseEvent) {
-			e.preventDefault();
-			isSidebarResizing = true;
-		}
-	
-		function startResizing(e: MouseEvent) {
-			e.preventDefault();
-			window.getSelection()?.removeAllRanges();
-			isResizing = true;
-		}
-	
-		function handleGlobalMouseMove(e: MouseEvent) {
-			if (isResizing && mainLayoutEl) {
-				e.preventDefault();
-				const rect = mainLayoutEl.getBoundingClientRect();
-				// splitRatio is the LEFT (PDF) pane's width %, and the panes are in
-				// natural order (PDF left, editor right), so the cursor's fraction from
-				// the left edge is the ratio directly — no per-doc-type inversion.
-				const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
-				const resizerWidth = 10;
-				const minSourceWidth = PANE_MIN_WIDTH;
-				const maxSourceRatio = ((rect.width - PANE_MIN_WIDTH - resizerWidth) / rect.width) * 100;
-				const minSourceRatio = (minSourceWidth / rect.width) * 100;
-				if (maxSourceRatio >= minSourceRatio) {
-					splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxSourceRatio));
-				}
-			} else if (isSidebarResizing) {
-				const layoutRect = mainLayoutEl?.getBoundingClientRect();
-				const containerWidth = layoutRect?.width ?? window.innerWidth;
-				// Measure from the actual layout edge rather than the browser window.
-				// The note view can be inset by a host shell, and using window.innerWidth
-				// made the sidebar grow past the editor when it was resized.
-				const newWidth = (layoutRect?.right ?? window.innerWidth) - e.clientX;
-				const maxSidebar = Math.max(SIDEBAR_MIN_WIDTH, containerWidth - PANE_MIN_WIDTH);
-				sidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(newWidth, maxSidebar));
-			}
-		}
-	
-		function stopResizing() {
-			if (isResizing || isSidebarResizing) {
-				isResizing = false;
-				if (isSidebarResizing) {
-					isSidebarResizing = false;
-					localStorage.setItem('myelin_sidebar_width', sidebarWidth.toString());
-				}
-				if (vditorInstance) {
-					// Let Vditor resize after layout shift
-					setTimeout(() => {
-						window.dispatchEvent(new Event('resize'));
-					}, 50);
-				}
-			}
-		}
-	
 		function focusEditor() {
 			if (!vditorInstance || !vditorContainer) return;
 			vditorInstance.focus();
@@ -399,60 +346,7 @@ export function createNotePageController() {
 			shortcutEditorRange = null;
 		}
 	
-		async function handleChatSidebarShortcut(event: KeyboardEvent) {
-			if (
-				event.repeat ||
-				!shortcutMatches(event, get(chatSidebarShortcut)) ||
-				!note ||
-				event.defaultPrevented
-			)
-				return;
-			event.preventDefault();
-			event.stopPropagation();
-	
-			if (get(noteSidebarOpen) && document.activeElement === chatTextareaEl) {
-				noteSidebarOpen.set(false);
-				await tick();
-				restoreShortcutEditorFocus();
-				return;
-			}
-	
-			captureShortcutEditorTarget();
-			activeSidebarTab = 'chat';
-			noteSidebarOpen.set(true);
-			await tick();
-			chatTextareaEl?.focus();
-		}
-	
 		let userScrolledUp = false;
-	
-		function handleChatScroll(e: Event) {
-			const el = e.currentTarget as HTMLElement;
-			const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-			userScrolledUp = distanceToBottom > 50;
-		}
-	
-		function scrollChatToBottom(force = false) {
-			if (!chatMessagesEl) return;
-			if (force || !userScrolledUp) {
-				chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-			}
-		}
-	
-		$effect(() => {
-			if (activeSidebarTab !== 'chat') return;
-			const chatScrollKey = chatMessages
-				.map(
-					(msg) =>
-						`${msg.role}:${msg.content.length}:${msg.isStreaming ? 1 : 0}:${msg.tools?.length ?? 0}:${msg.error ? 1 : 0}`
-				)
-				.join('|');
-			void chatScrollKey;
-			void tick().then(() => {
-				scrollChatToBottom();
-			});
-		});
-	
 		let mathDialog: HTMLDialogElement | undefined = $state();
 		let mathValue = $state('');
 		let mathLiveReady = $state(false);
@@ -859,6 +753,38 @@ export function createNotePageController() {
 		const restoreSelectionTextOffset = selectionSession.restoreSelectionTextOffset;
 		const saveCursorPosition = selectionSession.saveCursorPosition;
 		const insertAtSavedCursor = selectionSession.insertAtSavedCursor;
+		const layoutSession = createLayoutSession({
+			PANE_MIN_WIDTH,
+			SIDEBAR_MIN_WIDTH,
+			get splitRatio() { return splitRatio; },
+			set splitRatio(value) { splitRatio = value; },
+			get isResizing() { return isResizing; },
+			set isResizing(value) { isResizing = value; },
+			get mainLayoutEl() { return mainLayoutEl; },
+			get sidebarWidth() { return sidebarWidth; },
+			set sidebarWidth(value) { sidebarWidth = value; },
+			get isSidebarResizing() { return isSidebarResizing; },
+			set isSidebarResizing(value) { isSidebarResizing = value; },
+			get vditorInstance() { return vditorInstance; },
+			get note() { return note; },
+			get activeSidebarTab() { return activeSidebarTab; },
+			set activeSidebarTab(value) { activeSidebarTab = value; },
+			get chatTextareaEl() { return chatTextareaEl; },
+			get chatMessagesEl() { return chatMessagesEl; },
+			get chatMessages() { return chatMessages; },
+			get userScrolledUp() { return userScrolledUp; },
+			set userScrolledUp(value) { userScrolledUp = value; },
+			captureShortcutEditorTarget,
+			restoreShortcutEditorFocus,
+			tick
+		});
+		const startSidebarResizing = layoutSession.startSidebarResizing;
+		const startResizing = layoutSession.startResizing;
+		const handleGlobalMouseMove = layoutSession.handleGlobalMouseMove;
+		const stopResizing = layoutSession.stopResizing;
+		const handleChatSidebarShortcut = layoutSession.handleChatSidebarShortcut;
+		const handleChatScroll = layoutSession.handleChatScroll;
+		const scrollChatToBottom = layoutSession.scrollChatToBottom;
 		let chatSession: ReturnType<typeof createChatSession>;
 		const persistChatHistory = (...args: any[]) => chatSession.persistChatHistory(...args);
 		const checkpointChatHistory = (delay = 250) => chatSession.checkpointChatHistory(delay);
