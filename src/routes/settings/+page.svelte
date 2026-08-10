@@ -8,6 +8,14 @@
 	import { theme, toggleTheme } from '$lib/theme';
 	import { chatSidebarShortcut } from '$lib/stores';
 	import { prettyShortcut, shortcutFromEvent, shortcutsCollide } from '$lib/keyboardShortcut';
+	import {
+		backendPreference as normalizeBackendPreference,
+		configMatchPositions as findConfigMatches,
+		inferencePayload,
+		openharnPayload,
+		recommendedBeeBackend as chooseBeeBackend
+	} from '$lib/settings/model';
+	import type { OpenharnForm } from '$lib/settings/types';
 
 	type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 
@@ -171,15 +179,7 @@
 	const backendLabel = (b: string) =>
 		b === 'cuda' ? 'CUDA' : b === 'vulkan' ? 'Vulkan' : b === 'metal' ? 'Metal' : 'CPU';
 	const recommendedBeeBackend = $derived(
-		backendPreference === 'cpu'
-			? 'cpu'
-			: downloadableBeeBackends.includes('metal')
-				? 'metal'
-				: nvidiaDetected && downloadableBeeBackends.includes('cuda')
-					? 'cuda'
-					: downloadableBeeBackends.includes('vulkan')
-						? 'vulkan'
-						: 'cpu'
+		chooseBeeBackend(backendPreference, downloadableBeeBackends, nvidiaDetected)
 	);
 
 	let statusPoll: ReturnType<typeof setInterval> | undefined;
@@ -350,18 +350,7 @@
 	let aiConfigEditor: HTMLTextAreaElement;
 	let aiConfigSearchIndex = $state(-1);
 	function configMatchPositions() {
-		const query = aiConfigSearch.trim().toLowerCase();
-		if (!query) return [] as number[];
-		const source = aiConfigText.toLowerCase();
-		const positions: number[] = [];
-		let offset = 0;
-		while (offset < source.length) {
-			const found = source.indexOf(query, offset);
-			if (found < 0) break;
-			positions.push(found);
-			offset = found + Math.max(query.length, 1);
-		}
-		return positions;
+		return findConfigMatches(aiConfigText, aiConfigSearch);
 	}
 	function gotoConfigMatch(direction = 1) {
 		const positions = configMatchPositions();
@@ -494,16 +483,7 @@
 			// Auto chooses based on hardware; the remaining values name the exact
 			// backend. The retired generic GPU value is treated as Auto.
 			const sp = status.config?.backendPreference;
-			backendPreference =
-				sp === 'cpu'
-					? 'cpu'
-					: sp === 'vulkan'
-						? 'vulkan'
-					: sp === 'metal'
-						? 'metal'
-						: sp === 'cuda'
-							? 'cuda'
-							: 'auto';
+			backendPreference = normalizeBackendPreference(sp);
 			thinking = status.config?.thinking ?? false;
 			autoOffload = status.config?.autoOffload ?? true;
 			deterministicTools = status.config?.deterministicTools ?? true;
@@ -750,20 +730,18 @@
 		isSaving = true;
 		saved = false;
 		try {
-			const extraArgsArray = extraArgs.filter((arg) => arg.trim() !== '');
-			await invoke('set_llama_advanced_config', {
-				contextSize: contextSize,
-				gpuLayers: gpuLayers,
-				threads: threads,
-				temperature: temperature,
-				topP: topP,
-				extraArgs: extraArgsArray.length > 0 ? extraArgsArray : null,
-				backendPreference: backendPreference,
-				gpuDevice: null,
-				thinking: thinking,
-				autoOffload: autoOffload,
-				maxTurns: maxTurns
-			});
+			await invoke('set_llama_advanced_config', inferencePayload({
+				contextSize,
+				gpuLayers,
+				threads,
+				temperature,
+				topP,
+				maxTurns,
+				extraArgs,
+				backendPreference,
+				thinking,
+				autoOffload
+			}));
 			saved = true;
 			setTimeout(() => {
 				saved = false;
@@ -817,27 +795,26 @@
 	async function saveOpenharn() {
 		ohSaving = true;
 		try {
-			await invoke('set_openharn_settings', {
-				settings: {
-					port: ohPort || null,
-					bin_path: ohBinPath.trim() || null,
-					tool_mode: ohToolMode,
-					strict: ohStrict,
-					prompt_tools: ohPromptTools,
-					call_only: ohCallOnly,
-					no_think: ohNoThink,
-					tool_choice: ohToolChoice.trim() || null,
-					template_kwargs: ohTemplateKwargs.trim() || null,
-					max_calls: ohMaxCalls || null,
-					total_max: ohTotalMax || null,
-					tool_timeout_secs: ohToolTimeout || null,
-					base_url: ohBaseUrl.trim() || null,
-					external_enabled: externalEnabled,
-					external_base_url: externalBaseUrl.trim() || null,
-					external_model: externalModel.trim() || null,
-					external_api_key: externalApiKey.trim() || null
-				}
-			});
+			const settings: OpenharnForm = {
+				port: ohPort,
+				binPath: ohBinPath,
+				toolMode: ohToolMode,
+				strict: ohStrict,
+				promptTools: ohPromptTools,
+				callOnly: ohCallOnly,
+				noThink: ohNoThink,
+				toolChoice: ohToolChoice,
+				templateKwargs: ohTemplateKwargs,
+				maxCalls: ohMaxCalls,
+				totalMax: ohTotalMax,
+				toolTimeoutSecs: ohToolTimeout,
+				baseUrl: ohBaseUrl,
+				externalEnabled,
+				externalBaseUrl,
+				externalModel,
+				externalApiKey
+			};
+			await invoke('set_openharn_settings', { settings: openharnPayload(settings) });
 			saved = true;
 			setTimeout(() => {
 				saved = false;
