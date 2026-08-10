@@ -16,12 +16,12 @@ import type {
 		ChatMessage
 	} from '$lib/types';
 
-import { onMount, onDestroy, tick } from 'svelte';
+import { tick } from 'svelte';
 import { get } from 'svelte/store';
 
-import { noteOpened, noteClosed } from '$lib/llamaWarm';
+import { noteOpened } from '$lib/llamaWarm';
 
-import { chatSidebarShortcut, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
+import { chatSidebarShortcut, noteSidebarOpen } from '$lib/stores';
 
 import { shortcutMatches } from '$lib/keyboardShortcut';
 
@@ -44,7 +44,7 @@ import {
 	} from '$lib/noteMutation';
 
 import type { BlockItem } from './types';
-import { installAiEventBridge } from './sessions/aiEvents.svelte';
+import { createNotePageLifecycle } from './sessions/lifecycle.svelte';
 import { createLinkingSession } from './sessions/linking.svelte';
 import { createSelectionSession } from './sessions/selection.svelte';
 import { createLatexSession } from './sessions/latex.svelte';
@@ -1031,106 +1031,42 @@ export function createNotePageController() {
 			resolveApproval
 		};
 
-		onMount(() => {
-			// Warm llama-server (safety net — the server is already started at app
-			// boot and stays warm for the entire session).
-			const savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
-			aiInteractionMode = savedInteractionMode === 'operation' || savedInteractionMode === 'write' ? 'write' : 'chat';
-			const savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
-			if (savedSidebarWidth) {
-				const parsed = parseInt(savedSidebarWidth, 10);
-				if (!isNaN(parsed)) {
-					const maxSidebar = Math.max(
-						SIDEBAR_MIN_WIDTH,
-						window.innerWidth - PANE_MIN_WIDTH
-					);
-					sidebarWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(parsed, maxSidebar));
-				}
-			}
-	
-		showSidebarToggle.set(true);
-			// The note sidebar's open/closed state is remembered across sessions via the
-			// persisted noteSidebarOpen store, so we intentionally don't force it here.
-	
-			const mql = window.matchMedia('(max-width: 1200px)');
-			const handleMediaChange = (_e: MediaQueryListEvent) => {};
-			mql.addEventListener('change', handleMediaChange);
-			document.addEventListener('selectionchange', handleGlobalSelectionChange);
-			document.addEventListener('mousedown', onDocMouseDown, true);
-			window.addEventListener('keydown', handleChatSidebarShortcut, true);
-			const disposeAiEvents = installAiEventBridge(aiEventContext);
-			window.addEventListener('mousemove', handleGlobalMouseMove);
-			window.addEventListener('mouseup', stopResizing);
-			window.addEventListener('beforeunload', handleBeforeUnload);
-	
-			return () => {
-				mql.removeEventListener('change', handleMediaChange);
-				document.removeEventListener('selectionchange', handleGlobalSelectionChange);
-				document.removeEventListener('mousedown', onDocMouseDown, true);
-				window.removeEventListener('keydown', handleChatSidebarShortcut, true);
-				window.removeEventListener('mousemove', handleGlobalMouseMove);
-				window.removeEventListener('mouseup', stopResizing);
-				window.removeEventListener('beforeunload', handleBeforeUnload);
-			showSidebarToggle.set(false);
-	
-				disposeAiEvents();
-			};
+		const lifecycle = createNotePageLifecycle({
+			get aiInteractionMode() { return aiInteractionMode; },
+			set aiInteractionMode(value) { aiInteractionMode = value; },
+			PANE_MIN_WIDTH,
+			SIDEBAR_MIN_WIDTH,
+			get sidebarWidth() { return sidebarWidth; },
+			set sidebarWidth(value) { sidebarWidth = value; },
+			handleGlobalSelectionChange,
+			onDocMouseDown,
+			handleChatSidebarShortcut,
+			aiEventContext,
+			handleGlobalMouseMove,
+			stopResizing,
+			handleBeforeUnload,
+			get chatPersistTimer() { return chatPersistTimer; },
+			get texAutoTimer() { return texAutoTimer; },
+			approvalTimeouts,
+			activeAiNoteId,
+			get chatMessages() { return chatMessages; },
+			persistChatHistory,
+			get toolbarResizeObserver() { return toolbarResizeObserver; },
+			editorSession,
+			sourceSession,
+			get vditorInstance() { return vditorInstance; },
+			get loadedRouteNoteId() { return loadedRouteNoteId; },
+			set loadedRouteNoteId(value) { loadedRouteNoteId = value; },
+			loadCurrentNote,
+			get debugInfo() { return debugInfo; },
+			set debugInfo(value) { debugInfo = value; },
+			get showDebugWindow() { return showDebugWindow; },
+			get activeChatRequestId() { return activeChatRequestId; },
+			get debugTimer() { return debugTimer; },
+			set debugTimer(value) { debugTimer = value; }
 		});
-	
-		onDestroy(() => {
-			// Note view closing — server stays warm (started at app boot, lives until
-			// app exit). Only the note-editor UI is torn down.
-			if (chatPersistTimer) clearTimeout(chatPersistTimer);
-			if (texAutoTimer) clearTimeout(texAutoTimer);
-			for (const timeout of approvalTimeouts.values()) clearTimeout(timeout);
-			approvalTimeouts.clear();
-			const aiNoteId = activeAiNoteId();
-			if (aiNoteId && chatMessages.length) void persistChatHistory(aiNoteId, chatMessages);
-			noteClosed();
-			if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
-			editorSession.dispose();
-			sourceSession.dispose();
-			if (vditorInstance) vditorInstance.destroy();
-			if (typeof document !== 'undefined') {
-				document.removeEventListener('selectionchange', handleGlobalSelectionChange);
-				document.removeEventListener('mousedown', onDocMouseDown, true);
-			}
-		});
-	
-		$effect(() => {
-			const routeNoteId = page.params.id;
-			if (!routeNoteId || routeNoteId === loadedRouteNoteId) return;
-			loadedRouteNoteId = routeNoteId;
-			void loadCurrentNote(routeNoteId);
-		});
-	
-		// Debug window: update the live elapsed timer while a request is in progress.
-		let debugTraceEl: HTMLDivElement | undefined = $state();
-		$effect(() => {
-			if (debugInfo && debugTraceEl) {
-				debugTraceEl.scrollTop = debugTraceEl.scrollHeight;
-			}
-		});
-		$effect(() => {
-			// Only keep the 100ms live-elapsed ticker while the debug window is open
-			// AND a request is in flight; the window already renders wall-clock time.
-			if (!showDebugWindow || !debugInfo || debugInfo.done || !activeChatRequestId) {
-				if (debugTimer) {
-					clearInterval(debugTimer);
-					debugTimer = null;
-				}
-				return;
-			}
-			if (!debugTimer) {
-				debugTimer = setInterval(() => {
-					if (debugInfo && !debugInfo.done) {
-						debugInfo = { ...debugInfo };
-					}
-				}, 100);
-			}
-		});
-
 	return {
+		...lifecycle,
 		get requireToolApproval() { return requireToolApproval; },
 		set requireToolApproval(value: typeof requireToolApproval) { requireToolApproval = value; },
 		get note() { return note; },
@@ -1465,8 +1401,6 @@ export function createNotePageController() {
 		cancelNavigation,
 		updateToolbarOverflow,
 		handleGlobalSelectionChange,
-		get debugTraceEl() { return debugTraceEl; },
-		set debugTraceEl(value: typeof debugTraceEl) { debugTraceEl = value; },
 	};
 }
 
