@@ -1,7 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
 
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 
 import { goto, beforeNavigate } from '$app/navigation';
@@ -61,6 +59,7 @@ import { vditorI18n } from '$lib/vditorI18n';
 
 import { parseBlocks } from './model/links';
 import type { BlockItem } from './types';
+import { installAiEventBridge } from './sessions/aiEvents.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -3080,6 +3079,53 @@ export function createNotePageController() {
 			});
 		}
 	
+		const aiEventContext: Record<string, any> = {
+			get note() { return note; },
+			set note(value) { note = value; },
+			get message() { return message; },
+			set message(value) { message = value; },
+			get latexDownloadMsg() { return latexDownloadMsg; },
+			set latexDownloadMsg(value) { latexDownloadMsg = value; },
+			get texCacheWarmed() { return texCacheWarmed; },
+			set texCacheWarmed(value) { texCacheWarmed = value; },
+			get chatMessages() { return chatMessages; },
+			set chatMessages(value) { chatMessages = value; },
+			get chatChunkBuf() { return chatChunkBuf; },
+			set chatChunkBuf(value) { chatChunkBuf = value; },
+			get chatChunkFlushPending() { return chatChunkFlushPending; },
+			set chatChunkFlushPending(value) { chatChunkFlushPending = value; },
+			get showDebugWindow() { return showDebugWindow; },
+			get pendingDebugTrace() { return pendingDebugTrace; },
+			set pendingDebugTrace(value) { pendingDebugTrace = value; },
+			get activeAiComposerMode() { return activeAiComposerMode; },
+			get debugInfo() { return debugInfo; },
+			set debugInfo(value) { debugInfo = value; },
+			get armedSelection() { return armedSelection; },
+			get activeChatRequestId() { return activeChatRequestId; },
+			get chatMessagesEl() { return chatMessagesEl; },
+			get workingDocType() { return workingDocType; },
+			get sectionCache() { return sectionCache; },
+			set sectionCache(value) { sectionCache = value; },
+			APPROVAL_TIMEOUT_MS,
+			approvalTimeouts,
+			MAX_DEBUG_TRACE,
+			activeAiNoteId,
+			flushChatChunks,
+			makeDebugTraceEntry,
+			setStreamingStatus,
+			visibleAiStatus,
+			scrollChatToBottom,
+			clearArmedSelection,
+			reselectAfterEdit,
+			beginNoteStream,
+			appendNoteStream,
+			cancelNoteStream,
+			applyNoteWrite,
+			finishStreamingChatMessage,
+			failStreamingChatMessage,
+			resolveApproval
+		};
+
 		onMount(() => {
 			// Warm llama-server (safety net — the server is already started at app
 			// boot and stays warm for the entire session).
@@ -3097,18 +3143,6 @@ export function createNotePageController() {
 				}
 			}
 	
-			let unlistenChunk: UnlistenFn;
-			let unlistenDone: UnlistenFn;
-			let unlistenError: UnlistenFn;
-			let unlistenUsage: UnlistenFn;
-			let unlistenApproval: UnlistenFn;
-			let unlistenNoteWritten: UnlistenFn;
-			let unlistenNoteStreamStart: UnlistenFn;
-			let unlistenNoteDelta: UnlistenFn;
-			let unlistenNoteStreamCancel: UnlistenFn;
-			let unlistenLatex: UnlistenFn;
-			let unlistenAiWarmup: UnlistenFn;
-	
 		showSidebarToggle.set(true);
 			// The note sidebar's open/closed state is remembered across sessions via the
 			// persisted noteSidebarOpen store, so we intentionally don't force it here.
@@ -3119,357 +3153,7 @@ export function createNotePageController() {
 			document.addEventListener('selectionchange', handleGlobalSelectionChange);
 			document.addEventListener('mousedown', onDocMouseDown, true);
 			window.addEventListener('keydown', handleChatSidebarShortcut, true);
-			let unlistenTool: () => void;
-	
-			// Setup AI Streaming listeners
-			listen<{ noteId: string; content: string; mode: 'write' | 'append' }>(
-				'ai://note_written',
-				(event) => {
-					const { noteId, content, mode } = event.payload;
-					if (!note || activeAiNoteId() !== noteId) return;
-					applyNoteWrite(content, mode);
-					if (activeChatRequestId && showDebugWindow && debugInfo) {
-						debugInfo = {
-							...debugInfo,
-							trace: [
-								...debugInfo.trace,
-								{
-									time: Date.now(),
-									msg: `Note written (${content.length}c ${mode})`,
-									kind: 'note' as const
-								}
-							]
-						};
-					}
-					// Cursor anchors are consumed by an insertion. Selected spans are
-					// refreshed so an immediate follow-up can target the replacement.
-					if (armedSelection?.cursor || workingDocType !== 'md') clearArmedSelection();
-					else if (armedSelection) setTimeout(reselectAfterEdit, 60);
-				}
-			).then((fn) => (unlistenNoteWritten = fn));
-	
-			listen<{ noteId: string; requestId: string }>('ai://note_stream_start', (event) => {
-				if (
-					!note ||
-					activeAiNoteId() !== event.payload.noteId ||
-					activeChatRequestId !== event.payload.requestId
-				)
-					return;
-				beginNoteStream();
-				if (showDebugWindow && debugInfo) {
-					debugInfo = {
-						...debugInfo,
-						trace: [
-							...debugInfo.trace,
-							{ time: Date.now(), msg: 'Streaming note to editor…', kind: 'note' as const }
-						]
-					};
-				}
-			}).then((fn) => (unlistenNoteStreamStart = fn));
-	
-			listen<{ noteId: string; requestId: string; delta: string }>('ai://note_delta', (event) => {
-				if (
-					!note ||
-					activeAiNoteId() !== event.payload.noteId ||
-					activeChatRequestId !== event.payload.requestId
-				)
-					return;
-				appendNoteStream(event.payload.delta);
-				setStreamingStatus('Writing replacement…');
-			}).then((fn) => (unlistenNoteDelta = fn));
-	
-			listen<{ noteId: string; requestId: string }>('ai://note_stream_cancel', (event) => {
-				if (
-					!note ||
-					activeAiNoteId() !== event.payload.noteId ||
-					activeChatRequestId !== event.payload.requestId
-				)
-					return;
-				cancelNoteStream();
-			}).then((fn) => (unlistenNoteStreamCancel = fn));
-	
-			listen<{ tool: string; details: string; mutatesNote?: boolean }>('ai://chat_tool', (event) => {
-				if (!activeChatRequestId) return;
-				let lastStartTime = Date.now();
-				const toolStatus =
-					activeAiComposerMode === 'editor' && event.payload.mutatesNote
-						? 'Applying selected edit…'
-						: `Using ${event.payload.tool.toLowerCase()}…`;
-				if (showDebugWindow && debugInfo) {
-					debugInfo = {
-						...debugInfo,
-						trace: [
-							...debugInfo.trace,
-							{ time: Date.now(), msg: `Tool: ${event.payload.tool}`, kind: 'tool' as const }
-						]
-					};
-				}
-				chatMessages = chatMessages.map((m) => {
-					if (m.isStreaming) {
-						lastStartTime = m.startTime || lastStartTime;
-						// On a note edit, drop the model's pre-tool prose — it tends to
-						// duplicate the note content that's already shown in the editor.
-						return { ...m, isStreaming: false, content: event.payload.mutatesNote ? '' : m.content };
-					}
-					return m;
-				});
-				chatMessages = [
-					...chatMessages,
-					{
-						role: 'assistant',
-						content: '',
-						tools: [{ name: event.payload.tool, details: event.payload.details }],
-						isStreaming: false
-					},
-					{
-						role: 'assistant',
-						content: '',
-						isStreaming: true,
-						startTime: lastStartTime,
-						statusText: toolStatus
-					}
-				];
-				if (chatMessagesEl) {
-					setTimeout(() => scrollChatToBottom(true), 100);
-				}
-			}).then((fn) => (unlistenTool = fn));
-	
-			listen<{ id: string; tool: string; title: string; content: string }>(
-				'ai://tool_approval_request',
-				(event) => {
-					// Auto-reject if the user never answers: the backend refuses the
-					// request on the same deadline, so the frontend must not show a
-					// stale "pending" bar forever.
-					approvalTimeouts.set(
-						event.payload.id,
-						setTimeout(() => {
-							const pending = chatMessages.find(
-								(m) => m.isApprovalRequest && m.approvalId === event.payload.id
-							);
-							if (pending && pending.approvalStatus === 'pending') {
-								void resolveApproval(event.payload.id, false);
-							}
-						}, APPROVAL_TIMEOUT_MS)
-					);
-					let lastStartTime = Date.now();
-					chatMessages = chatMessages.map((m) => {
-						if (m.isStreaming) {
-							lastStartTime = m.startTime || lastStartTime;
-							return { ...m, isStreaming: false };
-						}
-						return m;
-					});
-					chatMessages = [
-						...chatMessages,
-						{
-							role: 'assistant',
-							content: '',
-							isApprovalRequest: true,
-							approvalId: event.payload.id,
-							approvalTool: event.payload.tool,
-							approvalDetails: `Title: ${event.payload.title}\nContent:\n${event.payload.content}`,
-							approvalStatus: 'pending'
-						},
-						{
-							role: 'assistant',
-							content: '',
-							isStreaming: true,
-							startTime: lastStartTime
-						}
-					];
-					if (chatMessagesEl) {
-						setTimeout(() => {
-							scrollChatToBottom(true);
-						}, 100);
-					}
-				}
-			).then((fn) => (unlistenApproval = fn));
-	
-			listen<{ delta: string; requestId: string }>('ai://chat_chunk', (event) => {
-				if (activeChatRequestId !== event.payload.requestId) return;
-				// Buffer deltas and apply once per frame; applying on every token
-				// re-renders the whole streaming bubble (full markdown re-parse).
-				chatChunkBuf += event.payload.delta;
-				if (!chatChunkFlushPending) {
-					chatChunkFlushPending = true;
-					requestAnimationFrame(() => {
-						chatChunkFlushPending = false;
-						flushChatChunks();
-					});
-				}
-			}).then((fn) => (unlistenChunk = fn));
-	
-			listen<{ requestId: string; tools?: { name: string; details: string }[] }>(
-				'ai://chat_done',
-				(event) => {
-					void finishStreamingChatMessage(event.payload.requestId, event.payload.tools || []);
-					if (activeChatRequestId === event.payload.requestId && showDebugWindow && debugInfo) {
-						debugInfo = {
-							...debugInfo,
-							done: Date.now(),
-							trace: [...debugInfo.trace, { time: Date.now(), msg: 'Done', kind: 'done' as const }]
-						};
-					}
-				}
-			).then((fn) => (unlistenDone = fn));
-	
-			listen<{
-				requestId: string;
-				promptTokens: number;
-				completionTokens: number;
-				totalTokens: number;
-			}>('ai://chat_usage', (event) => {
-				if (activeChatRequestId !== event.payload.requestId) return;
-				if (showDebugWindow && debugInfo) {
-					debugInfo = {
-						...debugInfo,
-						promptTokens: event.payload.promptTokens,
-						completionTokens: event.payload.completionTokens,
-						totalTokens: event.payload.totalTokens
-					};
-					debugInfo.generationEnd = Date.now();
-				}
-			}).then((fn) => (unlistenUsage = fn));
-	
-			listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>(
-				'ai://chat_error',
-				(event) => {
-					failStreamingChatMessage(
-						event.payload.requestId,
-						event.payload.message,
-						event.payload.tools || []
-					);
-				}
-			).then((fn) => (unlistenError = fn));
-	
-			listen<{ status: 'started' | 'ready' | 'failed'; message?: string }>(
-				'ai://llama_warmup',
-				(event) => {
-					if (!activeChatRequestId) return;
-					if (event.payload.status === 'started') {
-						setStreamingStatus('Reading the note… warming the model…');
-					} else if (event.payload.status === 'ready') {
-						setStreamingStatus('Model ready — preparing the response…');
-					}
-				}
-			).then((fn) => (unlistenAiWarmup = fn));
-	
-			// Whole-document section pre-cache progress (shown over the document pane).
-			let unlistenSectionCache: UnlistenFn | undefined;
-			listen<{
-				noteId: string;
-				done: number;
-				total: number;
-				sectionDone?: number;
-				sectionTotal?: number;
-				label: string;
-				profile?: 'shared' | 'chat' | 'write' | '';
-					failed?: number;
-					failedDetails?: string[];
-					finished?: boolean;
-			}>(
-				'ai://section_cache_progress',
-				(event) => {
-					const {
-						done,
-						total,
-						sectionDone = 0,
-						sectionTotal = Math.max(1, total),
-						label,
-						profile = '',
-						failed = 0,
-						failedDetails = [],
-						finished = false
-					} = event.payload;
-					if (finished || done >= total) {
-						if (event.payload.noteId !== activeAiNoteId()) return;
-						if (!sectionCache) return;
-						sectionCache = {
-							...sectionCache,
-							done,
-							total: Math.max(total, 1),
-							sectionDone,
-							sectionTotal,
-							label,
-							profile,
-							failed,
-							failedDetails,
-							finished: true,
-							elapsedMs: Math.max(0, performance.now() - sectionCache.startedAt)
-						};
-						return;
-					}
-					if (event.payload.noteId !== activeAiNoteId()) return;
-					sectionCache = {
-						...(sectionCache ?? {
-							done: 0,
-							total: Math.max(total, 1),
-							sectionDone: 0,
-							sectionTotal,
-							label: '',
-							profile: '',
-							startedAt: performance.now(),
-							finished: false,
-							failed: 0,
-							failedDetails: [],
-							elapsedMs: null
-						}),
-						done: Math.max(done, 0),
-						total: Math.max(total, 1),
-						sectionDone,
-						sectionTotal,
-						label,
-						profile,
-						failed,
-						failedDetails,
-						finished: false,
-						elapsedMs: null
-					};
-				}
-			).then((fn) => (unlistenSectionCache = fn));
-	
-			// Debug event: model behavior, tool calls, grammar config, etc.
-			let unlistenDebug: UnlistenFn | undefined;
-			listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
-				if (activeChatRequestId !== event.payload.requestId) return;
-				const entry = makeDebugTraceEntry(event.payload.kind, event.payload.msg);
-				// Keep every trace even with the panel closed; it is attached to
-				// the completed assistant turn and persisted in chat history.
-				pendingDebugTrace = [...pendingDebugTrace.slice(-(MAX_DEBUG_TRACE - 1)), entry];
-				const status = visibleAiStatus(event.payload.kind, event.payload.msg);
-				if (status) setStreamingStatus(status);
-				if (showDebugWindow && debugInfo) {
-					const isModelStart =
-						event.payload.kind === 'gen' || event.payload.kind === 'first_model_delta';
-					debugInfo = {
-						...debugInfo,
-						generationStart: isModelStart ? entry.time : debugInfo.generationStart,
-						firstChunk:
-							event.payload.kind === 'gen' && debugInfo.firstChunk === null
-								? entry.time
-								: debugInfo.firstChunk,
-						trace: [...debugInfo.trace.slice(-(MAX_DEBUG_TRACE - 1)), entry]
-					};
-				}
-			}).then((fn) => (unlistenDebug = fn));
-	
-			// LaTeX support bundle download progress (first compile only).
-			listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
-				const p = event.payload;
-				const mb = ((p.bytes ?? 0) / (1024 * 1024)).toFixed(1);
-				if (p.phase === 'start' || p.phase === 'progress') {
-					latexDownloadMsg = `Downloading LaTeX support files (first run)… ${mb} MB`;
-				} else if (p.phase === 'done') {
-					texCacheWarmed = true;
-					latexDownloadMsg = null;
-				} else if (p.phase === 'error') {
-					latexDownloadMsg = null;
-				}
-			}).then((fn) => (unlistenLatex = fn));
-			invoke<{ warmed: boolean }>('tectonic_cache_status')
-				.then((status) => (texCacheWarmed = status.warmed))
-				.catch(() => {});
-	
+			const disposeAiEvents = installAiEventBridge(aiEventContext);
 			window.addEventListener('mousemove', handleGlobalMouseMove);
 			window.addEventListener('mouseup', stopResizing);
 			window.addEventListener('beforeunload', handleBeforeUnload);
@@ -3484,20 +3168,7 @@ export function createNotePageController() {
 				window.removeEventListener('beforeunload', handleBeforeUnload);
 			showSidebarToggle.set(false);
 	
-				if (unlistenChunk) unlistenChunk();
-				if (unlistenDone) unlistenDone();
-				if (unlistenError) unlistenError();
-				if (unlistenUsage) unlistenUsage();
-				if (unlistenTool) unlistenTool();
-				if (unlistenApproval) unlistenApproval();
-				if (unlistenDebug) unlistenDebug();
-				if (unlistenNoteWritten) unlistenNoteWritten();
-				if (unlistenNoteStreamStart) unlistenNoteStreamStart();
-				if (unlistenNoteDelta) unlistenNoteDelta();
-				if (unlistenNoteStreamCancel) unlistenNoteStreamCancel();
-				if (unlistenLatex) unlistenLatex();
-				if (unlistenAiWarmup) unlistenAiWarmup();
-				if (unlistenSectionCache) unlistenSectionCache();
+				disposeAiEvents();
 			};
 		});
 	
