@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { goto } from '$app/navigation';
 
-import { base, resolve } from '$app/paths';
+import { resolve } from '$app/paths';
 
 import { page } from '$app/state';
 
@@ -33,8 +33,6 @@ import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 
 import { hideThinkingContent } from '$lib/chatContent';
 
-import { resolveActiveAiTarget } from '$lib/aiTarget';
-
 import {
 		canApplyReconciledNote,
 		editorNeedsAuthoritativeBody,
@@ -54,6 +52,8 @@ import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
 import { createNotePageGraph } from './sessions/graph.svelte';
+import { createNotePageUtilities } from './sessions/utilities.svelte';
+import { createNotePageDialogs } from './sessions/dialogs.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -159,14 +159,6 @@ export function createNotePageController() {
 		let activeChatRequestId: string | null = null;
 		let isChatStreaming = $derived(chatMessages.some((m) => m.isStreaming));
 	
-		// The notebook (top-level folder) the open note lives in. Anything created or
-		// uploaded while it's open inherits it, so docs stay with their note.
-		function openNoteNotebook(): string | null {
-			if (!note) return null;
-			const segs = note.relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
-			return segs.length > 1 ? segs[0] : null;
-		}
-	
 		let chatTextareaEl: HTMLTextAreaElement | undefined = $state();
 		let chatMessagesEl: HTMLDivElement | undefined = $state();
 		let currentTime = $state(Date.now());
@@ -189,14 +181,6 @@ export function createNotePageController() {
 		let vditorInstance: Vditor | null = null;
 		let VditorConstructor = $state<any>(null);
 		let vditorLoading = $state(false);
-	
-		function localVditorCdn() {
-			const appPath = `${base}/vditor/`.replace(/\/+/g, '/');
-			return new URL(appPath.startsWith('/') ? appPath : `/${appPath}`, document.baseURI).href.replace(
-				/\/$/,
-				''
-			);
-		}
 	
 		// Keep the note render separate from the editor/tool bundle. The bundle is
 		// requested only after the note has had a chance to paint.
@@ -263,18 +247,6 @@ export function createNotePageController() {
 		let isResizing = $state(false);
 		let mainLayoutEl: HTMLElement | undefined = $state();
 	
-		function activeAiNoteId(): string | null {
-			return (
-				resolveActiveAiTarget({
-					openedDocumentId: note?.id ?? null,
-					isSourceMaterial,
-					attachedNoteVisible: showAttachedNote,
-					workingNoteId: scratchpadSavedId,
-					attachedSourceId: activeSourceId
-				})?.workingNoteId ?? null
-			);
-		}
-	
 		const PANE_MIN_WIDTH = 26 * 16;
 		const SIDEBAR_MIN_WIDTH = 320;
 		let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
@@ -310,10 +282,6 @@ export function createNotePageController() {
 		let deleteMainNoteDialog: HTMLDialogElement | undefined = $state();
 		let detachPdfDialog: HTMLDialogElement | undefined = $state();
 	
-		function requestDeleteMainNote() {
-			deleteMainNoteDialog?.showModal();
-		}
-	
 		let attachPdfDialog: HTMLDialogElement | undefined = $state();
 		let pdfSearchQuery = $state('');
 		let pdfNotesList = $state<NoteDocument[]>([]);
@@ -342,103 +310,24 @@ export function createNotePageController() {
 		});
 		const { appendToNoteBody, destroyEditorInstance, triggerAutoSave } = editorState;
 	
-		$effect(() => {
-			if (sourceMaterialType === 'pdf' && !PdfViewerComponent) {
-				import('$lib/components/PdfViewer.svelte').then(({ default: component }) => {
-					PdfViewerComponent = component;
-				});
-			}
-			if (sourceMaterialType === 'epub' && !EpubViewerComponent) {
-				import('$lib/components/EpubViewer.svelte').then(({ default: component }) => {
-					EpubViewerComponent = component;
-				});
-			}
-			if (sourceMaterialType === 'html' && !HtmlViewerComponent) {
-				import('$lib/components/HtmlViewer.svelte').then(({ default: component }) => {
-					HtmlViewerComponent = component;
-				});
-			}
-			if (workingDocType === 'tex' && !TexEditorComponent) {
-				import('$lib/components/TexEditor.svelte').then(({ default: component }) => {
-					TexEditorComponent = component;
-				});
-			}
-			if (workingDocType === 'ipynb' && !IpynbEditorComponent) {
-				import('$lib/components/IpynbEditor.svelte').then(({ default: component }) => {
-					IpynbEditorComponent = component;
-				});
-			}
+		const utilities = createNotePageUtilities({
+			get note() { return note; },
+			get isSourceMaterial() { return isSourceMaterial; },
+			get showAttachedNote() { return showAttachedNote; },
+			get scratchpadSavedId() { return scratchpadSavedId; },
+			get activeSourceId() { return activeSourceId; },
+			get sourceMaterialType() { return sourceMaterialType; },
+			get workingDocType() { return workingDocType; },
+			get PdfViewerComponent() { return PdfViewerComponent; }, set PdfViewerComponent(value) { PdfViewerComponent = value; },
+			get EpubViewerComponent() { return EpubViewerComponent; }, set EpubViewerComponent(value) { EpubViewerComponent = value; },
+			get HtmlViewerComponent() { return HtmlViewerComponent; }, set HtmlViewerComponent(value) { HtmlViewerComponent = value; },
+			get TexEditorComponent() { return TexEditorComponent; }, set TexEditorComponent(value) { TexEditorComponent = value; },
+			get IpynbEditorComponent() { return IpynbEditorComponent; }, set IpynbEditorComponent(value) { IpynbEditorComponent = value; },
+			get vditorContainer() { return vditorContainer; },
+			get toolbarExpanded() { return toolbarExpanded; }
 		});
+		const { openNoteNotebook, localVditorCdn, activeAiNoteId, updateToolbarOverflow } = utilities;
 	
-	
-	
-		function requestDeleteAttachedNote() {
-			deleteAttachedNoteDialog?.showModal();
-		}
-
-		async function confirmDeleteAttachedNote() {
-			deleteAttachedNoteDialog?.close();
-			const targetId = isSourceMaterial ? scratchpadSavedId : note?.sourcePdf ? note.id : null;
-			const sourceId = isSourceMaterial ? activeSourceId : (note?.sourcePdf ?? activeSourceId);
-			isBusy = true;
-			try {
-				if (targetId) await invoke('delete_note', { noteId: targetId });
-				if (!isSourceMaterial && sourceId) {
-					navigationSession.isProgrammaticNavigation = true;
-					await goto(`/notes/${encodeURIComponent(sourceId)}`);
-					return;
-				}
-				if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-				destroyEditorInstance();
-				draftBody = '';
-				scratchpadSavedId = null;
-				showAttachedNote = false;
-				saveStatus = 'saved';
-				message = '';
-			} finally {
-				isBusy = false;
-			}
-		}
-
-		function cancelDeleteAttachedNote() {
-			deleteAttachedNoteDialog?.close();
-		}
-
-		function buildPreviewExpandHref() {
-			const targetId = linkingSession.previewNoteTarget?.sourcePdf ?? linkingSession.previewNoteTarget?.id;
-			const currentNoteId = note?.id;
-			if (!targetId) return null;
-			const basePath = `/notes/${encodeURIComponent(targetId)}`;
-			if (!currentNoteId) return basePath;
-			return `${basePath}?returnTo=/notes/${encodeURIComponent(currentNoteId)}`;
-		}
-	
-		function expandPreviewNoteDirect() {
-			const href = buildPreviewExpandHref();
-			if (!href) return;
-			linkingSession.previewNoteDialog?.close();
-			navigationSession.isProgrammaticNavigation = true;
-			window.location.href = href;
-		}
-		function updateToolbarOverflow() {
-			const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
-			if (!toolbar) return;
-			const items = toolbar.querySelectorAll('.vditor-toolbar__item, .vditor-toolbar__divider');
-			items.forEach((item: any) => {
-				if (!toolbarExpanded && item.offsetTop > 20) {
-					item.style.visibility = 'hidden';
-					item.style.pointerEvents = 'none';
-				} else {
-					item.style.visibility = 'visible';
-					item.style.pointerEvents = 'auto';
-				}
-			});
-		}
-	
-		$effect(() => {
-			const _trigger = toolbarExpanded;
-			updateToolbarOverflow();
-		});
 	
 		const inputGraph = createNoteInputGraph({
 			get note() { return note; },
@@ -584,6 +473,30 @@ export function createNotePageController() {
 			sendChatMessage, sendChatText, rewindToSnapshot, retryMessage, mergeChatTools, reconcileRequestNote,
 			finishStreamingChatMessage, extractChatErrorMessage, failStreamingChatMessage, resolveApproval, aiEventContext
 		} = graph;
+		const dialogs = createNotePageDialogs({
+			get deleteMainNoteDialog() { return deleteMainNoteDialog; },
+			get deleteAttachedNoteDialog() { return deleteAttachedNoteDialog; },
+			get isSourceMaterial() { return isSourceMaterial; },
+			get scratchpadSavedId() { return scratchpadSavedId; },
+			get activeSourceId() { return activeSourceId; },
+			get note() { return note; },
+			get isBusy() { return isBusy; }, set isBusy(value) { isBusy = value; },
+			get saveTimer() { return saveTimer; }, set saveTimer(value) { saveTimer = value; },
+			destroyEditorInstance,
+			get draftBody() { return draftBody; }, set draftBody(value) { draftBody = value; },
+			get showAttachedNote() { return showAttachedNote; }, set showAttachedNote(value) { showAttachedNote = value; },
+			get saveStatus() { return saveStatus; }, set saveStatus(value) { saveStatus = value; },
+			get message() { return message; }, set message(value) { message = value; },
+			deleteNote: (noteId: string) => invoke('delete_note', { noteId }),
+			navigationSession: graph.navigationSession,
+			linkingSession: graph.linkingSession,
+			goToNote: (noteId: string) => goto(`/notes/${encodeURIComponent(noteId)}`),
+			goToHref: (href: string) => { window.location.href = href; }
+		});
+		const {
+			requestDeleteMainNote, requestDeleteAttachedNote, confirmDeleteAttachedNote,
+			cancelDeleteAttachedNote, buildPreviewExpandHref, expandPreviewNoteDirect
+		} = dialogs;
 
 		const lifecycle = createNotePageLifecycle({
 			get aiInteractionMode() { return aiInteractionMode; },
