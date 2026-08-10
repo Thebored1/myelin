@@ -14,10 +14,8 @@ const facadeLimits = new Map([
 	['src/lib/components/PdfViewer.svelte', 300]
 ]);
 
-// These are the extracted implementation roots. Build output, generated files,
-// fixtures, and the transitional note composition controller are intentionally
-// outside this guard: the controller remains the final coordination boundary
-// and is being reduced through session slices.
+// These are the extracted implementation roots. Build output and generated
+// files are intentionally outside this guard.
 const implementationRoots = [
 	'src-tauri/src/state',
 	'src-tauri/src/agent',
@@ -28,9 +26,6 @@ const implementationRoots = [
 	'src/lib/settings'
 ];
 const excludedNames = new Set(['target', 'node_modules', '.svelte-kit', 'dist', 'build']);
-const excludedFiles = new Set([
-	'src/lib/note-page/controller.svelte.ts'
-]);
 
 function lineCount(path) {
 	return readFileSync(path, 'utf8').split(/\r?\n/).length - 1;
@@ -58,7 +53,6 @@ for (const [file, limit] of facadeLimits) {
 for (const rootDir of implementationRoots) {
 	for (const path of walk(join(root, rootDir))) {
 		const file = relative(root, path).replaceAll('\\', '/');
-		if (excludedFiles.has(file)) continue;
 		if (!/\.(rs|ts|svelte|svelte\.ts)$/.test(file)) continue;
 		if (/[/](tests?|fixtures|generated|assets)[/]/.test(file)) continue;
 		const actual = lineCount(path);
