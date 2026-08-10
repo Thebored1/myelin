@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 
-import { goto, beforeNavigate } from '$app/navigation';
+import { goto } from '$app/navigation';
 
 import { base, resolve } from '$app/paths';
 
@@ -56,6 +56,7 @@ import { createDocumentSession } from './sessions/document.svelte';
 import { createStreamingSession } from './sessions/streaming.svelte';
 import { createEditorSession } from './sessions/editor.svelte';
 import { createChatSession } from './sessions/chat.svelte';
+import { createNavigationSession } from './sessions/navigation.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -765,8 +766,6 @@ export function createNotePageController() {
 		function requestDeleteMainNote() {
 			deleteMainNoteDialog?.showModal();
 		}
-		let pendingNavigationUrl = $state('');
-		let pendingBack = $state(false);
 	
 		let attachPdfDialog: HTMLDialogElement | undefined = $state();
 		let pdfSearchQuery = $state('');
@@ -1009,111 +1008,6 @@ export function createNotePageController() {
 			}
 		}
 	
-		async function fetchNoteHistory() {
-			if (!note) return;
-			isBusy = true;
-			try {
-				const history = await invoke<GitCommit[]>('get_note_history', { noteId: note.id });
-				noteHistory = history
-					.filter((c) => c.message && c.message.trim() !== '')
-					.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-			} catch (e) {
-				console.error('Failed to fetch history:', e);
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		async function previewVersion(commitHash: string) {
-			if (!note) return;
-			isBusy = true;
-			try {
-				let rawContent = await invoke<string>('get_note_version', { noteId: note.id, commitHash });
-				if (rawContent.match(/^---\r?\n/)) {
-					const match = rawContent.match(/^---\r?\n[\s\S]*?\n---\r?\n/);
-					if (match) {
-						rawContent = rawContent.slice(match[0].length);
-					}
-				}
-				versionPreviewContent = rawContent;
-				versionPreviewHash = commitHash;
-				if (versionPreviewDialog) {
-					versionPreviewDialog.showModal();
-				}
-			} catch (e) {
-				console.error('Failed to fetch version:', e);
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		async function restoreVersion(commitHash: string) {
-			if (!note) return;
-			isBusy = true;
-			try {
-				let rawContent = await invoke<string>('get_note_version', { noteId: note.id, commitHash });
-				if (rawContent.match(/^---\r?\n/)) {
-					const match = rawContent.match(/^---\r?\n[\s\S]*?\n---\r?\n/);
-					if (match) {
-						rawContent = rawContent.slice(match[0].length);
-					}
-				}
-				draftBody = rawContent;
-				if (vditorInstance) {
-					vditorInstance.setValue(rawContent);
-				}
-				versionPreviewContent = null;
-				versionPreviewHash = null;
-				if (versionPreviewDialog) {
-					versionPreviewDialog.close();
-				}
-				triggerAutoSave();
-				activeSidebarTab = 'info';
-			} catch (e) {
-				console.error('Failed to restore version:', e);
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		let isProgrammaticNavigation = false;
-	
-		function safeNavigate(url: string) {
-			if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-				pendingNavigationUrl = url;
-				navigationWarningDialog?.showModal();
-				return;
-			}
-			isProgrammaticNavigation = true;
-			void goto(url);
-		}
-	
-		// Back button: go to the page the user actually came from (browser history),
-		// not always home. A deliberate ?returnTo= still wins, and the unsaved-changes
-		// guard is respected (warn first, then go back on confirm).
-		function goBack() {
-			if (page.url.searchParams.has('returnTo')) {
-				safeNavigate(backUrl);
-				return;
-			}
-			if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-				pendingBack = true;
-				navigationWarningDialog?.showModal();
-				return;
-			}
-			navigateBack();
-		}
-	
-		function navigateBack() {
-			// Mark programmatic so beforeNavigate doesn't re-prompt on the popstate.
-			isProgrammaticNavigation = true;
-			if (typeof window !== 'undefined' && window.history.length > 1) {
-				history.back();
-			} else {
-				void goto('/');
-			}
-		}
-	
 		function requestDeleteAttachedNote() {
 			deleteAttachedNoteDialog?.showModal();
 		}
@@ -1128,7 +1022,7 @@ export function createNotePageController() {
 					await invoke('delete_note', { noteId: targetId });
 				}
 				if (!isSourceMaterial && sourceId) {
-					isProgrammaticNavigation = true;
+					navigationSession.isProgrammaticNavigation = true;
 					await goto(`/notes/${encodeURIComponent(sourceId)}`);
 					return;
 				}
@@ -1150,7 +1044,6 @@ export function createNotePageController() {
 		function cancelDeleteAttachedNote() {
 			deleteAttachedNoteDialog?.close();
 		}
-	
 		async function openAttachPdfDialog() {
 			pdfSearchQuery = '';
 			pdfSelectedIndex = 0;
@@ -1315,47 +1208,9 @@ export function createNotePageController() {
 			const href = buildPreviewExpandHref();
 			if (!href) return;
 			linkingSession.previewNoteDialog?.close();
-			isProgrammaticNavigation = true;
+			navigationSession.isProgrammaticNavigation = true;
 			window.location.href = href;
 		}
-	
-		function handleBeforeUnload(e: BeforeUnloadEvent) {
-			if (isProgrammaticNavigation) return;
-			if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-				e.preventDefault();
-				e.returnValue = '';
-			}
-		}
-	
-		beforeNavigate(({ cancel, to }) => {
-			if (isProgrammaticNavigation) return;
-			if (saveStatus === 'saving' || saveStatus === 'unsaved') {
-				pendingNavigationUrl = to?.url ? `${to.url.pathname}${to.url.search}${to.url.hash}` : '';
-				navigationWarningDialog?.showModal();
-				cancel();
-			}
-		});
-	
-		function confirmNavigation() {
-			navigationWarningDialog?.close();
-			if (pendingBack) {
-				pendingBack = false;
-				navigateBack();
-				return;
-			}
-			if (pendingNavigationUrl) {
-				isProgrammaticNavigation = true;
-				void goto(pendingNavigationUrl);
-				pendingNavigationUrl = '';
-			}
-		}
-	
-		function cancelNavigation() {
-			navigationWarningDialog?.close();
-			pendingNavigationUrl = '';
-			pendingBack = false;
-		}
-	
 		function updateToolbarOverflow() {
 			const toolbar = vditorContainer?.querySelector('.vditor-toolbar');
 			if (!toolbar) return;
@@ -1640,6 +1495,37 @@ export function createNotePageController() {
 		const scanForTransclusions = editorSession.scanForTransclusions;
 		const setupTransclusionObserver = editorSession.setupTransclusionObserver;
 		const fetchRelatedNotes = editorSession.fetchRelatedNotes;
+		const navigationSession = createNavigationSession({
+			get note() { return note; },
+			get isBusy() { return isBusy; },
+			set isBusy(value) { isBusy = value; },
+			get noteHistory() { return noteHistory; },
+			set noteHistory(value) { noteHistory = value; },
+			get versionPreviewContent() { return versionPreviewContent; },
+			set versionPreviewContent(value) { versionPreviewContent = value; },
+			get versionPreviewHash() { return versionPreviewHash; },
+			set versionPreviewHash(value) { versionPreviewHash = value; },
+			get versionPreviewDialog() { return versionPreviewDialog; },
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get vditorInstance() { return vditorInstance; },
+			get activeSidebarTab() { return activeSidebarTab; },
+			set activeSidebarTab(value) { activeSidebarTab = value; },
+			get navigationWarningDialog() { return navigationWarningDialog; },
+			get saveStatus() { return saveStatus; },
+			hasReturnTo: () => page.url.searchParams.has('returnTo'),
+			get backUrl() { return backUrl; },
+			triggerAutoSave
+		});
+		const fetchNoteHistory = navigationSession.fetchNoteHistory;
+		const previewVersion = navigationSession.previewVersion;
+		const restoreVersion = navigationSession.restoreVersion;
+		const safeNavigate = navigationSession.safeNavigate;
+		const goBack = navigationSession.goBack;
+		const navigateBack = navigationSession.navigateBack;
+		const handleBeforeUnload = navigationSession.handleBeforeUnload;
+		const confirmNavigation = navigationSession.confirmNavigation;
+		const cancelNavigation = navigationSession.cancelNavigation;
 		const chatContext: Record<string, any> = {
 			get activeChatRequestId() { return activeChatRequestId; },
 			set activeChatRequestId(value) { activeChatRequestId = value; },
@@ -2124,10 +2010,6 @@ export function createNotePageController() {
 		get detachPdfDialog() { return detachPdfDialog; },
 		set detachPdfDialog(value: typeof detachPdfDialog) { detachPdfDialog = value; },
 		requestDeleteMainNote,
-		get pendingNavigationUrl() { return pendingNavigationUrl; },
-		set pendingNavigationUrl(value: typeof pendingNavigationUrl) { pendingNavigationUrl = value; },
-		get pendingBack() { return pendingBack; },
-		set pendingBack(value: typeof pendingBack) { pendingBack = value; },
 		get attachPdfDialog() { return attachPdfDialog; },
 		set attachPdfDialog(value: typeof attachPdfDialog) { attachPdfDialog = value; },
 		get pdfSearchQuery() { return pdfSearchQuery; },
@@ -2188,8 +2070,12 @@ export function createNotePageController() {
 		fetchNoteHistory,
 		previewVersion,
 		restoreVersion,
-		get isProgrammaticNavigation() { return isProgrammaticNavigation; },
-		set isProgrammaticNavigation(value: typeof isProgrammaticNavigation) { isProgrammaticNavigation = value; },
+		get pendingNavigationUrl() { return navigationSession.pendingNavigationUrl; },
+		set pendingNavigationUrl(value) { navigationSession.pendingNavigationUrl = value; },
+		get pendingBack() { return navigationSession.pendingBack; },
+		set pendingBack(value) { navigationSession.pendingBack = value; },
+		get isProgrammaticNavigation() { return navigationSession.isProgrammaticNavigation; },
+		set isProgrammaticNavigation(value) { navigationSession.isProgrammaticNavigation = value; },
 		safeNavigate,
 		goBack,
 		navigateBack,
