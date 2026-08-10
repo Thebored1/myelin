@@ -1,13 +1,12 @@
-import { onMount } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
-import { emit, listen } from '@tauri-apps/api/event';
+import { emit } from '@tauri-apps/api/event';
 import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
 import { open } from '@tauri-apps/plugin-dialog';
 import { appCache } from '$lib/appCache';
 import type { AppSnapshot, NoteDocument, NoteSummary, ProviderStatus, SearchResponse } from '$lib/types';
 import { NOTE_GROUP, DOCUMENT_GROUP as DOC_GROUP, noteType } from '$lib/home/model';
-import { getVersion } from '@tauri-apps/api/app';
+import { createHomeLifecycle } from './lifecycle.svelte';
 
 export function createHomeController() {
 	let appVersion = $state('');
@@ -604,103 +603,25 @@ export function createHomeController() {
 		return normalized.split('/').pop() || path;
 	}
 
-	onMount(() => {
-		let unlistenChanged = () => {};
-		let unlistenStatus = () => {};
-		let unlistenTasks = () => {};
-
-		// Paint instantly from the last-known snapshot so coming back from a note
-		// doesn't blank the UI while the backend responds.
-		if (appCache.app) {
-			app = appCache.app;
-			provider = appCache.provider;
-			appVersion = appCache.appVersion;
-			indexing = app.indexState.isIndexing;
-			ready = true;
-		}
-
-		void (async () => {
-			// Listen before bootstrap: startup indexing emits `notes_ready` as soon as
-			// parsed notes can be opened, long before semantic indexing finishes.
-			[unlistenChanged, unlistenStatus, unlistenTasks] = await Promise.all([
-				listen('index://changed', () => {
-					message = 'Reindexing…';
-				}),
-				listen<string>('index://status', (event) => {
-					if (event.payload === 'started') {
-						message = 'Loading your library…';
-						indexing = true;
-					} else if (event.payload === 'notes_ready') {
-						message = 'Library ready — finishing search index…';
-						indexing = true;
-						void refreshApp();
-					} else if (event.payload === 'completed') {
-						message = '';
-						indexing = false;
-						void refreshApp();
-					} else if (event.payload === 'failed') {
-						message = 'Indexing failed. Try rebuilding the index.';
-						indexing = false;
-						void refreshApp();
-					}
-				}),
-				listen<{ workspacePath?: string; source?: string }>('tasks://sync', (event) => {
-					const ws = currentWorkspaceForTasks ?? app?.workspacePath;
-					if (!ws) return;
-					if (event.payload?.workspacePath && event.payload.workspacePath !== ws) return;
-					if (event.payload?.source === 'main') return;
-					try {
-						suppressNextTaskBroadcast += 1;
-						const stored = localStorage.getItem(`tasks_${ws}`);
-						dashTasks = stored ? JSON.parse(stored) : [];
-					} catch {
-						/* ignore */
-					}
-				})
-			]);
-
-			if (!appVersion) {
-				getVersion()
-					.then((v) => {
-						appVersion = v;
-						appCache.appVersion = v;
-					})
-					.catch(() => {});
-			}
-
-			if (!appCache.app) {
-				try {
-					app = await invoke<AppSnapshot>('get_snapshot');
-					provider = app.providerStatus;
-					indexing = app.indexState.isIndexing;
-					appCache.app = app;
-					appCache.provider = provider;
-				} catch (e) {
-					console.error(e);
-				} finally {
-					ready = true;
-				}
-			}
-
-			try {
-				if (!appCache.bootstrapped) {
-					indexing = true;
-					app = await invoke<AppSnapshot>('bootstrap');
-					provider = app.providerStatus;
-					indexing = app.indexState.isIndexing;
-					appCache.bootstrapped = true;
-					appCache.app = app;
-				}
-				await refreshApp();
-			} finally {
-				ready = true;
-			}
-		})();
-		return () => {
-			unlistenChanged();
-			unlistenStatus();
-			unlistenTasks();
-		};
+	createHomeLifecycle({
+		get app() { return app; },
+		set app(value) { app = value; },
+		get appVersion() { return appVersion; },
+		set appVersion(value) { appVersion = value; },
+		get provider() { return provider; },
+		set provider(value) { provider = value; },
+		get indexing() { return indexing; },
+		set indexing(value) { indexing = value; },
+		get ready() { return ready; },
+		set ready(value) { ready = value; },
+		get message() { return message; },
+		set message(value) { message = value; },
+		get currentWorkspaceForTasks() { return currentWorkspaceForTasks; },
+		get dashTasks() { return dashTasks; },
+		set dashTasks(value) { dashTasks = value; },
+		get suppressNextTaskBroadcast() { return suppressNextTaskBroadcast; },
+		set suppressNextTaskBroadcast(value) { suppressNextTaskBroadcast = value; },
+		refreshApp
 	});
 
 	let globalSearchDialog: HTMLDialogElement | undefined = $state();

@@ -1,0 +1,108 @@
+import { onMount } from 'svelte';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { getVersion } from '@tauri-apps/api/app';
+import { appCache } from '$lib/appCache';
+
+/** Owns Home's bootstrap and event subscriptions. */
+export function createHomeLifecycle(ctx: Record<string, any>) {
+	onMount(() => {
+		let unlistenChanged = () => {};
+		let unlistenStatus = () => {};
+		let unlistenTasks = () => {};
+
+		// Paint instantly from the last-known snapshot so coming back from a note
+		// doesn't blank the UI while the backend responds.
+		if (appCache.app) {
+			ctx.app = appCache.app;
+			ctx.provider = appCache.provider;
+			ctx.appVersion = appCache.appVersion;
+			ctx.indexing = appCache.app.indexState.isIndexing;
+			ctx.ready = true;
+		}
+
+		void (async () => {
+			// Listen before bootstrap: startup indexing emits `notes_ready` as soon as
+			// parsed notes can be opened, long before semantic indexing finishes.
+			[unlistenChanged, unlistenStatus, unlistenTasks] = await Promise.all([
+				listen('index://changed', () => {
+					ctx.message = 'Reindexing…';
+				}),
+				listen<string>('index://status', (event) => {
+					if (event.payload === 'started') {
+						ctx.message = 'Loading your library…';
+						ctx.indexing = true;
+					} else if (event.payload === 'notes_ready') {
+						ctx.message = 'Library ready — finishing search index…';
+						ctx.indexing = true;
+						void ctx.refreshApp();
+					} else if (event.payload === 'completed') {
+						ctx.message = '';
+						ctx.indexing = false;
+						void ctx.refreshApp();
+					} else if (event.payload === 'failed') {
+						ctx.message = 'Indexing failed. Try rebuilding the index.';
+						ctx.indexing = false;
+						void ctx.refreshApp();
+					}
+				}),
+				listen<{ workspacePath?: string; source?: string }>('tasks://sync', (event) => {
+					const ws = ctx.currentWorkspaceForTasks ?? ctx.app?.workspacePath;
+					if (!ws) return;
+					if (event.payload?.workspacePath && event.payload.workspacePath !== ws) return;
+					if (event.payload?.source === 'main') return;
+					try {
+						ctx.suppressNextTaskBroadcast += 1;
+						const stored = localStorage.getItem(`tasks_${ws}`);
+						ctx.dashTasks = stored ? JSON.parse(stored) : [];
+					} catch {
+						/* ignore */
+					}
+				})
+			]);
+
+			if (!ctx.appVersion) {
+				getVersion()
+					.then((version) => {
+						ctx.appVersion = version;
+						appCache.appVersion = version;
+					})
+					.catch(() => {});
+			}
+
+			if (!appCache.app) {
+				try {
+					ctx.app = await invoke('get_snapshot');
+					ctx.provider = ctx.app.providerStatus;
+					ctx.indexing = ctx.app.indexState.isIndexing;
+					appCache.app = ctx.app;
+					appCache.provider = ctx.provider;
+				} catch (error) {
+					console.error(error);
+				} finally {
+					ctx.ready = true;
+				}
+			}
+
+			try {
+				if (!appCache.bootstrapped) {
+					ctx.indexing = true;
+					ctx.app = await invoke('bootstrap');
+					ctx.provider = ctx.app.providerStatus;
+					ctx.indexing = ctx.app.indexState.isIndexing;
+					appCache.bootstrapped = true;
+					appCache.app = ctx.app;
+				}
+				await ctx.refreshApp();
+			} finally {
+				ctx.ready = true;
+			}
+		})();
+
+		return () => {
+			unlistenChanged();
+			unlistenStatus();
+			unlistenTasks();
+		};
+	});
+}
