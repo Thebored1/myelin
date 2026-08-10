@@ -38,11 +38,6 @@ import ChatToolIndicator from '$lib/components/ChatToolIndicator.svelte';
 
 import { hideThinkingContent } from '$lib/chatContent';
 
-import {
-		composeNoteStreamPreviewWithStatus,
-		locateNoteStreamTarget
-	} from '$lib/noteStreamPreview';
-
 import { resolveActiveAiTarget } from '$lib/aiTarget';
 
 import {
@@ -64,6 +59,7 @@ import { createLinkingSession } from './sessions/linking.svelte';
 import { createSelectionSession } from './sessions/selection.svelte';
 import { createLatexSession } from './sessions/latex.svelte';
 import { createDocumentSession } from './sessions/document.svelte';
+import { createStreamingSession } from './sessions/streaming.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -863,116 +859,6 @@ export function createNotePageController() {
 		// A live note stream is starting (whole-body replace). Keep the existing note
 		// visible until the first real content arrives; clearing here made fast tool
 		// calls flash an empty editor before the authoritative write landed.
-		function beginNoteStream() {
-			noteStreamBackup = vditorInstance ? vditorInstance.getValue() : draftBody;
-			noteStreamBuf = '';
-			noteStreaming = true;
-			// Every stream flush rebuilds the whole IR DOM; keep the transclusion
-			// observer disconnected until the stream settles so it doesn't drain
-			// full-tree mutation batches each frame. scanForTransclusions runs once
-			// after the stream lands (setupTransclusionObserver re-arms it).
-			if (transclusionObserver) transclusionObserver.disconnect();
-			// Locate the cursor/selection target once: it is stable for the whole
-			// request, so per-delta re-scanning a large note is wasted work.
-			noteStreamSpan = activeAiEditTarget
-				? locateNoteStreamTarget(noteStreamBackup, activeAiEditTarget)
-				: null;
-			scheduleNoteStreamFlush();
-		}
-	
-		function scheduleNoteStreamFlush() {
-			if (noteStreamFlushPending) return;
-			noteStreamFlushPending = true;
-			requestAnimationFrame(() => {
-				noteStreamFlushPending = false;
-				flushNoteStream();
-			});
-		}
-	
-		// One editor rebuild per frame, coalescing all deltas that arrived since the
-		// last flush. Restores the caret/selection across the rebuild so streaming
-		// no longer destroys the user's cursor position every token.
-		function flushNoteStream() {
-			if (!noteStreaming) return;
-			const result = composeNoteStreamPreviewWithStatus(
-				noteStreamBackup,
-				noteStreamBuf,
-				activeAiEditTarget,
-				noteStreamSpan
-			);
-			if (vditorInstance) {
-				// getSelectionTextOffset walks every text node of the editor; only do
-				// it when the editor actually has focus and a live selection. The
-				// user isn't interacting mid-stream, so skip the walk otherwise.
-				const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-				const hasSelection =
-					editorEl?.contains(document.activeElement) && window.getSelection()?.rangeCount !== 0;
-				const selectionOffset = editorEl && hasSelection ? getSelectionTextOffset(editorEl) : null;
-				vditorInstance.setValue(result.preview);
-				if (selectionOffset !== null) {
-					const refreshed = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-					if (refreshed) {
-						restoreSelectionTextOffset(refreshed, Math.min(selectionOffset, result.preview.length));
-					}
-				}
-				// Keep draftBody in sync with the live preview so any mid-stream save
-				// (title/tag autosave, exit) carries the streamed content instead of
-				// racing the backend with a stale body.
-				draftBody = result.preview;
-			}
-		}
-	
-		// A token (or several) of the note arrived — buffer it and coalesce the
-		// editor update to the next animation frame.
-		function appendNoteStream(delta: string): boolean {
-			if (!noteStreaming) beginNoteStream();
-			noteStreamBuf += delta;
-			scheduleNoteStreamFlush();
-			return noteStreamSpan !== null || !activeAiEditTarget;
-		}
-	
-		// The stream turned out not to be a whole-body replace (append/edit) — undo
-		// the live preview; the authoritative note_written will apply the real change.
-		function cancelNoteStream() {
-			if (!noteStreaming) return;
-			noteStreaming = false;
-			if (vditorInstance) vditorInstance.setValue(noteStreamBackup);
-			setupTransclusionObserver();
-		}
-	
-		// Authoritative result of a write_note tool call. Sets the final content in
-		// one shot (no fake animation) and reconciles any live-streamed preview.
-		function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
-			noteStreaming = false;
-			// Rust emits the full authoritative body for every note mutation. Keep a
-			// compatibility path for older sidecars that may still send an append
-			// fragment, but never duplicate a full body that already contains the
-			// current note prefix.
-			const currentContent = vditorInstance ? vditorInstance.getValue() : draftBody;
-			const currentTrimmed = currentContent.trimEnd();
-			const isAuthoritativeBody =
-				mode === 'write' ||
-				newContent === currentContent ||
-				(mode === 'append' && currentTrimmed.length > 0 && newContent.startsWith(currentTrimmed));
-			const finalContent = isAuthoritativeBody
-				? newContent
-				: currentTrimmed
-					? `${currentTrimmed}\n\n${newContent}`
-					: newContent;
-			if (note) note = { ...note, body: finalContent };
-			draftBody = finalContent;
-			// Avoid a second visible reset only when the editor itself already contains
-			// the authoritative result. The streamed buffer may be stale or may cover
-			// only a cursor/selection target. clearStack resets Vditor's undo history so
-			// Ctrl+Z doesn't walk back through every mid-stream snapshot.
-			if (vditorInstance && editorNeedsAuthoritativeBody(vditorInstance.getValue(), finalContent)) {
-				vditorInstance.setValue(finalContent, true);
-			}
-			// Re-arm the transclusion observer disconnected during streaming and scan
-			// once so the settled content picks up any new links.
-			setupTransclusionObserver();
-		}
-	
 		function initVditor() {
 			if (!VditorConstructor || !vditorContainer || vditorInstance) return;
 	
@@ -2301,6 +2187,35 @@ export function createNotePageController() {
 		});
 		const loadCurrentNote = documentSession.loadCurrentNote;
 		const refreshCurrentNoteFromBackend = documentSession.refreshCurrentNoteFromBackend;
+		const streamingSession = createStreamingSession({
+			get noteStreamBackup() { return noteStreamBackup; },
+			set noteStreamBackup(value) { noteStreamBackup = value; },
+			get noteStreamBuf() { return noteStreamBuf; },
+			set noteStreamBuf(value) { noteStreamBuf = value; },
+			get noteStreaming() { return noteStreaming; },
+			set noteStreaming(value) { noteStreaming = value; },
+			get transclusionObserver() { return transclusionObserver; },
+			get activeAiEditTarget() { return activeAiEditTarget; },
+			get noteStreamSpan() { return noteStreamSpan; },
+			set noteStreamSpan(value) { noteStreamSpan = value; },
+			get noteStreamFlushPending() { return noteStreamFlushPending; },
+			set noteStreamFlushPending(value) { noteStreamFlushPending = value; },
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get vditorInstance() { return vditorInstance; },
+			get vditorContainer() { return vditorContainer; },
+			get note() { return note; },
+			set note(value) { note = value; },
+			getSelectionTextOffset,
+			restoreSelectionTextOffset,
+			setupTransclusionObserver
+		});
+		const beginNoteStream = streamingSession.beginNoteStream;
+		const scheduleNoteStreamFlush = streamingSession.scheduleNoteStreamFlush;
+		const flushNoteStream = streamingSession.flushNoteStream;
+		const appendNoteStream = streamingSession.appendNoteStream;
+		const cancelNoteStream = streamingSession.cancelNoteStream;
+		const applyNoteWrite = streamingSession.applyNoteWrite;
 
 		const linkingSession = createLinkingSession({
 			get isBusy() { return isBusy; },
