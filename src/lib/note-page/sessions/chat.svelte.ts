@@ -1,11 +1,122 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { NoteDocument, NoteSnapshot } from '$lib/types';
 import { canApplyReconciledNote, editorNeedsAuthoritativeBody, hasNoteMutation } from '$lib/noteMutation';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 
 type ChatTool = { name: string; details: string };
 
 /** Coordinates request lifecycle, retry/rewind, persistence, and tool approvals. */
 export function createChatSession(ctx: Record<string, any>) {
+	const chatRenderCache = new Map<string, string>();
+
+	function persistableChatHistory(messages: any[]): any[] {
+		return messages
+			.filter((message) => message.role === 'user' || !!message.content.trim() || !!message.tools?.length || message.error === true)
+			.map(({ statusText: _statusText, ...message }) => ({ ...message, isStreaming: false }));
+	}
+
+	async function persistChatHistory(noteId = ctx.activeAiNoteId(), messages = ctx.chatMessages) {
+		if (!noteId) return;
+		try {
+			await invoke('save_chat_history', { noteId, chatHistory: persistableChatHistory(messages) });
+		} catch (error) {
+			console.error('Failed to persist chat history:', error);
+		}
+	}
+
+	function checkpointChatHistory(delay = 250) {
+		if (ctx.chatPersistTimer) clearTimeout(ctx.chatPersistTimer);
+		ctx.chatPersistTimer = setTimeout(() => {
+			ctx.chatPersistTimer = undefined;
+			void persistChatHistory();
+		}, delay);
+	}
+
+	function flushChatChunks() {
+		if (!ctx.chatChunkBuf) return;
+		const delta = ctx.chatChunkBuf;
+		ctx.chatChunkBuf = '';
+		ctx.chatMessages = ctx.chatMessages.map((m: any) => m.isStreaming ? { ...m, content: m.content + delta, statusText: undefined } : m);
+		checkpointChatHistory();
+		if (ctx.showDebugWindow && ctx.debugInfo) {
+			if (ctx.debugInfo.firstChunk === null) {
+				ctx.debugInfo = { ...ctx.debugInfo, firstChunk: Date.now(), trace: [...ctx.debugInfo.trace, { time: Date.now(), msg: 'Generation started', kind: 'gen' }] };
+			}
+			ctx.debugInfo = { ...ctx.debugInfo, replyChars: ctx.debugInfo.replyChars + delta.length };
+		}
+	}
+
+	function makeDebugTraceEntry(kind: string, msg: string) {
+		const max = ctx.MAX_DEBUG_MSG_CHARS ?? 2000;
+		const display = msg.length > max ? msg.slice(0, max) + `… (+${msg.length - max}c)` : msg;
+		return { time: Date.now(), msg: `[${kind}] ${display}`, kind };
+	}
+
+	function renderChatContent(content: string): string {
+		const cached = chatRenderCache.get(content);
+		if (cached !== undefined) return cached;
+		const rendered = DOMPurify.sanitize(marked.parse(content) as string);
+		const max = ctx.MAX_CHAT_RENDER_CACHE ?? 64;
+		if (chatRenderCache.size >= max && chatRenderCache.size > 0) {
+			const oldest = chatRenderCache.keys().next().value as string | undefined;
+			if (oldest) chatRenderCache.delete(oldest);
+		}
+		chatRenderCache.set(content, rendered);
+		return rendered;
+	}
+
+	function setAiInteractionMode(mode: 'chat' | 'write') {
+		ctx.aiInteractionMode = mode;
+		if (mode === 'chat') ctx.writeTargetNotice = false;
+		localStorage.setItem('myelin_ai_interaction_mode', mode);
+		if (mode === 'write' && ctx.activeSection) {
+			const aiNoteId = ctx.activeAiNoteId();
+			if (aiNoteId) void invoke('warm_llama_server', { noteId: aiNoteId, interactionMode: mode, activeSection: ctx.activeSection }).catch((error) => console.debug('Write profile warm-up skipped:', error));
+		}
+	}
+
+	function handleActiveSectionChange(section: any) {
+		const changed = ctx.activeSection?.key !== section.key;
+		ctx.activeSection = section;
+		if (!changed) return;
+		const aiNoteId = ctx.activeAiNoteId();
+		if (aiNoteId) void invoke('warm_llama_server', { noteId: aiNoteId, interactionMode: ctx.aiInteractionMode, activeSection: section }).catch((error) => console.debug('Section profile warm-up skipped:', error));
+	}
+
+	function setToolApproval(require: boolean) {
+		ctx.requireToolApproval = require;
+		void invoke('set_require_tool_approval', { require });
+	}
+
+	function setStreamingStatus(statusText: string | undefined) {
+		const changed = ctx.chatMessages.some((message: any) => message.isStreaming && message.statusText !== statusText);
+		if (!changed) return;
+		ctx.chatMessages = ctx.chatMessages.map((message: any) => message.isStreaming ? { ...message, statusText } : message);
+		if (ctx.chatMessagesEl) setTimeout(() => ctx.scrollChatToBottom(false), 0);
+	}
+
+	function visibleAiStatus(kind: string, detail: string): string | undefined {
+		if (kind === 'model_prompt' || kind === 'request_serialized') return 'Reading the note…';
+		if (kind === 'response_headers' || kind === 'first_model_delta' || kind === 'gen') return ctx.activeAiComposerMode === 'editor' ? 'Writing replacement…' : 'Writing a response…';
+		if (kind === 'intent_prompt') return 'Understanding the request…';
+		if (kind === 'tool') {
+			const name = detail.match(/executing\s+([^(]+)/i)?.[1]?.replaceAll('_', ' ');
+			if (ctx.activeAiComposerMode === 'editor' && name?.trim() === 'write note') return 'Applying selected edit…';
+			return name ? `Using ${name}…` : 'Looking that up…';
+		}
+		if (kind === 'tool_result') return 'Reading the result…';
+		if (kind === 'session' || kind === 'config' || kind === 'tools' || kind === 'wire_mode') return 'Preparing the request…';
+		return undefined;
+	}
+
+	async function copyMessage(idx: number, text: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			ctx.copiedIdx = idx;
+			setTimeout(() => { if (ctx.copiedIdx === idx) ctx.copiedIdx = null; }, 1200);
+		} catch { /* clipboard unavailable */ }
+	}
 	async function stopActiveChat(): Promise<boolean> {
 		if (!ctx.activeChatRequestId && !ctx.isChatStreaming) return true;
 		try {
@@ -284,6 +395,18 @@ export function createChatSession(ctx: Record<string, any>) {
 	}
 
 	return {
+		persistableChatHistory,
+		persistChatHistory,
+		checkpointChatHistory,
+		flushChatChunks,
+		makeDebugTraceEntry,
+		renderChatContent,
+		setAiInteractionMode,
+		handleActiveSectionChange,
+		setToolApproval,
+		setStreamingStatus,
+		visibleAiStatus,
+		copyMessage,
 		stopActiveChat,
 		stopChat,
 		beginAiRequest,

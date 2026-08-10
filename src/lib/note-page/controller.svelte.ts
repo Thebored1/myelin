@@ -43,10 +43,6 @@ import {
 		hasNoteMutation
 	} from '$lib/noteMutation';
 
-import { marked } from 'marked';
-
-import DOMPurify from 'dompurify';
-
 import type { BlockItem } from './types';
 import { installAiEventBridge } from './sessions/aiEvents.svelte';
 import { createLinkingSession } from './sessions/linking.svelte';
@@ -101,67 +97,6 @@ export function createNotePageController() {
 		let chatChunkFlushPending = false;
 		let chatPersistTimer: ReturnType<typeof setTimeout> | undefined;
 	
-		function persistableChatHistory(messages: ChatMessage[]): ChatMessage[] {
-			return messages
-				.filter(
-					(message) =>
-						message.role === 'user' ||
-						!!message.content.trim() ||
-						!!message.tools?.length ||
-						message.error === true
-				)
-				.map(({ statusText: _statusText, ...message }) => ({
-					...message,
-					isStreaming: false
-				}));
-		}
-	
-		async function persistChatHistory(noteId = activeAiNoteId(), messages = chatMessages) {
-			if (!noteId) return;
-			try {
-				const persisted = persistableChatHistory(messages);
-				await invoke('save_chat_history', { noteId, chatHistory: persisted });
-			} catch (error) {
-				console.error('Failed to persist chat history:', error);
-			}
-		}
-	
-		function checkpointChatHistory(delay = 250) {
-			if (chatPersistTimer) clearTimeout(chatPersistTimer);
-			chatPersistTimer = setTimeout(() => {
-				chatPersistTimer = undefined;
-				void persistChatHistory();
-			}, delay);
-		}
-	
-		// Apply any chat deltas buffered since the last frame (coalesces the
-		// per-token ai://chat_chunk events into one chatMessages update).
-		function flushChatChunks() {
-			if (!chatChunkBuf) return;
-			const delta = chatChunkBuf;
-			chatChunkBuf = '';
-			chatMessages = chatMessages.map((m) => {
-				if (m.isStreaming) {
-					return { ...m, content: m.content + delta, statusText: undefined };
-				}
-				return m;
-			});
-			checkpointChatHistory();
-			if (showDebugWindow && debugInfo) {
-				if (debugInfo.firstChunk === null) {
-					debugInfo = {
-						...debugInfo,
-						firstChunk: Date.now(),
-						trace: [
-							...debugInfo.trace,
-							{ time: Date.now(), msg: 'Generation started', kind: 'gen' as const }
-						]
-					};
-				}
-				debugInfo = { ...debugInfo, replyChars: debugInfo.replyChars + delta.length };
-			}
-		}
-	
 		// Debug window state for AI performance metrics. Off by default — it renders
 		// a live per-request trace (including full model prompts) that churns the
 		// page for every user if left on.
@@ -174,103 +109,12 @@ export function createNotePageController() {
 		// bloat every persisted chat message and the live debug window.
 		const MAX_DEBUG_TRACE = 200;
 		const MAX_DEBUG_MSG_CHARS = 2000;
-		function makeDebugTraceEntry(kind: string, msg: string): DebugTraceEntry {
-			let display = msg;
-			if (display.length > MAX_DEBUG_MSG_CHARS) {
-				display =
-					display.slice(0, MAX_DEBUG_MSG_CHARS) + `… (+${display.length - MAX_DEBUG_MSG_CHARS}c)`;
-			}
-			return { time: Date.now(), msg: `[${kind}] ${display}`, kind };
-		}
-	
-		// Memoized markdown render for chat bubbles. Each ai://chat_chunk re-renders
-		// the streaming bubble, so without a cache the whole accumulated response is
-		// parsed + sanitized on every token (O(n²) over the stream). Caching by exact
-		// content means only the bubble whose content actually changed re-parses.
-		const chatRenderCache = new Map<string, string>();
-		const MAX_CHAT_RENDER_CACHE = 64;
-		function renderChatContent(content: string): string {
-			const cached = chatRenderCache.get(content);
-			if (cached !== undefined) return cached;
-			const rendered = DOMPurify.sanitize(marked.parse(content) as string);
-			if (chatRenderCache.size >= MAX_CHAT_RENDER_CACHE && chatRenderCache.size > 0) {
-				const oldest = chatRenderCache.keys().next().value as string | undefined;
-				if (oldest) chatRenderCache.delete(oldest);
-			}
-			chatRenderCache.set(content, rendered);
-			return rendered;
-		}
 		let pendingDebugTrace = $state<DebugTraceEntry[]>([]);
 		let activeAiComposerMode: 'chat' | 'editor' | null = null;
 		let activeChatNoteId: string | null = null;
 		type AiInteractionMode = 'chat' | 'write';
 		let aiInteractionMode = $state<AiInteractionMode>('chat');
 	
-		function setAiInteractionMode(mode: AiInteractionMode) {
-			aiInteractionMode = mode;
-			if (mode === 'chat') writeTargetNotice = false;
-			localStorage.setItem('myelin_ai_interaction_mode', mode);
-			if (mode === 'write' && activeSection) {
-				const aiNoteId = activeAiNoteId();
-				if (aiNoteId) {
-					void invoke('warm_llama_server', {
-						noteId: aiNoteId,
-						interactionMode: mode,
-						activeSection
-					}).catch((error) => console.debug('Write profile warm-up skipped:', error));
-				}
-			}
-		}
-	
-		function handleActiveSectionChange(section: ActiveSection) {
-			const changed = activeSection?.key !== section.key;
-			activeSection = section;
-			if (!changed) return;
-			const aiNoteId = activeAiNoteId();
-			if (aiNoteId) {
-				void invoke('warm_llama_server', {
-					noteId: aiNoteId,
-					interactionMode: aiInteractionMode,
-					activeSection: section
-				}).catch((error) => console.debug('Section profile warm-up skipped:', error));
-			}
-		}
-	
-		function setToolApproval(require: boolean) {
-			requireToolApproval = require;
-			void invoke('set_require_tool_approval', { require });
-		}
-	
-		function setStreamingStatus(statusText: string | undefined) {
-			const changed = chatMessages.some(
-				(message) => message.isStreaming && message.statusText !== statusText
-			);
-			if (!changed) return;
-			chatMessages = chatMessages.map((message) =>
-				message.isStreaming ? { ...message, statusText } : message
-			);
-			if (chatMessagesEl) setTimeout(() => scrollChatToBottom(false), 0);
-		}
-	
-		function visibleAiStatus(kind: string, detail: string): string | undefined {
-			if (kind === 'model_prompt' || kind === 'request_serialized') return 'Reading the note…';
-			if (kind === 'response_headers' || kind === 'first_model_delta' || kind === 'gen') {
-				return activeAiComposerMode === 'editor' ? 'Writing replacement…' : 'Writing a response…';
-			}
-			if (kind === 'intent_prompt') return 'Understanding the request…';
-			if (kind === 'tool') {
-				const name = detail.match(/executing\s+([^(]+)/i)?.[1]?.replaceAll('_', ' ');
-				if (activeAiComposerMode === 'editor' && name?.trim() === 'write note') {
-					return 'Applying selected edit…';
-				}
-				return name ? `Using ${name}…` : 'Looking that up…';
-			}
-			if (kind === 'tool_result') return 'Reading the result…';
-			if (kind === 'session' || kind === 'config' || kind === 'tools' || kind === 'wire_mode') {
-				return 'Preparing the request…';
-			}
-			return undefined;
-		}
 		let debugInfo = $state<{
 			requestStart: number | null;
 			firstChunk: number | null;
@@ -285,17 +129,6 @@ export function createNotePageController() {
 			trace: DebugTraceEntry[];
 		} | null>(null);
 	
-		async function copyMessage(idx: number, text: string) {
-			try {
-				await navigator.clipboard.writeText(text);
-				copiedIdx = idx;
-				setTimeout(() => {
-					if (copiedIdx === idx) copiedIdx = null;
-				}, 1200);
-			} catch {
-				/* clipboard unavailable */
-			}
-		}
 		// The editor selection the user has "armed" for the AI. Persists across sends
 		// (cleared only by the ✕ pill or by deselecting inside the editor). Captured in
 		// source-markdown coordinates with surrounding context so the backend can pin
@@ -1026,6 +859,10 @@ export function createNotePageController() {
 		const restoreSelectionTextOffset = selectionSession.restoreSelectionTextOffset;
 		const saveCursorPosition = selectionSession.saveCursorPosition;
 		const insertAtSavedCursor = selectionSession.insertAtSavedCursor;
+		let chatSession: ReturnType<typeof createChatSession>;
+		const persistChatHistory = (...args: any[]) => chatSession.persistChatHistory(...args);
+		const checkpointChatHistory = (delay = 250) => chatSession.checkpointChatHistory(delay);
+		const flushChatChunks = () => chatSession.flushChatChunks();
 
 		const documentSession = createDocumentSession({
 			get isLoadingNote() { return isLoadingNote; },
@@ -1309,6 +1146,11 @@ export function createNotePageController() {
 			get note() { return note; },
 			set note(value) { note = value; },
 			get aiInteractionMode() { return aiInteractionMode; },
+			set aiInteractionMode(value) { aiInteractionMode = value; },
+			get activeSection() { return activeSection; },
+			set activeSection(value) { activeSection = value; },
+			get requireToolApproval() { return requireToolApproval; },
+			set requireToolApproval(value) { requireToolApproval = value; },
 			get writeTargetNotice() { return writeTargetNotice; },
 			set writeTargetNotice(value) { writeTargetNotice = value; },
 			get isSourceMaterial() { return isSourceMaterial; },
@@ -1322,9 +1164,14 @@ export function createNotePageController() {
 			get draftTags() { return draftTags; },
 			set draftTags(value) { draftTags = value; },
 			get workingDocType() { return workingDocType; },
-			get activeSection() { return activeSection; },
 			get activeSourceId() { return activeSourceId; },
 			get vditorInstance() { return vditorInstance; },
+			get chatMessagesEl() { return chatMessagesEl; },
+			get copiedIdx() { return copiedIdx; },
+			set copiedIdx(value) { copiedIdx = value; },
+			get chatChunkBuf() { return chatChunkBuf; },
+			set chatChunkBuf(value) { chatChunkBuf = value; },
+			get MAX_DEBUG_MSG_CHARS() { return MAX_DEBUG_MSG_CHARS; },
 			get isBusy() { return isBusy; },
 			set isBusy(value) { isBusy = value; },
 			get chatPersistTimer() { return chatPersistTimer; },
@@ -1347,8 +1194,17 @@ export function createNotePageController() {
 			appendNoteStream,
 			applyNoteWrite
 		};
-		const chatSession = createChatSession(chatContext);
+		chatSession = createChatSession(chatContext);
 		chatContext.failStreamingChatMessage = chatSession.failStreamingChatMessage;
+		const persistableChatHistory = chatSession.persistableChatHistory;
+		const makeDebugTraceEntry = chatSession.makeDebugTraceEntry;
+		const renderChatContent = chatSession.renderChatContent;
+		const setAiInteractionMode = chatSession.setAiInteractionMode;
+		const handleActiveSectionChange = chatSession.handleActiveSectionChange;
+		const setToolApproval = chatSession.setToolApproval;
+		const setStreamingStatus = chatSession.setStreamingStatus;
+		const visibleAiStatus = chatSession.visibleAiStatus;
+		const copyMessage = chatSession.copyMessage;
 		const stopActiveChat = chatSession.stopActiveChat;
 		const stopChat = chatSession.stopChat;
 		const beginAiRequest = chatSession.beginAiRequest;
@@ -1579,8 +1435,6 @@ export function createNotePageController() {
 		get MAX_DEBUG_TRACE() { return MAX_DEBUG_TRACE; },
 		get MAX_DEBUG_MSG_CHARS() { return MAX_DEBUG_MSG_CHARS; },
 		makeDebugTraceEntry,
-		get chatRenderCache() { return chatRenderCache; },
-		get MAX_CHAT_RENDER_CACHE() { return MAX_CHAT_RENDER_CACHE; },
 		renderChatContent,
 		get pendingDebugTrace() { return pendingDebugTrace; },
 		set pendingDebugTrace(value: typeof pendingDebugTrace) { pendingDebugTrace = value; },
