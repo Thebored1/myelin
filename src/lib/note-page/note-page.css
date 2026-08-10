@@ -1,21 +1,3 @@
-		/* Bruteforce hide the left scrollbar in split view to prevent Svelte scoping issues */
-		.vditor-sv::-webkit-scrollbar {
-			display: none !important;
-			width: 0 !important;
-			background: transparent !important;
-		}
-		.vditor-sv {
-			scrollbar-width: none !important;
-			-ms-overflow-style: none !important;
-		}
-	</style>
-</svelte:head>
-
-<NoteWorkspace {notePage} />
-<NoteDialogs {notePage} />
-
-<style>
-<style>
 .editor-shell {
 		height: 100%;
 		position: relative;

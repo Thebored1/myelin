@@ -60,6 +60,7 @@ import { vditorI18n } from '$lib/vditorI18n';
 import { parseBlocks } from './model/links';
 import type { BlockItem } from './types';
 import { installAiEventBridge } from './sessions/aiEvents.svelte';
+import { createLinkingSession } from './sessions/linking.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -1032,30 +1033,6 @@ export function createNotePageController() {
 			}
 		});
 	
-		let linkNoteDialog: HTMLDialogElement | undefined = $state();
-		let linkSearchQuery = $state('');
-		let linkSearchResults = $state<NoteSummary[]>([]);
-		let linkSelectedIndex = $state(0);
-	
-		let linkDialogMode = $state<'notes' | 'blocks'>('notes');
-		let selectedNoteForBlocks = $state<NoteDocument | null>(null);
-	
-		type LinkBlockItem = BlockItem & { isFullNote?: boolean };
-		let allNoteBlocks = $state<LinkBlockItem[]>([]);
-		let filteredBlocks = $derived(
-			linkDialogMode === 'blocks'
-				? linkSearchQuery.trim()
-					? allNoteBlocks.filter(
-							(b) => b.isFullNote || b.text.toLowerCase().includes(linkSearchQuery.toLowerCase())
-						)
-					: [...allNoteBlocks]
-				: []
-		);
-	
-		let previewNoteDialog: HTMLDialogElement | undefined = $state();
-		let previewNoteTarget = $state<NoteDocument | null>(null);
-		let previewNoteContainer: HTMLDivElement | undefined = $state();
-	
 		let blockCache: Record<string, string> = {};
 		let transclusionObserver: MutationObserver | null = null;
 	
@@ -1283,342 +1260,6 @@ export function createNotePageController() {
 				if (texAutoTimer) clearTimeout(texAutoTimer);
 			};
 		});
-	
-		$effect(() => {
-			const query = linkSearchQuery;
-			if (linkDialogMode === 'notes') {
-				if (query.trim()) {
-					invoke<SearchResponse>('search_notes', { query }).then((res) => {
-						linkSearchResults = res.results.map((r) => r.note);
-					});
-				} else {
-					linkSearchResults = [];
-				}
-			}
-		});
-	
-		async function openPreviewModal(noteId: string) {
-			isBusy = true;
-			try {
-				previewNoteTarget = await invoke<NoteDocument>('load_note', { noteId });
-				previewNoteDialog?.showModal();
-				// Need a tiny delay to ensure previewNoteContainer is bound
-				setTimeout(() => {
-					if (previewNoteContainer && previewNoteTarget) {
-						const cdn = localVditorCdn();
-						VditorConstructor?.preview(previewNoteContainer, previewNoteTarget.body, {
-							mode: 'dark',
-							cdn,
-							theme: { current: 'dark' },
-							i18n: vditorI18n
-						});
-					}
-				}, 50);
-			} catch (err) {
-				console.error('Failed to load preview note', err);
-				alert('Could not load preview.');
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		async function handleVditorClick(e: MouseEvent) {
-			const target = e.target as HTMLElement;
-	
-			let href = '';
-	
-			// 1. Standard HTML links (WYSIWYG or preview modes)
-			const link = target.closest('a');
-			if (link) {
-				href = link.getAttribute('href') || '';
-			}
-	
-			// 2. Vditor Instant Rendering (IR) mode links
-			if (!href) {
-				const irLink = target.closest('[data-type="a"]');
-				if (irLink) {
-					const text = irLink.textContent || '';
-					// IR links look like [text](/notes/targetId)
-					const match = text.match(/\]\(([^)]+)\)/);
-					if (match && match[1]) {
-						href = match[1].trim();
-					}
-				}
-			}
-	
-			if (!href) return;
-	
-			if (href.startsWith('/notes/')) {
-				e.preventDefault();
-				e.stopPropagation();
-				const fullTargetId = decodeURIComponent(href.replace('/notes/', ''));
-				const targetId = fullTargetId.split('#')[0];
-				await openPreviewModal(targetId);
-			}
-		}
-	
-		function handleVditorKeydownCapture(e: KeyboardEvent) {
-			// Prevent WYSIWYG mode shortcut (Cmd/Ctrl + Alt + 7)
-			if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.code === 'Digit7') {
-				e.preventDefault();
-				e.stopPropagation();
-			}
-	
-			// Prevent Ctrl+Arrow keys (Up/Down) from scrolling in the editor, but allow Shift for text selection
-			if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-				e.preventDefault();
-				e.stopPropagation();
-			}
-	
-			// Vditor has a bug where it freezes during Shift+Arrow selection across nodes.
-			// By completely stopping propagation, the browser's native text selection engine
-			// takes over flawlessly and Vditor's internal range parser never runs.
-			if (e.shiftKey && e.key.startsWith('Arrow')) {
-				e.stopImmediatePropagation();
-			}
-		}
-	
-		function handleVditorKeyupCapture(e: KeyboardEvent) {
-			// Stop Vditor's keyup processor (which calls expandMarker and freezes)
-			if (e.shiftKey && e.key.startsWith('Arrow')) {
-				e.stopImmediatePropagation();
-			}
-		}
-	
-		function handleLinkSearchKeydown(e: KeyboardEvent) {
-			const targetListLength =
-				linkDialogMode === 'notes' ? linkSearchResults.length : filteredBlocks.length;
-			if (e.key === 'ArrowDown') {
-				e.preventDefault();
-				linkSelectedIndex = Math.min(targetListLength - 1, linkSelectedIndex + 1);
-			} else if (e.key === 'ArrowUp') {
-				e.preventDefault();
-				linkSelectedIndex = Math.max(0, linkSelectedIndex - 1);
-			} else if (e.key === 'Enter') {
-				e.preventDefault();
-				if (targetListLength > 0) {
-					if (linkDialogMode === 'notes') {
-						selectNoteForBlocks(linkSearchResults[linkSelectedIndex]);
-					} else {
-						insertBlockLink(filteredBlocks[linkSelectedIndex]);
-					}
-				}
-			}
-		}
-	
-		function autofocus(node: HTMLElement) {
-			node.focus();
-		}
-	
-		async function selectNoteForBlocks(target: NoteSummary) {
-			isBusy = true;
-			try {
-				selectedNoteForBlocks = await invoke<NoteDocument>('load_note', { noteId: target.id });
-				allNoteBlocks = [
-					{ text: `Link to entire note: ${target.title}`, id: null, original: '', isFullNote: true },
-					...parseBlocks(selectedNoteForBlocks.body)
-				];
-				linkSearchQuery = '';
-				linkDialogMode = 'blocks';
-				linkSelectedIndex = 0;
-			} catch (e) {
-				console.error('Failed to load note for blocks', e);
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		async function insertBlockLink(block: LinkBlockItem) {
-			if (!selectedNoteForBlocks) return;
-	
-			if (block.isFullNote) {
-				shouldRefocusEditor = true;
-				linkNoteDialog?.close();
-				const linkText = `[${selectedNoteForBlocks.title}](/notes/${selectedNoteForBlocks.id}) `;
-				insertAtSavedCursor(linkText);
-				refocusEditorSoon();
-				return;
-			}
-	
-			let blockId = block.id;
-			if (!blockId) {
-				blockId = Math.random().toString(16).substring(2, 8);
-				const newBlockText = `${block.original} ((${blockId}))`;
-				selectedNoteForBlocks.body = selectedNoteForBlocks.body.replace(block.original, newBlockText);
-				await invoke('save_note', {
-					noteId: selectedNoteForBlocks.id,
-					title: selectedNoteForBlocks.title,
-					tags: selectedNoteForBlocks.tags,
-					body: selectedNoteForBlocks.body,
-					sourcePdf: selectedNoteForBlocks.sourcePdf,
-					annotations: selectedNoteForBlocks.annotations
-				});
-	
-				if (selectedNoteForBlocks.id === note?.id) {
-					setTimeout(() => {
-						if (vditorInstance) {
-							const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-							const selectionOffset = editorEl ? getSelectionTextOffset(editorEl) : null;
-							let currentBody = vditorInstance.getValue();
-							if (!currentBody.includes(block.original)) {
-								const escaped = block.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-								const regex = new RegExp(escaped.replace(/\s+/g, '\\s+'));
-								currentBody = currentBody.replace(regex, `$& ((${blockId}))`);
-							} else {
-								currentBody = currentBody.replace(block.original, newBlockText);
-							}
-							vditorInstance.setValue(currentBody);
-							draftBody = currentBody;
-							if (selectionOffset !== null) {
-								setTimeout(() => {
-									focusEditor();
-									const refreshedEditorEl = vditorContainer?.querySelector(
-										'.vditor-ir'
-									) as HTMLElement | null;
-									if (refreshedEditorEl)
-										restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
-								}, 0);
-							}
-						}
-					}, 50);
-				}
-			}
-	
-			shouldRefocusEditor = true;
-			linkNoteDialog?.close();
-			const linkText = `[((${blockId}))](/notes/${selectedNoteForBlocks!.id}#${blockId}) `;
-			insertAtSavedCursor(linkText);
-			refocusEditorSoon();
-		}
-	
-		let globalSearchDialog: HTMLDialogElement | undefined = $state();
-		let globalSearchQuery = $state('');
-		let globalSelectedIndex = $state(0);
-	
-		let globalBlocks = $state<LinkBlockItem[]>([]);
-		let filteredGlobalBlocks = $derived(
-			globalSearchQuery.trim()
-				? globalBlocks.filter((b) => b.text.toLowerCase().includes(globalSearchQuery.toLowerCase()))
-				: globalBlocks.slice(0, 50)
-		);
-	
-		async function openGlobalBlockSearch() {
-			saveCursorPosition();
-			globalSearchQuery = '';
-			globalSelectedIndex = 0;
-			globalSearchDialog?.showModal();
-			setTimeout(() => {
-				const input = globalSearchDialog?.querySelector('.link-search-input') as HTMLInputElement;
-				if (input) input.focus();
-			}, 50);
-	
-			isBusy = true;
-			try {
-				const docs = await invoke<NoteDocument[]>('get_all_note_documents');
-				const allBlocks: BlockItem[] = [];
-				for (const doc of docs) {
-					const blocks = parseBlocks(doc.body);
-					for (const b of blocks) {
-						b.sourceNoteId = doc.id;
-						b.sourceNoteTitle = doc.title;
-						allBlocks.push(b);
-					}
-				}
-				globalBlocks = allBlocks;
-			} catch (err) {
-				console.error('Failed to load global blocks', err);
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		function handleGlobalSearchKeydown(e: KeyboardEvent) {
-			const targetListLength = filteredGlobalBlocks.length;
-			if (e.key === 'ArrowDown') {
-				e.preventDefault();
-				globalSelectedIndex = Math.min(targetListLength - 1, globalSelectedIndex + 1);
-			} else if (e.key === 'ArrowUp') {
-				e.preventDefault();
-				globalSelectedIndex = Math.max(0, globalSelectedIndex - 1);
-			} else if (e.key === 'Enter') {
-				e.preventDefault();
-				if (targetListLength > 0) {
-					void insertGlobalBlockLink(filteredGlobalBlocks[globalSelectedIndex]);
-				}
-			}
-		}
-	
-		async function insertGlobalBlockLink(block: LinkBlockItem) {
-			if (!block.sourceNoteId || !block.sourceNoteTitle) return;
-	
-			let blockId = block.id;
-			const isNewBlock = !blockId;
-			if (isNewBlock) {
-				blockId = Math.random().toString(16).substring(2, 8);
-			}
-	
-			shouldRefocusEditor = true;
-			globalSearchDialog?.close();
-			const linkText = `[((${blockId}))](/notes/${block.sourceNoteId}#${blockId}) `;
-	
-			if (isNewBlock) {
-				const newBlockText = `${block.original} ((${blockId}))`;
-				isBusy = true;
-				try {
-					const sourceDoc = await invoke<NoteDocument>('load_note', { noteId: block.sourceNoteId });
-					sourceDoc.body = sourceDoc.body.replace(block.original, newBlockText);
-					await invoke('save_note', {
-						noteId: sourceDoc.id,
-						title: sourceDoc.title,
-						tags: sourceDoc.tags,
-						body: sourceDoc.body,
-						sourcePdf: sourceDoc.sourcePdf,
-						annotations: sourceDoc.annotations
-					});
-	
-					if (sourceDoc.id === note?.id) {
-						setTimeout(() => {
-							if (vditorInstance) {
-								const editorEl = vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-								const selectionOffset = editorEl ? getSelectionTextOffset(editorEl) : null;
-								let currentBody = vditorInstance.getValue();
-								if (!currentBody.includes(block.original)) {
-									const escaped = block.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-									const regex = new RegExp(escaped.replace(/\s+/g, '\\s+'));
-									currentBody = currentBody.replace(regex, `$& ((${blockId}))`);
-								} else {
-									currentBody = currentBody.replace(block.original, newBlockText);
-								}
-								vditorInstance.setValue(currentBody);
-								draftBody = currentBody;
-								if (selectionOffset !== null) {
-									setTimeout(() => {
-										focusEditor();
-										const refreshedEditorEl = vditorContainer?.querySelector(
-											'.vditor-ir'
-										) as HTMLElement | null;
-										if (refreshedEditorEl)
-											restoreSelectionTextOffset(refreshedEditorEl, selectionOffset);
-									}, 0);
-								}
-							}
-						}, 50);
-					}
-	
-					insertAtSavedCursor(linkText);
-				} catch (err) {
-					console.error('Failed to append block ID to source note', err);
-					message = 'Failed to update source note.';
-					setTimeout(() => (message = ''), 3000);
-				} finally {
-					isBusy = false;
-					refocusEditorSoon();
-				}
-			} else {
-				insertAtSavedCursor(linkText);
-				refocusEditorSoon();
-			}
-		}
 	
 		async function loadCurrentNote(noteId: string) {
 			isLoadingNote = true;
@@ -1950,11 +1591,11 @@ export function createNotePageController() {
 							icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>',
 							click: () => {
 								saveCursorPosition();
-								linkSearchQuery = '';
-								linkSearchResults = [];
-								linkNoteDialog?.showModal();
+									linkingSession.linkSearchQuery = '';
+									linkingSession.linkSearchResults = [];
+									linkingSession.linkNoteDialog?.showModal();
 								setTimeout(() => {
-									const input = linkNoteDialog?.querySelector(
+									const input = linkingSession.linkNoteDialog?.querySelector(
 										'.link-search-input'
 									) as HTMLInputElement;
 									if (input) input.focus();
@@ -1967,7 +1608,7 @@ export function createNotePageController() {
 							tip: 'Search Global Blocks',
 							icon: '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
 							click: () => {
-								openGlobalBlockSearch();
+								linkingSession.openGlobalBlockSearch();
 							}
 						},
 						'|',
@@ -2974,7 +2615,7 @@ export function createNotePageController() {
 		}
 	
 		function buildPreviewExpandHref() {
-			const targetId = previewNoteTarget?.sourcePdf ?? previewNoteTarget?.id;
+			const targetId = linkingSession.previewNoteTarget?.sourcePdf ?? linkingSession.previewNoteTarget?.id;
 			const currentNoteId = note?.id;
 			if (!targetId) return null;
 			const basePath = `/notes/${encodeURIComponent(targetId)}`;
@@ -2985,7 +2626,7 @@ export function createNotePageController() {
 		function expandPreviewNoteDirect() {
 			const href = buildPreviewExpandHref();
 			if (!href) return;
-			previewNoteDialog?.close();
+			linkingSession.previewNoteDialog?.close();
 			isProgrammaticNavigation = true;
 			window.location.href = href;
 		}
@@ -3079,6 +2720,28 @@ export function createNotePageController() {
 			});
 		}
 	
+		const linkingSession = createLinkingSession({
+			get isBusy() { return isBusy; },
+			set isBusy(value) { isBusy = value; },
+			get VditorConstructor() { return VditorConstructor; },
+			localVditorCdn,
+			get shouldRefocusEditor() { return shouldRefocusEditor; },
+			set shouldRefocusEditor(value) { shouldRefocusEditor = value; },
+			insertAtSavedCursor,
+			refocusEditorSoon,
+			get vditorInstance() { return vditorInstance; },
+			get vditorContainer() { return vditorContainer; },
+			getSelectionTextOffset,
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get note() { return note; },
+			get message() { return message; },
+			set message(value) { message = value; },
+			saveCursorPosition,
+			focusEditor,
+			restoreSelectionTextOffset
+		});
+
 		const aiEventContext: Record<string, any> = {
 			get note() { return note; },
 			set note(value) { note = value; },
@@ -3464,28 +3127,6 @@ export function createNotePageController() {
 		set mathError(value: typeof mathError) { mathError = value; },
 		mathToKatex,
 		openMathDialog,
-		get linkNoteDialog() { return linkNoteDialog; },
-		set linkNoteDialog(value: typeof linkNoteDialog) { linkNoteDialog = value; },
-		get linkSearchQuery() { return linkSearchQuery; },
-		set linkSearchQuery(value: typeof linkSearchQuery) { linkSearchQuery = value; },
-		get linkSearchResults() { return linkSearchResults; },
-		set linkSearchResults(value: typeof linkSearchResults) { linkSearchResults = value; },
-		get linkSelectedIndex() { return linkSelectedIndex; },
-		set linkSelectedIndex(value: typeof linkSelectedIndex) { linkSelectedIndex = value; },
-		get linkDialogMode() { return linkDialogMode; },
-		set linkDialogMode(value: typeof linkDialogMode) { linkDialogMode = value; },
-		get selectedNoteForBlocks() { return selectedNoteForBlocks; },
-		set selectedNoteForBlocks(value: typeof selectedNoteForBlocks) { selectedNoteForBlocks = value; },
-		get allNoteBlocks() { return allNoteBlocks; },
-		set allNoteBlocks(value: typeof allNoteBlocks) { allNoteBlocks = value; },
-		get filteredBlocks() { return filteredBlocks; },
-		set filteredBlocks(value: typeof filteredBlocks) { filteredBlocks = value; },
-		get previewNoteDialog() { return previewNoteDialog; },
-		set previewNoteDialog(value: typeof previewNoteDialog) { previewNoteDialog = value; },
-		get previewNoteTarget() { return previewNoteTarget; },
-		set previewNoteTarget(value: typeof previewNoteTarget) { previewNoteTarget = value; },
-		get previewNoteContainer() { return previewNoteContainer; },
-		set previewNoteContainer(value: typeof previewNoteContainer) { previewNoteContainer = value; },
 		get blockCache() { return blockCache; },
 		set blockCache(value: typeof blockCache) { blockCache = value; },
 		get transclusionObserver() { return transclusionObserver; },
@@ -3537,28 +3178,8 @@ export function createNotePageController() {
 		compileTex,
 		parseLatexError,
 		closeTexPreview,
-		openPreviewModal,
-		handleVditorClick,
-		handleVditorKeydownCapture,
-		handleVditorKeyupCapture,
-		handleLinkSearchKeydown,
-		autofocus,
 		parseBlocks,
-		selectNoteForBlocks,
-		insertBlockLink,
-		get globalSearchDialog() { return globalSearchDialog; },
-		set globalSearchDialog(value: typeof globalSearchDialog) { globalSearchDialog = value; },
-		get globalSearchQuery() { return globalSearchQuery; },
-		set globalSearchQuery(value: typeof globalSearchQuery) { globalSearchQuery = value; },
-		get globalSelectedIndex() { return globalSelectedIndex; },
-		set globalSelectedIndex(value: typeof globalSelectedIndex) { globalSelectedIndex = value; },
-		get globalBlocks() { return globalBlocks; },
-		set globalBlocks(value: typeof globalBlocks) { globalBlocks = value; },
-		get filteredGlobalBlocks() { return filteredGlobalBlocks; },
-		set filteredGlobalBlocks(value: typeof filteredGlobalBlocks) { filteredGlobalBlocks = value; },
-		openGlobalBlockSearch,
-		handleGlobalSearchKeydown,
-		insertGlobalBlockLink,
+		...linkingSession,
 		loadCurrentNote,
 		refreshCurrentNoteFromBackend,
 		beginNoteStream,
