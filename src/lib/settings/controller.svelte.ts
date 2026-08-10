@@ -1,14 +1,13 @@
-import { onMount, onDestroy } from 'svelte';
-import { get } from 'svelte/store';
+import { onDestroy } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { goto } from '$app/navigation';
 import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
-import { chatSidebarShortcut } from '$lib/stores';
-import { shortcutFromEvent, shortcutsCollide } from '$lib/keyboardShortcut';
 import { backendPreference as normalizeBackendPreference, configMatchPositions as findConfigMatches, inferencePayload, openharnPayload, recommendedBeeBackend as chooseBeeBackend } from '$lib/settings/model';
 import type { OpenharnForm } from '$lib/settings/types';
+import { createSettingsLifecycle } from './lifecycle.svelte';
+import { createSettingsShortcuts } from './shortcuts.svelte';
 
 export function createSettingsController() {
 	type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
@@ -68,105 +67,14 @@ export function createSettingsController() {
 	let chatShortcutError = $state('');
 	let startWithSystem = $state(false);
 	let backgroundError = $state('');
-	async function applyShortcut(combo: string) {
-		if (shortcutsCollide(combo, get(chatSidebarShortcut))) {
-			quickShortcutError = 'This shortcut is already assigned to the chat sidebar.';
-			return;
-		}
-		try {
-			await invoke('set_quick_shortcut', { shortcut: combo });
-			quickShortcut = combo;
-			quickShortcutError = '';
-		} catch (e) {
-			quickShortcutError = String(e);
-		}
-	}
-	function startRecording() {
-		if (quickRecording) return;
-		quickRecording = true;
-		quickShortcutError = '';
-		const MODS = [
-			'ControlLeft',
-			'ControlRight',
-			'AltLeft',
-			'AltRight',
-			'ShiftLeft',
-			'ShiftRight',
-			'MetaLeft',
-			'MetaRight',
-			'OSLeft',
-			'OSRight'
-		];
-		const cleanup = () => {
-			quickRecording = false;
-			window.removeEventListener('keydown', onKey, true);
-		};
-		const onKey = (e: KeyboardEvent) => {
-			e.preventDefault();
-			e.stopPropagation();
-			if (MODS.includes(e.code)) return; // wait for a non-modifier key
-			if (e.code === 'Escape') {
-				cleanup();
-				return;
-			} // Esc cancels
-			const parts: string[] = [];
-			if (e.ctrlKey) parts.push('Ctrl');
-			if (e.altKey) parts.push('Alt');
-			if (e.shiftKey) parts.push('Shift');
-			if (e.metaKey) parts.push('Super');
-			parts.push(e.code);
-			cleanup();
-			void applyShortcut(parts.join('+'));
-		};
-		window.addEventListener('keydown', onKey, true);
-	}
-
-	function startChatShortcutRecording() {
-		if (chatShortcutRecording) return;
-		chatShortcutRecording = true;
-		chatShortcutError = '';
-		const cleanup = () => {
-			chatShortcutRecording = false;
-			window.removeEventListener('keydown', onKey, true);
-		};
-		const onKey = (e: KeyboardEvent) => {
-			e.preventDefault();
-			e.stopPropagation();
-			if (e.code === 'Escape') {
-				cleanup();
-				return;
-			}
-			const combo = shortcutFromEvent(e);
-			if (!combo) {
-				if (
-					![
-						'ControlLeft',
-						'ControlRight',
-						'AltLeft',
-						'AltRight',
-						'ShiftLeft',
-						'ShiftRight',
-						'MetaLeft',
-						'MetaRight',
-						'OSLeft',
-						'OSRight'
-					].includes(e.code)
-				) {
-					chatShortcutError = 'Use Ctrl, Alt, or Super with another key.';
-				}
-				return;
-			}
-			if (shortcutsCollide(combo, quickShortcut)) {
-				chatShortcutError = 'This shortcut is already assigned to Quick Capture.';
-				cleanup();
-				return;
-			}
-			chatSidebarShortcut.set(combo);
-			chatShortcutError = '';
-			cleanup();
-		};
-		window.addEventListener('keydown', onKey, true);
-	}
+	const shortcuts = createSettingsShortcuts({
+		get quickShortcut() { return quickShortcut; },
+		get quickRecording() { return quickRecording; }, set quickRecording(value) { quickRecording = value; },
+		get quickShortcutError() { return quickShortcutError; }, set quickShortcutError(value) { quickShortcutError = value; },
+		get chatShortcutRecording() { return chatShortcutRecording; }, set chatShortcutRecording(value) { chatShortcutRecording = value; },
+		get chatShortcutError() { return chatShortcutError; }, set chatShortcutError(value) { chatShortcutError = value; }
+	});
+	const { applyShortcut, startRecording, startChatShortcutRecording } = shortcuts;
 
 	const hasGpuBuild = () =>
 		installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
@@ -467,153 +375,62 @@ export function createSettingsController() {
 		}
 	}
 
-	onMount(async () => {
-		try {
-			await refreshAiConfig();
-			await refreshSnapshot();
-			const status = await loadProviderStatus();
-			downloadableBackends = await invoke<string[]>('downloadable_backends');
-			downloadableBeeBackends = await invoke<string[]>('downloadable_bee_backends');
-			// Auto chooses based on hardware; the remaining values name the exact
-			// backend. The retired generic GPU value is treated as Auto.
-			const sp = status.config?.backendPreference;
-			backendPreference = normalizeBackendPreference(sp);
-			thinking = status.config?.thinking ?? false;
-			autoOffload = status.config?.autoOffload ?? true;
-			deterministicTools = status.config?.deterministicTools ?? true;
-			// Gating is opt-in and off by default (model-agnostic full toolset).
-			toolGating = status.config?.toolGating ?? false;
-			promptCache = status.config?.promptCache ?? true;
-			recommendedThreads = status.recommendedThreads ?? null;
-			try {
-				llamaCache = await invoke('llama_cache_status');
-			} catch (e) {
-				console.error(e);
-			}
-			searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
-			embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
-			quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
-			startWithSystem = (await invoke<{ startWithSystem: boolean }>('get_background_settings'))
-				.startWithSystem;
-			try {
-				const oh = await invoke<OpenharnSettings>('get_openharn_settings');
-				ohPort = oh.port ?? null;
-				ohBinPath = oh.bin_path ?? '';
-				ohToolMode = oh.tool_mode === 'native' || oh.tool_mode === 'prompt' ? oh.tool_mode : 'auto';
-				// Manual grammar toggles only apply in explicit Prompt tools mode.
-				// Do not display stale legacy values as active in Auto/Native.
-				ohStrict = ohToolMode === 'prompt' ? (oh.strict ?? false) : false;
-				ohPromptTools = false;
-				ohCallOnly = ohToolMode === 'prompt' ? (oh.call_only ?? false) : false;
-				ohNoThink = oh.no_think ?? false;
-				ohToolChoice = oh.tool_choice ?? '';
-				ohTemplateKwargs = oh.template_kwargs ?? '';
-				ohMaxCalls = oh.max_calls ?? null;
-				ohTotalMax = oh.total_max ?? null;
-				ohToolTimeout = oh.tool_timeout_secs ?? null;
-				ohBaseUrl = oh.base_url ?? '';
-				externalEnabled = oh.external_enabled ?? false;
-				externalBaseUrl = oh.external_base_url ?? '';
-				externalModel = oh.external_model ?? '';
-				externalApiKey = oh.external_api_key ?? '';
-			} catch (e) {
-				console.error('Failed to load openharn settings:', e);
-			}
-			try {
-				modelProfiles = await invoke<ProfileInfo[]>('list_model_profiles');
-			} catch (e) {
-				modelProfiles = [];
-			}
-			if (status.resolved) {
-				currentModelPath = status.config?.modelPath || status.resolved.modelPath || '';
-				contextSize = status.config?.contextSize ?? status.resolved.contextSize ?? null;
-				gpuLayers = status.config?.gpuLayers ?? status.resolved.gpuLayers ?? null;
-				threads = status.config?.threads ?? status.resolved.threads ?? null;
-				temperature = status.config?.temperature ?? status.resolved.temperature ?? null;
-				topP = status.config?.topP ?? status.resolved.topP ?? null;
-				maxTurns = status.config?.maxTurns ?? null;
-				extraArgs = status.config?.extraArgs ?? status.resolved.extraArgs ?? [];
-			} else if (status.config) {
-				currentModelPath = status.config.modelPath || '';
-				contextSize = status.config.contextSize ?? null;
-				gpuLayers = status.config.gpuLayers ?? null;
-				threads = status.config.threads ?? null;
-				temperature = status.config.temperature ?? null;
-				topP = status.config.topP ?? null;
-				maxTurns = status.config.maxTurns ?? null;
-				extraArgs = status.config.extraArgs ?? [];
-			}
-
-			enableJupyterExecution = localStorage.getItem('myelin_jupyter_exec') === 'true';
-
-			// LaTeX support bundle: current cache state + live download progress.
-			try {
-				latexCache = await invoke('tectonic_cache_status');
-			} catch (e) {
-				console.error(e);
-			}
-			await listen<{ phase: string; bytes?: number; message?: string }>(
-				'latex://download',
-				async (event) => {
-					const p = event.payload;
-					if (p.phase === 'start') {
-						latexDownloading = true;
-						latexError = '';
-						latexDownloadBytes = p.bytes ?? 0;
-					} else if (p.phase === 'progress') {
-						latexDownloading = true;
-						latexDownloadBytes = p.bytes ?? latexDownloadBytes;
-					} else if (p.phase === 'done') {
-						latexDownloading = false;
-						latexDownloadBytes = p.bytes ?? latexDownloadBytes;
-						try {
-							latexCache = await invoke('tectonic_cache_status');
-						} catch (e) {
-							console.error(e);
-						}
-					} else if (p.phase === 'error') {
-						latexDownloading = false;
-						latexError = p.message ?? 'Download failed';
-					}
-				}
-			);
-
-			// Live-update the backend badge when a server actually starts.
-			await listen<{
-				backend: string;
-				engine: 'llama_cpp' | 'beellama';
-				gpuOffloaded: boolean;
-				fellBackToCpu: boolean;
-			}>('ai://llama_backend', (event) => {
-				activeBackend = event.payload.backend;
-				activeEngine = event.payload.engine;
-				backendFellBack = event.payload.fellBackToCpu;
-			});
-
-			// Backend download progress.
-			await listen<{ backend: string; phase: string; percent: number; message: string }>(
-				'backend://download',
-				async (event) => {
-					download = event.payload;
-					if (event.payload.phase === 'done') {
-						beeDownloadActive = false;
-						await loadProviderStatus();
-						setTimeout(() => {
-							if (download?.phase === 'done') download = null;
-						}, 4000);
-					}
-					if (event.payload.phase === 'error') beeDownloadActive = false;
-				}
-			);
-
-			// Keep the "Running on" badge live (server may start/restart/crash
-			// while this page is open).
-			statusPoll = setInterval(() => {
-				loadProviderStatus().catch(() => {});
-			}, 2500);
-		} catch (e) {
-			console.error('Failed to load provider status:', e);
-		}
+	createSettingsLifecycle({
+		refreshAiConfig,
+		refreshSnapshot,
+		loadProviderStatus,
+		normalizeBackendPreference,
+		get downloadableBackends() { return downloadableBackends; }, set downloadableBackends(value) { downloadableBackends = value; },
+		get downloadableBeeBackends() { return downloadableBeeBackends; }, set downloadableBeeBackends(value) { downloadableBeeBackends = value; },
+		get backendPreference() { return backendPreference; }, set backendPreference(value) { backendPreference = value; },
+		get thinking() { return thinking; }, set thinking(value) { thinking = value; },
+		get autoOffload() { return autoOffload; }, set autoOffload(value) { autoOffload = value; },
+		get deterministicTools() { return deterministicTools; }, set deterministicTools(value) { deterministicTools = value; },
+		get toolGating() { return toolGating; }, set toolGating(value) { toolGating = value; },
+		get promptCache() { return promptCache; }, set promptCache(value) { promptCache = value; },
+		get recommendedThreads() { return recommendedThreads; }, set recommendedThreads(value) { recommendedThreads = value; },
+		get llamaCache() { return llamaCache; }, set llamaCache(value) { llamaCache = value; },
+		get searxngUrl() { return searxngUrl; }, set searxngUrl(value) { searxngUrl = value; },
+		get embedModelPath() { return embedModelPath; }, set embedModelPath(value) { embedModelPath = value; },
+		get quickShortcut() { return quickShortcut; }, set quickShortcut(value) { quickShortcut = value; },
+		get startWithSystem() { return startWithSystem; }, set startWithSystem(value) { startWithSystem = value; },
+		get ohPort() { return ohPort; }, set ohPort(value) { ohPort = value; },
+		get ohBinPath() { return ohBinPath; }, set ohBinPath(value) { ohBinPath = value; },
+		get ohToolMode() { return ohToolMode; }, set ohToolMode(value) { ohToolMode = value; },
+		get ohStrict() { return ohStrict; }, set ohStrict(value) { ohStrict = value; },
+		get ohPromptTools() { return ohPromptTools; }, set ohPromptTools(value) { ohPromptTools = value; },
+		get ohCallOnly() { return ohCallOnly; }, set ohCallOnly(value) { ohCallOnly = value; },
+		get ohNoThink() { return ohNoThink; }, set ohNoThink(value) { ohNoThink = value; },
+		get ohToolChoice() { return ohToolChoice; }, set ohToolChoice(value) { ohToolChoice = value; },
+		get ohTemplateKwargs() { return ohTemplateKwargs; }, set ohTemplateKwargs(value) { ohTemplateKwargs = value; },
+		get ohMaxCalls() { return ohMaxCalls; }, set ohMaxCalls(value) { ohMaxCalls = value; },
+		get ohTotalMax() { return ohTotalMax; }, set ohTotalMax(value) { ohTotalMax = value; },
+		get ohToolTimeout() { return ohToolTimeout; }, set ohToolTimeout(value) { ohToolTimeout = value; },
+		get ohBaseUrl() { return ohBaseUrl; }, set ohBaseUrl(value) { ohBaseUrl = value; },
+		get externalEnabled() { return externalEnabled; }, set externalEnabled(value) { externalEnabled = value; },
+		get externalBaseUrl() { return externalBaseUrl; }, set externalBaseUrl(value) { externalBaseUrl = value; },
+		get externalModel() { return externalModel; }, set externalModel(value) { externalModel = value; },
+		get externalApiKey() { return externalApiKey; }, set externalApiKey(value) { externalApiKey = value; },
+		get modelProfiles() { return modelProfiles; }, set modelProfiles(value) { modelProfiles = value; },
+		get currentModelPath() { return currentModelPath; }, set currentModelPath(value) { currentModelPath = value; },
+		get contextSize() { return contextSize; }, set contextSize(value) { contextSize = value; },
+		get gpuLayers() { return gpuLayers; }, set gpuLayers(value) { gpuLayers = value; },
+		get threads() { return threads; }, set threads(value) { threads = value; },
+		get temperature() { return temperature; }, set temperature(value) { temperature = value; },
+		get topP() { return topP; }, set topP(value) { topP = value; },
+		get maxTurns() { return maxTurns; }, set maxTurns(value) { maxTurns = value; },
+		get extraArgs() { return extraArgs; }, set extraArgs(value) { extraArgs = value; },
+		get enableJupyterExecution() { return enableJupyterExecution; }, set enableJupyterExecution(value) { enableJupyterExecution = value; },
+		get latexCache() { return latexCache; }, set latexCache(value) { latexCache = value; },
+		get latexDownloading() { return latexDownloading; }, set latexDownloading(value) { latexDownloading = value; },
+		get latexDownloadBytes() { return latexDownloadBytes; }, set latexDownloadBytes(value) { latexDownloadBytes = value; },
+		get latexError() { return latexError; }, set latexError(value) { latexError = value; },
+		get activeBackend() { return activeBackend; }, set activeBackend(value) { activeBackend = value; },
+		get activeEngine() { return activeEngine; }, set activeEngine(value) { activeEngine = value; },
+		get backendFellBack() { return backendFellBack; }, set backendFellBack(value) { backendFellBack = value; },
+		get beeDownloadActive() { return beeDownloadActive; }, set beeDownloadActive(value) { beeDownloadActive = value; },
+		get download() { return download; }, set download(value) { download = value; },
+		get statusPoll() { return statusPoll; }, set statusPoll(value) { statusPoll = value; },
 	});
 
 	async function downloadLatexSupport() {
