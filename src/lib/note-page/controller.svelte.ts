@@ -62,6 +62,7 @@ import type { BlockItem } from './types';
 import { installAiEventBridge } from './sessions/aiEvents.svelte';
 import { createLinkingSession } from './sessions/linking.svelte';
 import { createSelectionSession } from './sessions/selection.svelte';
+import { createLatexSession } from './sessions/latex.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -857,130 +858,6 @@ export function createNotePageController() {
 			}
 			mathDialog?.close();
 		}
-	
-		async function pickLatexImage(): Promise<string | null> {
-			if (!note) return null;
-			const selected = await openFileDialog({
-				multiple: false,
-				filters: [{ name: 'LaTeX images', extensions: ['png', 'jpg', 'jpeg', 'pdf'] }]
-			});
-			if (!selected || Array.isArray(selected)) return null;
-			try {
-				return await invoke<string>('import_latex_asset', {
-					noteId: note.id,
-					sourcePath: selected
-				});
-			} catch (error) {
-				texCompileError = `Could not import image: ${String(error)}`;
-				texPreviewStatus = 'error';
-				return null;
-			}
-		}
-	
-		// Compile the open .tex note to PDF and show it in the split preview pane.
-		// Shared by the manual button and the debounced auto-compile.
-		async function compileTex(opts: { manual?: boolean } = {}) {
-			const manual = opts.manual === true;
-			if (!note) return;
-			if (!manual && !texCacheWarmed) return;
-			if (texCompiling) {
-				texCompileQueued = true;
-				texPreviewStatus = 'pending';
-				return;
-			}
-			texCompiling = true;
-			texPreviewStatus = 'compiling';
-			texCompileError = null;
-			if (manual) isBusy = true;
-			try {
-				let processedRevision = -1;
-				let processedNoteId: string = note.id;
-				do {
-					texCompileQueued = false;
-					const revision = texRevision;
-					const noteId: string = note.id;
-					processedNoteId = noteId;
-					const source = draftBody;
-					try {
-						if (manual) await saveNote();
-						const pdfBytes = await invoke<ArrayBuffer>('compile_latex', { noteId, source });
-						// Never let a late compile replace a newer edit or another note's PDF.
-						if (note?.id === noteId && revision === texRevision) {
-							activeSourceBytes = new Uint8Array(pdfBytes);
-							sourceMaterialType = 'pdf';
-							showAttachedNote = true;
-							texDiagnostics = [];
-							texCompileError = null;
-							texCacheWarmed = true;
-							texPreviewStatus = 'current';
-						}
-					} catch (e) {
-						// Errors from obsolete snapshots are intentionally discarded; the
-						// next queued revision will report the relevant result instead.
-						if (note?.id === noteId && revision === texRevision) {
-							const info = parseLatexError(e);
-							texDiagnostics = info.diagnostics;
-							texCompileError = info.message;
-							texPreviewStatus = 'error';
-						}
-					}
-					processedRevision = revision;
-				} while (
-					texCompileQueued ||
-					(note?.id === processedNoteId && texRevision !== processedRevision)
-				);
-			} finally {
-				texCompiling = false;
-				if (texCompileQueued) texPreviewStatus = 'pending';
-				if (manual) isBusy = false;
-				latexDownloadMsg = null;
-			}
-		}
-	
-		// The backend serialises compile failures as JSON { message, log, diagnostics }
-		// (line numbers already mapped to editor coordinates). Fall back to plain text.
-		function parseLatexError(e: unknown): {
-			message: string;
-			diagnostics: { line: number; message: string; severity?: 'error' | 'warning' }[];
-		} {
-			const raw = typeof e === 'string' ? e : ((e as any)?.message ?? String(e));
-			try {
-				const parsed = JSON.parse(raw);
-				if (parsed && Array.isArray(parsed.diagnostics)) {
-					return {
-						message: parsed.message ?? 'LaTeX compilation failed',
-						diagnostics: parsed.diagnostics
-					};
-				}
-			} catch {
-				/* not structured — show the raw string */
-			}
-			return { message: raw, diagnostics: [] };
-		}
-	
-		function closeTexPreview() {
-			activeSourceBytes = null;
-			activeSection = null;
-			sectionCache = null;
-			showAttachedNote = false;
-		}
-	
-		// Debounced auto-compile: a couple of seconds after typing stops, when armed.
-		$effect(() => {
-			const body = draftBody;
-			if (workingDocType === 'tex' && body !== lastTexBody) {
-				lastTexBody = body;
-				texRevision += 1;
-				if (texAutoCompile && texCacheWarmed) texPreviewStatus = 'pending';
-			}
-			const armed = texAutoCompile && workingDocType === 'tex';
-			if (!armed) return;
-			if (texAutoTimer) clearTimeout(texAutoTimer);
-			texAutoTimer = setTimeout(() => void compileTex(), 350);
-			return () => {
-				if (texAutoTimer) clearTimeout(texAutoTimer);
-			};
-		});
 	
 		async function loadCurrentNote(noteId: string) {
 			isLoadingNote = true;
@@ -2441,6 +2318,50 @@ export function createNotePageController() {
 			});
 		}
 	
+		const latexSession = createLatexSession({
+			get note() { return note; },
+			get texCompileError() { return texCompileError; },
+			set texCompileError(value) { texCompileError = value; },
+			get texPreviewStatus() { return texPreviewStatus; },
+			set texPreviewStatus(value) { texPreviewStatus = value; },
+			get texCacheWarmed() { return texCacheWarmed; },
+			set texCacheWarmed(value) { texCacheWarmed = value; },
+			get texCompiling() { return texCompiling; },
+			set texCompiling(value) { texCompiling = value; },
+			get texCompileQueued() { return texCompileQueued; },
+			set texCompileQueued(value) { texCompileQueued = value; },
+			get isBusy() { return isBusy; },
+			set isBusy(value) { isBusy = value; },
+			get texRevision() { return texRevision; },
+			set texRevision(value) { texRevision = value; },
+			get draftBody() { return draftBody; },
+			get activeSourceBytes() { return activeSourceBytes; },
+			set activeSourceBytes(value) { activeSourceBytes = value; },
+			get sourceMaterialType() { return sourceMaterialType; },
+			set sourceMaterialType(value) { sourceMaterialType = value; },
+			get showAttachedNote() { return showAttachedNote; },
+			set showAttachedNote(value) { showAttachedNote = value; },
+			get texDiagnostics() { return texDiagnostics; },
+			set texDiagnostics(value) { texDiagnostics = value; },
+			get latexDownloadMsg() { return latexDownloadMsg; },
+			set latexDownloadMsg(value) { latexDownloadMsg = value; },
+			get activeSection() { return activeSection; },
+			set activeSection(value) { activeSection = value; },
+			get sectionCache() { return sectionCache; },
+			set sectionCache(value) { sectionCache = value; },
+			get workingDocType() { return workingDocType; },
+			get lastTexBody() { return lastTexBody; },
+			set lastTexBody(value) { lastTexBody = value; },
+			get texAutoCompile() { return texAutoCompile; },
+			get texAutoTimer() { return texAutoTimer; },
+			set texAutoTimer(value) { texAutoTimer = value; },
+			saveNote
+		});
+		const pickLatexImage = latexSession.pickLatexImage;
+		const compileTex = latexSession.compileTex;
+		const parseLatexError = latexSession.parseLatexError;
+		const closeTexPreview = latexSession.closeTexPreview;
+
 		const selectionSession = createSelectionSession({
 			get vditorInstance() { return vditorInstance; },
 			get vditorContainer() { return vditorContainer; },
