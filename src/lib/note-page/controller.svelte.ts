@@ -59,6 +59,9 @@ import DOMPurify from 'dompurify';
 
 import { vditorI18n } from '$lib/vditorI18n';
 
+import { parseBlocks } from './model/links';
+import type { BlockItem } from './types';
+
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
 		let note = $state<NoteDocument | null>(null);
@@ -1038,15 +1041,8 @@ export function createNotePageController() {
 		let linkDialogMode = $state<'notes' | 'blocks'>('notes');
 		let selectedNoteForBlocks = $state<NoteDocument | null>(null);
 	
-		type BlockItem = {
-			text: string;
-			id: string | null;
-			original: string;
-			isFullNote?: boolean;
-			sourceNoteId?: string;
-			sourceNoteTitle?: string;
-		};
-		let allNoteBlocks = $state<BlockItem[]>([]);
+		type LinkBlockItem = BlockItem & { isFullNote?: boolean };
+		let allNoteBlocks = $state<LinkBlockItem[]>([]);
 		let filteredBlocks = $derived(
 			linkDialogMode === 'blocks'
 				? linkSearchQuery.trim()
@@ -1415,29 +1411,6 @@ export function createNotePageController() {
 			node.focus();
 		}
 	
-		function parseBlocks(markdown: string): BlockItem[] {
-			const chunks = markdown.split(/\n+/);
-			return chunks
-				.map((chunk) => {
-					const text = chunk.trim();
-					if (!text) return null;
-					const idMatch = text.match(/\(\(([a-fA-F0-9]{6})\)\)$/);
-	
-					let cleanDisplay = text.replace(/\s*\(\([a-fA-F0-9]{6}\)\)$/, '');
-					cleanDisplay = cleanDisplay.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-					cleanDisplay = cleanDisplay.replace(/(\*\*|__)(.*?)\1/g, '$2');
-					cleanDisplay = cleanDisplay.replace(/(\*|_)(.*?)\1/g, '$2');
-					cleanDisplay = cleanDisplay.replace(/^#+\s+/g, '');
-	
-					return {
-						text: cleanDisplay,
-						id: idMatch ? idMatch[1] : null,
-						original: text
-					};
-				})
-				.filter(Boolean) as BlockItem[];
-		}
-	
 		async function selectNoteForBlocks(target: NoteSummary) {
 			isBusy = true;
 			try {
@@ -1456,7 +1429,7 @@ export function createNotePageController() {
 			}
 		}
 	
-		async function insertBlockLink(block: BlockItem) {
+		async function insertBlockLink(block: LinkBlockItem) {
 			if (!selectedNoteForBlocks) return;
 	
 			if (block.isFullNote) {
@@ -1523,7 +1496,7 @@ export function createNotePageController() {
 		let globalSearchQuery = $state('');
 		let globalSelectedIndex = $state(0);
 	
-		let globalBlocks = $state<BlockItem[]>([]);
+		let globalBlocks = $state<LinkBlockItem[]>([]);
 		let filteredGlobalBlocks = $derived(
 			globalSearchQuery.trim()
 				? globalBlocks.filter((b) => b.text.toLowerCase().includes(globalSearchQuery.toLowerCase()))
@@ -1576,7 +1549,7 @@ export function createNotePageController() {
 			}
 		}
 	
-		async function insertGlobalBlockLink(block: BlockItem) {
+		async function insertGlobalBlockLink(block: LinkBlockItem) {
 			if (!block.sourceNoteId || !block.sourceNoteTitle) return;
 	
 			let blockId = block.id;

@@ -15,9 +15,21 @@ describe('note document model', () => {
 	});
 
 	it('keeps block identifiers and resolves transclusions', () => {
-		expect(parseBlocks('Alpha ((a1b2c3))\nBeta', 'n1', 'Note')).toEqual([
-		{ id: 'a1b2c3', original: 'Alpha ((a1b2c3))', text: 'Alpha', sourceNoteId: 'n1', sourceTitle: 'Note' },
-		{ id: '', original: 'Beta', text: 'Beta', sourceNoteId: 'n1', sourceTitle: 'Note' }
+		expect(parseBlocks('## [Alpha](https://example.test) ((a1b2c3))\nBeta', 'n1', 'Note')).toEqual([
+			{
+				id: 'a1b2c3',
+				original: '## [Alpha](https://example.test) ((a1b2c3))',
+				text: 'Alpha',
+				sourceNoteId: 'n1',
+				sourceNoteTitle: 'Note'
+			},
+			{
+				id: null,
+				original: 'Beta',
+				text: 'Beta',
+				sourceNoteId: 'n1',
+				sourceNoteTitle: 'Note'
+			}
 		]);
 		expect(transclusionTarget('/notes/hello%20world#a1b2c3')).toEqual({ noteId: 'hello world', blockId: 'a1b2c3' });
 	});

@@ -30,12 +30,11 @@ export type SectionCacheState = {
 export type DebugTraceEntry = { time: number; msg: string; kind: string };
 
 export type BlockItem = {
-	id: string;
+	id: string | null;
 	original: string;
 	text: string;
-	sourceNoteId: string;
-	sourceTitle: string;
+	sourceNoteId?: string;
+	sourceNoteTitle?: string;
 };
 
 export type ChatSnapshot = NoteSnapshot;
-
