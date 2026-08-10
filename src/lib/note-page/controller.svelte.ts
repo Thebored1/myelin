@@ -63,6 +63,7 @@ import { installAiEventBridge } from './sessions/aiEvents.svelte';
 import { createLinkingSession } from './sessions/linking.svelte';
 import { createSelectionSession } from './sessions/selection.svelte';
 import { createLatexSession } from './sessions/latex.svelte';
+import { createDocumentSession } from './sessions/document.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -857,154 +858,6 @@ export function createNotePageController() {
 				vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 			}
 			mathDialog?.close();
-		}
-	
-		async function loadCurrentNote(noteId: string) {
-			isLoadingNote = true;
-			toolsReady = false;
-			clearArmedSelection();
-			writeTargetNotice = false;
-			if (chatPersistTimer) {
-				clearTimeout(chatPersistTimer);
-				chatPersistTimer = undefined;
-			}
-			const previousAiNoteId = activeAiNoteId();
-			if (previousAiNoteId && previousAiNoteId !== noteId && chatMessages.length) {
-				await persistChatHistory(previousAiNoteId, chatMessages);
-			}
-			destroyEditorInstance();
-			activeSourceBytes = null;
-			activeSourceId = null;
-			activeSection = null;
-			sectionCache = null;
-			showAttachedNote = false;
-			note = null;
-	
-			try {
-				note = await invoke<NoteDocument>('load_note', { noteId });
-				const loadedNote = note;
-				// Keep the persisted transcript untouched; reasoning is removed only from
-				// the assistant's presentation below.
-				chatMessages = loadedNote.chatHistory || [];
-				noteHistory = [];
-				versionPreviewContent = null;
-				activeSidebarTab = 'info';
-	
-				const relLower = loadedNote.relativePath.toLowerCase();
-				isSourceMaterial =
-					relLower.endsWith('.pdf') || relLower.endsWith('.epub') || relLower.endsWith('.html');
-	
-				if (isSourceMaterial) {
-					sourceMaterialType = relLower.endsWith('.pdf')
-						? 'pdf'
-						: relLower.endsWith('.epub')
-							? 'epub'
-							: 'html';
-					workingDocType = 'md';
-	
-					const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
-					const existingScratchpad =
-						allNotes
-							.filter((candidate) => candidate.sourcePdf === loadedNote.id)
-							.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
-					draftTitle = loadedNote.title;
-					draftBody = existingScratchpad?.body ?? '';
-					draftTags = loadedNote.tags.join(', ');
-					activeSourceId = loadedNote.id;
-					const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: loadedNote.id });
-					activeSourceBytes = new Uint8Array(bytes);
-					scratchpadSavedId = existingScratchpad?.id ?? null;
-					// Opening the source document should show only that document. The
-					// linked note has its own dashboard row and opens in split view from
-					// there; it remains available here through the Attach Note button.
-					showAttachedNote = false;
-					noteOpened(loadedNote.id, 'chat');
-				} else {
-					workingDocType = relLower.endsWith('.tex')
-						? 'tex'
-						: relLower.endsWith('.ipynb')
-							? 'ipynb'
-							: 'md';
-	
-					draftTitle = loadedNote.title;
-					draftBody = loadedNote.body;
-					draftTags = loadedNote.tags.join(', ');
-	
-					if (loadedNote.sourcePdf) {
-						activeSourceId = loadedNote.sourcePdf;
-						const bytes = await invoke<ArrayBuffer>('read_pdf_binary', {
-							noteId: loadedNote.sourcePdf
-						});
-						activeSourceBytes = new Uint8Array(bytes);
-						// This route was opened through the note itself, so keep its
-						// editor visible even when the note is still empty.
-						showAttachedNote = true;
-						scratchpadSavedId = loadedNote.id;
-						noteOpened(loadedNote.id, 'chat');
-						// If a working document has a sourcePdf, we need to know its type.
-						// We'll query it or assume it's PDF for now unless we know otherwise.
-						// (We can load it to find out)
-						try {
-							const sourceDoc = await invoke<NoteDocument>('load_note', {
-								noteId: loadedNote.sourcePdf
-							});
-							const sRel = sourceDoc.relativePath.toLowerCase();
-							sourceMaterialType = sRel.endsWith('.pdf')
-								? 'pdf'
-								: sRel.endsWith('.epub')
-									? 'epub'
-									: 'html';
-						} catch (e) {
-							sourceMaterialType = 'pdf'; // fallback
-						}
-					} else {
-						activeSourceId = null;
-						activeSourceBytes = null;
-						activeSection = null;
-						sourceMaterialType = null;
-						showAttachedNote = true;
-						scratchpadSavedId = null;
-						noteOpened(loadedNote.id, 'chat');
-					}
-				}
-	
-				message = '';
-				void fetchRelatedNotes();
-			} catch (error) {
-				console.error('Failed to open note', error);
-				message = 'Could not open this note.';
-			} finally {
-				isLoadingNote = false;
-				// Let the note and its surrounding layout paint before requesting the
-				// comparatively heavy editor/tool bundle.
-				if (note) {
-					await tick();
-					await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-					toolsReady = true;
-				}
-			}
-		}
-	
-		async function refreshCurrentNoteFromBackend(skipEditorUpdate = false) {
-			if (!note) return;
-			const refreshed = await invoke<NoteDocument>('load_note', { noteId: note.id });
-			note = {
-				...refreshed,
-				chatHistory: chatMessages
-			};
-			if (!isSourceMaterial && workingDocType === 'md') {
-				draftTitle = refreshed.title;
-				draftBody = refreshed.body;
-				draftTags = refreshed.tags.join(', ');
-				if (!skipEditorUpdate && vditorInstance && vditorInstance.getValue() !== refreshed.body) {
-					vditorInstance.setValue(refreshed.body);
-				}
-			} else if (!isSourceMaterial) {
-				draftTitle = refreshed.title;
-				draftBody = refreshed.body;
-				draftTags = refreshed.tags.join(', ');
-			}
-			void fetchRelatedNotes();
 		}
 	
 		// A live note stream is starting (whole-body replace). Keep the existing note
@@ -2393,6 +2246,61 @@ export function createNotePageController() {
 		const restoreSelectionTextOffset = selectionSession.restoreSelectionTextOffset;
 		const saveCursorPosition = selectionSession.saveCursorPosition;
 		const insertAtSavedCursor = selectionSession.insertAtSavedCursor;
+
+		const documentSession = createDocumentSession({
+			get isLoadingNote() { return isLoadingNote; },
+			set isLoadingNote(value) { isLoadingNote = value; },
+			get toolsReady() { return toolsReady; },
+			set toolsReady(value) { toolsReady = value; },
+			clearArmedSelection,
+			get writeTargetNotice() { return writeTargetNotice; },
+			set writeTargetNotice(value) { writeTargetNotice = value; },
+			get chatPersistTimer() { return chatPersistTimer; },
+			set chatPersistTimer(value) { chatPersistTimer = value; },
+			activeAiNoteId,
+			persistChatHistory,
+			destroyEditorInstance,
+			get activeSourceBytes() { return activeSourceBytes; },
+			set activeSourceBytes(value) { activeSourceBytes = value; },
+			get activeSourceId() { return activeSourceId; },
+			set activeSourceId(value) { activeSourceId = value; },
+			get activeSection() { return activeSection; },
+			set activeSection(value) { activeSection = value; },
+			get sectionCache() { return sectionCache; },
+			set sectionCache(value) { sectionCache = value; },
+			get showAttachedNote() { return showAttachedNote; },
+			set showAttachedNote(value) { showAttachedNote = value; },
+			get note() { return note; },
+			set note(value) { note = value; },
+			get chatMessages() { return chatMessages; },
+			set chatMessages(value) { chatMessages = value; },
+			get noteHistory() { return noteHistory; },
+			set noteHistory(value) { noteHistory = value; },
+			get versionPreviewContent() { return versionPreviewContent; },
+			set versionPreviewContent(value) { versionPreviewContent = value; },
+			get activeSidebarTab() { return activeSidebarTab; },
+			set activeSidebarTab(value) { activeSidebarTab = value; },
+			get isSourceMaterial() { return isSourceMaterial; },
+			set isSourceMaterial(value) { isSourceMaterial = value; },
+			get sourceMaterialType() { return sourceMaterialType; },
+			set sourceMaterialType(value) { sourceMaterialType = value; },
+			get workingDocType() { return workingDocType; },
+			set workingDocType(value) { workingDocType = value; },
+			get draftTitle() { return draftTitle; },
+			set draftTitle(value) { draftTitle = value; },
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get draftTags() { return draftTags; },
+			set draftTags(value) { draftTags = value; },
+			get scratchpadSavedId() { return scratchpadSavedId; },
+			set scratchpadSavedId(value) { scratchpadSavedId = value; },
+			get message() { return message; },
+			set message(value) { message = value; },
+			fetchRelatedNotes,
+			get vditorInstance() { return vditorInstance; }
+		});
+		const loadCurrentNote = documentSession.loadCurrentNote;
+		const refreshCurrentNoteFromBackend = documentSession.refreshCurrentNoteFromBackend;
 
 		const linkingSession = createLinkingSession({
 			get isBusy() { return isBusy; },
