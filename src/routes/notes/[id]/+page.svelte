@@ -3,7 +3,7 @@
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 	import { goto, beforeNavigate } from '$app/navigation';
-	import { resolve } from '$app/paths';
+	import { base, resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import type {
 		NoteDocument,
@@ -36,6 +36,7 @@
 	} from '$lib/noteMutation';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
+	import { vditorI18n } from '$lib/vditorI18n';
 
 	let requireToolApproval = $state(false);
 	let note = $state<NoteDocument | null>(null);
@@ -347,6 +348,15 @@
 	let vditorInstance: Vditor | null = null;
 	let VditorConstructor = $state<any>(null);
 	let vditorLoading = $state(false);
+
+	function localVditorCdn() {
+		const appPath = `${base}/vditor/`.replace(/\/+/g, '/');
+		return new URL(appPath.startsWith('/') ? appPath : `/${appPath}`, document.baseURI).href.replace(
+			/\/$/,
+			''
+		);
+	}
+
 	// Keep the note render separate from the editor/tool bundle. The bundle is
 	// requested only after the note has had a chance to paint.
 	let toolsReady = $state(false);
@@ -1278,9 +1288,12 @@
 			// Need a tiny delay to ensure previewNoteContainer is bound
 			setTimeout(() => {
 				if (previewNoteContainer && previewNoteTarget) {
+					const cdn = localVditorCdn();
 					VditorConstructor?.preview(previewNoteContainer, previewNoteTarget.body, {
 						mode: 'dark',
-						theme: { current: 'dark' }
+						cdn,
+						theme: { current: 'dark' },
+						i18n: vditorI18n
 					});
 				}
 			}, 50);
@@ -1878,8 +1891,11 @@
 		if (!VditorConstructor || !vditorContainer || vditorInstance) return;
 
 		try {
+			const cdn = localVditorCdn();
 			vditorInstance = new VditorConstructor(vditorContainer, {
 				value: draftBody,
+				cdn,
+				_lutePath: `${cdn}/dist/js/lute/lute.min.js`,
 				placeholder: isSourceMaterial ? 'Scratchpad for notes...' : 'Start typing here...',
 				mode: 'ir',
 				// Vditor ships its own skin; 'classic' is its light theme. We mirror the
@@ -1889,6 +1905,7 @@
 				theme: $theme === 'light' ? 'classic' : 'dark',
 				icon: 'material',
 				lang: 'en_US',
+				i18n: vditorI18n,
 				tab: '\t',
 				cache: { enable: false },
 				toolbarConfig: { pin: true },

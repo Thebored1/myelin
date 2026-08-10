@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { loadPyodide } from 'pyodide';
-	import { version as pyodideVersion } from 'pyodide/package.json';
 
 	interface Props {
 		value: string;
@@ -91,12 +90,13 @@
 	let pyodideInstance: any = null;
 	let pyodideLoading = $state(false);
 
-	// The loader ships with the package; the WASM assets must come from the exact
-	// same version. jsDelivr serves this npm package's artifacts at this path, so
-	// the two can never drift apart again (they did once: loader 314.0.0 + v0.25.0
-	// CDN assets, which are incompatible). Keep tauri.conf.json's CSP in sync with
-	// the package version when bumping it.
-	const PYODIDE_INDEX_URL = `https://cdn.jsdelivr.net/npm/pyodide@${pyodideVersion}/`;
+	// The core runtime is shipped with the app under static/pyodide. Resolve the
+	// relative asset directory at execution time so this works in both Vite dev
+	// mode and the packaged Tauri asset origin. Third-party packages requested by
+	// notebook code remain separate and may still need a network connection.
+	function pyodideIndexUrl() {
+		return new URL('pyodide/', document.baseURI).href;
+	}
 
 	async function getPyodide() {
 		if (pyodideInstance) return pyodideInstance;
@@ -106,7 +106,7 @@
 		pyodideLoading = true;
 		try {
 			pyodideInstance = await loadPyodide({
-				indexURL: PYODIDE_INDEX_URL
+				indexURL: pyodideIndexUrl()
 			});
 			return pyodideInstance;
 		} finally {
@@ -176,8 +176,8 @@
 		<div class="cells">
 			{#if pyodideLoading}
 				<div class="pyodide-banner">
-					Downloading the Pyodide Python runtime (~14&nbsp;MB) — first run only. A network
-					connection is required; afterwards it runs fully offline.
+					Preparing the bundled Pyodide Python runtime (~14&nbsp;MB) — first run only. It runs
+					offline; third-party Python packages may require a network connection.
 				</div>
 			{/if}
 			{#each notebook.cells as cell, i}

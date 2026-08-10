@@ -1644,8 +1644,9 @@
 					<h3 style="margin: 0; font-size: 1rem;">Jupyter Code Execution</h3>
 					<p class="description" style="margin-top: 4px;">
 						Runs Python code cells in <code>.ipynb</code> notebooks in-browser via Pyodide
-						(WebAssembly). The first execution downloads the Pyodide runtime (~14&nbsp;MB) from
-						the web; a network connection is required only for that first run.
+						(WebAssembly). The core runtime (~14&nbsp;MB) is included with Myelin and initializes on
+						first execution. Third-party Python packages requested by a notebook may require a
+						network connection.
 					</p>
 				</div>
 				<button class="browse-btn" onclick={toggleJupyterExecution}>

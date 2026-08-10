@@ -6,7 +6,7 @@ Cross-platform local-first AI notes app built with Tauri 2, SvelteKit, and a Rus
 
 - **Markdown-first**: Standard `.md` notes are the primary source of truth, parsed and indexed locally.
 - **First-Class LaTeX (`.tex`)**: Edit LaTeX documents directly in the app. Myelin embeds the Tectonic LaTeX engine (written in Rust) to compile documents entirely in-memory and render the PDF side-by-side—no `pdflatex` or massive LaTeX distribution required on the host system.
-- **First-Class Jupyter Notebooks (`.ipynb`)**: Open and run Jupyter notebooks directly in the app. Python execution is powered by Pyodide (WebAssembly), which runs completely inside the browser/webview environment without requiring Python to be installed on the host OS.
+- **First-Class Jupyter Notebooks (`.ipynb`)**: Open and run Jupyter notebooks directly in the app. Python execution is powered by a bundled Pyodide (WebAssembly) runtime, which runs inside the browser/webview without requiring Python to be installed on the host OS. Notebook-requested third-party Python packages may still need to be downloaded.
 - **Split-Pane Viewer**: View source material (PDFs, Web pages, etc.) side-by-side with your working documents.
 - **Local AI & Vector Search**: Uses LanceDB for local vector indexing to provide intelligent search over your notes.
 

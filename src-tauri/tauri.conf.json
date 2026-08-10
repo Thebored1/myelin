@@ -26,9 +26,9 @@
 		"security": {
 			"csp": {
 				"default-src": "'self'",
-				"connect-src": "'self' ipc: http://ipc.localhost asset: http://asset.localhost https://asset.localhost blob: data: https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
-				"script-src": "'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
-				"worker-src": "'self' blob: https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"connect-src": "'self' ipc: http://ipc.localhost asset: http://asset.localhost https://asset.localhost blob: data:",
+				"script-src": "'self' 'wasm-unsafe-eval'",
+				"worker-src": "'self' blob:",
 				"style-src": "'self' 'unsafe-inline' blob: data:",
 				"font-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data:",
 				"img-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data:",
@@ -41,9 +41,9 @@
 			},
 			"devCsp": {
 				"default-src": "'self' http://localhost:1420",
-				"connect-src": "'self' ipc: http://ipc.localhost asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420 ws://localhost:1420 https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
-				"script-src": "'self' http://localhost:1420 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
-				"worker-src": "'self' blob: http://localhost:1420 https://cdn.jsdelivr.net/npm/pyodide@314.0.0/",
+				"connect-src": "'self' ipc: http://ipc.localhost asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420 ws://localhost:1420",
+				"script-src": "'self' http://localhost:1420 'wasm-unsafe-eval'",
+				"worker-src": "'self' blob: http://localhost:1420",
 				"style-src": "'self' 'unsafe-inline' blob: data: http://localhost:1420",
 				"font-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420",
 				"img-src": "'self' asset: http://asset.localhost https://asset.localhost blob: data: http://localhost:1420",

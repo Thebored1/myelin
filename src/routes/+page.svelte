@@ -25,6 +25,7 @@
 	let ready = $state(false);
 	let indexing = $state(false);
 	let provider = $state<ProviderStatus | null>(null);
+	let embeddingModelPath = $state<string | null>(null);
 	let query = $state('');
 	let isBusy = $state(false);
 	let message = $state('');
@@ -362,6 +363,11 @@
 				provider = status;
 			})
 			.catch(() => {});
+		void invoke<string | null>('get_embed_model_path')
+			.then((path) => {
+				embeddingModelPath = path;
+			})
+			.catch(() => {});
 		if (query.trim()) {
 			searchResults = await invoke<SearchResponse>('search_notes', { query });
 		} else {
@@ -608,6 +614,12 @@
 	function workspaceLabel(path: string) {
 		const parts = path.replace(/\\/g, '/').split('/');
 		return parts[parts.length - 1] || path;
+	}
+
+	function modelFileName(path: string | null | undefined) {
+		if (!path) return 'none';
+		const normalized = path.replace(/\\/g, '/');
+		return normalized.split('/').pop() || path;
 	}
 
 	onMount(() => {
@@ -1282,6 +1294,22 @@
 						<span class="ov-key">provider</span>
 						<span class="ov-val" class:ov-ok={provider?.healthy}
 							>{provider?.activeProvider || 'none'}</span
+						>
+					</div>
+					<div class="ov-row">
+						<span class="ov-key">model</span>
+						<span
+							class="ov-val ov-ellipsis ov-model"
+							title={provider?.resolved?.modelPath ?? provider?.config?.modelPath ?? 'No model selected'}
+							>{modelFileName(provider?.resolved?.modelPath ?? provider?.config?.modelPath)}</span
+						>
+					</div>
+					<div class="ov-row">
+						<span class="ov-key">embedding</span>
+						<span
+							class="ov-val ov-ellipsis ov-model"
+							title={embeddingModelPath ?? 'No embedding model selected'}
+							>{modelFileName(embeddingModelPath)}</span
 						>
 					</div>
 				</div>
@@ -2399,6 +2427,10 @@
 		flex-shrink: 0;
 		color: var(--text-primary);
 		font-size: 0.78rem;
+	}
+	.ov-model {
+		min-width: 0;
+		max-width: 68%;
 	}
 	.ov-val.ov-ok {
 		color: var(--success);
