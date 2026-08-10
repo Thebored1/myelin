@@ -152,8 +152,27 @@ export function createDocumentSession(ctx: Record<string, any>) {
 		}
 		void ctx.fetchRelatedNotes();
 	}
-	
 
-	return { loadCurrentNote, refreshCurrentNoteFromBackend };
+	async function deleteCurrent() {
+		if (!ctx.note) return;
+		ctx.isBusy = true;
+		try {
+			await invoke('delete_note', { noteId: ctx.note.id });
+			await ctx.goToHome();
+		} finally {
+			ctx.isBusy = false;
+		}
+	}
+
+	async function duplicateCurrent() {
+		if (!ctx.note) return;
+		ctx.isBusy = true;
+		try {
+			const duplicated = await invoke<NoteDocument>('duplicate_note', { noteId: ctx.note.id });
+			ctx.safeNavigate(`/notes/${encodeURIComponent(duplicated.id)}`);
+		} finally {
+			ctx.isBusy = false;
+		}
+	}
+	return { loadCurrentNote, refreshCurrentNoteFromBackend, deleteCurrent, duplicateCurrent };
 }
-

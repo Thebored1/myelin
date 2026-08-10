@@ -555,29 +555,6 @@ export function createNotePageController() {
 			}
 		}
 	
-		async function deleteNote() {
-			if (!note) return;
-			isBusy = true;
-			try {
-				await invoke('delete_note', { noteId: note.id });
-				await goto(resolve('/'));
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		async function duplicateNote() {
-			if (!note) return;
-			isBusy = true;
-			try {
-				const duplicated = await invoke<NoteDocument>('duplicate_note', { noteId: note.id });
-				// Navigate and reload
-				safeNavigate(`/notes/${encodeURIComponent(duplicated.id)}`);
-			} finally {
-				isBusy = false;
-			}
-		}
-	
 		function requestDeleteAttachedNote() {
 			deleteAttachedNoteDialog?.showModal();
 		}
@@ -840,10 +817,16 @@ export function createNotePageController() {
 			get message() { return message; },
 			set message(value) { message = value; },
 			fetchRelatedNotes: () => editorSession.fetchRelatedNotes(),
-			get vditorInstance() { return vditorInstance; }
+			get vditorInstance() { return vditorInstance; },
+			get isBusy() { return isBusy; },
+			set isBusy(value) { isBusy = value; },
+			goToHome: () => goto(resolve('/')),
+			safeNavigate: (url: string) => navigationSession.safeNavigate(url)
 		});
 		const loadCurrentNote = documentSession.loadCurrentNote;
 		const refreshCurrentNoteFromBackend = documentSession.refreshCurrentNoteFromBackend;
+		const deleteNote = documentSession.deleteCurrent;
+		const duplicateNote = documentSession.duplicateCurrent;
 		const streamingSession = createStreamingSession({
 			get noteStreamBackup() { return noteStreamBackup; },
 			set noteStreamBackup(value) { noteStreamBackup = value; },
