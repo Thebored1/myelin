@@ -57,6 +57,7 @@ import { createStreamingSession } from './sessions/streaming.svelte';
 import { createEditorSession } from './sessions/editor.svelte';
 import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
+import { createSourceSession } from './sessions/source.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -455,84 +456,6 @@ export function createNotePageController() {
 			);
 		}
 	
-		// The viewer extracted the whole document's sections (PDF pages / EPUB
-		// chapters / HTML buckets). Hand them to the backend so every section's KV
-		// snapshot is evaluated once, in the background, and saved to disk — by the
-		// time the user asks, the active section restores in milliseconds.
-		async function handleSectionsReady(sections: ActiveSection[]) {
-			if (!sections.length) return;
-			const aiNoteId = activeAiNoteId();
-			if (!aiNoteId) return;
-			// Optimistic start: show the bar immediately; the backend refines it with
-			// progress events and always emits a terminal event with which we can stop
-			// the elapsed-time clock.
-			sectionCache = {
-				done: 0,
-				total: sections.length,
-				sectionDone: 0,
-				sectionTotal: sections.length,
-				label: sections[0]?.label ?? '',
-				profile: '',
-				startedAt: performance.now(),
-				finished: false,
-				failed: 0,
-				failedDetails: [],
-				elapsedMs: null
-			};
-			try {
-				await invoke('cache_note_sections', {
-					noteId: aiNoteId,
-					sections,
-					activeSectionKey: activeSection?.key ?? sections[0]?.key ?? null,
-					interactionMode: null
-				});
-			} catch (error) {
-				if (sectionCache && !sectionCache.finished) {
-					sectionCache = {
-						...sectionCache,
-						failed: Math.max(sectionCache.failed, sectionCache.total - sectionCache.done),
-						finished: true,
-						elapsedMs: Math.max(0, performance.now() - sectionCache.startedAt)
-					};
-				}
-				console.debug('Section pre-cache skipped:', error);
-			}
-		}
-	
-		function formatSectionCacheDuration(milliseconds: number): string {
-			if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
-			const seconds = milliseconds / 1000;
-			if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
-			const minutes = Math.floor(seconds / 60);
-			return `${minutes}m ${Math.round(seconds % 60)}s`;
-		}
-	
-		async function openAttachedNote() {
-			if (!note || !isSourceMaterial) return;
-			if (!scratchpadSavedId) {
-				const created = await invoke<NoteDocument>('create_note', {
-					title: draftTitle,
-					sourcePdf: activeSourceId,
-					notebook: openNoteNotebook()
-				});
-				scratchpadSavedId = created.id;
-				draftTitle = created.title;
-				draftBody = created.body;
-				draftTags = created.tags.join(', ');
-				chatMessages = created.chatHistory || [];
-			} else {
-				const workingNote = await invoke<NoteDocument>('load_note', { noteId: scratchpadSavedId });
-				draftTitle = workingNote.title;
-				draftBody = workingNote.body;
-				draftTags = workingNote.tags.join(', ');
-				chatMessages = workingNote.chatHistory || [];
-			}
-			showAttachedNote = true;
-			noteOpened(scratchpadSavedId, 'chat');
-			await tick();
-			setTimeout(() => initVditor(), 100);
-		}
-	
 		const PANE_MIN_WIDTH = 26 * 16;
 		const SIDEBAR_MIN_WIDTH = 320;
 		let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
@@ -590,10 +513,6 @@ export function createNotePageController() {
 					}, 50);
 				}
 			}
-		}
-	
-		function handlePdfQuote(text: string, page: number) {
-			appendToNoteBody(`\n> ${text}\n> *(Page ${page})*\n\n`);
 		}
 	
 		function focusEditor() {
@@ -851,82 +770,6 @@ export function createNotePageController() {
 			mathDialog?.close();
 		}
 	
-		function handleAnnotationsChange(anns: PdfAnnotation[]) {
-			if (note) {
-				note.annotations = anns;
-				triggerAutoSave();
-			}
-		}
-	
-		function handleImageExtract(base64: string) {
-			appendToNoteBody(`\n\n![Extracted Image](${base64})\n\n`);
-		}
-	
-		function handlePdfTextExtracted(text: string) {
-			if (!activeSourceId || !note) return;
-			const sourceId = activeSourceId;
-			const sourceTitle = isSourceMaterial ? note.title : `${draftTitle} — attached PDF`;
-			pdfIngestionStatus = 'indexing';
-			pdfIngestionError = null;
-			const startedAt = Date.now();
-			const startEntry: DebugTraceEntry = {
-				time: startedAt,
-				kind: 'config',
-				msg: `PDF indexing started: ${sourceTitle} (${sourceId}), ${text.length.toLocaleString()} extracted characters`
-			};
-			pendingDebugTrace = [...pendingDebugTrace, startEntry];
-			pdfIngestionPromise = (async () => {
-				try {
-					const result = await invoke<{ status: 'cached' | 'indexed' | 'empty'; chunks: number }>(
-						'ensure_document_ingested',
-						{ docId: sourceId, source: sourceTitle, text }
-					);
-					const entry: DebugTraceEntry = {
-						time: Date.now(),
-						kind: 'done',
-						msg: `PDF indexing ${result.status}: ${sourceTitle} (${result.chunks} chunks)`
-					};
-					pendingDebugTrace = [...pendingDebugTrace, entry];
-					if (debugInfo) debugInfo = { ...debugInfo, trace: [...debugInfo.trace, startEntry, entry] };
-					if (activeSourceId === sourceId) pdfIngestionStatus = result.status;
-				} catch (error) {
-					console.error('Failed to index PDF text', error);
-					const detail =
-						typeof error === 'string'
-							? error
-							: error instanceof Error
-								? error.message
-								: JSON.stringify(error) || String(error);
-					const entry: DebugTraceEntry = {
-						time: Date.now(),
-						kind: 'error',
-						msg: `PDF indexing failed for ${sourceTitle} (${sourceId}): ${detail}`
-					};
-					pendingDebugTrace = [...pendingDebugTrace, entry];
-					showDebugWindow = true;
-					debugInfo = debugInfo
-						? { ...debugInfo, trace: [...debugInfo.trace, startEntry, entry] }
-						: {
-								requestStart: startedAt,
-								firstChunk: null,
-								generationStart: null,
-								generationEnd: null,
-								done: entry.time,
-								promptTokens: 0,
-								completionTokens: 0,
-								totalTokens: 0,
-								turnCount: 0,
-								replyChars: 0,
-								trace: [startEntry, entry]
-							};
-					if (activeSourceId === sourceId) {
-						pdfIngestionStatus = 'failed';
-						pdfIngestionError = detail;
-					}
-				}
-			})();
-		}
-	
 		async function saveNote() {
 			if (!note) return;
 			isBusy = true;
@@ -1011,25 +854,20 @@ export function createNotePageController() {
 		function requestDeleteAttachedNote() {
 			deleteAttachedNoteDialog?.showModal();
 		}
-	
+
 		async function confirmDeleteAttachedNote() {
 			deleteAttachedNoteDialog?.close();
 			const targetId = isSourceMaterial ? scratchpadSavedId : note?.sourcePdf ? note.id : null;
 			const sourceId = isSourceMaterial ? activeSourceId : (note?.sourcePdf ?? activeSourceId);
 			isBusy = true;
 			try {
-				if (targetId) {
-					await invoke('delete_note', { noteId: targetId });
-				}
+				if (targetId) await invoke('delete_note', { noteId: targetId });
 				if (!isSourceMaterial && sourceId) {
 					navigationSession.isProgrammaticNavigation = true;
 					await goto(`/notes/${encodeURIComponent(sourceId)}`);
 					return;
 				}
-				if (saveTimer) {
-					clearTimeout(saveTimer);
-					saveTimer = null;
-				}
+				if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 				destroyEditorInstance();
 				draftBody = '';
 				scratchpadSavedId = null;
@@ -1040,161 +878,11 @@ export function createNotePageController() {
 				isBusy = false;
 			}
 		}
-	
+
 		function cancelDeleteAttachedNote() {
 			deleteAttachedNoteDialog?.close();
 		}
-		async function openAttachPdfDialog() {
-			pdfSearchQuery = '';
-			pdfSelectedIndex = 0;
-			isBusy = true;
-			try {
-				const allDocs = await invoke<NoteDocument[]>('get_all_note_documents');
-				const referenced = new Set(
-					allDocs.map((d) => d.sourcePdf).filter((id): id is string => !!id)
-				);
-				const isCopyName = (d: NoteDocument) => {
-					const name = d.relativePath.split(/[\\/]/).pop()?.toLowerCase() ?? '';
-					return (
-						/ \d+\.(pdf|epub)$/.test(name) ||
-						/ [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|epub)$/.test(name)
-					);
-				};
-				pdfNotesList = allDocs.filter(
-					(d) =>
-						d.relativePath.toLowerCase().endsWith('.pdf') && !(referenced.has(d.id) && isCopyName(d))
-				);
-			} catch (err) {
-				message = `Failed to load PDFs: ${err}`;
-			} finally {
-				isBusy = false;
-			}
-			attachPdfDialog?.showModal();
-			setTimeout(() => {
-				const input = attachPdfDialog?.querySelector('.link-search-input') as HTMLInputElement | null;
-				input?.focus();
-			}, 50);
-		}
-	
-		async function attachPdf(pdfNote: NoteDocument, alreadyImported = false) {
-			if (!note) return;
-			attachPdfDialog?.close();
-			isBusy = true;
-			let createdPdfId: string | null = alreadyImported ? pdfNote.id : null;
-			try {
-				const attachmentPdf = alreadyImported
-					? pdfNote
-					: await invoke<NoteDocument>('clone_pdf_for_attachment', {
-							noteId: pdfNote.id,
-							notebook: openNoteNotebook()
-						});
-				createdPdfId = attachmentPdf.id;
-				const saved = await invoke<NoteDocument>('save_note', {
-					noteId: note.id,
-					title: draftTitle,
-					tags: draftTags
-						.split(',')
-						.map((t: string) => t.trim())
-						.filter(Boolean),
-					body: draftBody,
-					sourcePdf: attachmentPdf.id,
-					annotations: note.annotations
-				});
-				note = saved;
-				activeSourceId = attachmentPdf.id;
-				sectionCache = null;
-				const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: attachmentPdf.id });
-				activeSourceBytes = new Uint8Array(bytes);
-				sourceMaterialType = 'pdf';
-				showAttachedNote = true;
-				saveStatus = 'saved';
-				destroyEditorInstance();
-				await tick();
-				initVditor();
-			} catch (err) {
-				if (createdPdfId) {
-					try {
-						await invoke('delete_note', { noteId: createdPdfId });
-					} catch (cleanupError) {
-						console.warn('Failed to clean up copied PDF after attachment failure', cleanupError);
-					}
-				}
-				message = `Failed to attach PDF: ${err}`;
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		function requestDetachPdf() {
-			detachPdfDialog?.showModal();
-		}
-	
-		async function confirmDetachPdf() {
-			detachPdfDialog?.close();
-			if (!note) return;
-			isBusy = true;
-			try {
-				const saved = await invoke<NoteDocument>('save_note', {
-					noteId: note.id,
-					title: draftTitle,
-					tags: draftTags
-						.split(',')
-						.map((t: string) => t.trim())
-						.filter(Boolean),
-					body: draftBody,
-					sourcePdf: null,
-					annotations: note.annotations
-				});
-				note = saved;
-				activeSourceId = null;
-				activeSourceBytes = null;
-				activeSection = null;
-				sectionCache = null;
-				saveStatus = 'saved';
-				destroyEditorInstance();
-				await tick();
-				initVditor();
-			} catch (err) {
-				message = `Failed to detach PDF: ${err}`;
-			} finally {
-				isBusy = false;
-			}
-		}
-	
-		async function browseAndAttachPdf() {
-			const selected = await openFileDialog({
-				multiple: false,
-				filters: [{ name: 'Documents', extensions: ['pdf', 'epub', 'tex', 'ipynb', 'md'] }]
-			});
-			if (!selected) return;
-			const filePath = selected;
-			attachPdfDialog?.close();
-			isBusy = true;
-			try {
-				const pdfNote = await invoke<NoteDocument>('import_pdf_file', {
-					filePath,
-					notebook: openNoteNotebook()
-				});
-				await attachPdf(pdfNote, true);
-			} catch (err) {
-				message = `Failed to import PDF: ${err}`;
-				isBusy = false;
-			}
-		}
-	
-		function handlePdfSearchKeydown(e: KeyboardEvent) {
-			if (e.key === 'ArrowDown') {
-				e.preventDefault();
-				pdfSelectedIndex = Math.min(filteredPdfs.length - 1, pdfSelectedIndex + 1);
-			} else if (e.key === 'ArrowUp') {
-				e.preventDefault();
-				pdfSelectedIndex = Math.max(0, pdfSelectedIndex - 1);
-			} else if (e.key === 'Enter') {
-				e.preventDefault();
-				if (filteredPdfs.length > 0) attachPdf(filteredPdfs[pdfSelectedIndex]);
-			}
-		}
-	
+
 		function buildPreviewExpandHref() {
 			const targetId = linkingSession.previewNoteTarget?.sourcePdf ?? linkingSession.previewNoteTarget?.id;
 			const currentNoteId = note?.id;
@@ -1475,7 +1163,7 @@ export function createNotePageController() {
 			set relatedNotes(value) { relatedNotes = value; },
 			get note() { return note; },
 			localVditorCdn,
-			openAttachPdfDialog,
+			openAttachPdfDialog: () => sourceSession.openAttachPdfDialog(),
 			openMathDialog,
 			openLinkDialog: () => {
 				saveCursorPosition();
@@ -1526,6 +1214,80 @@ export function createNotePageController() {
 		const handleBeforeUnload = navigationSession.handleBeforeUnload;
 		const confirmNavigation = navigationSession.confirmNavigation;
 		const cancelNavigation = navigationSession.cancelNavigation;
+		const sourceSession = createSourceSession({
+			get note() { return note; },
+			set note(value) { note = value; },
+			get isSourceMaterial() { return isSourceMaterial; },
+			activeAiNoteId,
+			get activeSection() { return activeSection; },
+			get sectionCache() { return sectionCache; },
+			set sectionCache(value) { sectionCache = value; },
+			get scratchpadSavedId() { return scratchpadSavedId; },
+			set scratchpadSavedId(value) { scratchpadSavedId = value; },
+			get draftTitle() { return draftTitle; },
+			set draftTitle(value) { draftTitle = value; },
+			get draftBody() { return draftBody; },
+			set draftBody(value) { draftBody = value; },
+			get draftTags() { return draftTags; },
+			set draftTags(value) { draftTags = value; },
+			get chatMessages() { return chatMessages; },
+			set chatMessages(value) { chatMessages = value; },
+			get showAttachedNote() { return showAttachedNote; },
+			set showAttachedNote(value) { showAttachedNote = value; },
+			get activeSourceId() { return activeSourceId; },
+			set activeSourceId(value) { activeSourceId = value; },
+			get activeSourceBytes() { return activeSourceBytes; },
+			set activeSourceBytes(value) { activeSourceBytes = value; },
+			get sourceMaterialType() { return sourceMaterialType; },
+			set sourceMaterialType(value) { sourceMaterialType = value; },
+			set activeSection(value) { activeSection = value; },
+			get pendingDebugTrace() { return pendingDebugTrace; },
+			set pendingDebugTrace(value) { pendingDebugTrace = value; },
+			get debugInfo() { return debugInfo; },
+			set debugInfo(value) { debugInfo = value; },
+			get showDebugWindow() { return showDebugWindow; },
+			set showDebugWindow(value) { showDebugWindow = value; },
+			get pdfIngestionStatus() { return pdfIngestionStatus; },
+			set pdfIngestionStatus(value) { pdfIngestionStatus = value; },
+			get pdfIngestionError() { return pdfIngestionError; },
+			set pdfIngestionError(value) { pdfIngestionError = value; },
+			get pdfIngestionPromise() { return pdfIngestionPromise; },
+			set pdfIngestionPromise(value) { pdfIngestionPromise = value; },
+			get pdfSearchQuery() { return pdfSearchQuery; },
+			set pdfSearchQuery(value) { pdfSearchQuery = value; },
+			get pdfSelectedIndex() { return pdfSelectedIndex; },
+			set pdfSelectedIndex(value) { pdfSelectedIndex = value; },
+			get pdfNotesList() { return pdfNotesList; },
+			set pdfNotesList(value) { pdfNotesList = value; },
+			get filteredPdfs() { return filteredPdfs; },
+			get attachPdfDialog() { return attachPdfDialog; },
+			get detachPdfDialog() { return detachPdfDialog; },
+			get message() { return message; },
+			set message(value) { message = value; },
+			get isBusy() { return isBusy; },
+			set isBusy(value) { isBusy = value; },
+			get saveStatus() { return saveStatus; },
+			set saveStatus(value) { saveStatus = value; },
+			openNoteNotebook,
+			tick,
+			appendToNoteBody: (value: string) => appendToNoteBody(value),
+			triggerAutoSave,
+			destroyEditorInstance,
+			initVditor: () => editorSession.initVditor()
+		});
+		const handleSectionsReady = sourceSession.handleSectionsReady;
+		const formatSectionCacheDuration = sourceSession.formatSectionCacheDuration;
+		const openAttachedNote = sourceSession.openAttachedNote;
+		const handlePdfQuote = sourceSession.handlePdfQuote;
+		const handleAnnotationsChange = sourceSession.handleAnnotationsChange;
+		const handleImageExtract = sourceSession.handleImageExtract;
+		const handlePdfTextExtracted = sourceSession.handlePdfTextExtracted;
+		const openAttachPdfDialog = sourceSession.openAttachPdfDialog;
+		const attachPdf = sourceSession.attachPdf;
+		const requestDetachPdf = sourceSession.requestDetachPdf;
+		const confirmDetachPdf = sourceSession.confirmDetachPdf;
+		const browseAndAttachPdf = sourceSession.browseAndAttachPdf;
+		const handlePdfSearchKeydown = sourceSession.handlePdfSearchKeydown;
 		const chatContext: Record<string, any> = {
 			get activeChatRequestId() { return activeChatRequestId; },
 			set activeChatRequestId(value) { activeChatRequestId = value; },
@@ -1706,6 +1468,7 @@ export function createNotePageController() {
 			noteClosed();
 			if (toolbarResizeObserver) toolbarResizeObserver.disconnect();
 			editorSession.dispose();
+			sourceSession.dispose();
 			if (vditorInstance) vditorInstance.destroy();
 			if (typeof document !== 'undefined') {
 				document.removeEventListener('selectionchange', handleGlobalSelectionChange);
