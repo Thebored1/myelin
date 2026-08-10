@@ -55,6 +55,7 @@ import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
 import { createLayoutSession } from './sessions/layout.svelte';
+import { createMathSession } from './sessions/math.svelte';
 
 export function createNotePageController() {
 		let requireToolApproval = $state(false);
@@ -347,54 +348,6 @@ export function createNotePageController() {
 		}
 	
 		let userScrolledUp = false;
-		let mathDialog: HTMLDialogElement | undefined = $state();
-		let mathValue = $state('');
-		let mathLiveReady = $state(false);
-		let katexRenderer = $state<any>(null);
-		// Non-empty when the current formula won't render in KaTeX (the engine Vditor
-		// uses for $$…$$). Surfaced in the dialog so a bad formula isn't inserted only
-		// to silently fail — or render as a red error — later in the note.
-		let mathError = $state('');
-	
-		function mathToKatex(raw: string): string {
-			// MathLive emits \\placeholder tokens KaTeX doesn't know; map them to a box.
-			return raw.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
-		}
-	
-		async function openMathDialog() {
-			try {
-				const [{ default: katex }, _mathlive] = await Promise.all([
-					import('katex'),
-					import('mathlive')
-				]);
-				katexRenderer = katex;
-				mathLiveReady = true;
-				mathValue = '';
-				mathDialog?.showModal();
-			} catch (error) {
-				console.error('Failed to load math support', error);
-				message = 'Could not load math support.';
-			}
-		}
-	
-		$effect(() => {
-			const v = mathValue;
-			if (!v.trim()) {
-				mathError = '';
-				return;
-			}
-			if (!katexRenderer) {
-				mathError = '';
-				return;
-			}
-			try {
-				katexRenderer.renderToString(mathToKatex(v), { throwOnError: true, displayMode: true });
-				mathError = '';
-			} catch (e: any) {
-				mathError = e?.message ? String(e.message) : 'KaTeX cannot render this formula.';
-			}
-		});
-	
 		let blockCache: Record<string, string> = {};
 		let transclusionObserver: MutationObserver | null = null;
 	
@@ -481,20 +434,6 @@ export function createNotePageController() {
 			saveTimer = setTimeout(() => {
 				void saveNote();
 			}, 1000);
-		}
-	
-		function insertMath() {
-			if (vditorInstance && mathValue) {
-				const cleanMath = mathToKatex(mathValue);
-				if (
-					mathError &&
-					!confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)
-				) {
-					return; // keep the dialog open so the user can fix it
-				}
-				vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
-			}
-			mathDialog?.close();
 		}
 	
 		async function saveNote() {
@@ -730,6 +669,9 @@ export function createNotePageController() {
 		const restoreSelectionTextOffset = selectionSession.restoreSelectionTextOffset;
 		const saveCursorPosition = selectionSession.saveCursorPosition;
 		const insertAtSavedCursor = selectionSession.insertAtSavedCursor;
+		const mathSession = createMathSession({ get vditorInstance() { return vditorInstance; } });
+		const openMathDialog = mathSession.openMathDialog;
+		const insertMath = mathSession.insertMath;
 		const layoutSession = createLayoutSession({
 			PANE_MIN_WIDTH,
 			SIDEBAR_MIN_WIDTH,
@@ -1501,18 +1443,7 @@ export function createNotePageController() {
 		restoreSelectionTextOffset,
 		saveCursorPosition,
 		insertAtSavedCursor,
-		get mathDialog() { return mathDialog; },
-		set mathDialog(value: typeof mathDialog) { mathDialog = value; },
-		get mathValue() { return mathValue; },
-		set mathValue(value: typeof mathValue) { mathValue = value; },
-		get mathLiveReady() { return mathLiveReady; },
-		set mathLiveReady(value: typeof mathLiveReady) { mathLiveReady = value; },
-		get katexRenderer() { return katexRenderer; },
-		set katexRenderer(value: typeof katexRenderer) { katexRenderer = value; },
-		get mathError() { return mathError; },
-		set mathError(value: typeof mathError) { mathError = value; },
-		mathToKatex,
-		openMathDialog,
+		...mathSession,
 		get blockCache() { return blockCache; },
 		set blockCache(value: typeof blockCache) { blockCache = value; },
 		get transclusionObserver() { return transclusionObserver; },
@@ -1555,7 +1486,6 @@ export function createNotePageController() {
 		appendToNoteBody,
 		destroyEditorInstance,
 		triggerAutoSave,
-		insertMath,
 		pickLatexImage,
 		compileTex,
 		parseLatexError,
