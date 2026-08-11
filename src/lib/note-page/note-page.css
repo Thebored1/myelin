@@ -488,8 +488,15 @@
 	}
 
 	:global(.vditor-wrapper:not(.toolbar-expanded) .vditor-toolbar) {
-		max-height: 48px;
+		max-height: 52px;
+		overflow: hidden !important;
+		white-space: nowrap;
+	}
+
+	:global(.vditor-wrapper.toolbar-expanded .vditor-toolbar) {
+		max-height: none;
 		overflow: visible !important;
+		white-space: normal;
 	}
 
 	/* Force all upward-facing tooltips (__n, __ne, __nw) to point downwards vertically */
@@ -641,6 +648,49 @@
 		transition: max-height 0.2s ease-out;
 		position: relative !important;
 		z-index: 30 !important;
+	}
+
+	/* Vditor's toolbar items float. Clear those floats so wrapped rows have a
+	   real height, then clip only the collapsed toolbar. */
+	.vditor-toolbar::after {
+		content: '';
+		display: block;
+		clear: both;
+	}
+
+	/* Keep the overflow control above the toolbar while reserving its space in
+	   the toolbar's right padding. */
+	.toolbar-note-actions-container {
+		position: absolute;
+		top: 8px;
+		right: 12px;
+		z-index: 45;
+		display: flex;
+		align-items: center;
+		gap: var(--space-1);
+	}
+
+	.toolbar-close-note-container {
+		position: absolute;
+		top: 8px;
+		z-index: 45;
+	}
+
+	.toolbar-close-note-btn {
+		height: 28px;
+		padding: 0 var(--space-3);
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		color: var(--text-secondary);
+		font-family: var(--font-mono);
+		font-size: 0.75rem;
+		cursor: pointer;
+	}
+
+	.toolbar-close-note-btn:hover:not(:disabled) {
+		color: var(--text-primary);
+		background: var(--hover-overlay);
 	}
 
 	.vditor-wrapper.has-pdf-notePage.note .vditor-toolbar {

@@ -1,6 +1,6 @@
 import { onDestroy, onMount } from 'svelte';
 import { page } from '$app/state';
-import { showSidebarToggle } from '$lib/stores';
+import { noteSidebarOpen, showSidebarToggle } from '$lib/stores';
 import { noteClosed } from '$lib/llamaWarm';
 import { installAiEventBridge } from './aiEvents.svelte';
 
@@ -9,6 +9,9 @@ export function createNotePageLifecycle(ctx: Record<string, any>) {
 	let debugTraceEl = $state<HTMLDivElement | undefined>();
 
 	onMount(() => {
+		// Do not reopen the note sidebar just because an earlier session left it
+		// open. The header toggle remains the explicit way to show it.
+		noteSidebarOpen.set(false);
 		let savedInteractionMode: string | null = null;
 		let savedSidebarWidth: string | null = null;
 		try {

@@ -32,16 +32,45 @@ export function createNotePageUtilities(ctx: Record<string, any>) {
 
 	function updateToolbarOverflow() {
 		const toolbar = ctx.vditorContainer?.querySelector('.vditor-toolbar');
-		if (!toolbar) return;
+		if (!toolbar) {
+			ctx.toolbarNeedsToggle = false;
+			return;
+		}
 		const items = toolbar.querySelectorAll('.vditor-toolbar__item, .vditor-toolbar__divider');
-		items.forEach((item: any) => {
-			if (!ctx.toolbarExpanded && item.offsetTop > 20) {
-				item.style.visibility = 'hidden';
-				item.style.pointerEvents = 'none';
-			} else {
-				item.style.visibility = 'visible';
-				item.style.pointerEvents = 'auto';
-			}
+		if (items.length === 0) {
+			ctx.toolbarNeedsToggle = false;
+			return;
+		}
+
+		// Vditor lays toolbar items out with floats. Measuring offsetTop is
+		// unreliable here: wrapped items can still report the first row, and
+		// hiding them one-by-one changes the layout while it is being measured.
+		// Measure the complete unhidden row instead, then let CSS clip the
+		// overflow in collapsed mode and wrap it in expanded mode.
+		const toolbarStyle = getComputedStyle(toolbar);
+		const paddingLeft = parseFloat(toolbarStyle.paddingLeft) || 0;
+		const paddingRight = parseFloat(toolbarStyle.paddingRight) || 0;
+		const availableWidth = toolbar.clientWidth - paddingLeft - paddingRight;
+		const totalWidth = Array.from(items).reduce<number>((width, item) => {
+			const element = item as HTMLElement;
+			const style = getComputedStyle(element);
+			return (
+				width +
+				 element.getBoundingClientRect().width +
+				 (parseFloat(style.marginLeft) || 0) +
+				 (parseFloat(style.marginRight) || 0)
+			);
+		}, 0);
+
+		const needsToggle = availableWidth > 0 && totalWidth > availableWidth + 1;
+		ctx.toolbarNeedsToggle = needsToggle;
+		if (!needsToggle) ctx.toolbarExpanded = false;
+
+		// Clear styles left by older toolbar instances or a prior measurement.
+		items.forEach((item: Element) => {
+			const element = item as HTMLElement;
+			element.style.removeProperty('visibility');
+			element.style.removeProperty('pointer-events');
 		});
 	}
 

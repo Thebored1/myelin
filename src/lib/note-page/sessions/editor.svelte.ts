@@ -74,16 +74,9 @@ export function createEditorSession(ctx: Record<string, any>) {
 					const toolbar = ctx.vditorContainer?.querySelector('.vditor-toolbar');
 					if (toolbar) {
 						ctx.toolbarResizeObserver = new ResizeObserver(() => {
-							if (toolbar.scrollHeight > 55) {
-								ctx.toolbarNeedsToggle = true;
-							} else {
-								ctx.toolbarNeedsToggle = false;
-								ctx.toolbarExpanded = false;
-							}
 							ctx.updateToolbarOverflow();
 						});
 						ctx.toolbarResizeObserver.observe(toolbar);
-						if (toolbar.scrollHeight > 55) ctx.toolbarNeedsToggle = true;
 						ctx.updateToolbarOverflow();
 
 						const fsBtn = toolbar.querySelector('button[data-type="fullscreen"]');
