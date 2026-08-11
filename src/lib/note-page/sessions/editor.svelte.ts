@@ -131,7 +131,15 @@ export function createEditorSession(ctx: Record<string, any>) {
 		if (!ctx.toolsReady || !ctx.shouldInitEditor || !ctx.vditorContainer || ctx.vditorInstance) return;
 		if (!ctx.VditorConstructor && !ctx.vditorLoading) {
 			ctx.vditorLoading = true;
-			Promise.all([import('vditor'), import('vditor/dist/index.css')])
+			// Vditor's toolbar uses an SVG symbol sprite for its built-in icons.
+			// Keep this import inside the lazy editor path so the editor (and its
+			// assets) remain lazy-loaded, while ensuring the sprite exists before
+			// Vditor renders the toolbar.
+			Promise.all([
+				import('vditor'),
+				import('vditor/dist/index.css'),
+				import('vditor/dist/js/icons/material.js')
+			])
 				.then(([{ default: component }]) => {
 					ctx.VditorConstructor = component;
 					ctx.vditorLoading = false;
