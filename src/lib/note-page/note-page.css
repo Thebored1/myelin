@@ -491,12 +491,14 @@
 		max-height: 52px;
 		overflow: hidden !important;
 		white-space: nowrap;
+		flex-wrap: nowrap !important;
 	}
 
 	:global(.vditor-wrapper.toolbar-expanded .vditor-toolbar) {
 		max-height: none;
 		overflow: visible !important;
 		white-space: normal;
+		flex-wrap: wrap !important;
 	}
 
 	/* Force all upward-facing tooltips (__n, __ne, __nw) to point downwards vertically */
@@ -586,7 +588,15 @@
 
 	.vditor-toolbar {
 		min-width: 0 !important;
-		flex-wrap: wrap !important;
+		display: flex !important;
+		align-items: flex-start;
+		flex-wrap: nowrap !important;
+	}
+
+	.vditor-toolbar > .vditor-toolbar__item,
+	.vditor-toolbar > .vditor-toolbar__divider {
+		float: none !important;
+		flex: 0 0 auto;
 	}
 
 	.vditor-reset * {
@@ -648,14 +658,6 @@
 		transition: max-height 0.2s ease-out;
 		position: relative !important;
 		z-index: 30 !important;
-	}
-
-	/* Vditor's toolbar items float. Clear those floats so wrapped rows have a
-	   real height, then clip only the collapsed toolbar. */
-	.vditor-toolbar::after {
-		content: '';
-		display: block;
-		clear: both;
 	}
 
 	/* Keep the overflow control above the toolbar while reserving its space in
