@@ -168,6 +168,16 @@ describe('theme colors', () => {
 		expect(explicit['bg-panel']).toBe('#FFFFFF');
 	});
 
+	it('keeps the dark main surface visibly lighter than the menu area', () => {
+		const compiled = compileTheme(darkTheme);
+		expect(relativeLuminance(compiled['bg-page'] ?? '#000000')).toBeGreaterThan(
+			3 * relativeLuminance(compiled['bg-panel'] ?? '#FFFFFF')
+		);
+		expect(relativeLuminance(compiled['bg-elevated'] ?? '#000000')).toBeGreaterThan(
+			relativeLuminance(compiled['bg-page'] ?? '#FFFFFF')
+		);
+	});
+
 	it('rejects unknown and malformed custom token values', () => {
 		expect(() => normalizeTheme({ ...darkTheme, id: 'custom', readonly: false, tokens: { 'not-a-token': '#FFFFFF' } as never })).toThrow();
 	});

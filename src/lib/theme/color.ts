@@ -261,7 +261,7 @@ export function deriveThemeTokens(
 	}>
 ): ThemeTokens {
 	const page = normalizeHex(palette.page ?? (mode === 'dark' ? '#020202' : '#F4F2EF'));
-	const panel = normalizeHex(palette.panel ?? (mode === 'dark' ? '#101010' : '#FFFFFF'));
+	const panel = normalizeHex(palette.panel ?? (mode === 'dark' ? '#1C1B1A' : '#FFFFFF'));
 	const text = normalizeHex(palette.text ?? (mode === 'dark' ? '#EEEEEE' : '#1F1D1C'));
 	const muted = normalizeHex(
 		palette.mutedText ?? (mode === 'dark' ? '#A49D9A' : '#6E6A67')
@@ -279,7 +279,7 @@ export function deriveThemeTokens(
 		: ['#1F1D1C', '#2E2C2B', '#3D3A39', '#4D4947', '#5C5855', '#8A8380', '#A49D9A', '#CCC9C7', '#DDD9D5', '#E8E4E0'];
 	const overlay = mode === 'dark' ? '#FFFFFF0A' : '#0000000A';
 	const strongOverlay = mode === 'dark' ? '#FFFFFF14' : '#00000012';
-	const panelBlur = mode === 'dark' ? '#101010F0' : '#FFFFFFE6';
+	const panelBlur = mode === 'dark' ? '#1C1B1AF0' : '#FFFFFFE6';
 	const washed = washSurfaces(accent, mode, text, {
 		'bg-page': page,
 		'bg-panel': panel,

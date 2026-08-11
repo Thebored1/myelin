@@ -11,7 +11,7 @@
 	--accent-400: var(--accent-200);
 	--accent-500: var(--accent-300);
 	--surface-dark-primary: #020202;
-	--surface-dark-secondary: #101010;
+	--surface-dark-secondary: #1c1b1a;
 	--surface-light-primary: #eeeeee;
 	--surface-light-secondary: #fafafa;
 	--neutral-100: #d6d3d2;
@@ -38,7 +38,7 @@
 	--border-strong: #5c5855;
 	--border: var(--border-default);
 	--border-color: var(--border-default);
-	--bg-page: #101010;
+	--bg-page: #1c1b1a;
 	--bg-base: var(--bg-page);
 	--bg-body: var(--bg-page);
 	--bg-panel: #020202;
@@ -75,7 +75,7 @@
 	--success-fill: rgba(129, 199, 132, 0.06);
 	--warning-border: rgba(231, 184, 92, 0.3);
 	--warning-fill: rgba(231, 184, 92, 0.1);
-	--bg-panel-blur: rgba(16, 16, 16, 0.94);
+	--bg-panel-blur: rgba(28, 27, 26, 0.94);
 	--danger-text: #fecaca;
 	--danger-bg: rgba(239, 68, 68, 0.12);
 	--danger-bg-strong: rgba(239, 68, 68, 0.18);
