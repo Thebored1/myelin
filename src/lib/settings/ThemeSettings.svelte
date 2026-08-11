@@ -142,6 +142,8 @@
 	}
 
 	const draftContrast = $derived(editing ? contrastChecks(compileTheme(editing)) : []);
+
+	const previewTokens = $derived(new Map($availableThemes.map((theme) => [theme.id, compileTheme(theme)])));
 </script>
 
 <section class="settings-section theme-settings">
@@ -174,16 +176,17 @@
 
 	<div class="theme-gallery">
 		{#each $availableThemes as available}
+			{@const tokens = previewTokens.get(available.id)}
 			<button
 				class="theme-card"
 				class:active={available.id === $activeThemeId}
 				onclick={() => void selectTheme(available.id)}
 				disabled={busy}
 			>
-				<span class="theme-swatch" style={`background:${available.tokens['bg-page']}; color:${available.tokens['text-primary']}; border-color:${available.tokens['accent-100']}`}>
-					<span style={`background:${available.tokens['accent-100']}`}></span>
-					<span style={`background:${available.tokens['bg-panel']}`}></span>
-					<span style={`background:${available.tokens['text-primary']}`}></span>
+				<span class="theme-swatch" style={`background:${tokens?.['bg-page']}; color:${tokens?.['text-primary']}; border-color:${tokens?.['accent-100']}`}>
+					<span style={`background:${tokens?.['accent-100']}`}></span>
+					<span style={`background:${tokens?.['bg-panel']}`}></span>
+					<span style={`background:${tokens?.['text-primary']}`}></span>
 				</span>
 				<span class="theme-card-copy">
 					<strong>{available.name}</strong>
