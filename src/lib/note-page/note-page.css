@@ -718,6 +718,8 @@
 		transition:
 			transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
 			margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+		visibility: hidden;
+		pointer-events: none;
 		border-left: 1px solid var(--border-default);
 		border-radius: 0 !important;
 		box-shadow: -4px 0 24px var(--shadow-color);
@@ -726,6 +728,8 @@
 
 	.sidebar.open {
 		transform: translateX(0);
+		visibility: visible;
+		pointer-events: auto;
 	}
 
 	.sidebar-backdrop {
