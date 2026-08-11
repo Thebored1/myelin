@@ -47,8 +47,8 @@
 		color: var(--text-secondary);
 	}
 	.close-pdf-btn:hover {
-		color: var(--danger, #ef4444);
-		border-color: var(--danger, #ef4444) !important;
+		color: var(--danger);
+		border-color: var(--danger) !important;
 	}
 
 	.display-menu-container {
@@ -68,7 +68,7 @@
 		background: var(--bg-panel);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-md);
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+		box-shadow: 0 4px 12px var(--shadow-color);
 		padding: 0.5rem;
 		display: flex;
 		flex-direction: column;
@@ -219,7 +219,7 @@
 		background: var(--bg-panel);
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-md);
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+		box-shadow: 0 4px 12px var(--shadow-color);
 		z-index: 100;
 		padding: 0.25rem;
 		display: flex;

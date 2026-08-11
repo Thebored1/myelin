@@ -328,7 +328,7 @@
 									viewBox="0 0 24 24"
 									width="14"
 									height="14"
-									stroke="var(--danger, #ef4444)"
+									stroke="var(--danger)"
 									stroke-width="2"
 									fill="none"
 									stroke-linecap="round"

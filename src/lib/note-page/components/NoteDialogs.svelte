@@ -51,7 +51,7 @@
 			{/if}
 		</div>
 		{#if notePage.mathError}
-			<p style="margin: 8px 0 0; font-size: 0.8rem; color: var(--danger, #e5534b);">
+			<p style="margin: 8px 0 0; font-size: 0.8rem; color: var(--danger);">
 				⚠ Won't render in the note: {notePage.mathError}
 			</p>
 		{/if}
@@ -431,4 +431,3 @@
 		</div>
 	</div>
 </dialog>
-

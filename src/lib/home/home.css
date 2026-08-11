@@ -1425,7 +1425,7 @@
 		opacity: 1;
 	}
 	.subtask-remove:hover {
-		color: var(--danger, #ff4444);
+		color: var(--danger);
 	}
 	.subtask-add-hint {
 		margin-left: 56px;

@@ -104,7 +104,7 @@
 			border: 'none'
 		},
 		'.cm-activeLine': {
-			backgroundColor: 'color-mix(in srgb, var(--accent-200, #6ea8fe) 9%, transparent)'
+			backgroundColor: 'color-mix(in srgb, var(--accent-200) 9%, transparent)'
 		},
 		'.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text-primary)' },
 		'.cm-cursor': { borderLeftColor: 'var(--text-primary)' },
@@ -120,11 +120,11 @@
 
 	const latexHighlightStyle = HighlightStyle.define([
 		{ tag: [tags.keyword, tags.processingInstruction], color: 'var(--accent-200)' },
-		{ tag: [tags.tagName, tags.typeName, tags.className], color: '#4f7fd5' },
+		{ tag: [tags.tagName, tags.typeName, tags.className], color: 'var(--accent-200)' },
 		{ tag: [tags.string, tags.special(tags.string)], color: 'var(--success)' },
-		{ tag: [tags.number, tags.bool, tags.atom], color: '#9c6ade' },
+		{ tag: [tags.number, tags.bool, tags.atom], color: 'var(--accent-300)' },
 		{ tag: [tags.comment, tags.docComment], color: 'var(--text-secondary)', fontStyle: 'italic' },
-		{ tag: [tags.variableName, tags.propertyName, tags.attributeName], color: '#16856b' },
+		{ tag: [tags.variableName, tags.propertyName, tags.attributeName], color: 'var(--success)' },
 		{ tag: [tags.bracket, tags.paren, tags.punctuation], color: 'var(--neutral-500)' },
 		{ tag: [tags.strong], fontWeight: '700' },
 		{ tag: [tags.emphasis], fontStyle: 'italic' },
@@ -499,8 +499,8 @@
 
 <style>
 	.tex-toolbar {
-		--toolbar-icon-color: #586069;
-		--toolbar-icon-hover-color: #4285f4;
+		--toolbar-icon-color: var(--text-secondary);
+		--toolbar-icon-hover-color: var(--accent-100);
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
@@ -518,8 +518,8 @@
 		scrollbar-width: none;
 	}
 	.tex-toolbar.dark {
-		--toolbar-icon-color: #b9b9b9;
-		--toolbar-icon-hover-color: #fff;
+		--toolbar-icon-color: var(--text-secondary);
+		--toolbar-icon-hover-color: var(--text-primary);
 	}
 	.tex-toolbar::-webkit-scrollbar {
 		display: none;

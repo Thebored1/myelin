@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A single bullet-point subtask. Persisted inside its parent [`Task`] file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -138,6 +139,35 @@ pub struct StorageIssue {
     pub path: Option<String>,
     pub message: String,
     pub recoverable: bool,
+}
+
+/// A user-authored application color theme. Built-in themes are defined by the
+/// frontend and are never persisted in this collection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorTheme {
+    pub schema_version: u32,
+    pub id: String,
+    pub name: String,
+    pub base_theme_id: String,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub tokens: HashMap<String, String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppearanceSettings {
+    pub schema_version: u32,
+    pub active_theme_id: String,
+    #[serde(default)]
+    pub custom_themes: Vec<ColorTheme>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,7 +1,7 @@
 pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
 pub(crate) use crate::models::{
-    AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult, StorageIssue, Task,
+    AppSnapshot, AppearanceSettings, Backlink, ChatTool, ColorTheme, IndexState, LibraryFacets,
+    NoteDocument, NoteSummary, ProviderStatus, SearchResponse, SearchResult, StorageIssue, Task,
 };
 pub(crate) use crate::sidecar::ManagedSidecar;
 pub(crate) use anyhow::{anyhow, Context, Result};

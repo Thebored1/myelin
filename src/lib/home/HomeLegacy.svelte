@@ -42,10 +42,10 @@ const home = createHomeController();
 		max-width: min(42rem, calc(100vw - 2rem));
 		padding: 0.6rem 0.9rem;
 		transform: translateX(-50%);
-		border: 1px solid #d99b32;
+		border: 1px solid var(--warning-border);
 		border-radius: 0.45rem;
-		background: #fff8e8;
-		color: #6a4300;
+		background: var(--warning-fill);
+		color: var(--warning);
 		font-size: 0.78rem;
 	}
 </style>

@@ -9,7 +9,7 @@
 
 
 		<style>
-			.chat-persistence-error { margin: 0.35rem 0.5rem; padding: 0.45rem 0.6rem; border: 1px solid var(--text-error, #b33); border-radius: 0.35rem; color: var(--text-error, #b33); font-size: 0.78rem; }
+			.chat-persistence-error { margin: 0.35rem 0.5rem; padding: 0.45rem 0.6rem; border: 1px solid var(--danger-border); border-radius: 0.35rem; color: var(--text-error); font-size: 0.78rem; }
 		</style>
 		<div class="chat-container">
 			{#if notePage.chatPersistenceError}

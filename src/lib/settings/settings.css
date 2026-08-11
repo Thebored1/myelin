@@ -97,12 +97,12 @@
 	}
 	.config-modal-backdrop {
 		position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
-		background: rgba(0, 0, 0, 0.68); padding: 2rem;
+		background: var(--scrim); padding: 2rem;
 	}
 	.config-modal {
 		width: min(900px, 95vw); height: min(760px, 90vh); display: flex; flex-direction: column;
 		background: var(--bg-modal); color: var(--text-primary); border: 1px solid var(--border-default);
-		border-radius: 8px; box-shadow: 0 24px 80px rgba(0,0,0,.5); padding: 1rem;
+		border-radius: 8px; box-shadow: 0 24px 80px var(--shadow-color-strong); padding: 1rem;
 	}
 	.config-modal-header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
 	.config-modal-header h2 { margin: 0; }
@@ -113,7 +113,7 @@
 	.config-nav-btn { min-width: 2rem; padding: .35rem .55rem; color: var(--text-primary); background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: 4px; cursor: pointer; }
 	.config-nav-btn:disabled { opacity: .4; cursor: default; }
 	.config-modal-actions { display: flex; justify-content: flex-end; gap: .6rem; padding-top: 1rem; }
-	.config-modal-actions .primary { background: var(--accent-100); color: #fff; }
+	.config-modal-actions .primary { background: var(--accent-100); color: var(--on-accent); }
 
 	.settings-section h2 {
 		margin: 0;
@@ -132,7 +132,7 @@
 
 	code {
 		font-family: var(--font-mono);
-		background: rgba(255, 255, 255, 0.1);
+		background: var(--overlay-faint);
 		padding: 0.1em 0.3em;
 		border-radius: var(--radius-xs);
 	}
@@ -232,14 +232,14 @@
 	}
 
 	.device-issue.error {
-		border-color: #b3402f;
-		background: rgba(179, 64, 47, 0.1);
+		border-color: var(--danger-border);
+		background: var(--danger-bg);
 		color: var(--text-primary);
 	}
 
 	.device-issue.warn {
-		border-color: #9a6b1f;
-		background: rgba(154, 107, 31, 0.1);
+		border-color: var(--warning-border);
+		background: var(--warning-fill);
 		color: var(--text-primary);
 	}
 
@@ -304,7 +304,7 @@
 
 	.backend-installed {
 		font-size: 0.82rem;
-		color: #36c46f;
+		color: var(--success);
 	}
 
 	.backend-progress {
@@ -325,7 +325,7 @@
 
 	.backend-bar-fill {
 		height: 100%;
-		background: var(--accent, #e8500f);
+		background: var(--accent-100);
 		transition: width 0.2s;
 	}
 
@@ -336,21 +336,21 @@
 	}
 
 	.backend-status.gpu {
-		border-color: #2f7d4f;
-		background: rgba(47, 125, 79, 0.08);
+		border-color: var(--success-border);
+		background: var(--success-fill);
 	}
 
 	.backend-status.gpu .backend-dot {
-		background: #36c46f;
+		background: var(--success);
 	}
 
 	.backend-status.cpu {
-		border-color: #9a6b1f;
-		background: rgba(154, 107, 31, 0.08);
+		border-color: var(--warning-border);
+		background: var(--warning-fill);
 	}
 
 	.backend-status.cpu .backend-dot {
-		background: #e0a23a;
+		background: var(--warning);
 	}
 
 	.browse-btn {
@@ -451,10 +451,10 @@
 		width: 320px;
 		max-width: 60vw;
 		padding: 0.6rem 0.7rem;
-		background: var(--bg-elevated, #1e1e1e);
-		border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+		background: var(--bg-elevated);
+		border: 1px solid var(--border-default);
 		border-radius: 8px;
-		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+		box-shadow: 0 8px 24px var(--shadow-color);
 		color: var(--text-secondary);
 		font-size: 0.78rem;
 		font-weight: 400;
@@ -534,12 +534,12 @@
 		right: var(--space-6);
 		background: var(--bg-panel);
 		border: 1px solid var(--border-default);
-		color: #4ade80;
+		color: var(--success);
 		padding: var(--space-3) var(--space-4);
 		border-radius: var(--radius-sm);
 		box-shadow:
-			0 4px 6px -1px rgba(0, 0, 0, 0.1),
-			0 2px 4px -1px rgba(0, 0, 0, 0.06);
+			0 4px 6px -1px var(--shadow-color),
+			0 2px 4px -1px var(--shadow-color);
 		font-size: 0.875rem;
 		font-family: var(--font-sans);
 		animation: fade-in var(--duration-fast) ease-out;

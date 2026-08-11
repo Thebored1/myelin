@@ -9,6 +9,7 @@ mod runtime;
 mod documents;
 mod indexing;
 mod ai;
+mod appearance;
 
 pub use core::*;
 pub use crate::models::StorageIssue;

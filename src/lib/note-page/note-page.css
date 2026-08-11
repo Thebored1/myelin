@@ -130,7 +130,7 @@
 		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-sm);
 		background: transparent;
-		color: var(--danger, #ef4444);
+		color: var(--danger);
 		padding: 0.25rem 0.5rem;
 		font: 0.7rem var(--font-mono);
 		text-transform: uppercase;
@@ -187,7 +187,7 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-sm);
 		background: var(--bg-panel);
-		box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.15));
+		box-shadow: var(--shadow-md);
 		pointer-events: none;
 	}
 
@@ -201,16 +201,16 @@
 
 	.section-cache-fill {
 		height: 100%;
-		background: var(--accent, #4f7cff);
+		background: var(--accent);
 		transition: width 0.25s ease;
 	}
 
 	.section-cache-complete .section-cache-fill {
-		background: var(--success, #42a66b);
+		background: var(--success);
 	}
 
 	.section-cache-failed .section-cache-fill {
-		background: var(--danger, #d45b5b);
+		background: var(--danger);
 	}
 
 	.section-cache-label {
@@ -270,7 +270,7 @@
 		border-radius: 6px;
 		padding: 3px 10px;
 		font-size: 0.72rem;
-		box-shadow: 0 2px 8px var(--shadow-color, rgba(0, 0, 0, 0.15));
+		box-shadow: 0 2px 8px var(--shadow-color);
 	}
 
 	.resizer {
@@ -815,7 +815,7 @@
 	.latex-preview-state.error,
 	.latex-error,
 	.latex-diagnostics {
-		color: var(--danger-400, #f87171);
+		color: var(--danger-400);
 	}
 
 	.latex-status-dot {
@@ -828,7 +828,7 @@
 	}
 
 	.latex-status-dot.active {
-		background: var(--success-400, #4ade80);
+		background: var(--success-400);
 	}
 	.latex-status-dot.pending {
 		background: var(--accent-200);
@@ -1630,11 +1630,11 @@
 		background: transparent;
 	}
 	.approval-card pre::-webkit-scrollbar-thumb {
-		background: var(--neutral-700, #444);
+		background: var(--neutral-700);
 		border-radius: 3px;
 	}
 	.approval-card pre::-webkit-scrollbar-thumb:hover {
-		background: var(--neutral-500, #666);
+		background: var(--neutral-500);
 	}
 
 	.approval-actions {
@@ -1862,20 +1862,20 @@
 		background: transparent;
 	}
 	.chat-input-area textarea::-webkit-scrollbar-thumb {
-		background: var(--neutral-700, #444);
+		background: var(--neutral-700);
 		border-radius: 3px;
 	}
 	.chat-input-area textarea::-webkit-scrollbar-thumb:hover {
-		background: var(--neutral-500, #666);
+		background: var(--neutral-500);
 	}
 
 	.debug-window {
-		background: var(--neutral-900, #1a1a2e);
-		border: 1px solid var(--border-subtle, #333);
+		background: var(--neutral-900);
+		border: 1px solid var(--border-subtle);
 		border-radius: var(--radius-md);
 		font-size: 0.7rem;
 		font-family: var(--font-mono, monospace);
-		color: var(--text-secondary, #aaa);
+		color: var(--text-secondary);
 		overflow: hidden;
 	}
 	.debug-window-header {
@@ -1883,20 +1883,20 @@
 		justify-content: space-between;
 		align-items: center;
 		padding: 4px 8px;
-		border-bottom: 1px solid var(--border-subtle, #333);
-		background: var(--neutral-950, #0d0d1a);
+		border-bottom: 1px solid var(--border-subtle);
+		background: var(--neutral-950);
 	}
 	.debug-title {
 		font-weight: 600;
 		font-size: 0.68rem;
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
-		color: var(--text-tertiary, #777);
+		color: var(--text-tertiary);
 	}
 	.debug-toggle {
 		background: none;
 		border: none;
-		color: var(--text-tertiary, #777);
+		color: var(--text-tertiary);
 		cursor: pointer;
 		padding: 0 2px;
 		font-size: 0.85rem;
@@ -1905,7 +1905,7 @@
 	}
 	.debug-toggle:hover {
 		color: var(--text-primary);
-		background: var(--neutral-800, #222);
+		background: var(--neutral-800);
 	}
 	.debug-grid {
 		display: grid;
@@ -1919,16 +1919,16 @@
 		padding: 1px 0;
 	}
 	.debug-label {
-		color: var(--text-tertiary, #777);
+		color: var(--text-tertiary);
 	}
 	.debug-value {
-		color: var(--text-primary, #ddd);
+		color: var(--text-primary);
 		font-weight: 500;
 		text-align: right;
 	}
 	.debug-note {
 		grid-column: 1 / -1;
-		color: var(--text-tertiary, #777);
+		color: var(--text-tertiary);
 		font-size: 0.65rem;
 		padding: 2px 8px 4px;
 		font-style: italic;
@@ -1950,13 +1950,13 @@
 		padding: 1px 0;
 	}
 	.trace-time {
-		color: var(--text-tertiary, #555);
+		color: var(--text-tertiary);
 		flex-shrink: 0;
 		min-width: 38px;
 		font-variant-numeric: tabular-nums;
 	}
 	.trace-msg {
-		color: var(--text-secondary, #aaa);
+		color: var(--text-secondary);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1964,7 +1964,7 @@
 	.trace-prompt {
 		flex: 1;
 		min-width: 0;
-		color: var(--accent-100, #93c5fd);
+		color: var(--accent-100);
 	}
 	.trace-prompt summary {
 		cursor: pointer;
@@ -1978,36 +1978,36 @@
 		white-space: pre-wrap;
 		word-break: break-word;
 		font: inherit;
-		color: var(--text-secondary, #aaa);
-		background: var(--bg-raised, rgba(0, 0, 0, 0.2));
+		color: var(--text-secondary);
+		background: var(--bg-raised);
 		border-radius: 3px;
 	}
 	.trace-entry.tool .trace-msg {
-		color: var(--accent-200, #6ea8fe);
+		color: var(--accent-200);
 	}
 	.trace-entry.gen .trace-msg {
-		color: var(--text-primary, #ddd);
+		color: var(--text-primary);
 	}
 	.trace-entry.note .trace-msg {
-		color: var(--accent-100, #93c5fd);
+		color: var(--accent-100);
 	}
 	.trace-entry.done .trace-msg {
-		color: #4ade80;
+		color: var(--success);
 	}
 	.trace-entry.error .trace-msg {
-		color: var(--danger, #ef4444);
+		color: var(--danger);
 	}
 	.trace-entry.send .trace-msg {
-		color: var(--text-tertiary, #777);
+		color: var(--text-tertiary);
 	}
 	.trace-entry.config .trace-msg {
-		color: #c084fc;
+		color: var(--warning);
 	}
 	.trace-entry.usage .trace-msg {
-		color: #38bdf8;
+		color: var(--info);
 	}
 	.trace-entry.tool_result .trace-msg {
-		color: #4ade80;
+		color: var(--success);
 	}
 
 	.loading-dots .loading-dots::after {

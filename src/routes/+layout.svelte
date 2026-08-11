@@ -5,12 +5,13 @@
 	import { invoke } from '@tauri-apps/api/core';
 	import { listen } from '@tauri-apps/api/event';
 	import { sidebarOpen, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
-	import '$lib/theme';
+	import { initializeThemes } from '$lib/theme';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { providerAiStatus, type AiStatus } from '$lib/aiStatus';
 	import '@fontsource-variable/inter';
 	import '@fontsource-variable/jetbrains-mono';
+	import '$lib/styles/theme.css';
 
 	let { children } = $props();
 
@@ -33,6 +34,7 @@
 	});
 
 	onMount(() => {
+		void initializeThemes();
 		let unlistenResize: (() => void) | undefined;
 		let unlistenAiWarmup: (() => void) | undefined;
 		let aiStatusPoll: ReturnType<typeof setInterval> | undefined;
@@ -378,160 +380,6 @@
 {/if}
 
 <style>
-	:global(:root) {
-		/* Drives native control rendering (checkboxes, scrollbars) to match the theme. */
-		color-scheme: dark;
-		--accent-100: #ef6f2e;
-		--accent-200: #ee6018;
-		--accent-300: #d15010;
-		--surface-dark-primary: #020202;
-		--surface-dark-secondary: #101010;
-		--surface-light-primary: #eeeeee;
-		--surface-light-secondary: #fafafa;
-		--neutral-100: #d6d3d2;
-		--neutral-200: #ccc9c7;
-		--neutral-300: #b8b3b0;
-		--neutral-400: #a49d9a;
-		--neutral-500: #8a8380;
-		--neutral-600: #5c5855;
-		--neutral-700: #4d4947;
-		--neutral-800: #3d3a39;
-		--neutral-900: #2e2c2b;
-		--neutral-1000: #1f1d1c;
-		--text-primary: #eeeeee;
-		--text-secondary: #a49d9a;
-		--text-inverse: #020202;
-		--text-selection: #020202; /* dark text on the orange selection highlight */
-		--text-hero: #f6f1e7;
-		--border-default: #3d3a39;
-		--border-subtle: #4d4947;
-		--bg-page: #020202;
-		--bg-panel: #101010;
-		--bg-code: #1f1d1c;
-		--bg-selection: var(--accent-100);
-		--font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
-		--font-mono:
-			'JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
-		--space-1: 0.25rem;
-		--space-2: 0.5rem;
-		--space-3: 0.75rem;
-		--space-4: 1rem;
-		--space-5: 1.25rem;
-		--space-6: 1.5rem;
-		--space-8: 2rem;
-		--space-10: 2.5rem;
-		--space-12: 3rem;
-		--space-16: 4rem;
-		--space-20: 5rem;
-		--radius-xs: 0.125rem;
-		--radius-sm: 0.1875rem;
-		--radius-md: 0.25rem;
-		--radius-lg: 0.375rem;
-		--radius-xl: 0.5rem;
-		--radius-2xl: 0.625rem;
-		--radius-3xl: 0.75rem;
-		--duration-fast: 0.15s;
-		--duration-page: 0.32s;
-		--duration-content: 0.64s;
-		--ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
-		--ease-out: cubic-bezier(0, 0, 0.2, 1);
-		--ease-emphasis: cubic-bezier(0.22, 1, 0.36, 1);
-		--blur-sm: 8px;
-		--blur-md: 12px;
-		--blur-xl: 24px;
-
-		/* ── Theme-aware semantic tokens ──
-		   These have a dark default here and are overridden under
-		   [data-theme='light'] below. Components should use these instead of
-		   hardcoding rgba(255,255,255,…) overlays or opaque dark hexes, so that
-		   both themes stay consistent. */
-		--hover-overlay: rgba(255, 255, 255, 0.04); /* subtle row/button hover */
-		--hover-overlay-strong: rgba(255, 255, 255, 0.08); /* icon-button hover */
-		--overlay-faint: rgba(255, 255, 255, 0.02); /* faint chip/badge fill */
-		--bg-elevated: #262626; /* raised card (e.g. note tiles) */
-		--bg-elevated-hover: #333333;
-		--bg-input: #1e1e1e; /* search / input surface that differs from panel */
-		--bg-modal: #151515; /* modal sheet surface */
-		--scrim: rgba(0, 0, 0, 0.6); /* modal backdrop */
-		--scrim-soft: rgba(0, 0, 0, 0.5);
-		--shadow-color: rgba(0, 0, 0, 0.4);
-		--shadow-color-strong: rgba(0, 0, 0, 0.8);
-		--accent-tint: rgba(238, 96, 24, 0.12); /* selected/hover accent wash */
-		--danger: #e05555;
-		--danger-tint: rgba(224, 85, 85, 0.1);
-		--success: #4caf50;
-		--on-accent: #ffffff; /* text/icons sitting on an accent fill */
-		/* Status tints — translucent, so they read on either theme. */
-		--info-border: rgba(100, 181, 246, 0.3);
-		--info-fill: rgba(100, 181, 246, 0.06);
-		--success-border: rgba(129, 199, 132, 0.3);
-		--success-fill: rgba(129, 199, 132, 0.06);
-		--bg-panel-blur: rgba(16, 16, 16, 0.94); /* frosted header / editor toolbar */
-		--danger-text: #fecaca; /* readable text on a danger tint */
-		--danger-bg: rgba(239, 68, 68, 0.12);
-		--danger-bg-strong: rgba(239, 68, 68, 0.18);
-		--danger-border: rgba(239, 68, 68, 0.35);
-	}
-
-	/* ── Light theme ──
-	   Warm off-white surfaces with the same orange accent, matching the
-	   reference. The neutral scale is inverted (100 was lightest in dark; here
-	   it's darkest) so existing var(--neutral-*) usages keep their semantic
-	   meaning: low numbers = prominent text, high numbers = faint borders. */
-	:global(:root[data-theme='light']) {
-		color-scheme: light;
-		--surface-dark-primary: #ffffff;
-		--surface-dark-secondary: #f4f2ef;
-		--surface-light-primary: #1f1d1c;
-		--surface-light-secondary: #2e2c2b;
-
-		--neutral-100: #1f1d1c;
-		--neutral-200: #2e2c2b;
-		--neutral-300: #3d3a39;
-		--neutral-400: #4d4947;
-		--neutral-500: #5c5855;
-		--neutral-600: #8a8380;
-		--neutral-700: #a49d9a;
-		--neutral-800: #ccc9c7;
-		--neutral-900: #ddd9d5;
-		--neutral-1000: #e8e4e0;
-
-		--text-primary: #1f1d1c;
-		--text-secondary: #6e6a67;
-		--text-inverse: #ffffff;
-		--text-selection: #1f1d1c; /* dark text on the orange selection highlight */
-		--text-hero: #1a1714;
-
-		--border-default: #e2ded9;
-		--border-subtle: #ece9e5;
-
-		--bg-page: #f4f2ef;
-		--bg-panel: #ffffff;
-		--bg-code: #f0ede9;
-		--bg-selection: var(--accent-100);
-
-		--hover-overlay: rgba(0, 0, 0, 0.04);
-		--hover-overlay-strong: rgba(0, 0, 0, 0.07);
-		--overlay-faint: rgba(0, 0, 0, 0.025);
-		--bg-elevated: #ffffff;
-		/* Card hover stays a faint off-white just below pure white — going darker
-		   drops it to the page color and the white card visually "sinks". */
-		--bg-elevated-hover: #f8f6f3;
-		--bg-input: #ffffff;
-		--bg-modal: #ffffff;
-		--scrim: rgba(40, 32, 24, 0.25);
-		--scrim-soft: rgba(40, 32, 24, 0.2);
-		--shadow-color: rgba(60, 50, 40, 0.12);
-		--shadow-color-strong: rgba(60, 50, 40, 0.2);
-		--accent-tint: rgba(238, 96, 24, 0.1);
-		--bg-panel-blur: rgba(255, 255, 255, 0.9);
-		--danger-text: #b42318;
-		--danger-bg: rgba(239, 68, 68, 0.1);
-		--danger-bg-strong: rgba(239, 68, 68, 0.16);
-		--danger-border: rgba(239, 68, 68, 0.4);
-		/* --danger / --success / --on-accent stay readable on both themes */
-	}
-
 	:global(html) {
 		background: var(--bg-page);
 		color: var(--text-primary);
@@ -544,8 +392,8 @@
 		padding: 0;
 		font-family: var(--font-sans);
 		background:
-			radial-gradient(circle at top right, rgba(239, 111, 46, 0.12), transparent 20rem),
-			linear-gradient(180deg, #050505 0%, #020202 100%);
+			radial-gradient(circle at top right, var(--page-glow), transparent 20rem),
+			linear-gradient(180deg, var(--page-gradient-start) 0%, var(--page-gradient-end) 100%);
 		color: var(--text-primary);
 		-webkit-font-smoothing: antialiased;
 		height: 100vh;
@@ -561,13 +409,13 @@
 		background:
 			repeating-linear-gradient(
 				135deg,
-				rgba(120, 100, 80, 0.022) 0,
-				rgba(120, 100, 80, 0.022) 1px,
+				var(--page-pattern) 0,
+				var(--page-pattern) 1px,
 				transparent 1px,
 				transparent 7px
 			),
-			radial-gradient(circle at top right, rgba(239, 111, 46, 0.06), transparent 22rem),
-			linear-gradient(180deg, #f6f4f1 0%, #f1eee9 100%);
+				radial-gradient(circle at top right, var(--page-glow), transparent 22rem),
+				linear-gradient(180deg, var(--page-gradient-start) 0%, var(--page-gradient-end) 100%);
 	}
 
 	:global(input),

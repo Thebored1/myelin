@@ -56,6 +56,35 @@ async fn bootstrap(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+fn get_appearance_settings(state: State<'_, AppState>) -> Result<crate::models::AppearanceSettings, String> {
+    state.get_appearance_settings().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_color_theme(
+    state: State<'_, AppState>,
+    theme: crate::models::ColorTheme,
+) -> Result<crate::models::AppearanceSettings, String> {
+    state.save_color_theme(theme).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_color_theme(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::models::AppearanceSettings, String> {
+    state.delete_color_theme(&id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_active_color_theme(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::models::AppearanceSettings, String> {
+    state.set_active_color_theme(&id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_ai_config_status(state: State<'_, AppState>) -> crate::ai_config::AiConfigStatus {
     state.ai_config_status()
 }
@@ -875,6 +904,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            get_appearance_settings,
+            save_color_theme,
+            delete_color_theme,
+            set_active_color_theme,
             get_ai_config_status,
             validate_ai_config,
             apply_ai_config,

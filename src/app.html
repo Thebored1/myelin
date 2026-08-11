@@ -5,10 +5,24 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
 		<script>
-			// Apply the saved theme before first paint so light mode doesn't flash dark.
+			// Apply the saved theme before first paint so light mode and custom themes
+			// do not flash dark. Values are deliberately restricted to hex colors and
+			// a fixed CSS-variable name pattern because localStorage is user-editable.
 			try {
-				var t = localStorage.getItem('myelin_theme');
-				if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+				var bootstrap = JSON.parse(localStorage.getItem('myelin_theme_bootstrap_v1') || 'null');
+				var hex = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
+				if (bootstrap && (bootstrap.mode === 'light' || bootstrap.mode === 'dark') && bootstrap.tokens) {
+					document.documentElement.dataset.theme = bootstrap.mode;
+					document.documentElement.dataset.themeId = String(bootstrap.themeId || 'myelin-dark');
+					Object.keys(bootstrap.tokens).forEach(function (key) {
+						if (/^[a-z0-9-]+$/.test(key) && hex.test(bootstrap.tokens[key])) {
+							document.documentElement.style.setProperty('--' + key, bootstrap.tokens[key]);
+						}
+					});
+				} else {
+					var t = localStorage.getItem('myelin_theme');
+					if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+				}
 			} catch (e) {}
 		</script>
 		%sveltekit.head%

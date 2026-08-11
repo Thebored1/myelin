@@ -1,13 +1,13 @@
 <script lang="ts">
 import '$lib/settings/settings.css';
 import { invoke } from '@tauri-apps/api/core';
-import { theme, toggleTheme } from '$lib/theme';
 import { chatSidebarShortcut } from '$lib/stores';
 import { prettyShortcut } from '$lib/keyboardShortcut';
 import { createSettingsController } from '$lib/settings/controller.svelte';
 import type { BackendPref } from '$lib/settings/types';
 import LocalModelSettings from '$lib/settings/LocalModelSettings.svelte';
 import AssistantSettings from '$lib/settings/AssistantSettings.svelte';
+import ThemeSettings from '$lib/settings/ThemeSettings.svelte';
 
 const settings = createSettingsController();
 </script>
@@ -143,23 +143,7 @@ const settings = createSettingsController();
 	<LocalModelSettings settings={settings} />
 	<AssistantSettings settings={settings} />
 
-		<section class="settings-section">
-			<h2>Appearance</h2>
-			<div
-				class="feature-toggle"
-				style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;"
-			>
-				<div>
-					<h3 style="margin: 0; font-size: 1rem;">Theme</h3>
-					<p class="description" style="margin-top: 4px;">
-						Switch between the dark and light interface. Your choice is remembered across sessions.
-					</p>
-				</div>
-				<button class="browse-btn" onclick={toggleTheme}>
-					{$theme === 'light' ? 'Light' : 'Dark'}
-				</button>
-			</div>
-		</section>
+		<ThemeSettings />
 
 		<section class="settings-section">
 			<h2>Features</h2>
@@ -192,7 +176,7 @@ const settings = createSettingsController();
 					<h3 style="margin: 0; font-size: 1rem;">Chat sidebar</h3>
 					<p class="description" style="margin-top: 4px;">
 						{#if settings.chatShortcutError}
-							<span style="color: var(--danger, #e5534b);">{settings.chatShortcutError}</span>
+							<span style="color: var(--danger);">{settings.chatShortcutError}</span>
 						{:else if settings.chatShortcutRecording}
 							Press your shortcut… (Esc to cancel)
 						{:else}
@@ -224,7 +208,7 @@ const settings = createSettingsController();
 					<h3 style="margin: 0; font-size: 1rem;">Global shortcut</h3>
 					<p class="description" style="margin-top: 4px;">
 						{#if settings.quickShortcutError}
-							<span style="color: var(--danger, #e5534b);">{settings.quickShortcutError}</span>
+							<span style="color: var(--danger);">{settings.quickShortcutError}</span>
 						{:else if settings.quickRecording}
 							Press your shortcut… (Esc to cancel)
 						{:else}
@@ -249,7 +233,7 @@ const settings = createSettingsController();
 					<p class="description" style="margin-top: 4px;">
 						Starts hidden in the tray with the shortcut and model ready.
 					</p>
-					{#if settings.backgroundError}<p class="description" style="color: var(--danger, #e5534b);">
+					{#if settings.backgroundError}<p class="description" style="color: var(--danger);">
 							{settings.backgroundError}
 						</p>{/if}
 				</div>
@@ -288,7 +272,7 @@ const settings = createSettingsController();
 						{#if settings.latexDownloading}
 							Downloading… {settings.formatMB(settings.latexDownloadBytes)}
 						{:else if settings.latexError}
-							<span style="color: var(--danger, #e5534b);">Error: {settings.latexError}</span>
+							<span style="color: var(--danger);">Error: {settings.latexError}</span>
 						{:else if settings.latexCache?.warmed}
 							Ready — {settings.formatMB(settings.latexCache.sizeBytes)} cached.
 						{:else}

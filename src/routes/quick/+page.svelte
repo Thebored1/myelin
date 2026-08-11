@@ -906,7 +906,7 @@
 		opacity: 1;
 	}
 	.subtask-remove:hover {
-		color: var(--danger, #ff4444);
+		color: var(--danger);
 	}
 	.subtask-add-hint {
 		margin-left: 56px;
@@ -937,7 +937,7 @@
 		color: var(--text-secondary);
 	}
 	.quick-hint .ok {
-		color: var(--success, #4caf50);
+		color: var(--success);
 	}
 	kbd {
 		background: var(--bg-code);

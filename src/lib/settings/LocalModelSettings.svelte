@@ -389,7 +389,7 @@
 							class="browse-btn"
 							onclick={() => settings.removeExtraArg(i)}
 							title="Remove argument"
-							style="padding: 0 1rem; color: #f87171; border-color: rgba(248, 113, 113, 0.3);"
+						style="padding: 0 1rem; color: var(--danger-text); border-color: var(--danger-border);"
 						>
 							Remove
 						</button>
@@ -407,4 +407,3 @@
 
 		{/if}
 		</div>
-

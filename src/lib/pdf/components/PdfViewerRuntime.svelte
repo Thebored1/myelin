@@ -501,7 +501,7 @@
 	<div class="pdf-viewer-scroll-area" bind:this={pdfViewerDiv}>
 		{#if errorMessage}
 			<div
-				style="color: red; padding: 2rem; background: #fee2e2; border-radius: 8px; margin: 2rem;"
+					style="color: var(--danger-text); padding: 2rem; background: var(--danger-bg); border-radius: var(--radius-lg); margin: 2rem;"
 			>
 				<h3 style="margin-top: 0;">Error Loading PDF</h3>
 				<pre style="white-space: pre-wrap; font-family: monospace;">{errorMessage}</pre>
