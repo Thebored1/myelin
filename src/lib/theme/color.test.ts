@@ -132,12 +132,19 @@ describe('theme colors', () => {
 		expect(compileTheme(clone)['accent-100']).toBe('#EF6F2E');
 	});
 
-	it('swaps main-area and menu-area surface colors', () => {
-		const tokens = deriveThemeTokens('light', { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' });
-		expect(tokens['bg-page']).not.toBe(tokens['bg-panel']);
-		expect(relativeLuminance(tokens['bg-page'] ?? '#000000')).toBeLessThan(
-			relativeLuminance(tokens['bg-panel'] ?? '#FFFFFF')
+	it('swaps main-area and menu-area surface colors globally', () => {
+		const derived = deriveThemeTokens('light', { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' });
+		expect(relativeLuminance(derived['bg-page'] ?? '#000000')).toBeGreaterThan(
+			relativeLuminance(derived['bg-panel'] ?? '#FFFFFF')
 		);
+		const compiled = compileTheme({ ...darkTheme, mode: 'light', palette: { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' }, tokens: {} });
+		expect(compiled['bg-page']).not.toBe(compiled['bg-panel']);
+		expect(relativeLuminance(compiled['bg-page'] ?? '#000000')).toBeLessThan(
+			relativeLuminance(compiled['bg-panel'] ?? '#FFFFFF')
+		);
+		const explicit = compileTheme({ ...darkTheme, mode: 'light', tokens: { 'bg-page': '#FFFFFF', 'bg-panel': '#112233' } });
+		expect(explicit['bg-page']).toBe('#112233');
+		expect(explicit['bg-panel']).toBe('#FFFFFF');
 	});
 
 	it('rejects unknown and malformed custom token values', () => {

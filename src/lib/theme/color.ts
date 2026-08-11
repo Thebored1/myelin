@@ -307,10 +307,8 @@ export function deriveThemeTokens(
 		'border-default': washed['border-default'],
 		'border-subtle': washed['border-subtle'],
 		'border-strong': mode === 'dark' ? '#5C5855' : '#C9C2BB',
-		// The main content area sits on the panel color while menus, rails and
-		// sidebars use the page color, swapping the conventional pairing.
-		'bg-page': washed['bg-panel'],
-		'bg-panel': washed['bg-page'],
+		'bg-page': washed['bg-page'],
+		'bg-panel': washed['bg-panel'],
 		'bg-code': mode === 'dark' ? '#1F1D1C' : '#F0EDE9',
 		'bg-elevated': washed['bg-elevated'],
 		'bg-elevated-hover': mode === 'dark' ? '#333333' : '#F8F6F3',

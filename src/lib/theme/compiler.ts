@@ -12,7 +12,17 @@ export function compileTheme(theme: ColorTheme): ThemeTokens {
 	const normalized = normalizeTheme(theme);
 	const base = builtinTheme(normalized.baseThemeId) ?? darkTheme;
 	const derived = normalized.palette ? deriveThemeTokens(normalized.mode, normalized.palette) : {};
-	return { ...base.tokens, ...derived, ...normalized.tokens };
+	const tokens = { ...base.tokens, ...derived, ...normalized.tokens };
+	// The main content area sits on the panel color while menus, rails and
+	// sidebars use the page color. Applied after the full merge so the
+	// pairing holds for built-in and saved custom themes alike.
+	const page = tokens['bg-page'];
+	const panel = tokens['bg-panel'];
+	if (page && panel) {
+		tokens['bg-page'] = panel;
+		tokens['bg-panel'] = page;
+	}
+	return tokens;
 }
 
 export function makeCustomTheme(
