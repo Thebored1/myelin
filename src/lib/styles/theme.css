@@ -38,10 +38,10 @@
 	--border-strong: #5c5855;
 	--border: var(--border-default);
 	--border-color: var(--border-default);
-	--bg-page: #020202;
+	--bg-page: #101010;
 	--bg-base: var(--bg-page);
 	--bg-body: var(--bg-page);
-	--bg-panel: #101010;
+	--bg-panel: #020202;
 	--bg-primary: var(--bg-page);
 	--bg-surface: var(--bg-panel);
 	--bg-raised: var(--bg-elevated);
@@ -143,8 +143,8 @@
 	--border-default: #e2ded9;
 	--border-subtle: #ece9e5;
 	--border-strong: #c9c2bb;
-	--bg-page: #f4f2ef;
-	--bg-panel: #ffffff;
+	--bg-page: #ffffff;
+	--bg-panel: #f4f2ef;
 	--bg-code: #f0ede9;
 	--bg-selection: var(--accent-100);
 	--bg-elevated: #ffffff;

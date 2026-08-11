@@ -10,6 +10,7 @@ import {
 	isHexColor,
 	mixHex,
 	readableForeground,
+	relativeLuminance,
 	toOklch,
 	washSurfaces
 } from './color';
@@ -129,6 +130,14 @@ describe('theme colors', () => {
 		expect(theme.palette?.accent).toBe('#EAB308');
 		const clone = cloneTheme(darkTheme);
 		expect(compileTheme(clone)['accent-100']).toBe('#EF6F2E');
+	});
+
+	it('swaps main-area and menu-area surface colors', () => {
+		const tokens = deriveThemeTokens('light', { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' });
+		expect(tokens['bg-page']).not.toBe(tokens['bg-panel']);
+		expect(relativeLuminance(tokens['bg-page'] ?? '#000000')).toBeLessThan(
+			relativeLuminance(tokens['bg-panel'] ?? '#FFFFFF')
+		);
 	});
 
 	it('rejects unknown and malformed custom token values', () => {
