@@ -66,6 +66,186 @@ export function readableForeground(background: string): '#000000' | '#FFFFFF' {
 		: '#000000';
 }
 
+// ---- OKLCH color math ----------------------------------------------------
+// Perceptually uniform conversions (Björn Ottosson's OKLab). Shifting
+// lightness in OKLCH keeps the hue stable, which is what makes a single
+// accent input able to drive a whole app-wide color family.
+
+function srgbToLinear(channel: number): number {
+	return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+}
+
+function linearToSrgb(channel: number): number {
+	return channel <= 0.0031308 ? 12.92 * channel : 1.055 * channel ** (1 / 2.4) - 0.055;
+}
+
+function okLabToLinear(lightness: number, a: number, b: number): [number, number, number] {
+	const l_ = lightness + 0.3963377774 * a + 0.2158037573 * b;
+	const m_ = lightness - 0.1055613458 * a - 0.0638541728 * b;
+	const s_ = lightness - 0.0894841775 * a - 1.291485548 * b;
+	const l = l_ ** 3;
+	const m = m_ ** 3;
+	const s = s_ ** 3;
+	return [
+		4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+		-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+		-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s
+	];
+}
+
+function oklchToLinear(lightness: number, chroma: number, hue: number): [number, number, number] {
+	const radians = (hue * Math.PI) / 180;
+	return okLabToLinear(lightness, chroma * Math.cos(radians), chroma * Math.sin(radians));
+}
+
+export type Oklch = { l: number; c: number; h: number };
+
+export function toOklch(value: string): Oklch {
+	const [r, g, b] = channels(value)
+		.slice(0, 3)
+		.map((channel) => srgbToLinear(channel / 255));
+	const l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+	const m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+	const s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+	const l_ = Math.cbrt(l);
+	const m_ = Math.cbrt(m);
+	const s_ = Math.cbrt(s);
+	const L = 0.2104542553 * l_ + 0.793617785 * m_ - 0.0040720468 * s_;
+	const a = 1.9779984951 * l_ - 2.428592205 * m_ + 0.4505937099 * s_;
+	const bChannel = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.808675766 * s_;
+	const chroma = Math.hypot(a, bChannel);
+	return { l: L, c: chroma, h: ((Math.atan2(bChannel, a) * 180) / Math.PI + 360) % 360 };
+}
+
+function toHex(r: number, g: number, b: number): string {
+	const channel = (value: number) =>
+		Math.round(Math.max(0, Math.min(1, value)) * 255)
+			.toString(16)
+			.padStart(2, '0')
+			.toUpperCase();
+	return `#${channel(r)}${channel(g)}${channel(b)}`;
+}
+
+/** Rebuild a hex color from OKLCH, reducing chroma when needed to stay in
+ *  gamut so the hue is never silently distorted. */
+export function fromOklch(lightness: number, chroma: number, hue: number): string {
+	const h = ((hue % 360) + 360) % 360;
+	let c = Math.max(0, chroma);
+	let [r, g, b] = oklchToLinear(lightness, c, h);
+	while (c > 0 && (r < 0 || r > 1 || g < 0 || g > 1 || b < 0 || b > 1)) {
+		c *= 0.9;
+		[r, g, b] = oklchToLinear(lightness, c, h);
+	}
+	return toHex(linearToSrgb(r), linearToSrgb(g), linearToSrgb(b));
+}
+
+/** Shift OKLCH lightness by a fixed delta, keeping hue and chroma. */
+export function adjustLightness(value: string, delta: number): string {
+	const { l, c, h } = toOklch(value);
+	return fromOklch(Math.max(0, Math.min(1, l + delta)), c, h);
+}
+
+/** Scale OKLCH chroma by a factor, keeping hue and lightness. */
+export function adjustChroma(value: string, factor: number): string {
+	const { l, c, h } = toOklch(value);
+	return fromOklch(l, Math.max(0, c * factor), h);
+}
+
+/** Composite a foreground color over a fully opaque background. */
+export function compositeOver(foreground: string, background: string, alpha: number): string {
+	const fg = channels(foreground);
+	const bg = channels(background);
+	const t = Math.max(0, Math.min(1, alpha));
+	const rgb = [0, 1, 2].map((index) => Math.round(fg[index] * t + bg[index] * (1 - t)));
+	return `#${rgb
+		.map((value) => value.toString(16).padStart(2, '0'))
+		.join('')
+		.toUpperCase()}`;
+}
+
+// ---- Accent family derivation ----------------------------------------------
+
+export const accentDerivedTokenIds = [
+	'accent-100',
+	'accent-200',
+	'accent-300',
+	'accent-tint',
+	'on-accent',
+	'bg-selection',
+	'text-selection'
+] as const;
+
+export const washDerivedTokenIds = [
+	'bg-page',
+	'bg-panel',
+	'bg-elevated',
+	'bg-input',
+	'bg-modal',
+	'border-default',
+	'border-subtle'
+] as const;
+
+/** Derive the whole app-wide accent family from one input color. */
+export function deriveAccentTokens(
+	accent: string,
+	mode: ThemeMode,
+	panel: string
+): ThemeTokens {
+	const base = normalizeHex(accent);
+	const delta = mode === 'dark' ? 0.1 : -0.1;
+	const selection = compositeOver(base, panel, 0.22);
+	return {
+		'accent-100': base,
+		'accent-200': adjustLightness(base, delta),
+		'accent-300': adjustChroma(adjustLightness(base, delta * 2), 0.85),
+		'accent-tint': `${base.slice(0, 7)}1F`,
+		'bg-selection': selection,
+		'text-selection': readableForeground(selection),
+		'on-accent': readableForeground(base)
+	} as ThemeTokens;
+}
+
+export type WashSurfaces = {
+	'bg-page': string;
+	'bg-panel': string;
+	'bg-elevated': string;
+	'bg-input': string;
+	'bg-modal': string;
+	'border-default': string;
+	'border-subtle': string;
+};
+
+/** Tint surfaces toward the accent hue at low chroma, keeping text readable.
+ *  Achromatic accents leave the surfaces untouched. */
+export function washSurfaces(
+	accent: string,
+	mode: ThemeMode,
+	textPrimary: string,
+	surfaces: WashSurfaces
+): WashSurfaces {
+	const accentOklch = toOklch(accent);
+	if (accentOklch.c < 0.01) return surfaces;
+	const baseChroma = mode === 'dark' ? 0.03 : 0.04;
+	const tinted = (surface: string, chroma: number) => fromOklch(toOklch(surface).l, chroma, accentOklch.h);
+	const guarded = (surface: string, chroma: number): string => {
+		let value = tinted(surface, chroma);
+		while (contrastRatio(textPrimary, value) < 4.5 && chroma > 0.004) {
+			chroma *= 0.8;
+			value = tinted(surface, chroma);
+		}
+		return value;
+	};
+	return {
+		'bg-page': guarded(surfaces['bg-page'], baseChroma),
+		'bg-panel': guarded(surfaces['bg-panel'], baseChroma),
+		'bg-elevated': tinted(surfaces['bg-elevated'], baseChroma),
+		'bg-input': tinted(surfaces['bg-input'], baseChroma),
+		'bg-modal': tinted(surfaces['bg-modal'], baseChroma),
+		'border-default': tinted(surfaces['border-default'], baseChroma * 0.6),
+		'border-subtle': tinted(surfaces['border-subtle'], baseChroma * 0.6)
+	};
+}
+
 export function deriveThemeTokens(
 	mode: ThemeMode,
 	palette: Partial<{
@@ -100,11 +280,18 @@ export function deriveThemeTokens(
 	const overlay = mode === 'dark' ? '#FFFFFF0A' : '#0000000A';
 	const strongOverlay = mode === 'dark' ? '#FFFFFF14' : '#00000012';
 	const panelBlur = mode === 'dark' ? '#101010F0' : '#FFFFFFE6';
+	const washed = washSurfaces(accent, mode, text, {
+		'bg-page': page,
+		'bg-panel': panel,
+		'bg-elevated': mode === 'dark' ? '#262626' : light,
+		'bg-input': panel,
+		'bg-modal': mode === 'dark' ? '#151515' : light,
+		'border-default': mode === 'dark' ? '#3D3A39' : '#E2DED9',
+		'border-subtle': mode === 'dark' ? '#4D4947' : '#ECE9E5'
+	});
 
 	return {
-		'accent-100': accent,
-		'accent-200': normalizeHex(palette.accent ? mixHex(accent, mode === 'dark' ? dark : light, 0.08) : mode === 'dark' ? '#EE6018' : '#EE6018'),
-		'accent-300': normalizeHex(palette.accent ? mixHex(accent, mode === 'dark' ? dark : light, 0.2) : '#D15010'),
+		...deriveAccentTokens(accent, mode, panel),
 		'surface-dark-primary': mode === 'dark' ? page : light,
 		'surface-dark-secondary': mode === 'dark' ? panel : '#F4F2EF',
 		'surface-light-primary': mode === 'dark' ? '#EEEEEE' : '#1F1D1C',
@@ -113,22 +300,20 @@ export function deriveThemeTokens(
 		'text-primary': text,
 		'text-secondary': muted,
 		'text-inverse': textInverse,
-		'text-selection': mode === 'dark' ? dark : '#1F1D1C',
 		'text-hero': mode === 'dark' ? '#F6F1E7' : '#1A1714',
 		'text-muted': muted,
 		'text-tertiary': muted,
 		'text-error': mode === 'dark' ? '#FECACA' : '#B42318',
-		'border-default': mode === 'dark' ? '#3D3A39' : '#E2DED9',
-		'border-subtle': mode === 'dark' ? '#4D4947' : '#ECE9E5',
+		'border-default': washed['border-default'],
+		'border-subtle': washed['border-subtle'],
 		'border-strong': mode === 'dark' ? '#5C5855' : '#C9C2BB',
-		'bg-page': page,
-		'bg-panel': panel,
+		'bg-page': washed['bg-page'],
+		'bg-panel': washed['bg-panel'],
 		'bg-code': mode === 'dark' ? '#1F1D1C' : '#F0EDE9',
-		'bg-selection': accent,
-		'bg-elevated': mode === 'dark' ? '#262626' : light,
+		'bg-elevated': washed['bg-elevated'],
 		'bg-elevated-hover': mode === 'dark' ? '#333333' : '#F8F6F3',
-		'bg-input': panel,
-		'bg-modal': mode === 'dark' ? '#151515' : light,
+		'bg-input': washed['bg-input'],
+		'bg-modal': washed['bg-modal'],
 		'bg-panel-blur': panelBlur,
 		'hover-overlay': overlay,
 		'hover-overlay-strong': strongOverlay,
@@ -137,7 +322,6 @@ export function deriveThemeTokens(
 		'scrim-soft': mode === 'dark' ? '#00000080' : '#281F1833',
 		'shadow-color': mode === 'dark' ? '#00000066' : '#3C32201F',
 		'shadow-color-strong': mode === 'dark' ? '#000000CC' : '#3C322033',
-		'accent-tint': `${accent.slice(0, 7)}1F`,
 		'danger': danger,
 		'danger-tint': `${danger.slice(0, 7)}1A`,
 		'danger-text': mode === 'dark' ? '#FECACA' : '#B42318',
@@ -151,7 +335,6 @@ export function deriveThemeTokens(
 		'warning-fill': `${warning.slice(0, 7)}1A`,
 		'info-border': `${info.slice(0, 7)}4D`,
 		'info-fill': `${info.slice(0, 7)}0F`,
-		'on-accent': readableForeground(accent),
 		warning,
 		info
 	} as ThemeTokens;

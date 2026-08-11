@@ -1,5 +1,10 @@
 import { builtinTheme, darkTheme } from './builtins';
-import { deriveThemeTokens } from './color';
+import {
+	accentDerivedTokenIds,
+	deriveThemeTokens,
+	normalizeHex,
+	washDerivedTokenIds
+} from './color';
 import { normalizeTheme } from './validation';
 import type { ColorTheme, ThemeTokens } from './types';
 
@@ -43,4 +48,16 @@ export function cloneTheme(theme: ColorTheme, name = `${theme.name} Copy`): Colo
 		info: resolved.info
 	});
 	return { ...copy, tokens: { ...theme.tokens } };
+}
+
+/** Rebuild a theme around one accent input: keep the resolved neutrals and
+ *  status colors, clear accent/wash family overrides so the new accent fully
+ *  drives the derived tokens. */
+export function applyAccent(theme: ColorTheme, accent: string): ColorTheme {
+	const draft = cloneTheme(theme);
+	draft.palette = { ...draft.palette, accent: normalizeHex(accent) };
+	for (const id of [...accentDerivedTokenIds, ...washDerivedTokenIds]) {
+		delete draft.tokens[id];
+	}
+	return draft;
 }

@@ -6,16 +6,24 @@
 		themeController,
 		themeError
 	} from '$lib/theme';
-	import { cloneTheme } from '$lib/theme/compiler';
+	import { applyAccent, cloneTheme } from '$lib/theme/compiler';
 	import { contrastChecks } from '$lib/theme/color';
 	import { compileTheme } from '$lib/theme/compiler';
 	import type { ColorTheme } from '$lib/theme/types';
+	import AccentPicker from './AccentPicker.svelte';
 
 	let editing = $state<ColorTheme | null>(null);
 	let draftName = $state('');
 	let busy = $state(false);
 	let message = $state('');
 	let importInput = $state<HTMLInputElement | null>(null);
+	let accentDraft = $state('#EF6F2E');
+
+	$effect(() => {
+		if ($activeColorTheme) {
+			accentDraft = compileTheme($activeColorTheme)['accent-100'] ?? '#EF6F2E';
+		}
+	});
 
 	const paletteFields = [
 		['page', 'Page background'],
@@ -35,6 +43,12 @@
 		draftName = copy.name;
 		message = '';
 		themeController.preview(copy);
+	}
+
+	function applyAccentDraft() {
+		const active = $activeColorTheme;
+		if (!active) return;
+		beginEdit(applyAccent(active, accentDraft));
 	}
 
 	function updatePalette(key: (typeof paletteFields)[number][0], value: string) {
@@ -137,6 +151,27 @@
 		shared with the Quick Capture window.
 	</p>
 
+	{#if !editing}
+		<div class="accent-hero">
+			<div class="accent-hero-heading">
+				<h3>Accent color</h3>
+				<p class="compute-hint">
+					Pick one color and the entire app recolors: buttons, links, selection, hovers, focus states,
+					and a subtle surface wash. Applied to {$activeColorTheme?.name ?? 'the active theme'}.
+				</p>
+			</div>
+			<AccentPicker value={accentDraft} mode={$activeColorTheme?.mode ?? 'dark'} onchange={(hex) => (accentDraft = hex)} />
+			<div class="theme-actions">
+				<button
+					class="browse-btn primary"
+					onclick={() => void applyAccentDraft()}
+					disabled={busy}
+				>Apply accent</button>
+				<span class="accent-hint">Creates an editable copy that you can fine-tune and save below.</span>
+			</div>
+		</div>
+	{/if}
+
 	<div class="theme-gallery">
 		{#each $availableThemes as available}
 			<button
@@ -214,6 +249,9 @@
 
 <style>
 	.theme-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .6rem; }
+	.accent-hero { margin-top: 1rem; padding: 1rem; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-elevated); }
+	.accent-hero-heading h3 { margin: 0 0 .3rem; }
+	.accent-hint { color: var(--text-secondary); font-size: .78rem; align-self: center; }
 	.theme-card { display: flex; align-items: center; gap: .65rem; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-panel); color: var(--text-primary); padding: .55rem; text-align: left; cursor: pointer; }
 	.theme-card:hover, .theme-card.active { border-color: var(--accent-100); background: var(--accent-tint); }
 	.theme-card:disabled { opacity: .6; cursor: wait; }
