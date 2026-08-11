@@ -132,6 +132,27 @@ describe('theme colors', () => {
 		expect(compileTheme(clone)['accent-100']).toBe('#EF6F2E');
 	});
 
+	it('keeps the new surface direction for clones and any applied accent', () => {
+		for (const base of [darkTheme, lightTheme]) {
+			const original = compileTheme(base);
+			const clone = compileTheme(cloneTheme(base));
+			expect(clone['bg-page']).toBe(original['bg-page']);
+			expect(clone['bg-panel']).toBe(original['bg-panel']);
+		}
+		const check = (tokens: Record<string, string | undefined>, original: Record<string, string | undefined>) => {
+			expect(Math.abs(relativeLuminance(tokens['bg-page'] ?? '#000000') - relativeLuminance(original['bg-page'] ?? '#000000'))).toBeLessThan(0.02);
+			expect(Math.abs(relativeLuminance(tokens['bg-panel'] ?? '#FFFFFF') - relativeLuminance(original['bg-panel'] ?? '#FFFFFF'))).toBeLessThan(0.02);
+		};
+		for (const base of [darkTheme, lightTheme]) {
+			const original = compileTheme(base);
+			const accent = compileTheme(applyAccent(base, '#EAB308'));
+			expect(relativeLuminance(accent['bg-page'] ?? '#000000')).toBeGreaterThan(
+				relativeLuminance(accent['bg-panel'] ?? '#FFFFFF')
+			);
+			check(accent, original);
+		}
+	});
+
 	it('swaps main-area and menu-area surface colors globally', () => {
 		const derived = deriveThemeTokens('light', { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' });
 		expect(relativeLuminance(derived['bg-page'] ?? '#000000')).toBeGreaterThan(

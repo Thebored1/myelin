@@ -13,9 +13,11 @@ export function compileTheme(theme: ColorTheme): ThemeTokens {
 	const base = builtinTheme(normalized.baseThemeId) ?? darkTheme;
 	const derived = normalized.palette ? deriveThemeTokens(normalized.mode, normalized.palette) : {};
 	const tokens = { ...base.tokens, ...derived, ...normalized.tokens };
-	// The main content area sits on the panel color while menus, rails and
-	// sidebars use the page color. Applied after the full merge so the
-	// pairing holds for built-in and saved custom themes alike.
+	// Direction contract: the main content area sits on the panel color while
+	// menus, rails and sidebars use the page color. Enforced once, after the
+	// full merge, so every theme — built-in, palette-derived, or saved with
+	// explicit tokens — renders in the same direction. Stored themes always
+	// carry the true surface roles; the pairing is applied at compile time.
 	const page = tokens['bg-page'];
 	const panel = tokens['bg-panel'];
 	if (page && panel) {
@@ -46,9 +48,14 @@ export function makeCustomTheme(
 
 export function cloneTheme(theme: ColorTheme, name = `${theme.name} Copy`): ColorTheme {
 	const resolved = compileTheme(theme);
+	// The palette is the pre-direction source of truth: deriveThemeTokens
+	// expects the true page/panel roles. compileTheme output is post-direction,
+	// and the swap is an involution, so swapping the resolved surfaces once
+	// recovers the true roles. Without this, re-deriving from the crossed
+	// palette would flip the direction back on the next compile.
 	const copy = makeCustomTheme(name, theme, {
-		page: resolved['bg-page'],
-		panel: resolved['bg-panel'],
+		page: resolved['bg-panel'],
+		panel: resolved['bg-page'],
 		text: resolved['text-primary'],
 		mutedText: resolved['text-secondary'],
 		accent: resolved['accent-100'],
