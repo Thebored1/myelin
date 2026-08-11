@@ -51,7 +51,12 @@ export function createNotePageUtilities(ctx: Record<string, any>) {
 		const paddingLeft = parseFloat(toolbarStyle.paddingLeft) || 0;
 		const paddingRight = parseFloat(toolbarStyle.paddingRight) || 0;
 		const availableWidth = toolbar.clientWidth - paddingLeft - paddingRight;
-		const totalWidth = Array.from(items).reduce<number>((width, item) => {
+		const itemElements = Array.from(items) as HTMLElement[];
+		const firstRowTop = Math.min(...itemElements.map((item) => item.getBoundingClientRect().top));
+		const hasWrappedRow = itemElements.some(
+			(item) => item.getBoundingClientRect().top > firstRowTop + 2
+		);
+		const totalWidth = itemElements.reduce<number>((width, item) => {
 			const element = item as HTMLElement;
 			const style = getComputedStyle(element);
 			return (
@@ -62,7 +67,8 @@ export function createNotePageUtilities(ctx: Record<string, any>) {
 			);
 		}, 0);
 
-		const needsToggle = availableWidth > 0 && totalWidth > availableWidth + 1;
+		const needsToggle =
+			hasWrappedRow || (availableWidth > 0 && totalWidth > availableWidth + 1);
 		ctx.toolbarNeedsToggle = needsToggle;
 		if (!needsToggle) ctx.toolbarExpanded = false;
 
