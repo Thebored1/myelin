@@ -13,14 +13,16 @@ export function compileTheme(theme: ColorTheme): ThemeTokens {
 	const base = builtinTheme(normalized.baseThemeId) ?? darkTheme;
 	const derived = normalized.palette ? deriveThemeTokens(normalized.mode, normalized.palette) : {};
 	const tokens = { ...base.tokens, ...derived, ...normalized.tokens };
-	// Direction contract: the main content area sits on the panel color while
-	// menus, rails and sidebars use the page color. Enforced once, after the
-	// full merge, so every theme — built-in, palette-derived, or saved with
-	// explicit tokens — renders in the same direction. Stored themes always
-	// carry the true surface roles; the pairing is applied at compile time.
+	// Direction contract: the main content area takes the dominant surface —
+	// the lightest in light mode (panel) and the darkest in dark mode (page) —
+	// while menus, rails and sidebars use the complementary surface. Enforced
+	// once, after the full merge, so every theme — built-in, palette-derived,
+	// or saved with explicit tokens — renders in the same direction. Stored
+	// themes always carry the true surface roles; the pairing is applied at
+	// compile time.
 	const page = tokens['bg-page'];
 	const panel = tokens['bg-panel'];
-	if (page && panel) {
+	if (normalized.mode === 'light' && page && panel) {
 		tokens['bg-page'] = panel;
 		tokens['bg-panel'] = page;
 	}
@@ -49,13 +51,14 @@ export function makeCustomTheme(
 export function cloneTheme(theme: ColorTheme, name = `${theme.name} Copy`): ColorTheme {
 	const resolved = compileTheme(theme);
 	// The palette is the pre-direction source of truth: deriveThemeTokens
-	// expects the true page/panel roles. compileTheme output is post-direction,
-	// and the swap is an involution, so swapping the resolved surfaces once
-	// recovers the true roles. Without this, re-deriving from the crossed
-	// palette would flip the direction back on the next compile.
+	// expects the true page/panel roles. compileTheme only swaps those roles
+	// for light mode, so the resolved surfaces recover the true roles either
+	// directly (dark) or by un-swapping (light). Without this, re-deriving
+	// from the crossed palette would flip the direction on the next compile.
+	const swapped = theme.mode === 'light';
 	const copy = makeCustomTheme(name, theme, {
-		page: resolved['bg-panel'],
-		panel: resolved['bg-page'],
+		page: swapped ? resolved['bg-panel'] : resolved['bg-page'],
+		panel: swapped ? resolved['bg-page'] : resolved['bg-panel'],
 		text: resolved['text-primary'],
 		mutedText: resolved['text-secondary'],
 		accent: resolved['accent-100'],

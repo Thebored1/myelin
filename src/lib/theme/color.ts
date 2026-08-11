@@ -279,7 +279,7 @@ export function deriveThemeTokens(
 		: ['#1F1D1C', '#2E2C2B', '#3D3A39', '#4D4947', '#5C5855', '#8A8380', '#A49D9A', '#CCC9C7', '#DDD9D5', '#E8E4E0'];
 	const overlay = mode === 'dark' ? '#FFFFFF0A' : '#0000000A';
 	const strongOverlay = mode === 'dark' ? '#FFFFFF14' : '#00000012';
-	const panelBlur = mode === 'dark' ? '#1C1B1AF0' : '#FFFFFFE6';
+	const panelBlur = mode === 'dark' ? '#020202F0' : '#FFFFFFE6';
 	const washed = washSurfaces(accent, mode, text, {
 		'bg-page': page,
 		'bg-panel': panel,

@@ -146,9 +146,15 @@ describe('theme colors', () => {
 		for (const base of [darkTheme, lightTheme]) {
 			const original = compileTheme(base);
 			const accent = compileTheme(applyAccent(base, '#EAB308'));
-			expect(relativeLuminance(accent['bg-page'] ?? '#000000')).toBeGreaterThan(
-				relativeLuminance(accent['bg-panel'] ?? '#FFFFFF')
-			);
+			if (base.mode === 'light') {
+				expect(relativeLuminance(accent['bg-page'] ?? '#000000')).toBeGreaterThan(
+					relativeLuminance(accent['bg-panel'] ?? '#FFFFFF')
+				);
+			} else {
+				expect(relativeLuminance(accent['bg-page'] ?? '#000000')).toBeLessThan(
+					relativeLuminance(accent['bg-panel'] ?? '#FFFFFF')
+				);
+			}
 			check(accent, original);
 		}
 	});
@@ -168,13 +174,20 @@ describe('theme colors', () => {
 		expect(explicit['bg-panel']).toBe('#FFFFFF');
 	});
 
-	it('keeps the dark main surface visibly lighter than the menu area', () => {
+	it('keeps the dark menu area visibly lighter than the main surface', () => {
 		const compiled = compileTheme(darkTheme);
-		expect(relativeLuminance(compiled['bg-page'] ?? '#000000')).toBeGreaterThan(
-			3 * relativeLuminance(compiled['bg-panel'] ?? '#FFFFFF')
+		expect(relativeLuminance(compiled['bg-panel'] ?? '#000000')).toBeGreaterThan(
+			3 * relativeLuminance(compiled['bg-page'] ?? '#FFFFFF')
 		);
 		expect(relativeLuminance(compiled['bg-elevated'] ?? '#000000')).toBeGreaterThan(
 			relativeLuminance(compiled['bg-page'] ?? '#FFFFFF')
+		);
+	});
+
+	it('keeps the light main surface visibly lighter than the menu area', () => {
+		const compiled = compileTheme(lightTheme);
+		expect(relativeLuminance(compiled['bg-page'] ?? '#000000')).toBeGreaterThan(
+			relativeLuminance(compiled['bg-panel'] ?? '#FFFFFF')
 		);
 	});
 

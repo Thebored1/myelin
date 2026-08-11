@@ -38,10 +38,10 @@
 	--border-strong: #5c5855;
 	--border: var(--border-default);
 	--border-color: var(--border-default);
-	--bg-page: #1c1b1a;
+	--bg-page: #020202;
 	--bg-base: var(--bg-page);
 	--bg-body: var(--bg-page);
-	--bg-panel: #020202;
+	--bg-panel: #1c1b1a;
 	--bg-primary: var(--bg-page);
 	--bg-surface: var(--bg-panel);
 	--bg-raised: var(--bg-elevated);
@@ -75,7 +75,7 @@
 	--success-fill: rgba(129, 199, 132, 0.06);
 	--warning-border: rgba(231, 184, 92, 0.3);
 	--warning-fill: rgba(231, 184, 92, 0.1);
-	--bg-panel-blur: rgba(28, 27, 26, 0.94);
+	--bg-panel-blur: rgba(2, 2, 2, 0.94);
 	--danger-text: #fecaca;
 	--danger-bg: rgba(239, 68, 68, 0.12);
 	--danger-bg-strong: rgba(239, 68, 68, 0.18);
