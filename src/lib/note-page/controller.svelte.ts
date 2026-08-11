@@ -303,8 +303,11 @@ export function createNotePageController() {
 			get HtmlViewerComponent() { return HtmlViewerComponent; }, set HtmlViewerComponent(value) { HtmlViewerComponent = value; },
 			get TexEditorComponent() { return TexEditorComponent; }, set TexEditorComponent(value) { TexEditorComponent = value; },
 			get IpynbEditorComponent() { return IpynbEditorComponent; }, set IpynbEditorComponent(value) { IpynbEditorComponent = value; },
-			get vditorContainer() { return vditorContainer; },
-			get toolbarExpanded() { return toolbarExpanded; }
+		get vditorContainer() { return vditorContainer; },
+		get toolbarExpanded() { return toolbarExpanded; },
+		set toolbarExpanded(value) { toolbarExpanded = value; },
+		get toolbarNeedsToggle() { return toolbarNeedsToggle; },
+		set toolbarNeedsToggle(value) { toolbarNeedsToggle = value; }
 		});
 		const { openNoteNotebook, localVditorCdn, activeAiNoteId, updateToolbarOverflow } = utilities;
 	
