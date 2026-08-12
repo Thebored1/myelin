@@ -191,9 +191,9 @@
 			<br />
 			<h2>Embeddings — Document Search & RAG</h2>
 			<p class="description">
-				A small embedding model (e.g. nomic-embed-text v1.5, Q8_0) powers semantic search over your
-				notes and lets the assistant search ingested documents (PDFs, books). It runs as a second
-				local server.
+				A validated embedding GGUF powers semantic search over your notes and lets the assistant
+				search ingested documents (PDFs, books). Known models receive their required query/document
+				format; other compatible models use plain text. It runs as a second local server.
 			</p>
 			<div class="model-picker">
 				<div class="path-display" class:empty={!settings.embedModelPath}>
@@ -201,10 +201,34 @@
 						'No embedding model selected — semantic search uses a lexical fallback'}
 				</div>
 				<button class="browse-btn" onclick={settings.pickEmbedModel}>Browse...</button>
+				<button class="browse-btn" disabled={settings.downloadingModel === 'nomic-embed-text-v1.5-q4-k-m'} onclick={() => settings.downloadBuiltInModel('nomic-embed-text-v1.5-q4-k-m')}>{settings.downloadingModel === 'nomic-embed-text-v1.5-q4-k-m' ? 'Downloading…' : 'Download recommended'}</button>
 				{#if settings.embedModelPath}
 					<button class="browse-btn" onclick={settings.clearEmbedModel}>Clear</button>
 				{/if}
 			</div>
+
+			<br />
+			<h2>Reranker — Final Evidence Ordering</h2>
+			<p class="description">Optional resident English cross-encoder. It only reranks ambiguous agent document retrieval; ordinary note search stays fast and never calls it.</p>
+			<div class="model-picker">
+				<div class="path-display" class:empty={!settings.rerankerModelPath}>{settings.rerankerModelPath || 'No reranker selected — calibrated hybrid retrieval remains active'}</div>
+				<button class="browse-btn" onclick={settings.pickRerankerModel}>Browse...</button>
+				<button class="browse-btn" disabled={settings.downloadingModel === 'ms-marco-minilm-l6-v2-q4-k-m'} onclick={() => settings.downloadBuiltInModel('ms-marco-minilm-l6-v2-q4-k-m')}>{settings.downloadingModel === 'ms-marco-minilm-l6-v2-q4-k-m' ? 'Downloading…' : 'Download MiniLM-L6 Q4'}</button>
+				{#if settings.rerankerModelPath}<button class="browse-btn" onclick={settings.clearRerankerModel}>Clear</button>{/if}
+			</div>
+			{#if settings.modelDownloadError}<p class="compute-hint" style="color: var(--text-error)">{settings.modelDownloadError}</p>{/if}
+
+			<br />
+			<h2>PDF OCR</h2>
+			<p class="description">OCR is reserved for a future bundled runtime. It is currently dormant and native PDF extraction remains active.</p>
+			{#if settings.ocrStatus}
+				<label class="checkbox-label"><input type="checkbox" checked={settings.ocrStatus.autoLowTextPages ?? true} onchange={(event) => settings.saveOcrSettings({ autoLowTextPages: event.currentTarget.checked, executablePath: settings.ocrStatus.executablePath, language: settings.ocrStatus.configuredLanguage })} disabled /> Automatically OCR low-text pages (inactive until bundled runtime is enabled)</label>
+				<div class="model-picker">
+					<input class="path-display" value={settings.ocrStatus.executablePath ?? ''} placeholder="Bundled runtime path (future)" onchange={(event) => settings.saveOcrSettings({ autoLowTextPages: settings.ocrStatus.autoLowTextPages ?? true, executablePath: event.currentTarget.value || null, language: settings.ocrStatus.configuredLanguage })} />
+					<input class="path-display" value={settings.ocrStatus.configuredLanguage ?? 'eng'} placeholder="eng" onchange={(event) => settings.saveOcrSettings({ autoLowTextPages: settings.ocrStatus.autoLowTextPages ?? true, executablePath: settings.ocrStatus.executablePath, language: event.currentTarget.value })} />
+				</div>
+				<p class="compute-hint">{settings.ocrStatus.available && settings.ocrStatus.languageAvailable ? `Ready: ${settings.ocrStatus.version ?? 'Tesseract'} (${settings.ocrStatus.configuredLanguage})` : settings.ocrStatus.warning}</p>
+			{/if}
 
 			{#if settings.modelProfiles.length > 0}
 				<br />

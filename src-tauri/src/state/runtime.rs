@@ -99,7 +99,7 @@ impl AppState {
         let pdf_only = note.relative_path.to_ascii_lowercase().ends_with(".pdf");
         if attachment_backed && !section_scoped {
             let _ = self
-                .ensure_document_ingested(&note.id, &note.title, &note.body)
+                .ensure_document_ingested(&note.id, &note.title, &note.body, Some(crate::embeddings::DocumentFormat::from_path(&note.relative_path)))
                 .await;
         }
         let retrieval_backed = prompt_shape.oversized || attachment_backed || pdf_only;

@@ -97,6 +97,7 @@ pub(crate) fn normalize(vector: &mut [f32]) {
 }
 
 pub(crate) fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.is_empty() || left.len() != right.len() { return 0.0; }
     left.iter()
         .zip(right.iter())
         .map(|(left, right)| left * right)

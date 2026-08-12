@@ -175,9 +175,10 @@ impl AppState {
         }
         self.handle.emit("index://status", "notes_ready")?;
 
-        // Upgrade the hashed placeholder vectors to real embeddings (one batch)
-        // when an embed model is configured — semantic note search.
-        self.reembed_notes(&mut notes).await;
+        // Build source-preserving, non-overlapping retrieval chunks before
+        // replacing the derived workspace index. A configured-model failure is
+        // represented by nullable vectors and keyword-only search.
+        let workspace_chunks = self.build_workspace_note_chunks(&notes).await;
 
         // Self-heal: remove orphaned chat sessions whose note no longer exists
         // (left behind by older deletes that didn't clean up the sidecar).
@@ -242,7 +243,7 @@ impl AppState {
         if self.inner.runtime.read().workspace_path.as_ref() != Some(&workspace) {
             return Ok(());
         }
-        let table = rebuild_lancedb(&self.index_dir(), &notes).await?;
+        let table = rebuild_lancedb(&self.index_dir(), &workspace_chunks).await?;
 
         {
             let mut runtime = self.inner.runtime.write();

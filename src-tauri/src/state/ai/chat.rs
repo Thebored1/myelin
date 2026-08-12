@@ -131,7 +131,7 @@ impl AppState {
                 false
             };
             let attachment_note_ready = if attachment_backed && !active_section_request {
-                self.ensure_document_ingested(&note.id, &note.title, &note.body)
+                self.ensure_document_ingested(&note.id, &note.title, &note.body, Some(crate::embeddings::DocumentFormat::from_path(&note.relative_path)))
                     .await
                     .is_ok()
             } else {

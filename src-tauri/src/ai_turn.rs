@@ -246,30 +246,6 @@ pub fn contextual_retrieval_query(question: &str, history: &[Value]) -> String {
     // markers or silently dropping any retrieved evidence.
     let repeated_question = prior_user.is_some_and(|previous| previous.trim() == question.trim());
     let prior_user = (!repeated_question).then_some(prior_user).flatten();
-    let needs_assistant = {
-        let q = question.to_ascii_lowercase();
-        let has_reference = q
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|word| {
-                matches!(
-                    word,
-                    "it" | "they" | "them" | "that" | "those" | "this" | "these" | "he" | "she"
-                )
-            });
-        has_reference
-            || ["why did you", "what about", "what do you mean"]
-                .iter()
-                .any(|term| q.contains(term))
-    };
-    let prior_assistant = needs_assistant
-        .then(|| {
-            history.iter().rev().find_map(|message| {
-                (message["role"].as_str() == Some("assistant"))
-                    .then(|| message["content"].as_str())
-                    .flatten()
-            })
-        })
-        .flatten();
 
     let bounded = |text: &str| -> String {
         let chars: Vec<char> = text.chars().collect();
@@ -282,10 +258,9 @@ pub fn contextual_retrieval_query(question: &str, history: &[Value]) -> String {
         query.push_str("\nPrevious user context: ");
         query.push_str(&bounded(user));
     }
-    if let Some(assistant) = prior_assistant {
-        query.push_str("\nPrevious assistant context (may be incorrect): ");
-        query.push_str(&bounded(assistant));
-    }
+    // Retrieval's lexical query must never inherit claims made by the model.
+    // The answer-generation conversation memory remains responsible for the
+    // assistant side of a follow-up; retrieval only sees user-authored text.
     query
 }
 
@@ -899,7 +874,7 @@ mod tests {
         assert!(query.starts_with("Latest question: why did you say"));
         assert_eq!(query.matches("Latest question:").count(), 1);
         assert!(query.contains("LFM2 and MiniCPM"));
-        assert!(query.contains("They did not have a 2-bit result"));
+        assert!(!query.contains("They did not have a 2-bit result"));
     }
 
     #[test]
@@ -996,6 +971,7 @@ mod tests {
             chunk_index: index,
             text: text.into(),
             distance: 0.0,
+            ..Default::default()
         };
         let previous = vec![chunk(0, "a poem by William Shakespeare")];
         let supported = vec![

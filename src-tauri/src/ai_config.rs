@@ -33,6 +33,8 @@ pub struct AiConfigFile {
     #[serde(default)]
     pub embedding: EmbeddingConfig,
     #[serde(default)]
+    pub reranker: RerankerConfig,
+    #[serde(default)]
     pub retrieval: RetrievalConfig,
     #[serde(default)]
     pub tools: ToolingConfig,
@@ -155,7 +157,7 @@ fn default_cache_reuse() -> u32 { 256 }
 pub struct CacheConfig { pub max_bytes: u64 }
 impl Default for CacheConfig { fn default() -> Self { Self { max_bytes: 8 * 1024 * 1024 * 1024 } } }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingConfig {
     pub enabled: bool,
@@ -164,7 +166,43 @@ pub struct EmbeddingConfig {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub context_size: Option<u32>,
+    pub dimensions: Option<usize>,
+    pub pooling: Option<String>,
+    pub query_prefix: Option<String>,
+    pub document_prefix: Option<String>,
+    pub normalization: Option<String>,
+    pub token_reserve: u32,
+    pub batch_size: u32,
+    pub micro_batch_size: u32,
+    pub parallelism: u32,
+    pub max_inputs_per_request: u32,
+    pub batch_token_limit: u32,
 }
+impl Default for EmbeddingConfig { fn default() -> Self { Self { enabled: false, model_path: None, runtime: Some("stock".into()), host: Some("127.0.0.1".into()), port: None, context_size: None, dimensions: None, pooling: None, query_prefix: None, document_prefix: None, normalization: Some("l2".into()), token_reserve: 16, batch_size: 2048, micro_batch_size: 512, parallelism: 1, max_inputs_per_request: 8, batch_token_limit: 2048 } } }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankerConfig {
+    pub enabled: bool,
+    pub model_path: Option<PathBuf>,
+    pub runtime: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub context_size: Option<u32>,
+    pub candidate_cap: u32,
+    pub output_cap: u32,
+    pub timeout_ms: u32,
+    pub failure_threshold: u32,
+    pub circuit_break_ms: u32,
+    pub blend_weight: f32,
+    pub confidence_threshold: f32,
+    pub lead_threshold: f32,
+    pub batch_size: u32,
+    pub micro_batch_size: u32,
+    pub parallelism: u32,
+    #[serde(default)] pub extra_args: Vec<String>,
+}
+impl Default for RerankerConfig { fn default() -> Self { Self { enabled: false, model_path: None, runtime: Some("stock".into()), host: Some("127.0.0.1".into()), port: None, context_size: Some(512), candidate_cap: 12, output_cap: 8, timeout_ms: 800, failure_threshold: 3, circuit_break_ms: 60_000, blend_weight: 0.65, confidence_threshold: 0.82, lead_threshold: 0.18, batch_size: 2048, micro_batch_size: 512, parallelism: 1, extra_args: Vec::new() } } }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -212,7 +250,7 @@ pub fn applied_path(app_data: &Path) -> PathBuf { app_data.join(APPLIED_FILE_NAM
 
 pub fn default_config() -> AiConfigFile {
     AiConfigFile { version: CONFIG_VERSION, active_profile: "default".into(), profiles: BTreeMap::new(),
-        runtimes: BTreeMap::new(), cache: CacheConfig::default(), embedding: EmbeddingConfig::default(),
+        runtimes: BTreeMap::new(), cache: CacheConfig::default(), embedding: EmbeddingConfig::default(), reranker: RerankerConfig::default(),
         retrieval: RetrievalConfig::default(), tools: ToolingConfig::default(), agent: AgentConfig::default() }
 }
 
@@ -233,7 +271,18 @@ pub fn validate(config: &AiConfigFile) -> Vec<AiConfigError> {
     }
     for (id, runtime) in &config.runtimes { validate_id(id, "/runtimes", &mut errors); validate_runtime(id, runtime, &mut errors); }
     if config.cache.max_bytes == 0 { errors.push(err("/cache/maxBytes", "semantic", "cache budget must be positive")); }
+    validate_retrieval_model("/embedding", config.embedding.enabled, config.embedding.model_path.as_ref(), config.embedding.context_size, config.embedding.parallelism, &mut errors);
+    validate_retrieval_model("/reranker", config.reranker.enabled, config.reranker.model_path.as_ref(), config.reranker.context_size, config.reranker.parallelism, &mut errors);
+    if config.embedding.max_inputs_per_request == 0 || config.embedding.batch_token_limit == 0 { errors.push(err("/embedding", "semantic", "embedding request limits must be positive")); }
+    if config.reranker.candidate_cap == 0 || config.reranker.candidate_cap > 12 || config.reranker.output_cap == 0 || config.reranker.output_cap > config.reranker.candidate_cap { errors.push(err("/reranker", "semantic", "reranker caps must be 1..12 and output cannot exceed candidates")); }
+    if config.reranker.timeout_ms == 0 || config.reranker.timeout_ms > 5_000 || !(0.0..=1.0).contains(&config.reranker.blend_weight) { errors.push(err("/reranker", "semantic", "reranker timeout or blend weight is invalid")); }
     errors
+}
+
+fn validate_retrieval_model(root: &str, enabled: bool, path: Option<&PathBuf>, context: Option<u32>, parallelism: u32, errors: &mut Vec<AiConfigError>) {
+    if enabled && path.is_none() { errors.push(err(root, "semantic", "enabled model requires modelPath")); }
+    if path.is_some_and(|path| !path.is_absolute()) { errors.push(err(&format!("{root}/modelPath"), "semantic", "model path must be absolute")); }
+    if context == Some(0) || parallelism == 0 { errors.push(err(root, "semantic", "context size and parallelism must be positive")); }
 }
 
 fn validate_id(id: &str, root: &str, errors: &mut Vec<AiConfigError>) {

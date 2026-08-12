@@ -8,7 +8,6 @@ import { backendPreference as normalizeBackendPreference, configMatchPositions a
 import type { OpenharnForm } from '$lib/settings/types';
 import { createSettingsLifecycle } from './lifecycle.svelte';
 import { createSettingsShortcuts } from './shortcuts.svelte';
-
 export function createSettingsController() {
 	type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 
@@ -51,14 +50,12 @@ export function createSettingsController() {
 	let backendFellBack = $state(false);
 	let providerHealthy = $state(true);
 	let providerDetail = $state('');
-
 	// LaTeX → PDF support bundle (Tectonic) cache state.
 	let latexCache = $state<{ warmed: boolean; sizeBytes: number } | null>(null);
 	let latexDownloading = $state(false);
 	let latexDownloadBytes = $state(0);
 	let latexError = $state('');
 	const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-
 	// Quick-capture global shortcut.
 	let quickShortcut = $state('Ctrl+Space');
 	let quickRecording = $state(false);
@@ -75,7 +72,6 @@ export function createSettingsController() {
 		get chatShortcutError() { return chatShortcutError; }, set chatShortcutError(value) { chatShortcutError = value; }
 	});
 	const { applyShortcut, startRecording, startChatShortcutRecording } = shortcuts;
-
 	const hasGpuBuild = () =>
 		installedBackends.some((b) => b === 'cuda' || b === 'vulkan' || b === 'metal');
 	const backendLabel = (b: string) =>
@@ -83,12 +79,10 @@ export function createSettingsController() {
 	const recommendedBeeBackend = $derived(
 		chooseBeeBackend(backendPreference, downloadableBeeBackends, nvidiaDetected)
 	);
-
 	let statusPoll: ReturnType<typeof setInterval> | undefined;
 	onDestroy(() => {
 		if (statusPoll) clearInterval(statusPoll);
 	});
-
 	// Heads-up when the chosen GPU path isn't available / installed — the app
 	// falls back to CPU automatically, so it's never a hard error.
 	const gpuIssue = $derived.by((): { level: 'warn'; message: string } | null => {
@@ -117,7 +111,6 @@ export function createSettingsController() {
 		}
 		return null;
 	});
-
 	// What the current selection resolves to, and whether it's live yet.
 	const computeStatus = $derived.by((): { level: 'gpu' | 'cpu'; title: string; detail: string } => {
 		const installed = (b: string) => installedBackends.includes(b);
@@ -174,7 +167,6 @@ export function createSettingsController() {
 			detail: pending ? 'Applies on your next message.' : 'GPU acceleration active.'
 		};
 	});
-
 	function selectBackend(value: BackendPref) {
 		if (value === backendPreference) return;
 		backendPreference = value;
@@ -183,7 +175,6 @@ export function createSettingsController() {
 	let isSaving = $state(false);
 	let isRebuilding = $state(false);
 	let saved = $state(false);
-
 	let enableJupyterExecution = $state(false);
 
 	// openharn sidecar settings (Settings > Agent).
@@ -218,7 +209,6 @@ export function createSettingsController() {
 	let ohNoThink = $state(false);
 	let ohToolChoice = $state('');
 	let ohTemplateKwargs = $state('');
-
 	let ohMaxCalls = $state<number | null>(null);
 	let ohTotalMax = $state<number | null>(null);
 	let ohToolTimeout = $state<number | null>(null);
@@ -228,7 +218,6 @@ export function createSettingsController() {
 	let externalModel = $state('');
 	let externalApiKey = $state('');
 	let ohSaving = $state(false);
-
 	type AiConfigStatus = {
 		configPath: string;
 		schemaPath: string;
@@ -310,10 +299,14 @@ export function createSettingsController() {
 		catch (e) { aiConfigMessage = String(e); }
 		finally { aiConfigBusy = false; }
 	}
-
 	// Web search + embeddings/RAG + model compatibility (Phase 5).
 	let searxngUrl = $state('');
 	let embedModelPath = $state('');
+	let rerankerModelPath = $state('');
+	let modelDownloadError = $state('');
+	let ocrStatus = $state<any>(null);
+	let ocrSaving = $state(false);
+	let downloadingModel = $state('');
 	type ProfileInfo = {
 		name: string;
 		architecture?: string;
@@ -334,13 +327,37 @@ export function createSettingsController() {
 			filters: [{ name: 'GGUF model', extensions: ['gguf'] }]
 		});
 		if (typeof picked === 'string') {
-			embedModelPath = picked;
 			await invoke('set_embed_model_path', { path: picked });
+			embedModelPath = picked;
 		}
 	}
 	async function clearEmbedModel() {
 		embedModelPath = '';
 		await invoke('set_embed_model_path', { path: null });
+	}
+	async function pickRerankerModel() {
+		const picked = await open({ multiple: false, filters: [{ name: 'GGUF model', extensions: ['gguf'] }] });
+		if (typeof picked === 'string') { await invoke('set_reranker_model_path', { path: picked }); rerankerModelPath = picked; }
+	}
+	async function clearRerankerModel() { rerankerModelPath = ''; await invoke('set_reranker_model_path', { path: null }); }
+	async function downloadBuiltInModel(id: string) {
+		modelDownloadError = ''; downloadingModel = id;
+		try {
+			const path = await invoke<string>('download_built_in_model', { id });
+			if (id.startsWith('nomic-')) embedModelPath = path; else rerankerModelPath = path;
+		} catch (error) { modelDownloadError = String(error); }
+		finally { downloadingModel = ''; }
+	}
+
+	async function saveOcrSettings(next: { autoLowTextPages: boolean; executablePath?: string | null; language: string }) {
+		ocrSaving = true;
+		try {
+			ocrStatus = await invoke('set_ocr_settings', { settings: next });
+		} catch (error) {
+			modelDownloadError = String(error);
+		} finally {
+			ocrSaving = false;
+		}
 	}
 
 	async function refreshSnapshot() {
@@ -392,6 +409,11 @@ export function createSettingsController() {
 		get llamaCache() { return llamaCache; }, set llamaCache(value) { llamaCache = value; },
 		get searxngUrl() { return searxngUrl; }, set searxngUrl(value) { searxngUrl = value; },
 		get embedModelPath() { return embedModelPath; }, set embedModelPath(value) { embedModelPath = value; },
+		get rerankerModelPath() { return rerankerModelPath; }, set rerankerModelPath(value) { rerankerModelPath = value; },
+		get modelDownloadError() { return modelDownloadError; }, set modelDownloadError(value) { modelDownloadError = value; },
+		get ocrStatus() { return ocrStatus; }, set ocrStatus(value) { ocrStatus = value; },
+		get ocrSaving() { return ocrSaving; }, set ocrSaving(value) { ocrSaving = value; },
+		get downloadingModel() { return downloadingModel; }, set downloadingModel(value) { downloadingModel = value; },
 		get quickShortcut() { return quickShortcut; }, set quickShortcut(value) { quickShortcut = value; },
 		get startWithSystem() { return startWithSystem; }, set startWithSystem(value) { startWithSystem = value; },
 		get ohPort() { return ohPort; }, set ohPort(value) { ohPort = value; },
@@ -749,6 +771,10 @@ export function createSettingsController() {
 		saveSearxng,
 		pickEmbedModel,
 		clearEmbedModel,
+		pickRerankerModel,
+		clearRerankerModel,
+		downloadBuiltInModel,
+		saveOcrSettings,
 		refreshSnapshot,
 		loadProviderStatus,
 		goBack,

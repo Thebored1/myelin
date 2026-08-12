@@ -173,6 +173,8 @@ export type SearchResult = {
 	note: NoteSummary;
 	score: number;
 	reason: string;
+	matchExcerpt?: string | null;
+	matchedSection?: string | null;
 };
 
 export type SearchResponse = {

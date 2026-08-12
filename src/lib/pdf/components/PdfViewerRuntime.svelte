@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
+	import { invoke } from '@tauri-apps/api/core';
 	import * as pdfjsLib from 'pdfjs-dist';
 	import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 	import type { PdfAnnotation } from '$lib/types';
+	import { pdfItemsToStructuralText, suppressRepeatedPageFurniture } from '$lib/extraction/structuralText';
 	import PdfToolbar from '$lib/pdf/components/PdfToolbar.svelte';
 	import PdfPages from '$lib/pdf/components/PdfPages.svelte';
 	import PdfSelectionToolbar from '$lib/pdf/components/PdfSelectionToolbar.svelte';
@@ -82,17 +84,15 @@
 	let handleViewerScroll: (() => void) | null = null;
 
 	async function extractDocumentText(doc: any, generation: number) {
-		const pages: string[] = [];
+		const extractedPages: string[] = [];
 		for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
 			if (generation !== loadGeneration) return;
 			const page = await doc.getPage(pageNumber);
 			const content = await page.getTextContent();
-			const text = content.items
-				.map((item: any) => (typeof item?.str === 'string' ? item.str : ''))
-				.filter(Boolean)
-				.join(' ');
-			pages.push(`[Page ${pageNumber}]\n${text}`);
+			let text = pdfItemsToStructuralText(content.items);
+			extractedPages.push(text);
 		}
+		const pages = suppressRepeatedPageFurniture(extractedPages).map((text, index) => `[Page ${index + 1}]\n${text}`);
 		if (generation === loadGeneration) {
 			onTextExtracted?.(pages.join('\n\n').trim());
 			// Eager section cache: every page becomes a cacheable section so the
@@ -121,11 +121,7 @@
 		try {
 			const page = await pdfDoc.getPage(pageNumber);
 			const content = await page.getTextContent();
-			const text = content.items
-				.map((item: any) => (typeof item?.str === 'string' ? item.str : ''))
-				.filter(Boolean)
-				.join(' ')
-				.trim();
+			const text = pdfItemsToStructuralText(content.items);
 			if (generation === sectionReportGeneration && text) {
 				onActiveSection({
 					key: `page:${pageNumber}`,

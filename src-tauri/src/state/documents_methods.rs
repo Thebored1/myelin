@@ -1,6 +1,7 @@
 use super::core::*;
 use ::anyhow::{anyhow, Context, Result};
 use super::*;
+use super::workspace_search::{workspace_chunks, WorkspaceSearchHit};
 use crate::persistence::{FileMutation, FileTransaction, MutationRoot};
 
 impl AppState {
@@ -551,6 +552,8 @@ impl AppState {
                         note,
                         score: 0.0,
                         reason: "recent".into(),
+                        match_excerpt: None,
+                        matched_section: None,
                     })
                     .collect(),
             });
@@ -558,42 +561,31 @@ impl AppState {
 
         let notes = {
             let runtime = self.inner.runtime.read();
-            runtime.notes.values().cloned().collect::<Vec<_>>()
+            runtime.notes.clone()
         };
-
         let query_vector = self.note_embedding(trimmed, true).await;
         let keyword_terms = tokenize(trimmed);
-        let mut results = notes
-            .into_iter()
-            .map(|note| {
-                let haystack = format!(
-                    "{}\n{}\n{}",
-                    note.document.title.to_lowercase(),
-                    note.document.tags.join(" ").to_lowercase(),
-                    note.document.body.to_lowercase()
-                );
-                let keyword_score = keyword_terms
-                    .iter()
-                    .map(|term| haystack.matches(term).count() as f32)
-                    .sum::<f32>();
-                let vector_score = cosine_similarity(&query_vector, &note.vector);
-                let score = keyword_score * 0.7 + vector_score * 0.3;
-                let reason = if keyword_score > 0.0 && vector_score > 0.0 {
-                    "keyword + vector".into()
-                } else if keyword_score > 0.0 {
-                    "keyword".into()
-                } else {
-                    "vector".into()
-                };
-
-                SearchResult {
-                    note: summarize(&note.document),
-                    score,
-                    reason,
-                }
-            })
-            .filter(|result| result.score > 0.25)
-            .collect::<Vec<_>>();
+        let chunks = workspace_chunks(self).await?;
+        let mut per_note: HashMap<String, Vec<(f32, WorkspaceSearchHit, bool, bool)>> = HashMap::new();
+        for chunk in chunks {
+            let haystack = format!("{}\n{}", chunk.title.to_lowercase(), chunk.text.to_lowercase());
+            let lexical = keyword_terms.iter().map(|term| haystack.matches(term).count() as f32).sum::<f32>();
+            let semantic = chunk.vector.as_ref().filter(|v| chunk.embedding_fingerprint == self.embedding_fingerprint() && v.len() == query_vector.len() && !query_vector.is_empty()).map(|v| cosine_similarity(&query_vector, v));
+            let score = match semantic { Some(value) => 0.70 * (lexical / (lexical + 1.0)) + 0.30 * value, None => lexical / (lexical + 1.0) };
+            if score > 0.0 { per_note.entry(chunk.note_id.clone()).or_default().push((score, chunk, lexical > 0.0, semantic.is_some())); }
+        }
+        let mut results = per_note.into_iter().filter_map(|(note_id, mut hits)| {
+            let note = notes.get(&note_id)?;
+            hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let (best_score, best, lexical, semantic) = hits.remove(0);
+            let second = hits.into_iter().find(|(_, candidate, _, _)| match (best.char_start, best.char_end, candidate.char_start, candidate.char_end) {
+                (Some(a), Some(b), Some(c), Some(d)) => ((b.min(d) - a.max(c)).max(0) as f32) / ((d-c).max(1) as f32) < 0.60,
+                _ => true,
+            }).map(|hit| hit.0).unwrap_or(0.0);
+            let title_boost = keyword_terms.iter().filter(|term| note.document.title.to_lowercase().contains(term.as_str()) || note.document.tags.iter().any(|tag| tag.to_lowercase().contains(term.as_str()))).count() as f32 / keyword_terms.len().max(1) as f32;
+            let score = 0.75 * best_score + 0.15 * second + 0.10 * title_boost;
+            Some(SearchResult { note: summarize(&note.document), score, reason: if semantic && lexical { "hybrid".into() } else if semantic { "vector".into() } else { "keyword".into() }, match_excerpt: Some(excerpt(&best.text)), matched_section: best.section })
+        }).collect::<Vec<_>>();
 
         results.sort_by(|left, right| right.score.total_cmp(&left.score));
 

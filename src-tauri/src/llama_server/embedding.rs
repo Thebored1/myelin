@@ -11,11 +11,13 @@ use std::thread;
 use std::time::Duration;
 use sha2::{Digest, Sha256};
 use super::*;
+use crate::embeddings::EmbeddingPooling;
 pub struct ManagedEmbedServer {
     pub child: Child,
     pub port: u16,
     pub model_path: PathBuf,
     pub executable_path: PathBuf,
+    pub contract: Option<crate::embeddings::EmbeddingModelContract>,
     _stderr_reader: Option<thread::JoinHandle<()>>,
 }
 
@@ -33,6 +35,8 @@ pub async fn start_embed_server(
     model_path: &Path,
     host: &str,
     port: u16,
+    context_tokens: usize,
+    pooling: Option<EmbeddingPooling>,
 ) -> Result<ManagedEmbedServer> {
     let mut command = Command::new(executable);
     command
@@ -43,10 +47,8 @@ pub async fn start_embed_server(
         .arg("--model")
         .arg(model_path)
         .arg("--embedding")
-        .arg("--pooling")
-        .arg("mean")
         .arg("--ctx-size")
-        .arg("512")
+        .arg(context_tokens.to_string())
         .arg("--batch-size")
         .arg("1024")
         .arg("--ubatch-size")
@@ -56,6 +58,9 @@ pub async fn start_embed_server(
         .arg("--no-warmup")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if let Some(pooling) = pooling {
+        command.arg("--pooling").arg(pooling.as_server_arg());
+    }
     apply_library_path(&mut command, executable);
     #[cfg(target_os = "linux")]
     unsafe {
@@ -102,6 +107,7 @@ pub async fn start_embed_server(
                 port,
                 model_path: model_path.to_path_buf(),
                 executable_path: executable.to_path_buf(),
+                contract: None,
                 _stderr_reader: reader_handle,
             });
         }
@@ -163,4 +169,3 @@ pub fn resolve_embedding_executable(app_data_dir: &Path) -> Result<PathBuf> {
         installed.display()
     )
 }
-

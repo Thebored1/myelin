@@ -167,11 +167,24 @@ impl Tool for SearchDocumentsTool {
             "ai://chat_tool",
             serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
         );
-        match self
-            .state
-            .retrieve_chunks_scoped(&args.query, k, Some(&scoped_ids))
-            .await
-        {
+        let primary_future = self.state.retrieve_chunks_scoped(&args.query, k, Some(&scoped_ids));
+        let planner_future = self.state.plan_complex_retrieval(&args.query);
+        let (mut primary, alternates) = tokio::join!(primary_future, planner_future);
+        if let Ok(chunks) = &mut primary {
+            if !alternates.is_empty() {
+                let extra = futures_util::future::join_all(alternates.into_iter().map(|query| {
+                    let state = self.state.clone();
+                    let scoped_ids = scoped_ids.clone();
+                    async move { state.retrieve_chunks_scoped(&query, k, Some(&scoped_ids)).await }
+                })).await;
+                let mut seen = chunks.iter().map(|chunk| (chunk.doc_id.clone(), chunk.chunk_index)).collect::<std::collections::HashSet<_>>();
+                for result in extra.into_iter().flatten() {
+                    for chunk in result { if seen.insert((chunk.doc_id.clone(), chunk.chunk_index)) { chunks.push(chunk); } }
+                }
+                chunks.truncate(k);
+            }
+        }
+        match primary {
             Ok(chunks) if !chunks.is_empty() => {
                 let mut out = format!("Passages from your documents for \"{}\":\n\n", args.query);
                 for (i, c) in chunks.iter().enumerate() {

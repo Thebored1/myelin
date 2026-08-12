@@ -124,6 +124,8 @@ impl AppState {
                 ai_pipeline_lock: AsyncMutex::new(()),
                 ai_pipeline_ready: std::sync::atomic::AtomicBool::new(false),
                 embed_server: AsyncMutex::new(None),
+                reranker_server: AsyncMutex::new(None),
+                reranker_circuit: Mutex::new(RerankerCircuit::default()),
                 sidecar: AsyncMutex::new(None),
                 chat_lock: AsyncMutex::new(()),
                 llama_slot_lock: AsyncMutex::new(()),
@@ -402,6 +404,11 @@ impl AppState {
             }
         }
         if let Ok(mut guard) = self.inner.embed_server.try_lock() {
+            if let Some(server) = guard.as_mut() {
+                let _ = server.child.kill();
+            }
+        }
+        if let Ok(mut guard) = self.inner.reranker_server.try_lock() {
             if let Some(server) = guard.as_mut() {
                 let _ = server.child.kill();
             }

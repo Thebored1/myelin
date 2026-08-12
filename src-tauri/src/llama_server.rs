@@ -30,6 +30,7 @@ mod hardware_budget;
 mod launch_plan;
 mod process;
 mod embedding;
+mod reranker;
 mod discovery;
 
 #[cfg(test)]
@@ -41,8 +42,8 @@ pub use assets::{
     install_backend_from_staging,
 };
 pub use config::{
-    embed_model_path, inspect_provider, normalize_engine, quick_capture_shortcut, resolve_config,
-    searxng_url, set_advanced_config, set_deterministic_tools, set_embed_model_path,
+    embed_model_path, inspect_provider, normalize_engine, quick_capture_shortcut, reranker_model_path, resolve_config,
+    searxng_url, set_advanced_config, set_deterministic_tools, set_embed_model_path, set_reranker_model_path,
     set_executable_path, set_inference_engine, set_model_path, set_prompt_cache,
     set_quick_capture_shortcut, set_searxng_url, set_tool_gating,
 };
@@ -59,6 +60,7 @@ pub use types::{
 };
 pub use hardware::DeviceInfo;
 pub use embedding::ManagedEmbedServer;
+pub use reranker::{ManagedRerankerServer, resolve_reranker_executable, start_reranker_server, stop_reranker_server};
 
 use config::{desired_backends, load_config, tiering_roots};
 use discovery::{

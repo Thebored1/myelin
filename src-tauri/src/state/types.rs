@@ -173,6 +173,8 @@ pub(crate) struct InnerState {
     pub(crate) ai_pipeline_lock: AsyncMutex<()>,
     pub(crate) ai_pipeline_ready: std::sync::atomic::AtomicBool,
     pub(crate) embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
+    pub(crate) reranker_server: AsyncMutex<Option<crate::llama_server::ManagedRerankerServer>>,
+    pub(crate) reranker_circuit: Mutex<RerankerCircuit>,
     /// The openharn-myelin agent sidecar: a long-lived `openharn-myelin` process
     /// that runs the agent loop and calls back to Myelin for tool execution.
 	pub(crate) sidecar: AsyncMutex<Option<ManagedSidecar>>,
@@ -250,6 +252,12 @@ pub(crate) struct InnerState {
     pub(crate) conversations: Mutex<HashMap<String, Vec<serde_json::Value>>>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct RerankerCircuit {
+    pub(crate) failures: u32,
+    pub(crate) disabled_until: Option<std::time::Instant>,
+}
+
 /// Makes cancellation or an unexpected worker exit observable to generation
 /// waiters instead of leaving them asleep forever. Pending dirty work remains in
 /// the scheduler so a later request can restart it.
@@ -299,6 +307,27 @@ pub(crate) struct IndexedNote {
     pub(crate) vector: Vec<f32>,
 }
 
+/// A source-preserving workspace-search unit.  These rows are derived data;
+/// the note document remains the source of truth.
+#[derive(Clone)]
+pub(crate) struct WorkspaceNoteChunk {
+    pub(crate) note_id: String,
+    pub(crate) title: String,
+    pub(crate) tags_text: String,
+    pub(crate) path: String,
+    pub(crate) updated_at: String,
+    pub(crate) chunk_index: i32,
+    pub(crate) text: String,
+    pub(crate) lexical_text: String,
+    pub(crate) token_count: i32,
+    pub(crate) char_start: Option<i64>,
+    pub(crate) char_end: Option<i64>,
+    pub(crate) section_start: Option<String>,
+    pub(crate) section_end: Option<String>,
+    pub(crate) embedding_fingerprint: String,
+    pub(crate) vector: Option<Vec<f32>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub(crate) struct PersistedSettings {
@@ -308,6 +337,8 @@ pub(crate) struct PersistedSettings {
     pub(crate) openharn: OpenharnSettings,
     #[serde(default, skip_serializing_if = "BackgroundSettings::is_default")]
     pub background: BackgroundSettings,
+    #[serde(default, skip_serializing_if = "crate::ocr::OcrSettings::is_default")]
+    pub ocr: crate::ocr::OcrSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

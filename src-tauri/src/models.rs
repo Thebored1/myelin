@@ -276,4 +276,8 @@ pub struct SearchResult {
     pub note: NoteSummary,
     pub score: f32,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_excerpt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_section: Option<String>,
 }

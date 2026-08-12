@@ -7,9 +7,12 @@ pub mod llama_server;
 mod model_profiles;
 mod models;
 mod notebook;
+mod ocr;
 mod note_prompt;
 mod persistence;
 mod rag;
+pub mod retrieval_eval;
+pub mod retrieval_pipeline;
 mod sidecar;
 pub mod state;
 mod stream_chat;
@@ -392,6 +395,22 @@ async fn search_notes(state: State<'_, AppState>, query: String) -> Result<Searc
 }
 
 #[tauri::command]
+fn get_ocr_status(state: State<'_, AppState>) -> crate::ocr::OcrStatus { state.ocr_status() }
+
+#[tauri::command]
+fn set_ocr_settings(state: State<'_, AppState>, settings: crate::ocr::OcrSettings) -> Result<crate::ocr::OcrStatus, String> {
+    state.set_ocr_settings(settings).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn ocr_pdf_page(state: State<'_, AppState>, png: Vec<u8>, page_number: u32, language: Option<String>) -> Result<crate::ocr::OcrPageResult, String> {
+    let mut settings = state.ocr_settings();
+    if !settings.auto_low_text_pages { return Err("Automatic OCR is disabled in settings.".into()); }
+    if let Some(language) = language { settings.language = language; }
+    crate::ocr::recognize_png(&png, page_number, &settings)
+}
+
+#[tauri::command]
 async fn get_provider_status(state: State<'_, AppState>) -> Result<ProviderStatus, String> {
     state
         .provider_status()
@@ -511,11 +530,28 @@ async fn get_embed_model_path(state: State<'_, AppState>) -> Result<Option<Strin
 async fn set_embed_model_path(
     state: State<'_, AppState>,
     path: Option<String>,
-) -> Result<(), String> {
+) -> Result<crate::embeddings::EmbeddingModelContract, String> {
     state
         .set_embed_model_path(path)
+        .await
         .map_err(|error| error.to_string())
 }
+
+#[tauri::command]
+async fn get_reranker_model_status(state: State<'_, AppState>) -> Result<crate::state::RerankerModelStatus, String> {
+    Ok(state.get_reranker_model_status().await)
+}
+
+#[tauri::command]
+async fn set_reranker_model_path(state: State<'_, AppState>, path: Option<String>) -> Result<crate::state::RerankerModelStatus, String> {
+    state.set_reranker_model_path(path).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_built_in_models(state: State<'_, AppState>) -> Vec<crate::state::BuiltInModelInfo> { state.built_in_models() }
+
+#[tauri::command]
+async fn download_built_in_model(state: State<'_, AppState>, id: String) -> Result<String, String> { state.download_built_in_model(&id).await.map_err(|error| error.to_string()) }
 
 /// Ingest a document into the RAG store (chunk → embed → store). `contextual`
 /// for the working doc / deep index; plain for bulk sources. Returns chunk count.
@@ -526,9 +562,10 @@ async fn ingest_document(
     source: String,
     text: String,
     contextual: Option<bool>,
+    format_hint: Option<crate::embeddings::DocumentFormat>,
 ) -> Result<usize, String> {
     state
-        .ingest_document(&doc_id, &source, &text, contextual.unwrap_or(false))
+        .ingest_document(&doc_id, &source, &text, contextual.unwrap_or(false), format_hint)
         .await
         .map_err(|error| error.to_string())
 }
@@ -541,9 +578,10 @@ async fn ensure_document_ingested(
     doc_id: String,
     source: String,
     text: String,
+    format_hint: Option<crate::embeddings::DocumentFormat>,
 ) -> Result<crate::state::DocumentIngestionResult, String> {
     state
-        .ensure_document_ingested(&doc_id, &source, &text)
+        .ensure_document_ingested(&doc_id, &source, &text, format_hint)
         .await
         .map_err(|error| error.to_string())
 }
@@ -935,6 +973,9 @@ pub fn run() {
             move_note,
             reorder_note,
             search_notes,
+            get_ocr_status,
+            set_ocr_settings,
+            ocr_pdf_page,
             get_provider_status,
             rebuild_index,
             get_snapshot,
@@ -945,6 +986,10 @@ pub fn run() {
             set_searxng_url,
             get_embed_model_path,
             set_embed_model_path,
+            get_reranker_model_status,
+            set_reranker_model_path,
+            list_built_in_models,
+            download_built_in_model,
             ingest_document,
             ensure_document_ingested,
             delete_document,

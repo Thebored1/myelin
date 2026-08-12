@@ -60,8 +60,8 @@ impl NotePromptShape {
 }
 
 /// Split a textual document into stable, independently cacheable sections.
-/// Headed formats use their native boundaries; unheaded or very large regions
-/// fall back to the same conservative word chunker used by RAG.
+/// Headed formats use their native boundaries; unheaded regions use a separate
+/// synchronous viewer splitter. RAG ingestion uses the exact-token chunker.
 pub fn sections(body: &str, relative_path: &str) -> Vec<NoteSection> {
     let lower = relative_path.to_ascii_lowercase();
     if lower.ends_with(".ipynb") {
@@ -134,12 +134,13 @@ pub fn sections(body: &str, relative_path: &str) -> Vec<NoteSection> {
         return headed;
     }
 
-    crate::embeddings::chunk_text(body, 192, 32)
+    crate::embeddings::split_viewer_text(body, 900, 160)
         .into_iter()
-        .map(|chunk| NoteSection {
-            key: format!("chunk:{}", chunk.index),
-            label: format!("Section {}", chunk.index + 1),
-            body: chunk.text,
+        .enumerate()
+        .map(|(index, body)| NoteSection {
+            key: format!("chunk:{index}"),
+            label: format!("Section {}", index + 1),
+            body,
         })
         .collect()
 }

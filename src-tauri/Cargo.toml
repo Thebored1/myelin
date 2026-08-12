@@ -47,6 +47,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2.5"
 rig-core = "0.38.2"
 schemars = { version = "1.2.1", features = ["derive"] }
+scraper = "0.24"
 tempfile = "3.27.0"
 tectonic = "0.16.9"
 tokio = { version = "1.52.3", features = ["sync", "rt", "time"] }

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import ePub from 'epubjs';
+	import { htmlElementToStructuralText } from '$lib/extraction/structuralText';
 
 	interface Section {
 		key: string;
@@ -23,7 +24,7 @@
 	function reportLocation(location: any) {
 		const contents = rendition?.getContents?.() ?? [];
 		const text = contents
-			.map((item: any) => item?.document?.body?.innerText ?? '')
+			.map((item: any) => item?.document?.body ? htmlElementToStructuralText(item.document.body) : '')
 			.join('\n')
 			.trim();
 		if (text && onActiveSection) {
@@ -57,7 +58,7 @@
 			item
 				.load(book.load.bind(book))
 				.then((doc: any) => {
-					const text = (doc?.body?.innerText ?? '').trim().slice(0, 80_000);
+					const text = doc?.body ? htmlElementToStructuralText(doc.body) : '';
 					if (text) {
 						const href = item.href ?? `chapter-${index}`;
 						sections.push({ key: `epub:${href}`, label: href, content: text });

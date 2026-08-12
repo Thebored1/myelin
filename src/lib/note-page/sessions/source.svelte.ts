@@ -112,7 +112,7 @@ export function createSourceSession(ctx: Record<string, any>) {
 		ctx.pdfIngestionPromise = (async () => {
 			try {
 				const result = await invoke<{ status: 'cached' | 'indexed' | 'empty'; chunks: number }>(
-					'ensure_document_ingested', { docId: sourceId, source: sourceTitle, text }
+					'ensure_document_ingested', { docId: sourceId, source: sourceTitle, text, formatHint: 'pdfText' }
 				);
 				const entry = { time: Date.now(), kind: 'done', msg: `PDF indexing ${result.status}: ${sourceTitle} (${result.chunks} chunks)` };
 				ctx.pendingDebugTrace = [...ctx.pendingDebugTrace, entry];

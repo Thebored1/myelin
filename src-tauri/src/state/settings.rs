@@ -2,7 +2,75 @@ use super::core::*;
 use ::anyhow::{anyhow, Context, Result};
 use super::*;
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankerModelStatus {
+    pub configured_path: Option<String>,
+    pub state: String,
+    pub model_name: Option<String>,
+    pub context_tokens: Option<usize>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltInModelInfo { pub id: String, pub name: String, pub kind: String, pub size_bytes: u64, pub installed_path: Option<String> }
+
+struct BuiltInModel { id: &'static str, name: &'static str, kind: &'static str, filename: &'static str, url: &'static str, sha256: &'static str, size: u64 }
+const BUILT_INS: &[BuiltInModel] = &[
+    BuiltInModel { id: "nomic-embed-text-v1.5-q4-k-m", name: "Nomic Embed Text v1.5 (Q4_K_M)", kind: "embedding", filename: "nomic-embed-text-v1.5.Q4_K_M.gguf", url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf", sha256: "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac", size: 84_106_624 },
+    BuiltInModel { id: "ms-marco-minilm-l6-v2-q4-k-m", name: "MS MARCO MiniLM-L6-v2 (Q4_K_M)", kind: "reranker", filename: "ms-marco-MiniLM-L6-v2-Q4_K_M.gguf", url: "https://huggingface.co/sinjab/ms-marco-MiniLM-L6-v2-Q4_K_M-GGUF/resolve/main/ms-marco-MiniLM-L6-v2-Q4_K_M.gguf", sha256: "d814d09aa417373ec06320687f3ab2741a1fb6d71f28082f88b3574a7bd0fd95", size: 21_272_256 },
+];
+
 impl AppState {
+    pub fn ocr_settings(&self) -> crate::ocr::OcrSettings {
+        crate::state::context::load_settings(&self.inner.app_data_dir)
+            .map(|settings| settings.ocr)
+            .unwrap_or_default()
+    }
+
+    pub fn ocr_status(&self) -> crate::ocr::OcrStatus {
+        crate::ocr::status(&self.ocr_settings())
+    }
+
+    pub fn set_ocr_settings(&self, settings: crate::ocr::OcrSettings) -> Result<crate::ocr::OcrStatus> {
+        settings.validate().map_err(anyhow::Error::msg)?;
+        let _lock = self.inner.persistence_lock.lock();
+        let mut persisted = crate::state::context::load_settings(&self.inner.app_data_dir)?;
+        persisted.ocr = settings;
+        crate::state::context::save_settings(&self.inner.app_data_dir, &persisted)?;
+        Ok(crate::ocr::status(&persisted.ocr))
+    }
+
+    pub fn built_in_models(&self) -> Vec<BuiltInModelInfo> {
+        let root = self.inner.app_data_dir.join("models");
+        BUILT_INS.iter().map(|model| {
+            let path = root.join(model.filename);
+            BuiltInModelInfo { id: model.id.into(), name: model.name.into(), kind: model.kind.into(), size_bytes: model.size, installed_path: path.is_file().then(|| path.display().to_string()) }
+        }).collect()
+    }
+
+    pub async fn download_built_in_model(&self, id: &str) -> Result<String> {
+        use futures_util::StreamExt;
+        use sha2::{Digest, Sha256};
+        let model = BUILT_INS.iter().find(|model| model.id == id).ok_or_else(|| anyhow!("unknown built-in model '{id}'"))?;
+        let root = self.inner.app_data_dir.join("models"); fs::create_dir_all(&root)?;
+        let target = root.join(model.filename); let temporary = root.join(format!("{}.part", model.filename));
+        let result: Result<()> = async {
+            let response = self.inner.llama_client.get(model.url).send().await?.error_for_status()?;
+            if response.content_length().is_some_and(|size| size != model.size) { anyhow::bail!("model download size does not match the built-in manifest"); }
+            let mut file = fs::File::create(&temporary)?; let mut stream = response.bytes_stream(); let mut hash = Sha256::new(); let mut received = 0_u64;
+            while let Some(chunk) = stream.next().await { let chunk = chunk?; received += chunk.len() as u64; if received > model.size { anyhow::bail!("model download exceeds the built-in manifest size"); } std::io::Write::write_all(&mut file, &chunk)?; hash.update(&chunk); }
+            if received != model.size { anyhow::bail!("model download is incomplete ({received} of {} bytes)", model.size); }
+            let actual = format!("{:x}", hash.finalize()); if actual != model.sha256 { anyhow::bail!("model download checksum mismatch"); }
+            fs::rename(&temporary, &target)?; Ok(())
+        }.await;
+        if result.is_err() { let _ = fs::remove_file(&temporary); }
+        result?;
+        let path = target.display().to_string();
+        match model.kind { "embedding" => { self.set_embed_model_path(Some(path.clone())).await?; }, "reranker" => { self.set_reranker_model_path(Some(path.clone())).await?; }, _ => unreachable!() }
+        Ok(path)
+    }
     pub fn ai_config_status(&self) -> crate::ai_config::AiConfigStatus {
         crate::ai_config::status(&self.inner.app_data_dir)
     }
@@ -491,8 +559,49 @@ impl AppState {
         crate::model_profiles::all_profiles(&self.inner.app_data_dir)
     }
 
-    /// Set (or clear, when empty) the embedding model GGUF path.
-    pub fn set_embed_model_path(&self, path: Option<String>) -> Result<()> {
-        crate::llama_server::set_embed_model_path(&self.inner.app_data_dir, path)
+    /// Validate a candidate before changing persistent configuration. Derived
+    /// vector data is reset only after the new contract is proven live.
+    pub async fn set_embed_model_path(&self, path: Option<String>) -> Result<crate::embeddings::EmbeddingModelContract> {
+        match path.filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                let contract = self.validate_embedding_candidate(&path).await?;
+                crate::llama_server::set_embed_model_path(&self.inner.app_data_dir, Some(contract.model_path.display().to_string()))?;
+                self.invalidate_embedding_derived_data().await?;
+                Ok(contract)
+            }
+            None => {
+                crate::llama_server::set_embed_model_path(&self.inner.app_data_dir, None)?;
+                self.invalidate_embedding_derived_data().await?;
+                Ok(self.hashed_embedding_contract())
+            }
+        }
+    }
+
+    pub async fn get_reranker_model_status(&self) -> RerankerModelStatus {
+        let configured_path = crate::llama_server::reranker_model_path(&self.inner.app_data_dir);
+        let server = self.inner.reranker_server.lock().await;
+        let ready = server.is_some();
+        let context_tokens = server.as_ref().map(|server| server.context_tokens);
+        let model_name = configured_path.as_ref().and_then(|path| PathBuf::from(path).file_name().and_then(|name| name.to_str()).map(str::to_string));
+        RerankerModelStatus { configured_path, state: if ready { "ready".into() } else if model_name.is_some() { "error".into() } else { "none".into() }, model_name, context_tokens, last_error: None }
+    }
+
+    pub async fn set_reranker_model_path(&self, path: Option<String>) -> Result<RerankerModelStatus> {
+        match path.filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                let (model_path, _) = self.validate_reranker_candidate(&path).await?;
+                crate::llama_server::set_reranker_model_path(&self.inner.app_data_dir, Some(model_path.display().to_string()))?;
+            }
+            None => crate::llama_server::set_reranker_model_path(&self.inner.app_data_dir, None)?,
+        }
+        if let Some(mut server) = self.inner.reranker_server.lock().await.take() { crate::llama_server::stop_reranker_server(&mut server).await; }
+        *self.inner.reranker_circuit.lock() = crate::state::types::RerankerCircuit::default();
+        if crate::llama_server::reranker_model_path(&self.inner.app_data_dir).is_some() {
+            let state = self.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = state.ensure_reranker_server().await { log::warn!("reranker did not become resident: {error:#}"); }
+            });
+        }
+        Ok(self.get_reranker_model_status().await)
     }
 }

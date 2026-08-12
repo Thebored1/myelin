@@ -121,6 +121,9 @@ pub struct WorkspaceLlamaConfig {
     /// Optional path to the embedding model GGUF (e.g. nomic-embed-text). When
     /// set, the app runs a second llama-server in embedding mode for RAG.
     pub embed_model_path: Option<String>,
+    /// Optional cross-encoder reranker GGUF. It is served by a dedicated stock
+    /// llama-server and never shares the embedding runtime.
+    pub reranker_model_path: Option<String>,
     /// Deterministic correctness tools: regex format_note, find_in_note word
     /// search, and the destructive-write guard. Default ON — they make tool use
     /// more reliable. None → on.

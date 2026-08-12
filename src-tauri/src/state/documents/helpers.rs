@@ -1,16 +1,14 @@
 pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
-pub(crate) use crate::models::{
-    AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult, Task,
-};
+pub(crate) use crate::models::*;
 pub(crate) use crate::sidecar::ManagedSidecar;
 pub(crate) use anyhow::{anyhow, Context, Result};
 pub(crate) use arrow_array::types::Float32Type;
-pub(crate) use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
+pub(crate) use arrow_array::{ArrayRef, FixedSizeListArray, Int32Array, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 pub(crate) use arrow_schema::{DataType, Field, Schema};
 pub(crate) use chrono::Utc;
 pub(crate) use lancedb::connection::Connection;
 pub(crate) use lancedb::{connect, Table};
+pub(crate) use lancedb::query::ExecutableQuery;
 pub(crate) use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
 pub(crate) use parking_lot::{Mutex, RwLock};
 pub(crate) use reqwest::Client;
@@ -26,9 +24,6 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::sync::Arc;
 pub(crate) use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
 pub(crate) use uuid::Uuid;
-
-// GTE-small width. Notes use real embeddings when an embed model is
-
 use super::*;
 pub(crate) fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
@@ -37,7 +32,6 @@ pub(crate) fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     }
     name == "node_modules" || name == "target" || name == "dist" || name == "build"
 }
-
 pub(crate) struct WorkspaceScanResult {
     pub(crate) notes: Vec<IndexedNote>,
     pub(crate) issues: Vec<StorageIssue>,
@@ -71,7 +65,6 @@ pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) 
                 } else {
                     parse_note_file(workspace, workspace_data_dir, entry.path())
                 };
-
                 match doc_result {
                     Ok(document) => {
                         if let Some(existing) = notes.iter().find(|note: &&IndexedNote| note.document.id == document.id) {
@@ -103,11 +96,9 @@ pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) 
             }
         }
     }
-
     notes.sort_by(|left, right| left.document.relative_path.cmp(&right.document.relative_path));
     Ok(WorkspaceScanResult { notes, issues })
 }
-
 pub(crate) fn parse_pdf_file(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -132,7 +123,6 @@ pub(crate) fn parse_pdf_file(
         .as_ref()
         .and_then(|metadata| metadata.updated_at.clone())
         .unwrap_or(updated_at);
-
     let annotations = {
         let annotations_path = sidecar_path(
             workspace,
@@ -147,7 +137,6 @@ pub(crate) fn parse_pdf_file(
                 .with_context(|| format!("annotations are invalid at {}", annotations_path.display()))?)
         } else { None }
     };
-
     let document = NoteDocument {
         id: id.clone(),
         title,
@@ -179,7 +168,6 @@ pub(crate) fn parse_pdf_file(
     }
     Ok(document)
 }
-
 pub(crate) fn frontmatter_from_document(document: &NoteDocument) -> Frontmatter {
     Frontmatter {
         id: Some(document.id.clone()),
@@ -190,7 +178,6 @@ pub(crate) fn frontmatter_from_document(document: &NoteDocument) -> Frontmatter 
         source_pdf: document.source_pdf.clone(),
     }
 }
-
 pub(crate) fn frontmatter_has_myelin_metadata(metadata: &Frontmatter) -> bool {
     metadata.id.is_some()
         || metadata.title.is_some()
@@ -199,7 +186,6 @@ pub(crate) fn frontmatter_has_myelin_metadata(metadata: &Frontmatter) -> bool {
         || metadata.updated_at.is_some()
         || metadata.source_pdf.is_some()
 }
-
 /// Detect the legacy representation without mistaking ordinary TeX that starts
 /// with horizontal-rule-like text for a Myelin wrapper.
 pub(crate) fn split_legacy_native_frontmatter(raw: &str) -> (Option<Frontmatter>, String, bool) {
@@ -214,7 +200,6 @@ pub(crate) fn split_legacy_native_frontmatter(raw: &str) -> (Option<Frontmatter>
         (None, raw.to_string(), false)
     }
 }
-
 pub(crate) fn initial_note_body(path: &Path) -> String {
     if extension_is(path, "ipynb") {
         EMPTY_IPYNB.to_string()
@@ -222,7 +207,6 @@ pub(crate) fn initial_note_body(path: &Path) -> String {
         String::new()
     }
 }
-
 pub(crate) fn duplicate_note_extension(path: &Path) -> &str {
     if is_native_text_file(path) {
         path.extension().and_then(OsStr::to_str).unwrap_or("md")
@@ -230,7 +214,6 @@ pub(crate) fn duplicate_note_extension(path: &Path) -> &str {
         "md"
     }
 }
-
 pub(crate) fn validate_native_body(path: &Path, body: &str) -> Result<()> {
     if extension_is(path, "ipynb") {
         let notebook = serde_json::from_str::<serde_json::Value>(body).with_context(|| {
@@ -272,19 +255,16 @@ pub(crate) fn validate_native_body(path: &Path, body: &str) -> Result<()> {
     }
     Ok(())
 }
-
 pub(crate) fn write_raw_document(path: &Path, contents: &str) -> Result<()> {
     crate::persistence::atomic_write(path, contents.as_bytes())
         .with_context(|| format!("failed to persist {}", path.display()))
 }
-
 pub(crate) fn native_metadata_file_name(workspace: &Path, path: &Path) -> String {
     let relative_path = relative_to_workspace(workspace, path);
     let mut hasher = Sha256::new();
     hasher.update(relative_path.as_bytes());
     format!("{:x}.metadata.json", hasher.finalize())
 }
-
 pub(crate) fn native_metadata_app_path(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -294,7 +274,6 @@ pub(crate) fn native_metadata_app_path(
         .join(NATIVE_METADATA_DIR)
         .join(native_metadata_file_name(workspace, path))
 }
-
 pub(crate) fn read_native_metadata_sidecar(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -320,7 +299,6 @@ pub(crate) fn read_native_metadata_sidecar(
     }
     Ok(Some(sidecar.metadata))
 }
-
 pub(crate) fn read_document_metadata_sidecar(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -328,7 +306,6 @@ pub(crate) fn read_document_metadata_sidecar(
 ) -> Result<Option<Frontmatter>> {
     read_native_metadata_sidecar(workspace, workspace_data_dir, path)
 }
-
 pub(crate) fn write_native_metadata_sidecar(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -356,7 +333,6 @@ pub(crate) fn write_native_metadata_sidecar(
     crate::persistence::atomic_write_json(&metadata_path, &sidecar)
         .with_context(|| format!("failed to persist native metadata {}", metadata_path.display()))
 }
-
 pub(crate) fn write_document_metadata_sidecar(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -374,11 +350,9 @@ pub(crate) fn write_document_metadata_sidecar(
     };
     crate::persistence::atomic_write_json(&metadata_path, &sidecar)
 }
-
 pub(crate) fn is_metadata_document(path: &Path) -> bool {
     is_native_text_file(path) || is_binary_document(path)
 }
-
 pub(crate) fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_dir: &Path, path: &Path) {
     if !is_native_text_file(path) {
         return;
@@ -386,7 +360,6 @@ pub(crate) fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_di
     let file_name = native_metadata_file_name(workspace, path);
     let app_path = native_metadata_app_path(workspace, workspace_data_dir, path);
     let _ = crate::persistence::atomic_remove(&app_path);
-
     // Remove a portable legacy fallback too if one exists. Current writes never
     // place metadata inside the workspace.
     let legacy_path = workspace
@@ -395,7 +368,6 @@ pub(crate) fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_di
         .join(file_name);
     let _ = crate::persistence::atomic_remove(&legacy_path);
 }
-
 pub(crate) fn parse_note_file(
     workspace: &Path,
     workspace_data_dir: &Path,
@@ -416,7 +388,6 @@ pub(crate) fn parse_note_file(
         (metadata, body, false)
     };
     validate_native_body(path, &body)?;
-
     let stored_metadata = if native {
         read_native_metadata_sidecar(workspace, workspace_data_dir, path)?
     } else {
@@ -426,17 +397,14 @@ pub(crate) fn parse_note_file(
         .clone()
         .or(legacy_metadata)
         .unwrap_or_default();
-
     let title = metadata
         .title
         .clone()
         .unwrap_or_else(|| first_heading(&body).unwrap_or_else(|| default_title_from_path(path)));
-
     let (file_created, file_updated) = get_file_timestamps(path);
     let created_at = metadata.created_at.clone().unwrap_or(file_created);
     let updated_at = metadata.updated_at.clone().unwrap_or(file_updated);
     let id = metadata.id.clone().unwrap_or_else(|| stable_id_from_path(path));
-
     let annotations = {
         let annotations_path = sidecar_path(
             workspace,
@@ -451,7 +419,6 @@ pub(crate) fn parse_note_file(
                 .with_context(|| format!("annotations are invalid at {}", annotations_path.display()))?)
         } else { None }
     };
-
     let document = NoteDocument {
         id: id.clone(),
         title,
@@ -480,7 +447,6 @@ pub(crate) fn parse_note_file(
             }
         },
     };
-
     if native {
         let app_sidecar = native_metadata_app_path(workspace, workspace_data_dir, path);
         if stored_metadata.is_none() || !app_sidecar.exists() || legacy_wrapped {
@@ -493,85 +459,117 @@ pub(crate) fn parse_note_file(
             write_raw_document(path, &document.body)?;
         }
     }
-
     Ok(document)
 }
-
-pub(crate) async fn rebuild_lancedb(index_dir: &Path, notes: &[IndexedNote]) -> Result<Table> {
-    if index_dir.exists() {
-        fs::remove_dir_all(index_dir)
-            .with_context(|| format!("failed to clear index dir {}", index_dir.display()))?;
-    }
-    fs::create_dir_all(index_dir)
-        .with_context(|| format!("failed to create index dir {}", index_dir.display()))?;
-
-    let connection = open_database(index_dir).await?;
+pub(crate) async fn rebuild_lancedb(index_dir: &Path, chunks: &[WorkspaceNoteChunk]) -> Result<Table> {
+    let parent = index_dir.parent().ok_or_else(|| anyhow!("workspace index has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let name = index_dir.file_name().and_then(OsStr::to_str).unwrap_or("index");
+    let staging_dir = parent.join(format!(".{name}-staging"));
+    let previous_dir = parent.join(format!(".{name}-previous"));
+    if staging_dir.exists() { fs::remove_dir_all(&staging_dir).context("failed to clear stale workspace index staging directory")?; }
+    if previous_dir.exists() { fs::remove_dir_all(&previous_dir).context("failed to clear stale workspace index backup")?; }
+    fs::create_dir_all(&staging_dir).context("failed to create workspace index staging directory")?;
+    let dimension = chunks.iter().find_map(|chunk| chunk.vector.as_ref().map(|v| v.len() as i32)).unwrap_or(EMBEDDING_DIM);
+    if dimension <= 0 || chunks.iter().filter_map(|chunk| chunk.vector.as_ref()).any(|vector| vector.len() != dimension as usize || vector.iter().any(|value| !value.is_finite())) { anyhow::bail!("workspace note index contains inconsistent embedding dimensions"); }
+    let connection = open_database(&staging_dir).await?;
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
+        Field::new("note_id", DataType::Utf8, false),
         Field::new("title", DataType::Utf8, false),
+        Field::new("tags_text", DataType::Utf8, false),
         Field::new("path", DataType::Utf8, false),
         Field::new("updated_at", DataType::Utf8, false),
+        Field::new("chunk_index", DataType::Int32, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new("lexical_text", DataType::Utf8, false),
+        Field::new("token_count", DataType::Int32, false),
+        Field::new("char_start", DataType::Int64, true),
+        Field::new("char_end", DataType::Int64, true),
+        Field::new("section_start", DataType::Utf8, true),
+        Field::new("section_end", DataType::Utf8, true),
+        Field::new("embedding_fingerprint", DataType::Utf8, false),
         Field::new(
             "vector",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                EMBEDDING_DIM,
-            ),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dimension),
             true,
         ),
     ]));
-
-    if notes.is_empty() {
-        return connection
+    if chunks.is_empty() {
+        let table = connection
             .create_empty_table(TABLE_NAME, schema)
             .execute()
             .await
             .context("failed to create empty lancedb table");
+        let _ = table?;
+        publish_workspace_index(index_dir, &staging_dir, &previous_dir)?;
+        return open_database(index_dir).await?.open_table(TABLE_NAME).execute().await.context("failed to reopen published workspace index");
     }
-
-    let ids = StringArray::from_iter_values(notes.iter().map(|note| note.document.id.as_str()));
-    let titles =
-        StringArray::from_iter_values(notes.iter().map(|note| note.document.title.as_str()));
-    let paths = StringArray::from_iter_values(
-        notes
-            .iter()
-            .map(|note| note.document.relative_path.as_str()),
-    );
-    let updated_at =
-        StringArray::from_iter_values(notes.iter().map(|note| note.document.updated_at.as_str()));
+    let ids = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.note_id.as_str()));
+    let titles = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.title.as_str()));
+    let tags = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.tags_text.as_str()));
+    let paths = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.path.as_str()));
+    let updated_at = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.updated_at.as_str()));
+    let chunk_indices = Int32Array::from_iter_values(chunks.iter().map(|chunk| chunk.chunk_index));
+    let texts = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.text.as_str()));
+    let lexical = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.lexical_text.as_str()));
+    let counts = Int32Array::from_iter_values(chunks.iter().map(|chunk| chunk.token_count));
+    let starts = Int64Array::from_iter(chunks.iter().map(|chunk| chunk.char_start));
+    let ends = Int64Array::from_iter(chunks.iter().map(|chunk| chunk.char_end));
+    let section_starts = StringArray::from_iter(chunks.iter().map(|chunk| chunk.section_start.as_deref()));
+    let section_ends = StringArray::from_iter(chunks.iter().map(|chunk| chunk.section_end.as_deref()));
+    let fingerprints = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.embedding_fingerprint.as_str()));
     let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        notes
+        chunks
             .iter()
-            .map(|note| Some(note.vector.iter().copied().map(Some).collect::<Vec<_>>())),
-        EMBEDDING_DIM,
+            .map(|chunk| chunk.vector.as_ref().map(|vector| vector.iter().copied().map(Some).collect::<Vec<_>>())),
+        dimension,
     );
-
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(ids) as ArrayRef,
             Arc::new(titles) as ArrayRef,
+            Arc::new(tags) as ArrayRef,
             Arc::new(paths) as ArrayRef,
             Arc::new(updated_at) as ArrayRef,
+            Arc::new(chunk_indices) as ArrayRef,
+            Arc::new(texts) as ArrayRef,
+            Arc::new(lexical) as ArrayRef,
+            Arc::new(counts) as ArrayRef,
+            Arc::new(starts) as ArrayRef,
+            Arc::new(ends) as ArrayRef,
+            Arc::new(section_starts) as ArrayRef,
+            Arc::new(section_ends) as ArrayRef,
+            Arc::new(fingerprints) as ArrayRef,
             Arc::new(vectors) as ArrayRef,
         ],
     )?;
     let data = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
-
-    connection
+    let table = connection
         .create_table(TABLE_NAME, Box::new(data))
         .execute()
         .await
-        .context("failed to create lancedb table")
+        .context("failed to create lancedb table")?;
+    table.create_index(&["lexical_text"], lancedb::index::Index::FTS(Default::default())).execute().await
+        .context("failed to create workspace FTS index")?;
+    publish_workspace_index(index_dir, &staging_dir, &previous_dir)?;
+    open_database(index_dir).await?.open_table(TABLE_NAME).execute().await.context("failed to reopen published workspace index")
 }
-
+fn publish_workspace_index(index_dir: &Path, staging_dir: &Path, previous_dir: &Path) -> Result<()> {
+    if index_dir.exists() { fs::rename(index_dir, previous_dir).context("failed to stage previous workspace index")?; }
+    if let Err(error) = fs::rename(staging_dir, index_dir) {
+        if previous_dir.exists() { let _ = fs::rename(previous_dir, index_dir); }
+        return Err(error).context("failed to publish workspace index");
+    }
+    if previous_dir.exists() { fs::remove_dir_all(previous_dir).context("failed to remove previous workspace index")?; }
+    Ok(())
+}
 pub(crate) async fn open_database(index_dir: &Path) -> Result<Connection> {
     connect(index_dir.to_string_lossy().as_ref())
         .execute()
         .await
         .context("failed to open lancedb")
 }
-
 pub(crate) fn summarize(document: &NoteDocument) -> NoteSummary {
     NoteSummary {
         id: document.id.clone(),
@@ -586,7 +584,6 @@ pub(crate) fn summarize(document: &NoteDocument) -> NoteSummary {
         backlinks: document.backlinks.clone(),
     }
 }
-
 pub(crate) fn build_library_facets<'a>(documents: impl Iterator<Item = &'a NoteDocument>) -> LibraryFacets {
     let mut folders = Vec::new();
     let mut tags = Vec::new();
@@ -605,42 +602,35 @@ pub(crate) fn build_library_facets<'a>(documents: impl Iterator<Item = &'a NoteD
     tags.sort();
     LibraryFacets { folders, tags }
 }
-
 pub(crate) fn split_frontmatter(raw: &str) -> (Option<String>, String) {
     if !raw.starts_with("---\n") {
         return (None, raw.to_string());
     }
-
     let remaining = &raw[4..];
     if let Some(index) = remaining.find("\n---\n") {
         let frontmatter = remaining[..index].to_string();
         let body = remaining[index + 5..].trim_start_matches('\n').to_string();
         return (Some(frontmatter), body);
     }
-
     (None, raw.to_string())
 }
-
 pub(crate) fn first_heading(body: &str) -> Option<String> {
     body.lines()
         .find_map(|line| line.strip_prefix("# ").map(str::trim).map(str::to_string))
         .filter(|title| !title.is_empty())
 }
-
 pub(crate) fn default_title_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(OsStr::to_str)
         .unwrap_or("Untitled note")
         .replace("--", " ")
 }
-
 pub(crate) fn relative_to_workspace(workspace: &Path, path: &Path) -> String {
     path.strip_prefix(workspace)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
 }
-
 /// Directory holding a task's file for a given notebook (None = workspace root).
 pub(crate) fn task_dir_for(workspace: &Path, notebook: Option<&str>) -> PathBuf {
     match notebook.map(str::trim).filter(|s| !s.is_empty()) {
@@ -648,7 +638,6 @@ pub(crate) fn task_dir_for(workspace: &Path, notebook: Option<&str>) -> PathBuf 
         None => workspace.join("tasks"),
     }
 }
-
 pub(crate) fn is_task_file(path: &Path) -> bool {
     let is_json = path
         .extension()
@@ -663,7 +652,6 @@ pub(crate) fn is_task_file(path: &Path) -> bool {
         .unwrap_or(false);
     is_json && in_tasks_dir
 }
-
 pub(crate) fn notebook_from_task_path(workspace: &Path, path: &Path) -> Option<String> {
     let holder = path.parent()?.parent()?; // the folder that contains the `tasks` dir
     let rel = relative_to_workspace(workspace, holder);
@@ -673,7 +661,6 @@ pub(crate) fn notebook_from_task_path(workspace: &Path, path: &Path) -> Option<S
         Some(rel)
     }
 }
-
 pub(crate) fn task_files_for(workspace: &Path, id: &str) -> Vec<PathBuf> {
     let target = format!("{id}.json");
     let mut paths = walkdir::WalkDir::new(workspace)
@@ -689,7 +676,6 @@ pub(crate) fn task_files_for(workspace: &Path, id: &str) -> Vec<PathBuf> {
     paths.sort();
     paths
 }
-
 pub(crate) fn validate_task_id(id: &str) -> Result<()> {
     if id.is_empty()
         || !id
@@ -700,7 +686,6 @@ pub(crate) fn validate_task_id(id: &str) -> Result<()> {
     }
     Ok(())
 }
-
 /// Reject notebook paths that could escape the workspace (absolute, `..`, roots).
 pub(crate) fn validate_relative_dir(dir: &str) -> Result<()> {
     let p = Path::new(dir);
@@ -718,7 +703,6 @@ pub(crate) fn validate_relative_dir(dir: &str) -> Result<()> {
     }
     Ok(())
 }
-
 pub(crate) fn folder_from_relative_path(relative_path: &str) -> String {
     Path::new(relative_path)
         .parent()
@@ -727,7 +711,6 @@ pub(crate) fn folder_from_relative_path(relative_path: &str) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Root".into())
 }
-
 pub(crate) fn folder_to_relative_path(folder: &str) -> PathBuf {
     if folder == "Root" || folder.trim().is_empty() {
         PathBuf::new()
@@ -735,26 +718,22 @@ pub(crate) fn folder_to_relative_path(folder: &str) -> PathBuf {
         PathBuf::from(folder.replace('/', std::path::MAIN_SEPARATOR_STR))
     }
 }
-
 pub(crate) fn sanitize_relative_folder(input: &str) -> Result<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("root") {
         return Ok("Root".into());
     }
-
     let normalized = trimmed.replace('\\', "/");
     let path = Path::new(&normalized);
     if path.is_absolute() || normalized.split('/').any(|segment| segment == "..") {
         return Err(anyhow!("folder must stay inside the workspace"));
     }
-
     Ok(normalized
         .split('/')
         .filter(|segment| !segment.is_empty() && *segment != ".")
         .collect::<Vec<_>>()
         .join("/"))
 }
-
 pub(crate) fn normalized_custom_order(
     current_order: &[String],
     notes: &HashMap<String, IndexedNote>,
@@ -776,7 +755,6 @@ pub(crate) fn normalized_custom_order(
     }
     ordered
 }
-
 pub(crate) fn sort_summaries_by_custom_order(
     mut notes: Vec<NoteSummary>,
     custom_order: &[String],
@@ -794,7 +772,6 @@ pub(crate) fn sort_summaries_by_custom_order(
     });
     notes
 }
-
 pub(crate) fn timestamp_now() -> String {
     Utc::now().to_rfc3339()
 }

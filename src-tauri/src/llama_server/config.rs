@@ -166,6 +166,7 @@ pub fn resolve_config(app_data_dir: &Path) -> Result<ResolvedLlamaConfig> {
         chat_template_override: profile.chat_template.clone(),
         model_role: match profile.role {
             crate::model_profiles::ModelRole::Embed => "embed".to_string(),
+            crate::model_profiles::ModelRole::Rerank => "rerank".to_string(),
             crate::model_profiles::ModelRole::Chat => "chat".to_string(),
         },
         supports_tools: profile.supports_tools,
@@ -340,6 +341,18 @@ pub fn set_quick_capture_shortcut(app_data_dir: &Path, shortcut: String) -> Resu
 pub fn set_embed_model_path(app_data_dir: &Path, path: Option<String>) -> Result<()> {
     update_config(app_data_dir, |config| {
         config.embed_model_path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        Ok(())
+    })
+}
+
+pub fn reranker_model_path(app_data_dir: &Path) -> Option<String> {
+    load_config(app_data_dir).ok().and_then(|c| c.reranker_model_path)
+        .map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub fn set_reranker_model_path(app_data_dir: &Path, path: Option<String>) -> Result<()> {
+    update_config(app_data_dir, |config| {
+        config.reranker_model_path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         Ok(())
     })
 }

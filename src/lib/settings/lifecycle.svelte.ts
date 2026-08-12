@@ -35,6 +35,8 @@ export function createSettingsLifecycle(ctx: Record<string, any>) {
 			}
 			ctx.searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
 			ctx.embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
+			ctx.rerankerModelPath = (await invoke<any>('get_reranker_model_status')).configuredPath ?? '';
+			ctx.ocrStatus = await invoke<any>('get_ocr_status');
 			ctx.quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
 			ctx.startWithSystem = (await invoke<{ startWithSystem: boolean }>('get_background_settings'))
 				.startWithSystem;

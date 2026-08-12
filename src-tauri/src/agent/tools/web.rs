@@ -124,28 +124,27 @@ pub fn normalize_web_url(raw: &str) -> Result<String, String> {
 }
 
 pub fn html_to_text(raw: &str) -> String {
-    let mut without_scripts = raw.to_string();
-    for pattern in [
-        "(?is)<script[^>]*>.*?</script>",
-        "(?is)<style[^>]*>.*?</style>",
-        "(?is)<noscript[^>]*>.*?</noscript>",
-    ] {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            without_scripts = re.replace_all(&without_scripts, " ").into_owned();
+    let document = scraper::Html::parse_document(raw);
+    let preferred = scraper::Selector::parse("article, main, [role=main], .content, #content")
+        .expect("static selector");
+    let excluded = scraper::Selector::parse("script, style, noscript, nav, footer, form, aside, [hidden]")
+        .expect("static selector");
+    let block = scraper::Selector::parse("h1, h2, h3, h4, h5, h6, p, li, pre, blockquote, tr")
+        .expect("static selector");
+    let root = document.select(&preferred).next();
+    let roots = root.into_iter().collect::<Vec<_>>();
+    let roots: Vec<_> = if roots.is_empty() { vec![document.root_element()] } else { roots };
+    let mut output = Vec::new();
+    for root in roots {
+        for element in root.select(&block) {
+            if element.select(&excluded).next().is_some() { continue; }
+            let text = element.text().collect::<Vec<_>>().join(" ");
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !text.is_empty() { output.push(text); }
         }
     }
-    let without_tags = regex::Regex::new("(?is)<[^>]+>")
-        .map(|re| re.replace_all(&without_scripts, " ").into_owned())
-        .unwrap_or(without_scripts);
-    let decoded = without_tags
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'");
-    regex::Regex::new(r"\s+")
-        .map(|re| re.replace_all(&decoded, " ").trim().to_string())
-        .unwrap_or_else(|_| decoded.trim().to_string())
+    if output.is_empty() {
+        output.extend(document.root_element().text().map(str::trim).filter(|text| !text.is_empty()).map(str::to_string));
+    }
+    output.join("\n\n")
 }
-

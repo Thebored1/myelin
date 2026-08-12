@@ -39,10 +39,12 @@ pub(crate) const INDEX_DIR_NAME: &str = "index";
 pub(crate) const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 2;
 pub(crate) const MAX_LIVE_CONVERSATION_CHARS: usize = 8_000;
 pub(crate) const SETTINGS_FILE_NAME: &str = "settings.json";
-pub(crate) const TABLE_NAME: &str = "notes";
+pub(crate) const TABLE_NAME: &str = "note_chunks";
 pub(crate) const NOTE_INGEST_MANIFEST: &str = "note-ingestion.json";
 pub(crate) const QUERY_EMBEDDING_CACHE: &str = "query-embeddings.json";
-pub(crate) const NOTE_CHUNKER_VERSION: &str = "words-192-overlap-32-gte-small-v2";
+/// Kept in the note-ingestion manifest so pre-upgrade entries are lazily
+/// re-indexed with the source-preserving RAG chunker.
+pub(crate) const NOTE_CHUNKER_VERSION: &str = crate::embeddings::CHUNKER_VERSION;
 pub(crate) const NATIVE_METADATA_DIR: &str = "native-metadata";
 pub(crate) const EMPTY_IPYNB: &str = "{\n  \"cells\": [],\n  \"metadata\": {},\n  \"nbformat\": 4,\n  \"nbformat_minor\": 5\n}\n";
 pub(crate) const INDEX_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);

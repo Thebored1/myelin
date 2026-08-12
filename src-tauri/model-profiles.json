@@ -38,7 +38,19 @@
 		"name": "Nomic Embed Text v1.5",
 		"namePattern": "nomic-embed",
 		"role": "embed",
+		"embeddingDimensions": 768,
+		"embeddingContextTokens": 2048,
+		"embeddingPooling": "mean",
+		"embeddingQueryPrefix": "search_query: ",
+		"embeddingDocumentPrefix": "search_document: ",
 		"verified": true,
 		"notes": "768-dim text embedder for semantic search and document RAG."
+	},
+	{
+		"name": "MS MARCO MiniLM-L6-v2",
+		"namePattern": "ms-marco-minilm-l6-v2",
+		"role": "rerank",
+		"verified": true,
+		"notes": "Built-in speed-first English cross-encoder reranker. Uses llama.cpp rank pooling and a 512-token context."
 	}
 ]
