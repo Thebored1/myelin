@@ -401,14 +401,13 @@ pub async fn run_chat(
         "direct answer"
     };
     let submitted_messages = messages.clone();
-    // Direct document/chat answers should be allowed to use the model's full
-    // remaining context. The old 768-token ceiling cut long answers off in the
-    // middle of a sentence (for example, while reciting a retrieved poem). The
-    // llama server still stops at the actual context boundary; this value is
-    // only the upper bound sent for prediction. Keep tool turns bounded because
+    // Keep ordinary direct answers bounded. Raising this to the full context
+    // made a short question capable of producing thousands of tokens, which
+    // looked like an endless/hallucinating generation. The previous 768-token
+    // ceiling is intentional; tool turns remain separately bounded because
     // their output is structured arguments/results rather than prose.
     let max_output_tokens = if chat_mode && intent_is_tool != Some(true) {
-        config.context_size.max(4096)
+        768
     } else {
         4096
     };

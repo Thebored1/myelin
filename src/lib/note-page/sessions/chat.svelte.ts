@@ -192,9 +192,18 @@ export function createChatSession(ctx: Record<string, any>) {
 			return;
 		}
 		const userText = ctx.chatInput.trim();
-		ctx.chatInput = '';
-		if (ctx.chatTextareaEl) ctx.chatTextareaEl.style.height = 'auto';
-		await sendChatText(userText);
+		// Keep the draft in the textarea until sendChatText has recorded the user
+		// turn. Clearing first made any exception before that point look like a
+		// lost prompt. sendChatText clears it immediately after appending the turn.
+		try {
+			await sendChatText(userText);
+		} catch (error) {
+			console.error('Chat send failed before the request was recorded:', error);
+			if (!ctx.chatInput.trim()) ctx.chatInput = userText;
+			ctx.message = extractChatErrorMessage(error);
+			await ctx.tick();
+			ctx.chatTextareaEl?.focus();
+		}
 	}
 
 	async function sendChatText(userText: string) {
@@ -211,24 +220,56 @@ export function createChatSession(ctx: Record<string, any>) {
 			}
 			return;
 		}
-		if ((ctx.isSourceMaterial && ctx.showAttachedNote) || ctx.saveStatus !== 'saved') await ctx.saveNote();
-		if (ctx.pdfIngestionPromise) await ctx.pdfIngestionPromise;
-		const aiNoteId = ctx.activeAiNoteId();
-		if (!aiNoteId) {
-			ctx.message = 'Open or create the attached note before asking the AI to edit it.';
-			return;
-		}
 		const requestId = Date.now().toString();
-		const composerMode = ctx.aiInteractionMode === 'write' ? 'editor' : 'chat';
+		// The graph normally supplies this value, but normalize defensively so a
+		// stale/partial frontend context can never fall back to backend `auto`
+		// routing for a Chat submission.
+		const interactionMode = ctx.aiInteractionMode === 'write' ? 'write' : 'chat';
+		const composerMode = interactionMode === 'write' ? 'editor' : 'chat';
 		const selection = composerMode === 'editor' ? editorTarget : editorTarget?.cursor ? null : editorTarget;
 		ctx.activeAiEditTarget = composerMode === 'editor' ? selection : null;
+		// Show the user's prompt before any save/PDF preparation can block or fail.
+		// Previously the input was cleared first, then these awaits ran, making the
+		// prompt appear to disappear whenever preparation failed or took a long time.
+		const chatLength = ctx.chatMessages.length;
 		const snapshot: NoteSnapshot = {
 			noteBody: ctx.draftBody,
 			draftTitle: ctx.draftTitle,
 			draftTags: ctx.draftTags,
-			chatLength: ctx.chatMessages.length
+			chatLength
 		};
 		ctx.chatMessages = [...ctx.chatMessages, { role: 'user', content: userText, snapshotId: requestId, snapshot }];
+		ctx.chatInput = '';
+		if (ctx.chatTextareaEl) ctx.chatTextareaEl.style.height = 'auto';
+		try {
+			if ((ctx.isSourceMaterial && ctx.showAttachedNote) || ctx.saveStatus !== 'saved') await ctx.saveNote();
+			if (ctx.pdfIngestionPromise) await ctx.pdfIngestionPromise;
+		} catch (error) {
+			console.error('Chat preparation failed:', error);
+			ctx.chatMessages = [
+				...ctx.chatMessages,
+				{ role: 'assistant', content: extractChatErrorMessage(error), error: true, endTime: Date.now() }
+			];
+			ctx.message = 'The note could not be prepared for AI.';
+			ctx.checkpointChatHistory(0);
+			return;
+		}
+		const aiNoteId = ctx.activeAiNoteId();
+		if (!aiNoteId) {
+			ctx.message = 'Open or create the attached note before asking the AI to edit it.';
+			// sendChatMessage clears the textarea before entering this async path.
+			// Preserve the prompt when the current document cannot resolve an AI
+			// target, so an unavailable target never looks like a lost message.
+			ctx.chatInput = userText;
+			await ctx.tick();
+			if (ctx.chatTextareaEl) {
+				ctx.chatTextareaEl.style.height = 'auto';
+				ctx.chatTextareaEl.style.height = `${Math.min(ctx.chatTextareaEl.scrollHeight + 2, 150)}px`;
+				ctx.chatTextareaEl.focus();
+			}
+			ctx.checkpointChatHistory(0);
+			return;
+		}
 		beginAiRequest(
 			requestId,
 			composerMode,
@@ -243,7 +284,7 @@ export function createChatSession(ctx: Record<string, any>) {
 				requestId,
 				docType: ctx.workingDocType,
 				selection,
-				interactionMode: ctx.aiInteractionMode,
+				interactionMode,
 				activeSection: ctx.activeSection
 			});
 		} catch (e) {

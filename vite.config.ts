@@ -7,7 +7,16 @@ export default defineConfig({
 	// Vite FAIL LOUDLY if the port is taken instead of silently moving to 5174 —
 	// which once let `tauri dev` load whatever app held 5173 (e.g. ggufplay) inside
 	// myelin's window.
-	server: { port: 1420, strictPort: true },
+	server: {
+		port: 1420,
+		strictPort: true,
+		// Tauri's Rust build generates thousands of files under target/. Vite's
+		// recursive watcher otherwise consumes the system inotify quota during
+		// `tauri dev` and crashes with ENOSPC.
+		watch: {
+			ignored: ['**/src-tauri/target/**', '**/src-tauri/edit-core/target/**']
+		}
+	},
 	test: {
 		expect: { requireAssertions: true },
 		projects: [

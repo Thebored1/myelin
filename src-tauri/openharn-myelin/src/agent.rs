@@ -499,14 +499,20 @@ pub async fn run_loop(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let model = req.model.clone().unwrap_or_else(|| "myelin".to_string());
     let temperature = req.temperature.unwrap_or(0.2);
-    // Targeted writes must return a bounded insertion/replacement tool payload.
-    // Reusing the normal 4096-token chat budget lets a model that misses the
-    // tool protocol spend the whole turn reasoning or reproducing the note,
-    // leaving the editor waiting for a terminal tool call.
-    let max_tokens = req
-        .max_tokens
-        .unwrap_or(4096)
-        .min(if req.options.targeted_write { 1024 } else { 4096 });
+    // Keep a second hard cap here, inside the sidecar, so an older host binary
+    // or a malformed request cannot reopen the endless direct-chat path. The
+    // host normally sends 768 for this mode, but the sidecar must enforce the
+    // same safety limit independently.
+    let requested_max_tokens = req.max_tokens.unwrap_or(4096);
+    let max_tokens = if req.options.chat_mode && req.options.intent_is_tool == Some(false) {
+        requested_max_tokens.min(768)
+    } else {
+        // Targeted writes must return a bounded insertion/replacement tool
+        // payload. Reusing the normal 4096-token chat budget lets a model that
+        // misses the tool protocol spend the whole turn reasoning or reproducing
+        // the note, leaving the editor waiting for a terminal tool call.
+        requested_max_tokens.min(if req.options.targeted_write { 1024 } else { 4096 })
+    };
     let max_turns = req.max_turns.unwrap_or(8).max(1);
     let opts = req.options.clone();
     let _ = tx

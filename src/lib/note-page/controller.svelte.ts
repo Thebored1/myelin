@@ -410,7 +410,8 @@ export function createNotePageController() {
 			get noteStreamBackup() { return noteStreamBackup; }, set noteStreamBackup(value) { noteStreamBackup = value; },
 			get noteStreamBuf() { return noteStreamBuf; }, set noteStreamBuf(value) { noteStreamBuf = value; },
 			get noteStreaming() { return noteStreaming; }, set noteStreaming(value) { noteStreaming = value; },
-			get transclusionObserver() { return transclusionObserver; }, get activeAiEditTarget() { return activeAiEditTarget; },
+			get transclusionObserver() { return transclusionObserver; }, set transclusionObserver(value) { transclusionObserver = value; },
+			get activeAiEditTarget() { return activeAiEditTarget; }, set activeAiEditTarget(value) { activeAiEditTarget = value; },
 			get noteStreamSpan() { return noteStreamSpan; }, set noteStreamSpan(value) { noteStreamSpan = value; },
 			get noteStreamFlushPending() { return noteStreamFlushPending; }, set noteStreamFlushPending(value) { noteStreamFlushPending = value; },
 			getSelectionTextOffset, restoreSelectionTextOffset, get vditorContainer() { return vditorContainer; },
@@ -439,6 +440,10 @@ export function createNotePageController() {
 			get isChatStreaming() { return isChatStreaming; }, get activeAiComposerMode() { return activeAiComposerMode; }, set activeAiComposerMode(value) { activeAiComposerMode = value; },
 			get activeChatNoteId() { return activeChatNoteId; }, set activeChatNoteId(value) { activeChatNoteId = value; }, get activeChatRequestId() { return activeChatRequestId; }, set activeChatRequestId(value) { activeChatRequestId = value; },
 			get chatInput() { return chatInput; }, set chatInput(value) { chatInput = value; }, get chatTextareaEl() { return chatTextareaEl; }, get chatMessagesEl() { return chatMessagesEl; },
+			// Keep the selected Chat/Write mode in the graph context. Without this
+			// bridge the chat session sent `undefined`, and the backend accepted it
+			// as legacy `auto` mode even while the Chat button looked active.
+			get aiInteractionMode() { return aiInteractionMode; }, set aiInteractionMode(value) { aiInteractionMode = value; },
 			get copiedIdx() { return copiedIdx; }, set copiedIdx(value) { copiedIdx = value; }, get chatChunkBuf() { return chatChunkBuf; }, set chatChunkBuf(value) { chatChunkBuf = value; },
 			get chatChunkFlushPending() { return chatChunkFlushPending; }, set chatChunkFlushPending(value) { chatChunkFlushPending = value; },
 			get MAX_DEBUG_MSG_CHARS() { return MAX_DEBUG_MSG_CHARS; }, get MAX_DEBUG_TRACE() { return MAX_DEBUG_TRACE; }, get approvalTimeouts() { return approvalTimeouts; },

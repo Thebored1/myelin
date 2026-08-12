@@ -25,7 +25,12 @@ impl AppState {
             }
         };
         let interaction_mode = match interaction_mode.as_deref() {
-            None | Some("auto") => "auto",
+            // The desktop UI exposes Chat and Write. Treat a missing mode as
+            // Chat so an old frontend cannot silently enter the auto/tool
+            // generation path, while preserving explicit `auto` for headless
+            // callers that still use that compatibility mode.
+            None => "chat",
+            Some("auto") => "auto",
             Some("chat") => "chat",
             Some("write") => "write",
             Some("operation") => "operation",

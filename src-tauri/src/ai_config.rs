@@ -158,7 +158,7 @@ pub struct CacheConfig { pub max_bytes: u64 }
 impl Default for CacheConfig { fn default() -> Self { Self { max_bytes: 8 * 1024 * 1024 * 1024 } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct EmbeddingConfig {
     pub enabled: bool,
     pub model_path: Option<PathBuf>,
@@ -181,7 +181,7 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig { fn default() -> Self { Self { enabled: false, model_path: None, runtime: Some("stock".into()), host: Some("127.0.0.1".into()), port: None, context_size: None, dimensions: None, pooling: None, query_prefix: None, document_prefix: None, normalization: Some("l2".into()), token_reserve: 16, batch_size: 2048, micro_batch_size: 512, parallelism: 1, max_inputs_per_request: 8, batch_token_limit: 2048 } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct RerankerConfig {
     pub enabled: bool,
     pub model_path: Option<PathBuf>,
