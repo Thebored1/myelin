@@ -3,6 +3,10 @@
 	import { invoke } from '@tauri-apps/api/core';
 	import * as pdfjsLib from 'pdfjs-dist';
 	import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
+	// PDF.js keeps the text-layer positioning rules in its viewer stylesheet.
+	// Without this import the selectable spans render in normal document flow
+	// below the canvas instead of overlaying the PDF page.
+	import 'pdfjs-dist/web/pdf_viewer.css';
 	import type { PdfAnnotation } from '$lib/types';
 	import { pdfItemsToStructuralText, suppressRepeatedPageFurniture } from '$lib/extraction/structuralText';
 	import PdfToolbar from '$lib/pdf/components/PdfToolbar.svelte';

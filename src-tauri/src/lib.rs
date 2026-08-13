@@ -11,6 +11,7 @@ mod ocr;
 mod note_prompt;
 mod persistence;
 mod rag;
+mod rag_copy;
 pub mod retrieval_eval;
 pub mod retrieval_pipeline;
 mod sidecar;

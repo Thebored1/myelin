@@ -4,6 +4,7 @@ mod settings;
 mod latex;
 mod tasks;
 mod retrieval;
+mod ingestion;
 mod runtime;
 #[path = "state/documents_methods.rs"]
 mod documents;

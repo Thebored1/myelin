@@ -338,10 +338,13 @@ pub async fn run_chat(
         // `<think>` blocks. Operation mode may retain the user's configured
         // reasoning setting because it can help tool selection/edit quality.
         "no_think": oh.no_think || chat_mode,
-        // The managed llama-server already has a model-level --reasoning
-        // on/off switch. Keep stripping any leaked think markup from chat, but
-        // inject the legacy fake assistant prefill only when reasoning is on.
-        "no_think_prefill": config.thinking && (oh.no_think || chat_mode),
+        // Maple's server-level --reasoning off flag does not stop its template
+        // from entering a thinking turn. Chat must therefore close that turn
+        // explicitly with the assistant prefill; otherwise the model can spend
+        // the whole 768-token budget in hidden reasoning and emit no answer.
+        // Keep the older configured prefill behavior for explicitly no-think
+        // operation profiles that have reasoning enabled.
+        "no_think_prefill": chat_mode || (config.thinking && oh.no_think),
         "narrow": false,
         "slm": false,
         "chat_mode": chat_mode,
@@ -659,19 +662,19 @@ pub async fn run_chat(
                                 // still preferring normal streaming whenever it
                                 // happened.
                                 if !suppress_chat_output && !emitted_text {
-                                    let recovered = new_messages
-                                        .iter()
-                                        .rev()
-                                        .chain(final_messages.iter().rev())
-                                        .find_map(|message| {
-                                            (message["role"].as_str() == Some("assistant")
-                                                && message["tool_calls"].is_null())
-                                                .then(|| message["content"].as_str())
-                                                .flatten()
-                                                .map(str::trim)
-                                                .filter(|content| !content.is_empty())
-                                                .map(str::to_string)
-                                        });
+                                    // Only recover text produced by this turn.
+                                    // The previous implementation searched the
+                                    // complete returned conversation after an
+                                    // empty generation, so it replayed the last
+                                    // successful answer as if it belonged to
+                                    // the current prompt.
+                                    let recovery_messages = if has_new_messages {
+                                        new_messages.clone()
+                                    } else {
+                                        conversation_delta(&submitted_messages, &final_messages)
+                                            .unwrap_or_default()
+                                    };
+                                    let recovered = recoverable_assistant_text(&recovery_messages);
                                     if let Some(content) = recovered {
                                         emit_debug(
                                             "gen",
@@ -800,9 +803,20 @@ fn conversation_delta(submitted: &[Value], returned: &[Value]) -> Result<Vec<Val
     Ok(returned[submitted.len()..].to_vec())
 }
 
+fn recoverable_assistant_text(messages: &[Value]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        (message["role"].as_str() == Some("assistant") && message["tool_calls"].is_null())
+            .then(|| message["content"].as_str())
+            .flatten()
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+            .map(str::to_string)
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::conversation_delta;
+    use super::{conversation_delta, recoverable_assistant_text};
     use serde_json::json;
 
     #[test]
@@ -822,5 +836,23 @@ mod tests {
         let submitted = vec![json!({"role": "user", "content": "hello"})];
         let returned = vec![json!({"role": "system", "content": "wrong"})];
         assert!(conversation_delta(&submitted, &returned).is_err());
+    }
+
+    #[test]
+    fn empty_current_turn_never_recovers_an_older_answer() {
+        let current = vec![json!({"role": "assistant", "content": ""})];
+        assert!(recoverable_assistant_text(&current).is_none());
+    }
+
+    #[test]
+    fn recovery_uses_the_latest_current_assistant_message() {
+        let current = vec![
+            json!({"role": "user", "content": "new question"}),
+            json!({"role": "assistant", "content": "new answer"}),
+        ];
+        assert_eq!(
+            recoverable_assistant_text(&current).as_deref(),
+            Some("new answer")
+        );
     }
 }

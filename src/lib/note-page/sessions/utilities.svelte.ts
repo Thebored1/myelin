@@ -42,11 +42,8 @@ export function createNotePageUtilities(ctx: Record<string, any>) {
 			return;
 		}
 
-		// Vditor lays toolbar items out with floats. Measuring offsetTop is
-		// unreliable here: wrapped items can still report the first row, and
-		// hiding them one-by-one changes the layout while it is being measured.
-		// Measure the complete unhidden row instead, then let CSS clip the
-		// overflow in collapsed mode and wrap it in expanded mode.
+		// Measure the complete unhidden row, then let CSS clip overflow in
+		// collapsed mode and wrap only when the user expands the toolbar.
 		const toolbarStyle = getComputedStyle(toolbar);
 		const paddingLeft = parseFloat(toolbarStyle.paddingLeft) || 0;
 		const paddingRight = parseFloat(toolbarStyle.paddingRight) || 0;

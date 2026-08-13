@@ -3,6 +3,27 @@ use super::core::*;
 use super::*;
 
 impl AppState {
+    /// Publish a newly-copied PDF immediately. Attachments should not block the
+    /// note UI on a full workspace scan and embedding pass; PDF text is indexed
+    /// separately in the document RAG store when it is extracted by the viewer.
+    fn register_copied_pdf(&self, workspace: &Path, path: &Path) -> Result<NoteDocument> {
+        let workspace_data_dir = self.workspace_data_dir(workspace);
+        let document = parse_pdf_file(workspace, &workspace_data_dir, path)?;
+        let vector = hashed_embedding(&format!("{}\n{}\n{}", document.title, document.tags.join(" "), document.body));
+        {
+            let mut runtime = self.inner.runtime.write();
+            if runtime.workspace_path.as_deref() != Some(workspace) {
+                return Err(anyhow!("workspace changed before PDF registration completed"));
+            }
+            if runtime.notes.contains_key(&document.id) {
+                return Err(anyhow!("PDF registration produced a duplicate note id: {}", document.id));
+            }
+            runtime.notes.insert(document.id.clone(), IndexedNote { document: document.clone(), vector });
+            runtime.index_state.note_count = runtime.notes.len();
+        }
+        Ok(document)
+    }
+
     pub(crate) fn replace_storage_issues(&self, issues: Vec<StorageIssue>) {
         let changed = {
             let mut runtime = self.inner.runtime.write();
@@ -295,16 +316,7 @@ impl AppState {
         fs::copy(&src, &dest)
             .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
 
-        self.reindex_workspace_after_change(workspace.clone()).await?;
-
-        let rel_path = relative_to_workspace(&workspace, &dest);
-        let runtime = self.inner.runtime.read();
-        runtime
-            .notes
-            .values()
-            .find(|n| n.document.relative_path == rel_path)
-            .map(|n| n.document.clone())
-            .ok_or_else(|| anyhow!("PDF not found in index after import"))
+        self.register_copied_pdf(&workspace, &dest)
     }
 
     /// Copy an existing workspace PDF into the destination notebook so each
@@ -344,15 +356,11 @@ impl AppState {
         fs::copy(&source_path, &dest)
             .map_err(|e| anyhow!("failed to copy PDF for attachment: {}", e))?;
 
-        self.reindex_workspace_after_change(workspace.clone()).await?;
-        let rel_path = relative_to_workspace(&workspace, &dest);
-        let runtime = self.inner.runtime.read();
-        runtime
-            .notes
-            .values()
-            .find(|n| n.document.relative_path == rel_path)
-            .map(|n| n.document.clone())
-            .ok_or_else(|| anyhow!("cloned PDF not found in index after copy"))
+        let document = self.register_copied_pdf(&workspace, &dest)?;
+        if let Err(error) = self.clone_document_ingestion(&source.id, &document.id).await {
+            log::debug!("cached PDF chunks could not be reused for attachment: {error}");
+        }
+        Ok(document)
     }
 
     pub fn snapshot(&self) -> AppSnapshot {
@@ -433,6 +441,26 @@ impl AppState {
                 // Ignore read/open/close access events to avoid infinite reindexing loops when files are read
                 if matches!(event.kind, notify::EventKind::Access(_)) {
                     return;
+                }
+
+                // PDF/EPUB copies are registered in memory by their mutation
+                // command and their searchable text lives in the RAG store.
+                // Do not kick off a full workspace embedding pass for the
+                // already-known binary that was just attached.
+                let binary_paths = event
+                    .paths
+                    .iter()
+                    .filter(|path| is_binary_document(path))
+                    .collect::<Vec<_>>();
+                if !binary_paths.is_empty() {
+                    let runtime = state.inner.runtime.read();
+                    let known = binary_paths.iter().all(|path| {
+                        let relative = relative_to_workspace(&workspace_path, path);
+                        runtime.notes.values().any(|note| note.document.relative_path == relative)
+                    });
+                    if known {
+                        return;
+                    }
                 }
 
                 let is_markdown = event.paths.iter().any(|path| is_note_file(path));

@@ -165,7 +165,10 @@
 	}
 
 	.main-layout.split-layout {
-		overflow-x: auto;
+		/* The PDF/editor split already owns the available width.  Let the
+		   note sidebar overlay that editor instead of creating a third flex
+		   pane (and a horizontal scrollbar) when the window is narrow. */
+		overflow-x: hidden;
 	}
 
 	.pdf-pane {
@@ -302,7 +305,7 @@
 	}
 
 	.sidebar-backdrop {
-		display: none;
+		display: block;
 	}
 
 	/* Main Pane */
@@ -491,12 +494,14 @@
 		max-height: 52px;
 		overflow: hidden !important;
 		white-space: nowrap;
+		flex-wrap: nowrap !important;
 	}
 
 	:global(.vditor-wrapper.toolbar-expanded .vditor-toolbar) {
 		max-height: none;
 		overflow: visible !important;
 		white-space: normal;
+		flex-wrap: wrap !important;
 	}
 
 	/* Force all upward-facing tooltips (__n, __ne, __nw) to point downwards vertically */
@@ -586,12 +591,17 @@
 
 	.vditor-toolbar {
 		min-width: 0 !important;
-		display: block !important;
+		width: 100% !important;
+		display: flex !important;
+		align-items: flex-start;
+		align-content: flex-start;
+		flex-wrap: nowrap !important;
 	}
 
 	.vditor-toolbar > .vditor-toolbar__item,
 	.vditor-toolbar > .vditor-toolbar__divider {
-		float: left !important;
+		float: none !important;
+		flex: 0 0 auto;
 	}
 
 	.vditor-reset * {
@@ -655,12 +665,6 @@
 		z-index: 30 !important;
 	}
 
-	.vditor-toolbar::after {
-		content: '';
-		display: block;
-		clear: both;
-	}
-
 	/* Keep the overflow control above the toolbar while reserving its space in
 	   the toolbar's right padding. */
 	.toolbar-note-actions-container {
@@ -706,6 +710,10 @@
 		top: 0;
 		right: 0;
 		bottom: 0;
+		/* PDF.js ships nested logical-inset rules which older WebKitGTK builds
+		   can leak outside their intended annotation toolbar selector. */
+		inset-block: 0;
+		inset-inline: auto 0;
 		width: var(--sidebar-width, 20rem);
 		box-sizing: border-box;
 		min-width: 0;
@@ -718,9 +726,7 @@
 		overflow-y: auto;
 		z-index: 100;
 		transform: translateX(100%);
-		transition:
-			transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
-			margin-right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+		transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 		visibility: hidden;
 		pointer-events: none;
 		border-left: 1px solid var(--border-default);
@@ -735,6 +741,18 @@
 		pointer-events: auto;
 	}
 
+	/* WebKit can retain the docked `position: relative` value after crossing
+	   the desktop breakpoint.  In a PDF/editor split the sidebar must always
+	   be removed from flex layout, regardless of the previous window width. */
+	.main-layout.split-layout > .sidebar {
+		position: absolute !important;
+		inset-block: 0 !important;
+		inset-inline: auto 0 !important;
+		margin-right: 0 !important;
+		max-width: 85vw;
+		flex-shrink: 1;
+	}
+
 	.sidebar-backdrop {
 		position: absolute;
 		inset: 0;
@@ -744,9 +762,11 @@
 		animation: fade-in var(--duration-fast) ease-out;
 	}
 
-	/* Large Screen — sidebar docks side by side with the editor */
+	/* Large unsplit workspaces can dock the sidebar beside the editor.  A
+	   PDF/editor split is intentionally always overlay mode: the editor pane
+	   is only half the window and must not be squeezed by the sidebar. */
 	@media (min-width: 1380px) {
-		.sidebar {
+		.main-layout:not(.split-layout) .sidebar {
 			position: relative;
 			transition: none !important;
 			transform: none;
@@ -757,12 +777,12 @@
 			flex-shrink: 0;
 		}
 
-		.sidebar.open {
+		.main-layout:not(.split-layout) .sidebar.open {
 			transform: none;
 			margin-right: 0;
 		}
 
-		.sidebar-backdrop {
+		.main-layout:not(.split-layout) .sidebar-backdrop {
 			display: none !important;
 		}
 	}

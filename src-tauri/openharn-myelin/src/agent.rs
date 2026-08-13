@@ -60,8 +60,8 @@ pub struct Options {
     #[serde(default)]
     pub no_think: bool,
     /// Whether `no_think` should also inject the legacy closed-think assistant
-    /// prefill. Managed llama-server instances already support reasoning-off
-    /// mode, so their host disables this to keep the serialized prompt stable;
+    /// prefill. Some managed model templates still enter a thinking turn even
+    /// with reasoning disabled, so the host enables this for ordinary Chat;
     /// default true preserves the standalone sidecar's prior behavior.
     #[serde(default = "default_true")]
     pub no_think_prefill: bool,
@@ -780,6 +780,15 @@ pub async fn run_loop(
                 return;
             }
         };
+        if content.trim().is_empty() {
+            let _ = tx
+                .send(Out::Error(
+                    "The model used its response budget without producing an answer. Please try again."
+                        .to_string(),
+                ))
+                .await;
+            return;
+        }
         let mut h = history.clone();
         h.push(json!({ "role": "assistant", "content": content }));
         let _ = tx
