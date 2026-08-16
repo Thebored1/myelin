@@ -490,18 +490,16 @@
 		transform: rotate(180deg);
 	}
 
-	:global(.vditor-wrapper:not(.toolbar-expanded) .vditor-toolbar) {
-		max-height: 52px;
-		overflow: hidden !important;
-		white-space: nowrap;
-		flex-wrap: nowrap !important;
-	}
-
-	:global(.vditor-wrapper.toolbar-expanded .vditor-toolbar) {
-		max-height: none;
+	/* Keep every editing tool reachable in narrow panes. The toolbar owns its
+	   height and wraps into additional rows instead of hiding tools behind a
+	   second overflow toggle. */
+	:global(.vditor-wrapper .vditor-toolbar) {
+		max-height: none !important;
 		overflow: visible !important;
-		white-space: normal;
+		white-space: normal !important;
 		flex-wrap: wrap !important;
+		height: auto !important;
+		flex: 0 0 auto !important;
 	}
 
 	/* Force all upward-facing tooltips (__n, __ne, __nw) to point downwards vertically */
@@ -595,7 +593,12 @@
 		display: flex !important;
 		align-items: flex-start;
 		align-content: flex-start;
-		flex-wrap: nowrap !important;
+		flex-wrap: wrap !important;
+		max-height: none !important;
+		height: auto !important;
+		flex: 0 0 auto !important;
+		overflow: visible !important;
+		white-space: normal !important;
 	}
 
 	.vditor-toolbar > .vditor-toolbar__item,
@@ -660,7 +663,7 @@
 		border-bottom: 1px solid var(--border-subtle) !important;
 		padding: var(--space-2) var(--space-4) !important;
 		padding-right: 120px !important;
-		transition: max-height 0.2s ease-out;
+		transition: none !important;
 		position: relative !important;
 		z-index: 30 !important;
 	}

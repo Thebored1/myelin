@@ -32,45 +32,13 @@ export function createNotePageUtilities(ctx: Record<string, any>) {
 
 	function updateToolbarOverflow() {
 		const toolbar = ctx.vditorContainer?.querySelector('.vditor-toolbar');
-		if (!toolbar) {
-			ctx.toolbarNeedsToggle = false;
-			return;
-		}
-		const items = toolbar.querySelectorAll('.vditor-toolbar__item, .vditor-toolbar__divider');
-		if (items.length === 0) {
-			ctx.toolbarNeedsToggle = false;
-			return;
-		}
-
-		// Measure the complete unhidden row, then let CSS clip overflow in
-		// collapsed mode and wrap only when the user expands the toolbar.
-		const toolbarStyle = getComputedStyle(toolbar);
-		const paddingLeft = parseFloat(toolbarStyle.paddingLeft) || 0;
-		const paddingRight = parseFloat(toolbarStyle.paddingRight) || 0;
-		const availableWidth = toolbar.clientWidth - paddingLeft - paddingRight;
-		const itemElements = Array.from(items) as HTMLElement[];
-		const firstRowTop = Math.min(...itemElements.map((item) => item.getBoundingClientRect().top));
-		const hasWrappedRow = itemElements.some(
-			(item) => item.getBoundingClientRect().top > firstRowTop + 2
-		);
-		const totalWidth = itemElements.reduce<number>((width, item) => {
-			const element = item as HTMLElement;
-			const style = getComputedStyle(element);
-			return (
-				width +
-				 element.getBoundingClientRect().width +
-				 (parseFloat(style.marginLeft) || 0) +
-				 (parseFloat(style.marginRight) || 0)
-			);
-		}, 0);
-
-		const needsToggle =
-			hasWrappedRow || (availableWidth > 0 && totalWidth > availableWidth + 1);
-		ctx.toolbarNeedsToggle = needsToggle;
-		if (!needsToggle) ctx.toolbarExpanded = false;
-
-		// Clear styles left by older toolbar instances or a prior measurement.
-		items.forEach((item: Element) => {
+		// The toolbar is intentionally always visible and wrapping. Keep the old
+		// state fields neutral for callers that still pass them through the graph,
+		// but do not measure or hide items behind a custom overflow toggle.
+		ctx.toolbarNeedsToggle = false;
+		ctx.toolbarExpanded = false;
+		if (!toolbar) return;
+		toolbar.querySelectorAll('.vditor-toolbar__item, .vditor-toolbar__divider').forEach((item: Element) => {
 			const element = item as HTMLElement;
 			element.style.removeProperty('visibility');
 			element.style.removeProperty('pointer-events');
