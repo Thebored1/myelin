@@ -1,17 +1,12 @@
-use anyhow::{anyhow, bail, Context, Result};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::env;
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
-use std::time::Duration;
-use sha2::{Digest, Sha256};
 use super::*;
-pub(super) fn tiering_roots(app_data_dir: &Path, workspace_config: &WorkspaceLlamaConfig) -> Vec<PathBuf> {
+use anyhow::{anyhow, bail, Context, Result};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
+pub(super) fn tiering_roots(
+    app_data_dir: &Path,
+    workspace_config: &WorkspaceLlamaConfig,
+) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(raw) = &workspace_config.executable_path {
         let exe = resolve_input_path(app_data_dir, raw);
@@ -42,7 +37,10 @@ fn normalize_preference(raw: Option<&str>) -> String {
 }
 
 pub fn normalize_engine(raw: Option<&str>) -> String {
-    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+    match raw
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
         Some("beellama") => "beellama".into(),
         _ => "llama_cpp".into(),
     }
@@ -197,7 +195,10 @@ fn load_active_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
         let config = crate::ai_config::load_applied(app_data_dir)?
             .ok_or_else(|| anyhow!("applied AI configuration disappeared while loading"))?;
         crate::ai_config::require_valid(&config)?;
-        let profile = config.profiles.get(&config.active_profile).ok_or_else(|| anyhow!("active AI profile is missing"))?;
+        let profile = config
+            .profiles
+            .get(&config.active_profile)
+            .ok_or_else(|| anyhow!("active AI profile is missing"))?;
         let mut legacy = WorkspaceLlamaConfig::default();
         legacy.model_path = Some(profile.model_path.to_string_lossy().into_owned());
         legacy.host = Some(profile.server.host.clone());
@@ -215,11 +216,21 @@ fn load_active_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
         legacy.chat_format = profile.inference.chat_format.clone();
         legacy.extra_args = profile.inference.extra_args.clone();
         match config.runtimes.get(&profile.runtime).map(|r| &r.source) {
-            Some(crate::ai_config::RuntimeSource::Bundled { runtime: crate::ai_config::BuiltinRuntime::Bee }) => legacy.inference_engine = Some("beellama".into()),
-            Some(crate::ai_config::RuntimeSource::Path { executable }) => legacy.executable_path = Some(executable.to_string_lossy().into_owned()),
+            Some(crate::ai_config::RuntimeSource::Bundled {
+                runtime: crate::ai_config::BuiltinRuntime::Bee,
+            }) => legacy.inference_engine = Some("beellama".into()),
+            Some(crate::ai_config::RuntimeSource::Path { executable }) => {
+                legacy.executable_path = Some(executable.to_string_lossy().into_owned())
+            }
             Some(crate::ai_config::RuntimeSource::Download { binary_path, .. }) => {
-                let installed = app_data_dir.join("bin").join("runtimes").join(&profile.runtime);
-                let binary = binary_path.as_ref().map(|p| installed.join(p)).unwrap_or(installed.join(executable_name()));
+                let installed = app_data_dir
+                    .join("bin")
+                    .join("runtimes")
+                    .join(&profile.runtime);
+                let binary = binary_path
+                    .as_ref()
+                    .map(|p| installed.join(p))
+                    .unwrap_or(installed.join(executable_name()));
                 legacy.executable_path = Some(binary.to_string_lossy().into_owned());
             }
             _ => {}
@@ -234,15 +245,26 @@ fn load_active_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
 }
 
 fn runtime_fingerprint(path: &Path, engine: &str) -> Result<String> {
-    let metadata = fs::metadata(path).with_context(|| format!("failed to inspect runtime {}", path.display()))?;
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to inspect runtime {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(engine.as_bytes());
     hasher.update(metadata.len().to_le_bytes());
-    hasher.update(metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos().to_le_bytes()).unwrap_or_default());
+    hasher.update(
+        metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos().to_le_bytes())
+            .unwrap_or_default(),
+    );
     // Hash the executable when practical. This runs at configuration/startup
     // boundaries, never on every request, and gives custom forks isolated KV.
     if metadata.len() <= 512 * 1024 * 1024 {
-        hasher.update(fs::read(path).with_context(|| format!("failed to fingerprint runtime {}", path.display()))?);
+        hasher.update(
+            fs::read(path)
+                .with_context(|| format!("failed to fingerprint runtime {}", path.display()))?,
+        );
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -252,7 +274,14 @@ fn model_fingerprint(path: &Path) -> String {
     hasher.update(path.to_string_lossy().as_bytes());
     if let Ok(metadata) = fs::metadata(path) {
         hasher.update(metadata.len().to_le_bytes());
-        hasher.update(metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos().to_le_bytes()).unwrap_or_default());
+        hasher.update(
+            metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos().to_le_bytes())
+                .unwrap_or_default(),
+        );
     }
     format!("{:x}", hasher.finalize())
 }
@@ -271,8 +300,12 @@ fn update_config(
         bail!("llama configuration contains an invalid zero-sized runtime setting");
     }
     let path = config_path(app_data_dir);
-    crate::persistence::atomic_write_json(&path, &config)
-        .with_context(|| format!("failed to persist llama configuration at {}", path.display()))
+    crate::persistence::atomic_write_json(&path, &config).with_context(|| {
+        format!(
+            "failed to persist llama configuration at {}",
+            path.display()
+        )
+    })
 }
 
 pub(super) fn load_config(app_data_dir: &Path) -> Result<WorkspaceLlamaConfig> {
@@ -346,8 +379,11 @@ pub fn set_embed_model_path(app_data_dir: &Path, path: Option<String>) -> Result
 }
 
 pub fn reranker_model_path(app_data_dir: &Path) -> Option<String> {
-    load_config(app_data_dir).ok().and_then(|c| c.reranker_model_path)
-        .map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    load_config(app_data_dir)
+        .ok()
+        .and_then(|c| c.reranker_model_path)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 pub fn set_reranker_model_path(app_data_dir: &Path, path: Option<String>) -> Result<()> {
@@ -407,19 +443,43 @@ pub fn set_advanced_config(
     max_turns: Option<u32>,
 ) -> Result<()> {
     update_config(app_data_dir, |config| {
-        if let Some(cs) = context_size { config.context_size = Some(cs); }
-        if let Some(gl) = gpu_layers { config.gpu_layers = Some(gl); }
-        if let Some(t) = threads { config.threads = Some(t); }
-        if let Some(temp) = temperature { config.temperature = Some(temp); }
-        if let Some(tp) = top_p { config.top_p = Some(tp); }
-        if let Some(ea) = extra_args { config.extra_args = ea; }
-        if let Some(bp) = backend_preference { config.backend_preference = Some(normalize_preference(Some(&bp))); }
-        if let Some(dev) = gpu_device {
-            config.gpu_device = if dev.trim().is_empty() { None } else { Some(dev) };
+        if let Some(cs) = context_size {
+            config.context_size = Some(cs);
         }
-        if let Some(t) = thinking { config.thinking = Some(t); }
-        if let Some(ao) = auto_offload { config.auto_offload = Some(ao); }
-        if let Some(mt) = max_turns { config.max_turns = Some(mt.clamp(1, 12)); }
+        if let Some(gl) = gpu_layers {
+            config.gpu_layers = Some(gl);
+        }
+        if let Some(t) = threads {
+            config.threads = Some(t);
+        }
+        if let Some(temp) = temperature {
+            config.temperature = Some(temp);
+        }
+        if let Some(tp) = top_p {
+            config.top_p = Some(tp);
+        }
+        if let Some(ea) = extra_args {
+            config.extra_args = ea;
+        }
+        if let Some(bp) = backend_preference {
+            config.backend_preference = Some(normalize_preference(Some(&bp)));
+        }
+        if let Some(dev) = gpu_device {
+            config.gpu_device = if dev.trim().is_empty() {
+                None
+            } else {
+                Some(dev)
+            };
+        }
+        if let Some(t) = thinking {
+            config.thinking = Some(t);
+        }
+        if let Some(ao) = auto_offload {
+            config.auto_offload = Some(ao);
+        }
+        if let Some(mt) = max_turns {
+            config.max_turns = Some(mt.clamp(1, 12));
+        }
         Ok(())
     })
 }

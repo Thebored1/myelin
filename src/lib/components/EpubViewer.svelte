@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import ePub from 'epubjs';
+	import type { Book, Rendition } from 'epubjs';
 	import { htmlElementToStructuralText } from '$lib/extraction/structuralText';
 
 	interface Section {
@@ -14,17 +15,30 @@
 		onActiveSection?: (section: Section) => void;
 		onSectionsReady?: (sections: Section[]) => void;
 	}
+	type EpubLocation = { start?: { cfi?: string; href?: string } };
+	type EpubContents = { document?: Document };
+	type EpubSpineItem = {
+		href?: string;
+		load: (request: (path: string) => Promise<object>) => Document | Promise<Document>;
+	};
+	type EpubBook = Book & { spine: { items?: EpubSpineItem[] } };
+	type EpubRendition = Rendition & {
+		getContents: () => EpubContents[];
+		on: (event: string, callback: (location: EpubLocation) => void) => void;
+	};
 	let { epubBytes, onActiveSection, onSectionsReady }: Props = $props();
 
 	let container: HTMLDivElement | undefined = $state();
-	let book: any = null;
-	let rendition: any = null;
+	let book: EpubBook | null = null;
+	let rendition: EpubRendition | null = null;
 	let sectionsEmitted = false;
 
-	function reportLocation(location: any) {
+	function reportLocation(location: EpubLocation) {
 		const contents = rendition?.getContents?.() ?? [];
 		const text = contents
-			.map((item: any) => item?.document?.body ? htmlElementToStructuralText(item.document.body) : '')
+			.map((item: EpubContents) =>
+				item?.document?.body ? htmlElementToStructuralText(item.document.body) : ''
+			)
 			.join('\n')
 			.trim();
 		if (text && onActiveSection) {
@@ -41,7 +55,7 @@
 	// backend whenever a chapter's snapshot already exists.
 	function extractAllChapters() {
 		if (!book || !onSectionsReady || sectionsEmitted) return;
-		const spine = book.spine?.items ?? book.spine ?? [];
+		const spine = book.spine.items ?? [];
 		const sections: Section[] = [];
 		let index = 0;
 		let fired = false;
@@ -55,9 +69,10 @@
 				}
 				return;
 			}
-			item
-				.load(book.load.bind(book))
-				.then((doc: any) => {
+			const currentBook = book;
+			if (!currentBook) return;
+			Promise.resolve(item.load(currentBook.load.bind(currentBook)))
+				.then((doc) => {
 					const text = doc?.body ? htmlElementToStructuralText(doc.body) : '';
 					if (text) {
 						const href = item.href ?? `chapter-${index}`;
@@ -72,12 +87,12 @@
 
 	onMount(() => {
 		if (container && epubBytes) {
-			book = ePub(epubBytes.buffer as ArrayBuffer);
+			book = ePub(epubBytes.buffer as ArrayBuffer) as EpubBook;
 			rendition = book.renderTo(container, {
 				width: '100%',
 				height: '100%',
 				spread: 'none'
-			});
+			}) as EpubRendition;
 			rendition.on('relocated', reportLocation);
 			rendition.display().then(() => {
 				reportLocation({ start: { href: 'current' } });

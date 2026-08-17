@@ -1,11 +1,14 @@
 use super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
 use super::workspace_search::{workspace_chunks, WorkspaceSearchHit};
 use crate::persistence::{FileMutation, FileTransaction, MutationRoot};
+use ::anyhow::{anyhow, Context, Result};
 
 impl AppState {
-    pub(crate) fn ensure_unique_title(&self, requested_title: &str, current_note_id: Option<&str>) -> String {
+    pub(crate) fn ensure_unique_title(
+        &self,
+        requested_title: &str,
+        current_note_id: Option<&str>,
+    ) -> String {
         let runtime = self.inner.runtime.read();
 
         let base_title = if requested_title.trim().is_empty() {
@@ -231,10 +234,17 @@ impl AppState {
         };
 
         if prompt_changed {
-            let slot = self.inner.app_data_dir.join("llama-cache").join("slots")
+            let slot = self
+                .inner
+                .app_data_dir
+                .join("llama-cache")
+                .join("slots")
                 .join(Self::slot_filename(&note_id));
             let _ = fs::remove_file(&slot);
-            let _ = fs::remove_file(slot.with_file_name(format!("{}.json", slot.file_name().unwrap_or_default().to_string_lossy())));
+            let _ = fs::remove_file(slot.with_file_name(format!(
+                "{}.json",
+                slot.file_name().unwrap_or_default().to_string_lossy()
+            )));
         }
 
         let vector = self
@@ -300,7 +310,10 @@ impl AppState {
             )
             .oversized;
             if known || oversized {
-                if let Err(error) = ingest_state.ensure_oversized_note_ingested(&ingest_note).await {
+                if let Err(error) = ingest_state
+                    .ensure_oversized_note_ingested(&ingest_note)
+                    .await
+                {
                     log::warn!("background oversized-note ingestion failed: {error}");
                 }
             }
@@ -345,7 +358,9 @@ impl AppState {
             }
         }
 
-        if let Err(error) = crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id)) {
+        if let Err(error) =
+            crate::git_history::commit_changes(&workspace, &format!("Delete note: {}", note_id))
+        {
             log::warn!("deleted note but could not create Git history entry: {error}");
         }
         if let Err(error) = self.reindex_workspace_after_change(workspace).await {
@@ -566,26 +581,92 @@ impl AppState {
         let query_vector = self.note_embedding(trimmed, true).await;
         let keyword_terms = tokenize(trimmed);
         let chunks = workspace_chunks(self).await?;
-        let mut per_note: HashMap<String, Vec<(f32, WorkspaceSearchHit, bool, bool)>> = HashMap::new();
+        let mut per_note: HashMap<String, Vec<(f32, WorkspaceSearchHit, bool, bool)>> =
+            HashMap::new();
         for chunk in chunks {
-            let haystack = format!("{}\n{}", chunk.title.to_lowercase(), chunk.text.to_lowercase());
-            let lexical = keyword_terms.iter().map(|term| haystack.matches(term).count() as f32).sum::<f32>();
-            let semantic = chunk.vector.as_ref().filter(|v| chunk.embedding_fingerprint == self.embedding_fingerprint() && v.len() == query_vector.len() && !query_vector.is_empty()).map(|v| cosine_similarity(&query_vector, v));
-            let score = match semantic { Some(value) => 0.70 * (lexical / (lexical + 1.0)) + 0.30 * value, None => lexical / (lexical + 1.0) };
-            if score > 0.0 { per_note.entry(chunk.note_id.clone()).or_default().push((score, chunk, lexical > 0.0, semantic.is_some())); }
+            let haystack = format!(
+                "{}\n{}",
+                chunk.title.to_lowercase(),
+                chunk.text.to_lowercase()
+            );
+            let lexical = keyword_terms
+                .iter()
+                .map(|term| haystack.matches(term).count() as f32)
+                .sum::<f32>();
+            let semantic = chunk
+                .vector
+                .as_ref()
+                .filter(|v| {
+                    chunk.embedding_fingerprint == self.embedding_fingerprint()
+                        && v.len() == query_vector.len()
+                        && !query_vector.is_empty()
+                })
+                .map(|v| cosine_similarity(&query_vector, v));
+            let score = match semantic {
+                Some(value) => 0.70 * (lexical / (lexical + 1.0)) + 0.30 * value,
+                None => lexical / (lexical + 1.0),
+            };
+            if score > 0.0 {
+                per_note.entry(chunk.note_id.clone()).or_default().push((
+                    score,
+                    chunk,
+                    lexical > 0.0,
+                    semantic.is_some(),
+                ));
+            }
         }
-        let mut results = per_note.into_iter().filter_map(|(note_id, mut hits)| {
-            let note = notes.get(&note_id)?;
-            hits.sort_by(|a, b| b.0.total_cmp(&a.0));
-            let (best_score, best, lexical, semantic) = hits.remove(0);
-            let second = hits.into_iter().find(|(_, candidate, _, _)| match (best.char_start, best.char_end, candidate.char_start, candidate.char_end) {
-                (Some(a), Some(b), Some(c), Some(d)) => ((b.min(d) - a.max(c)).max(0) as f32) / ((d-c).max(1) as f32) < 0.60,
-                _ => true,
-            }).map(|hit| hit.0).unwrap_or(0.0);
-            let title_boost = keyword_terms.iter().filter(|term| note.document.title.to_lowercase().contains(term.as_str()) || note.document.tags.iter().any(|tag| tag.to_lowercase().contains(term.as_str()))).count() as f32 / keyword_terms.len().max(1) as f32;
-            let score = 0.75 * best_score + 0.15 * second + 0.10 * title_boost;
-            Some(SearchResult { note: summarize(&note.document), score, reason: if semantic && lexical { "hybrid".into() } else if semantic { "vector".into() } else { "keyword".into() }, match_excerpt: Some(excerpt(&best.text)), matched_section: best.section })
-        }).collect::<Vec<_>>();
+        let mut results = per_note
+            .into_iter()
+            .filter_map(|(note_id, mut hits)| {
+                let note = notes.get(&note_id)?;
+                hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let (best_score, best, lexical, semantic) = hits.remove(0);
+                let second = hits
+                    .into_iter()
+                    .find(|(_, candidate, _, _)| {
+                        match (
+                            best.char_start,
+                            best.char_end,
+                            candidate.char_start,
+                            candidate.char_end,
+                        ) {
+                            (Some(a), Some(b), Some(c), Some(d)) => {
+                                ((b.min(d) - a.max(c)).max(0) as f32) / ((d - c).max(1) as f32)
+                                    < 0.60
+                            }
+                            _ => true,
+                        }
+                    })
+                    .map(|hit| hit.0)
+                    .unwrap_or(0.0);
+                let title_boost = keyword_terms
+                    .iter()
+                    .filter(|term| {
+                        note.document.title.to_lowercase().contains(term.as_str())
+                            || note
+                                .document
+                                .tags
+                                .iter()
+                                .any(|tag| tag.to_lowercase().contains(term.as_str()))
+                    })
+                    .count() as f32
+                    / keyword_terms.len().max(1) as f32;
+                let score = 0.75 * best_score + 0.15 * second + 0.10 * title_boost;
+                Some(SearchResult {
+                    note: summarize(&note.document),
+                    score,
+                    reason: if semantic && lexical {
+                        "hybrid".into()
+                    } else if semantic {
+                        "vector".into()
+                    } else {
+                        "keyword".into()
+                    },
+                    match_excerpt: Some(excerpt(&best.text)),
+                    matched_section: best.section,
+                })
+            })
+            .collect::<Vec<_>>();
 
         results.sort_by(|left, right| right.score.total_cmp(&left.score));
 
@@ -678,5 +759,4 @@ impl AppState {
     // copyable, Drive-syncable). Default location is `<workspace>/tasks/<id>.json`;
     // a task assigned to a notebook lives at `<workspace>/<notebook>/tasks/<id>.json`.
     // The note indexer ignores them (not a note extension).
-
 }

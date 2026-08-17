@@ -1,5 +1,5 @@
 <script lang="ts">
-	import NoteLegacy from '$lib/note-page/NoteLegacy.svelte';
+	import NotePage from '$lib/note-page/NotePage.svelte';
 </script>
 
-<NoteLegacy />
+<NotePage />

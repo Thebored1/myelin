@@ -1,13 +1,4 @@
-use super::*;
-use crate::state::AppState;
-use futures_util::StreamExt;
-use rig_core::client::CompletionClient;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tauri::Emitter;
+use serde::Deserialize;
 /// An editor text selection the user armed, sent alongside the chat request.
 /// `text` is the selected source markdown; `before`/`after` are short surrounding
 /// context snippets used to pin the exact occurrence so repeats — and a body that
@@ -83,10 +74,7 @@ pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> O
         // one or more newlines while the frontend's cursor target has no anchors.
         // Every boundary would otherwise match and be rejected as ambiguous,
         // even though an empty note has only one meaningful insertion location.
-        if body.trim().is_empty()
-            && sel.before.trim().is_empty()
-            && sel.after.trim().is_empty()
-        {
+        if body.trim().is_empty() && sel.before.trim().is_empty() && sel.after.trim().is_empty() {
             return Some(WritePlan {
                 new_body: content,
                 op: WriteOp::EditSnippet,
@@ -103,19 +91,33 @@ pub fn selection_scoped_plan(body: &str, content: &str, sel: &SelectionArg) -> O
         }
         let position = matches[0];
         let mut insertion = content;
-        let left_alnum = body[..position].chars().next_back().is_some_and(char::is_alphanumeric);
-        let right_alnum = body[position..].chars().next().is_some_and(char::is_alphanumeric);
+        let left_alnum = body[..position]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        let right_alnum = body[position..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphanumeric);
         if left_alnum && insertion.chars().next().is_some_and(char::is_alphanumeric) {
             insertion.insert(0, ' ');
         }
-        if right_alnum && insertion.chars().next_back().is_some_and(char::is_alphanumeric) {
+        if right_alnum
+            && insertion
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+        {
             insertion.push(' ');
         }
         let mut new_body = String::with_capacity(body.len() + insertion.len());
         new_body.push_str(&body[..position]);
         new_body.push_str(&insertion);
         new_body.push_str(&body[position..]);
-        return Some(WritePlan { new_body, op: WriteOp::EditSnippet });
+        return Some(WritePlan {
+            new_body,
+            op: WriteOp::EditSnippet,
+        });
     }
     let (start, end) = locate_selection(body, sel)?;
     let regenerated_whole = (!sel.after.trim().is_empty() && content.contains(sel.after.trim()))
@@ -151,7 +153,9 @@ pub fn selection_insert_after_plan(
             && !marker.contains(selected)
             && !sel.text.trim().contains(marker))
     {
-        return Err("Rejected insertion marker: it does not match the armed selection.".to_string());
+        return Err(
+            "Rejected insertion marker: it does not match the armed selection.".to_string(),
+        );
     }
     let line_end = body[end..]
         .find('\n')
@@ -159,7 +163,10 @@ pub fn selection_insert_after_plan(
         .unwrap_or(body.len());
     let content = clean_note_content(&strip_prompt_markers(content));
     let new_body = format!("{}{}\n\n{}", &body[..line_end], content, &body[line_end..]);
-    Ok(WritePlan { new_body, op: WriteOp::Append })
+    Ok(WritePlan {
+        new_body,
+        op: WriteOp::Append,
+    })
 }
 
 /// Pure decision for `write_note`, `append_note` and the shared edit helpers:
@@ -169,7 +176,7 @@ pub fn selection_insert_after_plan(
 /// the `WriteOp`/`WritePlan` types live in `myelin-edit-core` so the sidecar's
 /// on-disk edits stay byte-identical to the app's.
 pub use myelin_edit_core::{
-    apply_format_op, clean_note_content, find_tolerant, is_format_op,
-    note_content_has_protocol_residue, normalize_append_content, plan_write,
-    strip_prompt_markers, WriteOp, WritePlan, FORMAT_OPS,
+    apply_format_op, clean_note_content, find_tolerant, is_format_op, normalize_append_content,
+    note_content_has_protocol_residue, plan_write, strip_prompt_markers, WriteOp, WritePlan,
+    FORMAT_OPS,
 };

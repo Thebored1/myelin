@@ -1,10 +1,8 @@
 use super::super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
 
 impl AppState {
     pub async fn save_active_slot_before_quit(&self) {
-        let record = match self.inner.last_slot_save.lock().clone() {
+        let record = match self.inner.ai.last_slot_save.lock().clone() {
             Some(record) => record,
             None => return,
         };

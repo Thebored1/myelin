@@ -1,9 +1,17 @@
+import type { ControllerContext } from '$lib/controller-context';
+
 /** Owns lazy MathLive/KaTeX loading and formula validation. */
-export function createMathSession(ctx: Record<string, any>) {
+export function createMathSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	let mathDialog: HTMLDialogElement | undefined = $state();
 	let mathValue = $state('');
 	let mathLiveReady = $state(false);
-	let katexRenderer = $state<any>(null);
+	let katexRenderer = $state<{
+		renderToString: (
+			value: string,
+			options: { throwOnError: boolean; displayMode: boolean }
+		) => string;
+	} | null>(null);
 	let mathError = $state('');
 	function mathToKatex(raw: string): string {
 		return raw.replace(/\\(?:_)?placeholder(?:\[.*?\])?(?:{})?/g, '\\square');
@@ -11,7 +19,7 @@ export function createMathSession(ctx: Record<string, any>) {
 
 	async function openMathDialog() {
 		try {
-			const [{ default: katex }, _mathlive] = await Promise.all([import('katex'), import('mathlive')]);
+			const [{ default: katex }] = await Promise.all([import('katex'), import('mathlive')]);
 			katexRenderer = katex;
 			mathLiveReady = true;
 			mathValue = '';
@@ -31,15 +39,22 @@ export function createMathSession(ctx: Record<string, any>) {
 		try {
 			katexRenderer.renderToString(mathToKatex(value), { throwOnError: true, displayMode: true });
 			mathError = '';
-		} catch (error: any) {
-			mathError = error?.message ? String(error.message) : 'KaTeX cannot render this formula.';
+		} catch (error: unknown) {
+			mathError =
+				error instanceof Error && error.message
+					? error.message
+					: 'KaTeX cannot render this formula.';
 		}
 	});
 
 	function insertMath() {
 		if (ctx.vditorInstance && mathValue) {
 			const cleanMath = mathToKatex(mathValue);
-			if (mathError && !confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)) return;
+			if (
+				mathError &&
+				!confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)
+			)
+				return;
 			ctx.vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 		}
 		mathDialog?.close();
@@ -49,15 +64,35 @@ export function createMathSession(ctx: Record<string, any>) {
 		mathToKatex,
 		openMathDialog,
 		insertMath,
-		get mathDialog() { return mathDialog; },
-		set mathDialog(value) { mathDialog = value; },
-		get mathValue() { return mathValue; },
-		set mathValue(value) { mathValue = value; },
-		get mathLiveReady() { return mathLiveReady; },
-		set mathLiveReady(value) { mathLiveReady = value; },
-		get katexRenderer() { return katexRenderer; },
-		set katexRenderer(value) { katexRenderer = value; },
-		get mathError() { return mathError; },
-		set mathError(value) { mathError = value; }
+		get mathDialog() {
+			return mathDialog;
+		},
+		set mathDialog(value) {
+			mathDialog = value;
+		},
+		get mathValue() {
+			return mathValue;
+		},
+		set mathValue(value) {
+			mathValue = value;
+		},
+		get mathLiveReady() {
+			return mathLiveReady;
+		},
+		set mathLiveReady(value) {
+			mathLiveReady = value;
+		},
+		get katexRenderer() {
+			return katexRenderer;
+		},
+		set katexRenderer(value) {
+			katexRenderer = value;
+		},
+		get mathError() {
+			return mathError;
+		},
+		set mathError(value) {
+			mathError = value;
+		}
 	};
 }

@@ -1,6 +1,5 @@
 use super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
+use ::anyhow::{anyhow, Result};
 
 impl AppState {
     pub(crate) fn tectonic_cache_dir(&self) -> PathBuf {
@@ -33,7 +32,12 @@ impl AppState {
     /// been warmed yet (first run ⇒ ~50 MB bundle fetch) we emit `latex://download`
     /// events (`start` / `progress` with byte counts / `done` / `error`) so the UI
     /// can show a real download indicator instead of a generic spinner.
-    pub(crate) async fn run_tectonic(&self, tex: String, line_map: Vec<usize>, input_root: Option<PathBuf>) -> Result<Vec<u8>> {
+    pub(crate) async fn run_tectonic(
+        &self,
+        tex: String,
+        line_map: Vec<usize>,
+        input_root: Option<PathBuf>,
+    ) -> Result<Vec<u8>> {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         // One Tectonic run at a time — concurrent runs corrupt the format cache.
@@ -68,8 +72,9 @@ impl AppState {
         };
 
         let result = tauri::async_runtime::spawn_blocking(move || {
-			compile_with_tectonic(&tex, input_root.as_deref())
-		}).await;
+            compile_with_tectonic(&tex, input_root.as_deref())
+        })
+        .await;
 
         stop.store(true, Ordering::Relaxed);
         if let Some(p) = poller {
@@ -169,51 +174,78 @@ impl AppState {
         };
 
         let note_dir = {
-			let runtime = self.inner.runtime.read();
-			let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
-			workspace.join(&note.document.relative_path).parent().map(Path::to_path_buf)
-		};
-		self.run_tectonic(transform.source, transform.line_map, note_dir).await
+            let runtime = self.inner.runtime.read();
+            let note = runtime
+                .notes
+                .get(&note_id)
+                .ok_or_else(|| anyhow!("note not found"))?;
+            workspace
+                .join(&note.document.relative_path)
+                .parent()
+                .map(Path::to_path_buf)
+        };
+        self.run_tectonic(transform.source, transform.line_map, note_dir)
+            .await
     }
 
-	pub fn import_latex_asset(&self, note_id: String, source_path: String) -> Result<String> {
-		let workspace = self.require_workspace()?.canonicalize()?;
-		let note_path = {
-			let runtime = self.inner.runtime.read();
-			let note = runtime.notes.get(&note_id).ok_or_else(|| anyhow!("note not found"))?;
-			workspace.join(&note.document.relative_path)
-		};
-		let source = PathBuf::from(source_path).canonicalize()?;
-		if !source.is_file() {
-			return Err(anyhow!("selected image is not a file"));
-		}
-		let extension = source.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
-		if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "pdf") {
-			return Err(anyhow!("unsupported LaTeX image type: {extension}"));
-		}
-		let note_dir = note_path.parent().ok_or_else(|| anyhow!("note has no parent directory"))?;
-		let stem = note_path.file_stem().and_then(|v| v.to_str()).unwrap_or("note");
-		let assets_dir = note_dir.join(format!("{stem}-assets"));
-		fs::create_dir_all(&assets_dir)?;
-		let original_name = source.file_name().ok_or_else(|| anyhow!("image has no filename"))?;
-		let mut target = assets_dir.join(original_name);
-		let mut suffix = 2;
-		while target.exists() {
-			let base = source.file_stem().and_then(|v| v.to_str()).unwrap_or("image");
-			target = assets_dir.join(format!("{base}-{suffix}.{extension}"));
-			suffix += 1;
-		}
-		fs::copy(&source, &target)?;
-		let relative = target.strip_prefix(note_dir).map_err(|_| anyhow!("asset path escaped note directory"))?;
-		Ok(relative.to_string_lossy().replace('\\', "/"))
-	}
+    pub fn import_latex_asset(&self, note_id: String, source_path: String) -> Result<String> {
+        let workspace = self.require_workspace()?.canonicalize()?;
+        let note_path = {
+            let runtime = self.inner.runtime.read();
+            let note = runtime
+                .notes
+                .get(&note_id)
+                .ok_or_else(|| anyhow!("note not found"))?;
+            workspace.join(&note.document.relative_path)
+        };
+        let source = PathBuf::from(source_path).canonicalize()?;
+        if !source.is_file() {
+            return Err(anyhow!("selected image is not a file"));
+        }
+        let extension = source
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "pdf") {
+            return Err(anyhow!("unsupported LaTeX image type: {extension}"));
+        }
+        let note_dir = note_path
+            .parent()
+            .ok_or_else(|| anyhow!("note has no parent directory"))?;
+        let stem = note_path
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .unwrap_or("note");
+        let assets_dir = note_dir.join(format!("{stem}-assets"));
+        fs::create_dir_all(&assets_dir)?;
+        let original_name = source
+            .file_name()
+            .ok_or_else(|| anyhow!("image has no filename"))?;
+        let mut target = assets_dir.join(original_name);
+        let mut suffix = 2;
+        while target.exists() {
+            let base = source
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or("image");
+            target = assets_dir.join(format!("{base}-{suffix}.{extension}"));
+            suffix += 1;
+        }
+        fs::copy(&source, &target)?;
+        let relative = target
+            .strip_prefix(note_dir)
+            .map_err(|_| anyhow!("asset path escaped note directory"))?;
+        Ok(relative.to_string_lossy().replace('\\', "/"))
+    }
 
     /// Pre-download Tectonic's support bundle by compiling a tiny stub document,
     /// so users can warm the cache from Settings instead of paying the first-run
     /// fetch when they hit "Compile to PDF".
     pub async fn prewarm_tectonic(&self) -> Result<()> {
         let stub = wrap_bare_latex("Myelin LaTeX warm-up: $E = mc^2$, \\textbf{ready}.");
-        self.run_tectonic(stub.source, stub.line_map, None).await.map(|_| ())
+        self.run_tectonic(stub.source, stub.line_map, None)
+            .await
+            .map(|_| ())
     }
-
 }

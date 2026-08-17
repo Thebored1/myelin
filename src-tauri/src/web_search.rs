@@ -57,7 +57,10 @@ pub fn assert_url_surface(url: &reqwest::Url) -> Result<(), String> {
         ));
     }
     // IPv6 hosts come back bracketed ("[::1]"); strip them for the literal check.
-    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_or_link_local(ip) {
             return Err(format!(
@@ -77,7 +80,10 @@ pub async fn resolve_public_url(raw_url: &str) -> Result<Option<SocketAddr>, Str
     assert_url_surface(&url)?;
     let host = url.host_str().unwrap_or("").to_string();
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(Some(SocketAddr::new(ip, url.port_or_known_default().unwrap_or(443))));
+        return Ok(Some(SocketAddr::new(
+            ip,
+            url.port_or_known_default().unwrap_or(443),
+        )));
     }
     let port = url.port_or_known_default().unwrap_or(443);
     let mut addrs = tokio::net::lookup_host((host.as_str(), port))
@@ -139,7 +145,12 @@ pub fn format_results(query: &str, results: &[SearchResult]) -> String {
     }
     let mut out = format!("Web results for \"{query}\":\n\n");
     for (i, r) in results.iter().enumerate() {
-        out.push_str(&format!("{}. {}\n   {}\n", i + 1, r.title.trim(), r.url.trim()));
+        out.push_str(&format!(
+            "{}. {}\n   {}\n",
+            i + 1,
+            r.title.trim(),
+            r.url.trim()
+        ));
         let snip = r.snippet.trim();
         if !snip.is_empty() {
             out.push_str(&format!("   {snip}\n"));
@@ -221,8 +232,7 @@ async fn duckduckgo_search(query: &str) -> Result<Vec<SearchResult>, String> {
 fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
     let anchor_re =
         regex::Regex::new(r#"(?s)class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#).ok();
-    let snippet_re =
-        regex::Regex::new(r#"(?s)class="result__snippet"[^>]*>(.*?)</a>"#).ok();
+    let snippet_re = regex::Regex::new(r#"(?s)class="result__snippet"[^>]*>(.*?)</a>"#).ok();
 
     let titles: Vec<(String, String)> = anchor_re
         .map(|re| {
@@ -361,9 +371,23 @@ mod tests {
     #[test]
     fn private_and_link_local_ranges_are_rejected() {
         for ip in [
-            "127.0.0.1", "127.8.8.8", "10.0.0.5", "172.16.0.1", "172.31.255.254",
-            "192.168.1.1", "169.254.1.1", "100.64.0.1", "100.127.255.255", "0.0.0.0",
-            "0.1.2.3", "255.255.255.255", "224.0.0.1", "::1", "::", "fc00::1", "fd12::7",
+            "127.0.0.1",
+            "127.8.8.8",
+            "10.0.0.5",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "100.127.255.255",
+            "0.0.0.0",
+            "0.1.2.3",
+            "255.255.255.255",
+            "224.0.0.1",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12::7",
             "fe80::1",
         ] {
             assert!(is_private_or_link_local(ip.parse().unwrap()), "{ip}");
@@ -384,10 +408,16 @@ mod tests {
             "https://10.0.0.2/",
             "http://mybox.local/",
         ] {
-            assert!(assert_url_surface(&reqwest::Url::parse(bad).unwrap()).is_err(), "{bad}");
+            assert!(
+                assert_url_surface(&reqwest::Url::parse(bad).unwrap()).is_err(),
+                "{bad}"
+            );
         }
         for good in ["https://example.com/page", "https://93.184.216.34/"] {
-            assert!(assert_url_surface(&reqwest::Url::parse(good).unwrap()).is_ok(), "{good}");
+            assert!(
+                assert_url_surface(&reqwest::Url::parse(good).unwrap()).is_ok(),
+                "{good}"
+            );
         }
     }
 

@@ -1,6 +1,5 @@
 use super::super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
+use ::anyhow::{anyhow, Result};
 
 impl AppState {
     pub async fn save_chat_history(
@@ -34,5 +33,4 @@ impl AppState {
         }
         Ok(())
     }
-
 }

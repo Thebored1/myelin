@@ -58,10 +58,14 @@
 			iframeEl.srcdoc = htmlContent;
 			iframeEl.onload = () => {
 				const root = iframeEl?.contentDocument?.scrollingElement;
-				root?.addEventListener('scroll', () => {
-					if (reportTimer) clearTimeout(reportTimer);
-					reportTimer = setTimeout(reportViewport, 100);
-				}, { passive: true });
+				root?.addEventListener(
+					'scroll',
+					() => {
+						if (reportTimer) clearTimeout(reportTimer);
+						reportTimer = setTimeout(reportViewport, 100);
+					},
+					{ passive: true }
+				);
 				setTimeout(reportViewport, 0);
 				reportAllBuckets();
 			};

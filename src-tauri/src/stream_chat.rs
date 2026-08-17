@@ -14,7 +14,7 @@ use crate::agent::{
     SearchDocumentsArgs, SearchDocumentsTool, SearchNotesArgs, SearchNotesTool, WebSearchArgs,
     WebSearchTool, WriteNoteArgs, WriteNoteTool,
 };
-use crate::state::AppState;
+use crate::ai_turn::ToolTurnContext;
 use rig_core::tool::Tool;
 use serde_json::{json, Value};
 
@@ -62,8 +62,8 @@ fn coerce_args(v: Value) -> Value {
 /// reusing all of its guard rails / save logic. Returns the tool's result text
 /// (tools return `Ok(message)` even for refusals). Used by the openharn
 /// sidecar path (`crate::sidecar`), so the real tools stay in Myelin's process.
-pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
-    if let Err(reason) = state.authorize_tool_call(name) {
+pub async fn execute_tool(turn: &ToolTurnContext, name: &str, args: &str) -> String {
+    if let Err(reason) = turn.authorize_tool_call(name) {
         log::warn!("[execute_tool] blocked {name}: {reason}");
         return format!("Tool call rejected: {reason}");
     }
@@ -71,7 +71,7 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
     match name {
         "write_note" => match serde_json::from_value::<WriteNoteArgs>(v.clone()) {
             Ok(a) => WriteNoteTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
@@ -81,7 +81,7 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
                 // `find: []` where a string is expected).
                 match serde_json::from_value::<WriteNoteArgs>(coerce_args(v)) {
                     Ok(a) => WriteNoteTool {
-                        state: state.clone(),
+                        turn: turn.clone(),
                     }
                     .call(a)
                     .await
@@ -91,50 +91,100 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
             }
         },
         "append_note" => match serde_json::from_value::<AppendNoteArgs>(v.clone()) {
-            Ok(a) => AppendNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Ok(a) => AppendNoteTool {
+                turn: turn.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<AppendNoteArgs>(coerce_args(v)) {
-                Ok(a) => AppendNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Ok(a) => AppendNoteTool {
+                    turn: turn.clone(),
+                }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
                 Err(e2) => format!("Invalid append_note arguments: {e} (coerced: {e2})"),
             },
         },
         "prepend_note" => match serde_json::from_value::<PrependNoteArgs>(v.clone()) {
-            Ok(a) => PrependNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Ok(a) => PrependNoteTool {
+                turn: turn.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<PrependNoteArgs>(coerce_args(v)) {
-                Ok(a) => PrependNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Ok(a) => PrependNoteTool {
+                    turn: turn.clone(),
+                }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
                 Err(e2) => format!("Invalid prepend_note arguments: {e} (coerced: {e2})"),
             },
         },
         "replace_in_note" => match serde_json::from_value::<ReplaceInNoteArgs>(v.clone()) {
-            Ok(a) => ReplaceInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Ok(a) => ReplaceInNoteTool {
+                turn: turn.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<ReplaceInNoteArgs>(coerce_args(v)) {
-                Ok(a) => ReplaceInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Ok(a) => ReplaceInNoteTool {
+                    turn: turn.clone(),
+                }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
                 Err(e2) => format!("Invalid replace_in_note arguments: {e} (coerced: {e2})"),
             },
         },
         "insert_after_line" => match serde_json::from_value::<InsertAfterLineArgs>(v.clone()) {
-            Ok(a) => InsertAfterLineTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Ok(a) => InsertAfterLineTool {
+                turn: turn.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<InsertAfterLineArgs>(coerce_args(v)) {
-                Ok(a) => InsertAfterLineTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Ok(a) => InsertAfterLineTool {
+                    turn: turn.clone(),
+                }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
                 Err(e2) => format!("Invalid insert_after_line arguments: {e} (coerced: {e2})"),
             },
         },
         "delete_in_note" => match serde_json::from_value::<DeleteInNoteArgs>(v.clone()) {
-            Ok(a) => DeleteInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+            Ok(a) => DeleteInNoteTool {
+                turn: turn.clone(),
+            }
+            .call(a)
+            .await
+            .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<DeleteInNoteArgs>(coerce_args(v)) {
-                Ok(a) => DeleteInNoteTool { state: state.clone() }.call(a).await.unwrap_or_else(|e| e.to_string()),
+                Ok(a) => DeleteInNoteTool {
+                    turn: turn.clone(),
+                }
+                .call(a)
+                .await
+                .unwrap_or_else(|e| e.to_string()),
                 Err(e2) => format!("Invalid delete_in_note arguments: {e} (coerced: {e2})"),
             },
         },
         "read_note" => match serde_json::from_value::<ReadNoteArgs>(v.clone()) {
             Ok(a) => ReadNoteTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<ReadNoteArgs>(coerce_args(v)) {
                 Ok(a) => ReadNoteTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await
@@ -144,14 +194,14 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
         },
         "search_notes" => match serde_json::from_value::<SearchNotesArgs>(v.clone()) {
             Ok(a) => SearchNotesTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<SearchNotesArgs>(coerce_args(v)) {
                 Ok(a) => SearchNotesTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await
@@ -161,14 +211,14 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
         },
         "fetch_web_page" => match serde_json::from_value::<FetchWebPageArgs>(v.clone()) {
             Ok(a) => FetchWebPageTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<FetchWebPageArgs>(coerce_args(v)) {
                 Ok(a) => FetchWebPageTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await
@@ -178,14 +228,14 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
         },
         "web_search" => match serde_json::from_value::<WebSearchArgs>(v.clone()) {
             Ok(a) => WebSearchTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<WebSearchArgs>(coerce_args(v)) {
                 Ok(a) => WebSearchTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await
@@ -195,14 +245,14 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
         },
         "search_documents" => match serde_json::from_value::<SearchDocumentsArgs>(v.clone()) {
             Ok(a) => SearchDocumentsTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<SearchDocumentsArgs>(coerce_args(v)) {
                 Ok(a) => SearchDocumentsTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await
@@ -212,14 +262,14 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
         },
         "find_in_note" => match serde_json::from_value::<FindInNoteArgs>(v.clone()) {
             Ok(a) => FindInNoteTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<FindInNoteArgs>(coerce_args(v)) {
                 Ok(a) => FindInNoteTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await
@@ -229,14 +279,14 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
         },
         "format_note" => match serde_json::from_value::<FormatNoteArgs>(v.clone()) {
             Ok(a) => FormatNoteTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<FormatNoteArgs>(coerce_args(v)) {
                 Ok(a) => FormatNoteTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await
@@ -246,14 +296,14 @@ pub async fn execute_tool(state: &AppState, name: &str, args: &str) -> String {
         },
         "edit_notebook" => match serde_json::from_value::<EditNotebookArgs>(v.clone()) {
             Ok(a) => EditNotebookTool {
-                state: state.clone(),
+                turn: turn.clone(),
             }
             .call(a)
             .await
             .unwrap_or_else(|e| e.to_string()),
             Err(e) => match serde_json::from_value::<EditNotebookArgs>(coerce_args(v)) {
                 Ok(a) => EditNotebookTool {
-                    state: state.clone(),
+                    turn: turn.clone(),
                 }
                 .call(a)
                 .await

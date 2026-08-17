@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { filterNotes, isAttachmentCopy, noteType, timeAgo } from './model';
 import type { NoteSummary } from '$lib/types';
+import { commonplaces, filterNotes as filterHomeNotes, tagCounts } from './filters';
 
 const note = (id: string, path: string, folder = ''): NoteSummary => ({
-	id, title: id, tags: ['work'], folder, excerpt: '', relativePath: path,
-	createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', backlinks: []
+	id,
+	title: id,
+	tags: ['work'],
+	folder,
+	excerpt: '',
+	relativePath: path,
+	createdAt: '2026-01-01T00:00:00Z',
+	updatedAt: '2026-01-01T00:00:00Z',
+	backlinks: []
 });
 
 describe('home model', () => {
@@ -15,8 +23,14 @@ describe('home model', () => {
 	});
 
 	it('filters notebook notes and puts pinned notes first', () => {
-		const notes = [note('a', 'a.md', 'Research'), note('b', 'b.md', 'Research/Ideas'), note('c', 'c.pdf')];
-		expect(filterNotes(notes, 'notes', 'work', 'Research', new Set(), ['b']).map((n) => n.id)).toEqual(['b', 'a']);
+		const notes = [
+			note('a', 'a.md', 'Research'),
+			note('b', 'b.md', 'Research/Ideas'),
+			note('c', 'c.pdf')
+		];
+		expect(
+			filterNotes(notes, 'notes', 'work', 'Research', new Set(), ['b']).map((n) => n.id)
+		).toEqual(['b', 'a']);
 	});
 
 	it('formats relative age deterministically', () => {
@@ -24,5 +38,21 @@ describe('home model', () => {
 		expect(timeAgo('2026-01-08T00:00:00Z', now)).toBe('now');
 		expect(timeAgo('2026-01-07T23:00:00Z', now)).toBe('1h');
 		expect(timeAgo('2025-12-01T00:00:00Z', now)).toBe('5w');
+	});
+
+	it('keeps dashboard filtering and backlink clusters deterministic', () => {
+		const notes: NoteSummary[] = [
+			{
+				...note('a', 'a.md', 'Research'),
+				backlinks: [{ sourceId: 'b', sourceTitle: 'b', targetBlock: '', contextExcerpt: '' }]
+			},
+			note('b', 'b.md', 'Research'),
+			note('c', 'c.md', 'Other')
+		];
+		expect(
+			filterHomeNotes(notes, 'notes', 'work', 'Research', ['b'], new Set()).map((n) => n.id)
+		).toEqual(['b', 'a']);
+		expect(commonplaces(notes).map((cluster) => cluster.map((n) => n.id))).toEqual([['a', 'b']]);
+		expect(tagCounts(notes)).toEqual([['work', 3]]);
 	});
 });

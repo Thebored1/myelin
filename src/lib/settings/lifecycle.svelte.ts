@@ -1,10 +1,32 @@
 import { onDestroy, onMount } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { appCache } from '$lib/appCache';
+import type { OcrStatus } from './types';
+import type { ControllerContext } from '$lib/controller-context';
+
+type RerankerStatus = { configuredPath?: string };
+type OpenharnSettings = {
+	port?: number;
+	bin_path?: string;
+	tool_mode?: string;
+	strict?: boolean;
+	call_only?: boolean;
+	no_think?: boolean;
+	tool_choice?: string;
+	template_kwargs?: string;
+	max_calls?: number;
+	total_max?: number;
+	tool_timeout_secs?: number;
+	base_url?: string;
+	external_enabled?: boolean;
+	external_base_url?: string;
+	external_model?: string;
+	external_api_key?: string;
+};
 
 /** Owns settings bootstrap, live backend events, and provider polling. */
-export function createSettingsLifecycle(ctx: Record<string, any>) {
+export function createSettingsLifecycle(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	const unlisteners: Array<() => void> = [];
 	onDestroy(() => {
 		if (ctx.statusPoll) clearInterval(ctx.statusPoll);
@@ -35,13 +57,15 @@ export function createSettingsLifecycle(ctx: Record<string, any>) {
 			}
 			ctx.searxngUrl = (await invoke<string | null>('get_searxng_url')) ?? '';
 			ctx.embedModelPath = (await invoke<string | null>('get_embed_model_path')) ?? '';
-			ctx.rerankerModelPath = (await invoke<any>('get_reranker_model_status')).configuredPath ?? '';
-			ctx.ocrStatus = await invoke<any>('get_ocr_status');
+			ctx.rerankerModelPath =
+				(await invoke<RerankerStatus>('get_reranker_model_status')).configuredPath ?? '';
+			ctx.ocrStatus = await invoke<OcrStatus>('get_ocr_status');
 			ctx.quickShortcut = (await invoke<string>('get_quick_shortcut')) || 'Ctrl+Space';
-			ctx.startWithSystem = (await invoke<{ startWithSystem: boolean }>('get_background_settings'))
-				.startWithSystem;
+			ctx.startWithSystem = (
+				await invoke<{ startWithSystem: boolean }>('get_background_settings')
+			).startWithSystem;
 			try {
-				const openharn = await invoke<any>('get_openharn_settings');
+				const openharn = await invoke<OpenharnSettings>('get_openharn_settings');
 				ctx.ohPort = openharn.port ?? null;
 				ctx.ohBinPath = openharn.bin_path ?? '';
 				ctx.ohToolMode =
@@ -67,7 +91,7 @@ export function createSettingsLifecycle(ctx: Record<string, any>) {
 				console.error('Failed to load openharn settings:', error);
 			}
 			try {
-				ctx.modelProfiles = await invoke<any[]>('list_model_profiles');
+				ctx.modelProfiles = await invoke<Record<string, unknown>[]>('list_model_profiles');
 			} catch {
 				ctx.modelProfiles = [];
 			}

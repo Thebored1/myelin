@@ -81,7 +81,9 @@ describe('theme colors', () => {
 		expect(tokens['accent-100']).toBe('#55AAFF');
 		expect(tokens['accent-tint']).toMatch(/^#55AAFF/);
 		expect(contrastRatio(tokens['on-accent'] ?? '#FFFFFF', '#55AAFF')).toBeGreaterThanOrEqual(4.5);
-		expect(contrastRatio(tokens['text-selection'] ?? '#000000', tokens['bg-selection'] ?? '#FFFFFF')).toBeGreaterThanOrEqual(4.5);
+		expect(
+			contrastRatio(tokens['text-selection'] ?? '#000000', tokens['bg-selection'] ?? '#FFFFFF')
+		).toBeGreaterThanOrEqual(4.5);
 	});
 
 	it('keeps surfaces readable when the wash cannot reach full contrast', () => {
@@ -139,9 +141,22 @@ describe('theme colors', () => {
 			expect(clone['bg-page']).toBe(original['bg-page']);
 			expect(clone['bg-panel']).toBe(original['bg-panel']);
 		}
-		const check = (tokens: Record<string, string | undefined>, original: Record<string, string | undefined>) => {
-			expect(Math.abs(relativeLuminance(tokens['bg-page'] ?? '#000000') - relativeLuminance(original['bg-page'] ?? '#000000'))).toBeLessThan(0.02);
-			expect(Math.abs(relativeLuminance(tokens['bg-panel'] ?? '#FFFFFF') - relativeLuminance(original['bg-panel'] ?? '#FFFFFF'))).toBeLessThan(0.02);
+		const check = (
+			tokens: Record<string, string | undefined>,
+			original: Record<string, string | undefined>
+		) => {
+			expect(
+				Math.abs(
+					relativeLuminance(tokens['bg-page'] ?? '#000000') -
+						relativeLuminance(original['bg-page'] ?? '#000000')
+				)
+			).toBeLessThan(0.02);
+			expect(
+				Math.abs(
+					relativeLuminance(tokens['bg-panel'] ?? '#FFFFFF') -
+						relativeLuminance(original['bg-panel'] ?? '#FFFFFF')
+				)
+			).toBeLessThan(0.02);
 		};
 		for (const base of [darkTheme, lightTheme]) {
 			const original = compileTheme(base);
@@ -160,16 +175,29 @@ describe('theme colors', () => {
 	});
 
 	it('swaps main-area and menu-area surface colors globally', () => {
-		const derived = deriveThemeTokens('light', { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' });
+		const derived = deriveThemeTokens('light', {
+			page: '#FFFFFF',
+			panel: '#112233',
+			accent: '#55AAFF'
+		});
 		expect(relativeLuminance(derived['bg-page'] ?? '#000000')).toBeGreaterThan(
 			relativeLuminance(derived['bg-panel'] ?? '#FFFFFF')
 		);
-		const compiled = compileTheme({ ...darkTheme, mode: 'light', palette: { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' }, tokens: {} });
+		const compiled = compileTheme({
+			...darkTheme,
+			mode: 'light',
+			palette: { page: '#FFFFFF', panel: '#112233', accent: '#55AAFF' },
+			tokens: {}
+		});
 		expect(compiled['bg-page']).not.toBe(compiled['bg-panel']);
 		expect(relativeLuminance(compiled['bg-page'] ?? '#000000')).toBeLessThan(
 			relativeLuminance(compiled['bg-panel'] ?? '#FFFFFF')
 		);
-		const explicit = compileTheme({ ...darkTheme, mode: 'light', tokens: { 'bg-page': '#FFFFFF', 'bg-panel': '#112233' } });
+		const explicit = compileTheme({
+			...darkTheme,
+			mode: 'light',
+			tokens: { 'bg-page': '#FFFFFF', 'bg-panel': '#112233' }
+		});
 		expect(explicit['bg-page']).toBe('#112233');
 		expect(explicit['bg-panel']).toBe('#FFFFFF');
 	});
@@ -192,6 +220,13 @@ describe('theme colors', () => {
 	});
 
 	it('rejects unknown and malformed custom token values', () => {
-		expect(() => normalizeTheme({ ...darkTheme, id: 'custom', readonly: false, tokens: { 'not-a-token': '#FFFFFF' } as never })).toThrow();
+		expect(() =>
+			normalizeTheme({
+				...darkTheme,
+				id: 'custom',
+				readonly: false,
+				tokens: { 'not-a-token': '#FFFFFF' } as never
+			})
+		).toThrow();
 	});
 });

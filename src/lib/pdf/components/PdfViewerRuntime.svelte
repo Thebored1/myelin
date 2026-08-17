@@ -1,14 +1,18 @@
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
-	import { invoke } from '@tauri-apps/api/core';
 	import * as pdfjsLib from 'pdfjs-dist';
+	import type { PDFDocumentProxy, PageViewport } from 'pdfjs-dist';
+	import type { TextItem } from 'pdfjs-dist/types/src/display/api';
 	import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 	// PDF.js keeps the text-layer positioning rules in its viewer stylesheet.
 	// Without this import the selectable spans render in normal document flow
 	// below the canvas instead of overlaying the PDF page.
 	import 'pdfjs-dist/web/pdf_viewer.css';
 	import type { PdfAnnotation } from '$lib/types';
-	import { pdfItemsToStructuralText, suppressRepeatedPageFurniture } from '$lib/extraction/structuralText';
+	import {
+		pdfItemsToStructuralText,
+		suppressRepeatedPageFurniture
+	} from '$lib/extraction/structuralText';
 	import PdfToolbar from '$lib/pdf/components/PdfToolbar.svelte';
 	import PdfPages from '$lib/pdf/components/PdfPages.svelte';
 	import PdfSelectionToolbar from '$lib/pdf/components/PdfSelectionToolbar.svelte';
@@ -41,9 +45,7 @@
 		onImageExtract?: (base64: string) => void;
 		onTextExtracted?: (text: string) => void;
 		onActiveSection?: (section: { key: string; label: string; content: string }) => void;
-		onSectionsReady?: (
-			sections: { key: string; label: string; content: string }[]
-		) => void;
+		onSectionsReady?: (sections: { key: string; label: string; content: string }[]) => void;
 		onAttachNote?: () => void;
 		onClosePdf?: () => void;
 		showAttachButton?: boolean;
@@ -52,10 +54,10 @@
 	let containerDiv: HTMLDivElement | undefined = $state();
 	let pdfViewerDiv: HTMLDivElement | undefined = $state();
 
-	let pdfDoc: any = $state.raw(null);
+	let pdfDoc: PDFDocumentProxy | null = $state.raw(null);
 	let numPages = $state(0);
 	let scale = $state(1.2);
-	let defaultViewport: any = $state.raw(null);
+	let defaultViewport: PageViewport | null = $state.raw(null);
 
 	// Layout & Scroll Modes
 	type ScrollMode = 'vertical' | 'horizontal' | 'wrapped' | 'page';
@@ -87,16 +89,19 @@
 	let sectionReportGeneration = 0;
 	let handleViewerScroll: (() => void) | null = null;
 
-	async function extractDocumentText(doc: any, generation: number) {
+	async function extractDocumentText(doc: PDFDocumentProxy, generation: number) {
 		const extractedPages: string[] = [];
 		for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
 			if (generation !== loadGeneration) return;
 			const page = await doc.getPage(pageNumber);
 			const content = await page.getTextContent();
-			let text = pdfItemsToStructuralText(content.items);
+			const items = content.items.filter((item): item is TextItem => 'str' in item);
+			let text = pdfItemsToStructuralText(items);
 			extractedPages.push(text);
 		}
-		const pages = suppressRepeatedPageFurniture(extractedPages).map((text, index) => `[Page ${index + 1}]\n${text}`);
+		const pages = suppressRepeatedPageFurniture(extractedPages).map(
+			(text, index) => `[Page ${index + 1}]\n${text}`
+		);
 		if (generation === loadGeneration) {
 			onTextExtracted?.(pages.join('\n\n').trim());
 			// Eager section cache: every page becomes a cacheable section so the
@@ -105,9 +110,7 @@
 			const active = activePage || 1;
 			const ordered = [
 				active,
-				...Array.from({ length: pages.length }, (_, i) => i + 1).filter(
-					(page) => page !== active
-				)
+				...Array.from({ length: pages.length }, (_, i) => i + 1).filter((page) => page !== active)
 			];
 			onSectionsReady?.(
 				ordered.map((pageNumber) => ({
@@ -125,7 +128,8 @@
 		try {
 			const page = await pdfDoc.getPage(pageNumber);
 			const content = await page.getTextContent();
-			const text = pdfItemsToStructuralText(content.items);
+			const items = content.items.filter((item): item is TextItem => 'str' in item);
+			const text = pdfItemsToStructuralText(items);
 			if (generation === sectionReportGeneration && text) {
 				onActiveSection({
 					key: `page:${pageNumber}`,
@@ -151,10 +155,15 @@
 		const root = pdfViewerDiv.getBoundingClientRect();
 		let bestPage = 0;
 		let bestVisible = 0;
-		for (const element of Array.from(pdfViewerDiv.querySelectorAll<HTMLElement>('.pdf-page-container'))) {
+		for (const element of Array.from(
+			pdfViewerDiv.querySelectorAll<HTMLElement>('.pdf-page-container')
+		)) {
 			const page = Number(element.dataset.pageNumber);
 			const rect = element.getBoundingClientRect();
-			const visible = Math.max(0, Math.min(rect.bottom, root.bottom) - Math.max(rect.top, root.top));
+			const visible = Math.max(
+				0,
+				Math.min(rect.bottom, root.bottom) - Math.max(rect.top, root.top)
+			);
 			if (visible > bestVisible) {
 				bestVisible = visible;
 				bestPage = page;
@@ -191,9 +200,9 @@
 				fitToScreen();
 				void reportPageSection(activePage || 1);
 			});
-		} catch (error: any) {
+		} catch (error: unknown) {
 			console.error('Error loading PDF:', error);
-			errorMessage = error?.message || String(error);
+			errorMessage = error instanceof Error ? error.message : String(error);
 		}
 	}
 
@@ -478,6 +487,7 @@
 		}
 	});
 </script>
+
 <div class="pdf-wrapper" bind:this={containerDiv}>
 	<PdfToolbar
 		bind:toolMode
@@ -501,13 +511,13 @@
 	<div class="pdf-viewer-scroll-area" bind:this={pdfViewerDiv}>
 		{#if errorMessage}
 			<div
-					style="color: var(--danger-text); padding: 2rem; background: var(--danger-bg); border-radius: var(--radius-lg); margin: 2rem;"
+				style="color: var(--danger-text); padding: 2rem; background: var(--danger-bg); border-radius: var(--radius-lg); margin: 2rem;"
 			>
 				<h3 style="margin-top: 0;">Error Loading PDF</h3>
 				<pre style="white-space: pre-wrap; font-family: monospace;">{errorMessage}</pre>
 			</div>
 		{/if}
- 
+
 		<PdfPages
 			{pdfDoc}
 			{defaultViewport}

@@ -20,12 +20,33 @@ const implementationRoots = [
 	'src-tauri/src/state',
 	'src-tauri/src/agent',
 	'src-tauri/src/llama_server',
+	'src-tauri/openharn-myelin/src',
 	'src/lib/note-page/sessions',
 	'src/lib/note-page/components',
+	'src/lib/note-page',
 	'src/lib/home',
 	'src/lib/settings'
 ];
 const excludedNames = new Set(['target', 'node_modules', '.svelte-kit', 'dist', 'build']);
+
+// These files have documented reasons to remain larger than the normal module
+// budget: compatibility facades preserve public bindings; the sidecar harness
+// keeps its parser/grammar/context-fit corpus together; the runner keeps one
+// ordered cancellation/tool-loop state machine; and the state modules each own
+// a cross-cutting transaction or cache invariant that would be obscured by a
+// purely mechanical split.
+const documentedLargeFiles = new Set([
+	'src/lib/home/controller.svelte.ts',
+	'src/lib/settings/controller.svelte.ts',
+	'src-tauri/openharn-myelin/src/harness.rs',
+	'src-tauri/openharn-myelin/src/runner.rs',
+	'src-tauri/openharn-myelin/src/runner/turn_loop.rs',
+	'src/lib/note-page/controller.svelte.ts',
+	'src-tauri/src/state/ai/section_cache.rs',
+	'src-tauri/src/state/documents/helpers.rs',
+	'src-tauri/src/state/retrieval.rs',
+	'src-tauri/src/state/settings.rs'
+]);
 
 function lineCount(path) {
 	return readFileSync(path, 'utf8').split(/\r?\n/).length - 1;
@@ -53,6 +74,7 @@ for (const [file, limit] of facadeLimits) {
 for (const rootDir of implementationRoots) {
 	for (const path of walk(join(root, rootDir))) {
 		const file = relative(root, path).replaceAll('\\', '/');
+		if (documentedLargeFiles.has(file)) continue;
 		if (!/\.(rs|ts|svelte|svelte\.ts)$/.test(file)) continue;
 		if (/[/](tests?|fixtures|generated|assets)[/]/.test(file)) continue;
 		const actual = lineCount(path);

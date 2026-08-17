@@ -25,7 +25,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use futures_util::stream::{self, Stream, StreamExt};
+use futures_util::stream::{self, StreamExt};
 use myelin_edit_core::{apply_format_op, plan_write};
 use serde_json::{json, Value};
 
@@ -111,7 +111,10 @@ fn run_tool(name: &str, args: &Value, ctx: &TestCtx) -> String {
 fn scripted_call(scenario: &str) -> String {
     let call = |name: &str, args: Value| {
         let args_str = serde_json::to_string(&args).unwrap();
-        format!("<tool_call>[{{\"name\":\"{}\",\"arguments\":{}}}]", name, args_str)
+        format!(
+            "<tool_call>[{{\"name\":\"{}\",\"arguments\":{}}}]",
+            name, args_str
+        )
     };
     match scenario {
         "write_note_replace" => call("write_note", json!({ "content": "# Title\nHello world" })),
@@ -147,6 +150,7 @@ fn scripted_call(scenario: &str) -> String {
             call("edit_notebook", json!({ "operation": "edit", "index": 0, "content": "print(42)" }))
         }
         "no_tool" => "Here is a short reply with no tool call.".to_string(),
+        "cancel_generation" => "__CANCEL_GENERATION__".to_string(),
         other => format!("Unknown scenario: {}", other),
     }
 }
@@ -191,21 +195,35 @@ fn build_sse(content: &str) -> Vec<Event> {
         }
     }
     if !buf.is_empty() {
-        events.push(
-            Event::default().data(
-                json!({ "choices": [{ "index": 0, "delta": { "content": buf.clone() } }] })
-                    .to_string(),
-            ),
-        );
+        events.push(Event::default().data(
+            json!({ "choices": [{ "index": 0, "delta": { "content": buf.clone() } }] }).to_string(),
+        ));
     }
     events.push(Event::default().data("[DONE]"));
     events
 }
 
-async fn completions(Json(body): Json<Value>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn completions(
+    Json(body): Json<Value>,
+) -> Sse<futures_util::stream::BoxStream<'static, Result<Event, Infallible>>> {
     let content = route(&body);
+    if content == "__CANCEL_GENERATION__" {
+        let first = Event::default().data(
+            json!({ "choices": [{ "index": 0, "delta": { "content": "generation started" } }] })
+                .to_string(),
+        );
+        let delayed = stream::once(async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<_, Infallible>(Event::default().data("[DONE]"))
+        });
+        return Sse::new(
+            stream::once(async { Ok::<_, Infallible>(first) })
+                .chain(delayed)
+                .boxed(),
+        );
+    }
     let events = build_sse(&content);
-    Sse::new(stream::iter(events.into_iter().map(Ok::<_, Infallible>)))
+    Sse::new(stream::iter(events.into_iter().map(Ok::<_, Infallible>)).boxed())
 }
 
 fn mock_router() -> Router {
@@ -217,6 +235,7 @@ fn mock_router() -> Router {
 // ---------------------------------------------------------------------------
 
 struct Outcome {
+    events: Vec<String>,
     tool: Option<String>,
     done: bool,
     error: Option<String>,
@@ -287,6 +306,7 @@ async fn run_chat(
     let mut event_name = String::new();
     let mut data = String::new();
     let mut out = Outcome {
+        events: Vec::new(),
         tool: None,
         done: false,
         error: None,
@@ -302,15 +322,17 @@ async fn run_chat(
             let line = String::from_utf8_lossy(&buf[..nl]).trim_end().to_string();
             buf.drain(..=nl);
             if line.is_empty() {
-                    if !event_name.is_empty() || !data.is_empty() {
-                        match event_name.as_str() {
+                if !event_name.is_empty() || !data.is_empty() {
+                    if !event_name.is_empty() {
+                        out.events.push(event_name.clone());
+                    }
+                    match event_name.as_str() {
                         "tool" => {
                             let v: Value = serde_json::from_str(&data).expect("tool event json");
                             let id = v["id"].as_str().unwrap_or("").to_string();
                             let name = v["name"].as_str().expect("tool name").to_string();
                             let args = v["arguments"].as_str().unwrap_or("{}");
-                            let args_val: Value =
-                                serde_json::from_str(args).unwrap_or(json!({}));
+                            let args_val: Value = serde_json::from_str(args).unwrap_or(json!({}));
                             assert!(
                                 out.tool.is_none(),
                                 "scenario {scenario}: expected at most one tool call, got {name}"
@@ -366,12 +388,17 @@ fn sidecar_bin() -> PathBuf {
     let target_dir =
         std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| format!("{}/target", manifest));
     for profile in ["debug", "release"] {
-        let p = std::path::Path::new(&target_dir).join(profile).join("openharn-myelin");
+        let p = std::path::Path::new(&target_dir)
+            .join(profile)
+            .join("openharn-myelin");
         if p.exists() {
             return p;
         }
     }
-    panic!("sidecar binary not found under {}/<debug|release>/openharn-myelin", target_dir);
+    panic!(
+        "sidecar binary not found under {}/<debug|release>/openharn-myelin",
+        target_dir
+    );
 }
 
 async fn wait_healthy(base: &str) {
@@ -427,7 +454,11 @@ async fn every_tool_round_trips_and_edits_md() {
         "nbformat": 4,
         "nbformat_minor": 5,
     });
-    std::fs::write(&ctx.notebook_path, serde_json::to_string_pretty(&nb).unwrap()).unwrap();
+    std::fs::write(
+        &ctx.notebook_path,
+        serde_json::to_string_pretty(&nb).unwrap(),
+    )
+    .unwrap();
 
     // Mock llama-server.
     let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -453,11 +484,42 @@ async fn every_tool_round_trips_and_edits_md() {
 
     // --- write_note: replace ---
     std::fs::write(&ctx.note_path, "").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-replace", "write_note_replace", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("write_note"), "write_note replace dispatched");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-replace",
+        "write_note_replace",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("write_note"),
+        "write_note replace dispatched"
+    );
     assert!(o.done, "write_note replace completed");
-    assert!(o.new_messages >= 2, "done includes assistant/tool-result delta");
-    assert_eq!(note().trim(), "# Title\nHello world", "write_note replace body");
+    assert!(
+        o.new_messages >= 2,
+        "done includes assistant/tool-result delta"
+    );
+    let tool_index = o.events.iter().position(|event| event == "tool").unwrap();
+    let result_index = o
+        .events
+        .iter()
+        .position(|event| event == "tool_result")
+        .unwrap();
+    let done_index = o.events.iter().position(|event| event == "done").unwrap();
+    assert!(
+        tool_index < result_index && result_index < done_index,
+        "tool event order: {:?}",
+        o.events
+    );
+    assert_eq!(
+        note().trim(),
+        "# Title\nHello world",
+        "write_note replace body"
+    );
 
     // --- incomplete strict write_note: preview streams, but nothing executes ---
     std::fs::write(&ctx.note_path, "Original remains authoritative").unwrap();
@@ -474,7 +536,10 @@ async fn every_tool_round_trips_and_edits_md() {
         o.note_deltas > 1,
         "incomplete write_note should expose multiple real upstream deltas"
     );
-    assert!(o.tool.is_none(), "incomplete write_note must not execute a tool");
+    assert!(
+        o.tool.is_none(),
+        "incomplete write_note must not execute a tool"
+    );
     assert!(
         o.error
             .as_deref()
@@ -501,7 +566,10 @@ async fn every_tool_round_trips_and_edits_md() {
         &ctx,
     )
     .await;
-    assert!(o.note_deltas > 1, "contaminated content should have previewed");
+    assert!(
+        o.note_deltas > 1,
+        "contaminated content should have previewed"
+    );
     assert!(o.tool.is_none(), "contaminated write_note must not execute");
     assert!(
         o.error
@@ -529,7 +597,10 @@ async fn every_tool_round_trips_and_edits_md() {
         &ctx,
     )
     .await;
-    assert!(o.note_deltas > 1, "LFM text content should stream incrementally");
+    assert!(
+        o.note_deltas > 1,
+        "LFM text content should stream incrementally"
+    );
     assert_eq!(o.tool.as_deref(), Some("write_note"));
     assert_eq!(
         note().trim(),
@@ -539,81 +610,264 @@ async fn every_tool_round_trips_and_edits_md() {
 
     // --- write_note: append ---
     std::fs::write(&ctx.note_path, "Base").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-append", "write_note_append", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("write_note"), "write_note append dispatched");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-append",
+        "write_note_append",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("write_note"),
+        "write_note append dispatched"
+    );
     let f = note();
-    assert!(f.contains("Base") && f.contains("more"), "write_note append result: {:?}", f);
+    assert!(
+        f.contains("Base") && f.contains("more"),
+        "write_note append result: {:?}",
+        f
+    );
 
     // --- write_note: edit (find/replace) ---
     std::fs::write(&ctx.note_path, "Hello world").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-edit", "write_note_edit", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("write_note"), "write_note edit dispatched");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-edit",
+        "write_note_edit",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("write_note"),
+        "write_note edit dispatched"
+    );
     assert_eq!(note().trim(), "Hi", "write_note edit body");
 
     // --- write_note: clear (planner replaces whole body with empty) ---
     std::fs::write(&ctx.note_path, "Something").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-clear", "write_note_clear", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("write_note"), "write_note clear dispatched");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-clear",
+        "write_note_clear",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("write_note"),
+        "write_note clear dispatched"
+    );
     assert!(note().trim().is_empty(), "write_note clear body");
 
     // --- format_note: remove_headings ---
     std::fs::write(&ctx.note_path, "# Title\nBody\n## Sub").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-fmt-h", "format_remove_headings", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("format_note"), "format_note dispatched");
-    assert_eq!(note().trim(), "Title\nBody\nSub", "format_note remove_headings body");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-fmt-h",
+        "format_remove_headings",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("format_note"),
+        "format_note dispatched"
+    );
+    assert_eq!(
+        note().trim(),
+        "Title\nBody\nSub",
+        "format_note remove_headings body"
+    );
 
     // --- format_note: uppercase ---
     std::fs::write(&ctx.note_path, "hello world").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-fmt-u", "format_uppercase", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("format_note"), "format_note uppercase dispatched");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-fmt-u",
+        "format_uppercase",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("format_note"),
+        "format_note uppercase dispatched"
+    );
     assert_eq!(note().trim(), "HELLO WORLD", "format_note uppercase body");
 
     // --- format_note: strip_markdown ---
     std::fs::write(&ctx.note_path, "# H\n**bold**\n- item").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-fmt-s", "format_strip_markdown", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("format_note"), "format_note strip_markdown dispatched");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-fmt-s",
+        "format_strip_markdown",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("format_note"),
+        "format_note strip_markdown dispatched"
+    );
     let f = note();
-    assert!(!f.contains('#') && !f.contains("**") && !f.contains("- item"), "strip_markdown result: {:?}", f);
+    assert!(
+        !f.contains('#') && !f.contains("**") && !f.contains("- item"),
+        "strip_markdown result: {:?}",
+        f
+    );
 
     // --- read_note (canned, but dispatch + result asserted) ---
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-read", "read_note", &ctx).await;
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-read",
+        "read_note",
+        &ctx,
+    )
+    .await;
     assert_eq!(o.tool.as_deref(), Some("read_note"), "read_note dispatched");
-    assert!(o.last_result.as_deref().unwrap().contains("Other Note"), "read_note result");
+    assert!(
+        o.last_result.as_deref().unwrap().contains("Other Note"),
+        "read_note result"
+    );
 
     // --- fetch_web_page ---
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-fetch", "fetch_web_page", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("fetch_web_page"), "fetch_web_page dispatched");
-    assert!(o.last_result.as_deref().unwrap().contains("Example"), "fetch_web_page result");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-fetch",
+        "fetch_web_page",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("fetch_web_page"),
+        "fetch_web_page dispatched"
+    );
+    assert!(
+        o.last_result.as_deref().unwrap().contains("Example"),
+        "fetch_web_page result"
+    );
 
     // --- web_search ---
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-search", "web_search", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("web_search"), "web_search dispatched");
-    assert!(o.last_result.as_deref().unwrap().contains("rust-lang.org"), "web_search result");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-search",
+        "web_search",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("web_search"),
+        "web_search dispatched"
+    );
+    assert!(
+        o.last_result.as_deref().unwrap().contains("rust-lang.org"),
+        "web_search result"
+    );
 
     // --- search_notes ---
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-snotes", "search_notes", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("search_notes"), "search_notes dispatched");
-    assert!(o.last_result.as_deref().unwrap().contains("Project Plan"), "search_notes result");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-snotes",
+        "search_notes",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("search_notes"),
+        "search_notes dispatched"
+    );
+    assert!(
+        o.last_result.as_deref().unwrap().contains("Project Plan"),
+        "search_notes result"
+    );
 
     // --- search_documents ---
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-sdocs", "search_documents", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("search_documents"), "search_documents dispatched");
-    assert!(o.last_result.as_deref().unwrap().contains("Annual Report"), "search_documents result");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-sdocs",
+        "search_documents",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("search_documents"),
+        "search_documents dispatched"
+    );
+    assert!(
+        o.last_result.as_deref().unwrap().contains("Annual Report"),
+        "search_documents result"
+    );
 
     // --- find_in_note (reads the real note file) ---
     std::fs::write(&ctx.note_path, "world here\nnothing").unwrap();
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-find", "find_in_note", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("find_in_note"), "find_in_note dispatched");
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-find",
+        "find_in_note",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("find_in_note"),
+        "find_in_note dispatched"
+    );
     assert!(
-        o.last_result.as_deref().unwrap().contains("appears 1 time(s)"),
+        o.last_result
+            .as_deref()
+            .unwrap()
+            .contains("appears 1 time(s)"),
         "find_in_note result: {:?}",
         o.last_result
     );
 
     // --- edit_notebook (.ipynb actually changes) ---
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-nb", "edit_notebook", &ctx).await;
-    assert_eq!(o.tool.as_deref(), Some("edit_notebook"), "edit_notebook dispatched");
-    let nb: Value = serde_json::from_str(&std::fs::read_to_string(&ctx.notebook_path).unwrap()).unwrap();
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-nb",
+        "edit_notebook",
+        &ctx,
+    )
+    .await;
+    assert_eq!(
+        o.tool.as_deref(),
+        Some("edit_notebook"),
+        "edit_notebook dispatched"
+    );
+    let nb: Value =
+        serde_json::from_str(&std::fs::read_to_string(&ctx.notebook_path).unwrap()).unwrap();
     assert_eq!(
         nb["cells"][0]["source"][0].as_str(),
         Some("print(42)"),
@@ -621,7 +875,15 @@ async fn every_tool_round_trips_and_edits_md() {
     );
 
     // --- no_tool: plain text, no dispatch, completes ---
-    let o = run_scenario(&client, &sidecar_base, &mock_base, "req-none", "no_tool", &ctx).await;
+    let o = run_scenario(
+        &client,
+        &sidecar_base,
+        &mock_base,
+        "req-none",
+        "no_tool",
+        &ctx,
+    )
+    .await;
     assert!(o.tool.is_none(), "no_tool must not dispatch a tool");
     assert!(o.done, "no_tool completed");
     assert!(o.error.is_none(), "no_tool had no error: {:?}", o.error);
@@ -629,4 +891,84 @@ async fn every_tool_round_trips_and_edits_md() {
     // Cleanup.
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn cancellation_and_stale_tool_results_are_recoverable() {
+    let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_port = mock_listener.local_addr().unwrap().port();
+    let mock_base = format!("http://127.0.0.1:{}/v1", mock_port);
+    tokio::spawn(async move {
+        axum::serve(mock_listener, mock_router()).await.unwrap();
+    });
+
+    let sidecar_port = free_port();
+    let sidecar_base = format!("http://127.0.0.1:{sidecar_port}");
+    let bin = sidecar_bin();
+    let mut child = Command::new(&bin)
+        .arg("--port")
+        .arg(sidecar_port.to_string())
+        .spawn()
+        .expect("spawn sidecar");
+    wait_healthy(&sidecar_base).await;
+
+    let client = reqwest::Client::new();
+    let request_id = "req-cancel-generation";
+    let response = client
+        .post(format!("{sidecar_base}/v1/chat/stream"))
+        .json(&json!({
+            "request_id": request_id,
+            "base_url": mock_base,
+            "model": "mock",
+            "messages": [{"role": "user", "content": "__SCENARIO__:cancel_generation"}],
+            "options": {"generation_timeout_secs": 60}
+        }))
+        .send()
+        .await
+        .expect("start cancellable stream");
+    assert!(response.status().is_success());
+    let mut stream = response.bytes_stream();
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("initial stream event timeout")
+        .expect("initial stream ended")
+        .expect("initial stream error");
+    assert!(!first.is_empty(), "upstream generation should have started");
+
+    let cancel = client
+        .post(format!("{sidecar_base}/v1/cancel"))
+        .json(&json!({"request_id": request_id}))
+        .send()
+        .await
+        .expect("cancel request");
+    assert_eq!(cancel.status(), reqwest::StatusCode::OK);
+
+    let remainder = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.expect("cancelled stream chunk"));
+        }
+        bytes
+    })
+    .await
+    .expect("cancelled stream did not finish");
+    let text = String::from_utf8_lossy(&remainder);
+    assert!(
+        text.contains("event: done"),
+        "cancellation must emit recoverable done: {text}"
+    );
+
+    let stale = client
+        .post(format!("{sidecar_base}/v1/tool-result"))
+        .json(&json!({
+            "request_id": request_id,
+            "tool_call_id": "stale-call",
+            "result": "late result"
+        }))
+        .send()
+        .await
+        .expect("stale tool result request");
+    assert_eq!(stale.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let _ = child.kill();
 }

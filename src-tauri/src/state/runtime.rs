@@ -1,6 +1,5 @@
 use super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
+use ::anyhow::{anyhow, Result};
 
 impl AppState {
     pub(crate) fn index_dir(&self) -> PathBuf {
@@ -11,7 +10,10 @@ impl AppState {
         crate::state::prepare_workspace_data_dir(&self.inner.app_data_dir, workspace)
             .unwrap_or_else(|error| {
                 log::error!("failed to prepare workspace sidecar storage: {error}");
-                self.inner.app_data_dir.join("workspaces").join(workspace_storage_key(workspace))
+                self.inner
+                    .app_data_dir
+                    .join("workspaces")
+                    .join(workspace_storage_key(workspace))
             })
     }
 
@@ -27,7 +29,11 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) async fn run_llama_prompt(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+    pub(crate) async fn run_llama_prompt(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String> {
         let config = llama_server::resolve_config(&self.inner.app_data_dir)?;
         self.ensure_llama_server(&config).await?;
 
@@ -50,7 +56,7 @@ impl AppState {
 
     /// Context window (tokens) the running llama-server launched with, if any.
     pub(crate) async fn running_ctx_size(&self) -> Option<u32> {
-        self.inner
+        self.inner.ai
             .llama_server
             .lock()
             .await
@@ -74,19 +80,18 @@ impl AppState {
         // selection. The configured preference may differ from the running
         // binary/backend after startup fallback.
         let (config, ctx_tokens) = {
-            let server = self.inner.llama_server.lock().await;
+            let server = self.inner.ai.llama_server.lock().await;
             match server.as_ref() {
                 Some(server) => (server.config.clone(), server.ctx_size as usize),
                 None => (configured.clone(), configured.context_size as usize),
             }
         };
-        let Some(note_id) = note_id else { return Ok(()); };
+        let Some(note_id) = note_id else {
+            return Ok(());
+        };
         let note = self.load_note(note_id.clone()).await?;
-        let prompt_shape = crate::note_prompt::NotePromptShape::build(
-            &note.body,
-            &note.relative_path,
-            ctx_tokens,
-        );
+        let prompt_shape =
+            crate::note_prompt::NotePromptShape::build(&note.body, &note.relative_path, ctx_tokens);
         let section_scoped = active_section
             .as_ref()
             .is_some_and(|section| !section.content.trim().is_empty());
@@ -99,7 +104,14 @@ impl AppState {
         let pdf_only = note.relative_path.to_ascii_lowercase().ends_with(".pdf");
         if attachment_backed && !section_scoped {
             let _ = self
-                .ensure_document_ingested(&note.id, &note.title, &note.body, Some(crate::embeddings::DocumentFormat::from_path(&note.relative_path)))
+                .ensure_document_ingested(
+                    &note.id,
+                    &note.title,
+                    &note.body,
+                    Some(crate::embeddings::DocumentFormat::from_path(
+                        &note.relative_path,
+                    )),
+                )
                 .await;
         }
         let retrieval_backed = prompt_shape.oversized || attachment_backed || pdf_only;
@@ -145,24 +157,17 @@ impl AppState {
             None
         };
         let template_kwargs = self.openharn_settings().template_kwargs;
-        if config.prompt_cache
-            && section_scoped
-            && matches!(interaction_mode, "chat" | "write")
-        {
+        if config.prompt_cache && section_scoped && matches!(interaction_mode, "chat" | "write") {
             let common_system = add_no_think_directive(
-                &assemble_section_context(
-                    &note.title,
-                    &excerpt,
-                    cells.as_deref(),
-                ),
+                &assemble_section_context(&note.title, &excerpt, cells.as_deref()),
                 self.openharn_settings().no_think,
             );
             // Never enqueue synthetic inference while a real chat owns the
             // slot. This path is only a warm request for the shared prefix.
-            if self.inner.chat_lock.try_lock().is_err() {
+            if self.inner.ai.chat_lock.try_lock().is_err() {
                 return Ok(());
             }
-            let _slot_guard = self.inner.llama_slot_lock.lock().await;
+            let _slot_guard = self.inner.ai.llama_slot_lock.lock().await;
             if let Some(section) = active_section.as_ref() {
                 self.prepare_section_slot(
                     &config,
@@ -195,7 +200,11 @@ impl AppState {
             cells.as_deref(),
             interaction_mode,
             &doc_type,
-            if interaction_mode == "chat" { false } else { supports_tools },
+            if interaction_mode == "chat" {
+                false
+            } else {
+                supports_tools
+            },
             retrieval_backed,
             config.verbose_tool_schemas,
         );
@@ -203,16 +212,20 @@ impl AppState {
         let identity = Self::slot_identity(
             &config,
             ctx_tokens as u32,
-            if interaction_mode == "chat" { "section" } else { interaction_mode },
+            if interaction_mode == "chat" {
+                "section"
+            } else {
+                interaction_mode
+            },
             &system,
             &tools_json,
             &template_kwargs,
         );
         // Never enqueue synthetic inference while a real chat owns the turn.
-        if self.inner.chat_lock.try_lock().is_err() {
+        if self.inner.ai.chat_lock.try_lock().is_err() {
             return Ok(());
         }
-        let _slot_guard = self.inner.llama_slot_lock.lock().await;
+        let _slot_guard = self.inner.ai.llama_slot_lock.lock().await;
         if config.prompt_cache {
             if let Some(section) = active_section.as_ref() {
                 self.prepare_section_slot(
@@ -250,12 +263,12 @@ impl AppState {
     pub async fn stop_llama_server(&self) {
         self.invalidate_ai_pipeline();
         self.cancel_prompt_warmup().await;
-        if let Some(handle) = self.inner.section_cache.lock().take() {
+        if let Some(handle) = self.inner.ai.section_cache.lock().take() {
             if !handle.is_finished() {
                 handle.abort();
             }
         }
-        let mut guard = self.inner.llama_server.lock().await;
+        let mut guard = self.inner.ai.llama_server.lock().await;
         if let Some(mut server) = guard.take() {
             llama_server::stop_server(&mut server).await;
             log::info!("llama-server stopped (note closed)");

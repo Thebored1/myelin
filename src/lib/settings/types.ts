@@ -43,4 +43,15 @@ export type ProviderForm = InferenceForm & {
 	activeBackend: string | null;
 };
 
+export type OcrStatus = {
+	available?: boolean;
+	languageAvailable?: boolean;
+	version?: string;
+	configuredPath?: string;
+	configuredLanguage?: string;
+	autoLowTextPages?: boolean;
+	warning?: string;
+	executablePath?: string;
+};
+
 export type { ProviderStatus };

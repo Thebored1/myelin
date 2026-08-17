@@ -11,7 +11,11 @@ import type { PdfAnnotation } from '$lib/types';
 export type PdfViewerProps = {
 	pdfBytes: Uint8Array;
 	annotations?: PdfAnnotation[];
-	onQuote?: (quote: string, pageNum: number, rects?: { x: number; y: number; width: number; height: number }[]) => void;
+	onQuote?: (
+		quote: string,
+		pageNum: number,
+		rects?: { x: number; y: number; width: number; height: number }[]
+	) => void;
 	onAnnotationsChange?: (annotations: PdfAnnotation[]) => void;
 	onImageExtract?: (base64: string) => void;
 	onTextExtracted?: (text: string) => void;

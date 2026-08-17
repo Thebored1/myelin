@@ -1,35 +1,9 @@
-pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
-pub(crate) use crate::models::{
-    AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult, Task,
-};
-pub(crate) use crate::sidecar::ManagedSidecar;
-pub(crate) use anyhow::{anyhow, Context, Result};
-pub(crate) use arrow_array::types::Float32Type;
-pub(crate) use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
-pub(crate) use arrow_schema::{DataType, Field, Schema};
-pub(crate) use chrono::Utc;
-pub(crate) use lancedb::connection::Connection;
-pub(crate) use lancedb::{connect, Table};
-pub(crate) use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
-pub(crate) use parking_lot::{Mutex, RwLock};
-pub(crate) use reqwest::Client;
-pub(crate) use rig_core::completion::{CompletionError, Prompt, PromptError};
-pub(crate) use serde::{Deserialize, Serialize};
-pub(crate) use sha2::{Digest, Sha256};
-pub(crate) use std::borrow::Cow;
-pub(crate) use std::collections::HashMap;
-pub(crate) use std::ffi::OsStr;
+pub(crate) use anyhow::{Context, Result};
 pub(crate) use std::fs;
-pub(crate) use std::hash::{Hash, Hasher};
-pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::sync::Arc;
-pub(crate) use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
-pub(crate) use uuid::Uuid;
+pub(crate) use std::path::Path;
 
 // GTE-small width. Notes use real embeddings when an embed model is
 
-use super::*;
 use super::latex_support::*;
 use super::types::*;
 
@@ -53,7 +27,9 @@ pub(crate) fn save_settings(app_data_dir: &Path, settings: &PersistedSettings) -
 /// Seed a live conversation from the frontend's saved chat history on the first
 /// turn of a session. Only text turns survive (tool results were never persisted),
 /// but it keeps continuity after an app restart instead of starting blank.
-pub(crate) fn chat_history_to_messages(chat_history: &[crate::models::ChatMessage]) -> Vec<serde_json::Value> {
+pub(crate) fn chat_history_to_messages(
+    chat_history: &[crate::models::ChatMessage],
+) -> Vec<serde_json::Value> {
     chat_history
         .iter()
         .filter(|m| m.error != Some(true) && m.is_streaming != Some(true))
@@ -75,7 +51,9 @@ pub(crate) fn chat_history_to_messages(chat_history: &[crate::models::ChatMessag
 /// TURN-SPECIFIC/OPEN-NOTE wrapper) so the next request reproduces the
 /// byte-identical prefix and llama-server reuses the KV cache; only system
 /// rows and the sidecar's empty `<think>` placeholders are dropped.
-pub(crate) fn canonical_wire_conversation(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+pub(crate) fn canonical_wire_conversation(
+    messages: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
     messages
         .into_iter()
         .map(|mut message| {
@@ -103,7 +81,11 @@ pub(crate) fn canonical_wire_conversation(messages: Vec<serde_json::Value>) -> V
         .collect()
 }
 
-pub(crate) fn assemble_note_context(title: &str, body_excerpt: &str, notebook_cells: Option<&str>) -> String {
+pub(crate) fn assemble_note_context(
+    title: &str,
+    body_excerpt: &str,
+    notebook_cells: Option<&str>,
+) -> String {
     let mut context = format!("The note currently open is titled \"{title}\".");
     if let Some(cells) = notebook_cells {
         context.push_str(&format!("\n\n{cells}"));
@@ -288,7 +270,10 @@ pub(crate) fn turn_contains_note_mutation(messages: &[serde_json::Value]) -> boo
 /// budget. A "turn" starts at a `user` message and includes the assistant/tool
 /// messages that follow it, so trimming never orphans a tool result from its
 /// assistant tool_call (which llama-server would reject).
-pub(crate) fn trim_conversation(msgs: Vec<serde_json::Value>, max_chars: usize) -> Vec<serde_json::Value> {
+pub(crate) fn trim_conversation(
+    msgs: Vec<serde_json::Value>,
+    max_chars: usize,
+) -> Vec<serde_json::Value> {
     let mut groups: Vec<Vec<serde_json::Value>> = Vec::new();
     for m in msgs {
         if m["role"] == "user" || groups.is_empty() {

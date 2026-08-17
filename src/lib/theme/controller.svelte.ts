@@ -30,7 +30,8 @@ export class ThemeController {
 			// Migrate the pre-custom-theme local choice exactly once when the new
 			// backend registry is still at its untouched dark default.
 			if (settings.activeThemeId === 'myelin-dark' && settings.customThemes.length === 0) {
-				const legacy = typeof localStorage !== 'undefined' ? localStorage.getItem(LEGACY_KEY) : null;
+				const legacy =
+					typeof localStorage !== 'undefined' ? localStorage.getItem(LEGACY_KEY) : null;
 				if (legacy === 'light') settings = await this.port.setActiveTheme('myelin-light');
 			}
 			this.applySettings(settings);
@@ -61,6 +62,8 @@ export class ThemeController {
 		const normalized = normalizeTheme({
 			...theme,
 			readonly: false,
+			// This timestamp is persisted metadata, not reactive state.
+			// eslint-disable-next-line svelte/prefer-svelte-reactivity
 			updatedAt: new Date().toISOString()
 		});
 		try {
@@ -76,6 +79,8 @@ export class ThemeController {
 	}
 
 	async importTheme(theme: ColorTheme): Promise<ColorTheme> {
+		// This set is a local import collision check, not reactive state.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const existingIds = new Set(get(this.themes).map((entry) => entry.id));
 		const imported = normalizeTheme({
 			...theme,

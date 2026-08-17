@@ -10,7 +10,9 @@ export type ThemePort = {
 	listenChanged(callback: (settings: AppearanceSettings) => void): Promise<UnlistenFn>;
 };
 
-const isTauri = () => typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+const isTauri = () =>
+	typeof window !== 'undefined' &&
+	Boolean((window as Window & { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__);
 
 const localFallback: ThemePort = {
 	async getAppearance() {
@@ -31,12 +33,26 @@ const localFallback: ThemePort = {
 };
 
 export const productionThemePort: ThemePort = {
-	getAppearance: () => (isTauri() ? invoke<AppearanceSettings>('get_appearance_settings') : localFallback.getAppearance()),
-	saveTheme: (theme) => (isTauri() ? invoke<AppearanceSettings>('save_color_theme', { theme }) : localFallback.saveTheme(theme)),
-	deleteTheme: (id) => (isTauri() ? invoke<AppearanceSettings>('delete_color_theme', { id }) : localFallback.deleteTheme(id)),
-	setActiveTheme: (id) => (isTauri() ? invoke<AppearanceSettings>('set_active_color_theme', { id }) : localFallback.setActiveTheme(id)),
+	getAppearance: () =>
+		isTauri()
+			? invoke<AppearanceSettings>('get_appearance_settings')
+			: localFallback.getAppearance(),
+	saveTheme: (theme) =>
+		isTauri()
+			? invoke<AppearanceSettings>('save_color_theme', { theme })
+			: localFallback.saveTheme(theme),
+	deleteTheme: (id) =>
+		isTauri()
+			? invoke<AppearanceSettings>('delete_color_theme', { id })
+			: localFallback.deleteTheme(id),
+	setActiveTheme: (id) =>
+		isTauri()
+			? invoke<AppearanceSettings>('set_active_color_theme', { id })
+			: localFallback.setActiveTheme(id),
 	listenChanged: async (callback) => {
 		if (!isTauri()) return () => {};
-		return listen<AppearanceSettings>('appearance://theme_changed', (event) => callback(event.payload));
+		return listen<AppearanceSettings>('appearance://theme_changed', (event) =>
+			callback(event.payload)
+		);
 	}
 };

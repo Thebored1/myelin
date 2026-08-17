@@ -18,9 +18,12 @@
 			{notePage.versionPreviewContent || 'Loading...'}
 		</div>
 		<div class="dialog-actions">
-			<button class="secondary" onclick={() => notePage.versionPreviewDialog?.close()}>Close</button>
+			<button class="secondary" onclick={() => notePage.versionPreviewDialog?.close()}>Close</button
+			>
 			{#if notePage.versionPreviewHash}
-				<button class="primary" onclick={() => notePage.restoreVersion(notePage.versionPreviewHash!)}
+				<button
+					class="primary"
+					onclick={() => notePage.restoreVersion(notePage.versionPreviewHash!)}
 					>Restore This Version</button
 				>
 			{/if}
@@ -42,7 +45,7 @@
 			{#if notePage.mathLiveReady}
 				<svelte:element
 					this={'math-field'}
-					oninput={(e: any) => (notePage.mathValue = e.target.value)}
+					oninput={(e: Event) => (notePage.mathValue = (e.currentTarget as HTMLInputElement).value)}
 					style="width: 100%; font-size: 1.5rem; padding: 0.5rem; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-xs);"
 					>{notePage.mathValue}</svelte:element
 				>
@@ -116,8 +119,8 @@
 		{:else}
 			<h3>Select Block to Reference</h3>
 			<p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-4);">
-				Select a specific block from <strong>{notePage.selectedNoteForBlocks?.title}</strong> or link the entire
-				note.
+				Select a specific block from <strong>{notePage.selectedNoteForBlocks?.title}</strong> or link
+				the entire note.
 			</p>
 
 			<input
@@ -131,7 +134,7 @@
 			<div class="link-results-container">
 				{#if notePage.filteredBlocks.length > 0}
 					<ul class="link-results-list">
-						{#each notePage.filteredBlocks as block, i}
+						{#each notePage.filteredBlocks as block, i (block.id ?? i)}
 							<li>
 								<button
 									class="link-result-btn"
@@ -139,7 +142,7 @@
 									onclick={() => notePage.insertBlockLink(block)}
 								>
 									<span
-										style={block.isFullNote
+										style={'isFullNote' in block && block.isFullNote
 											? 'font-weight: bold;'
 											: 'font-size: 0.9em; opacity: 0.9; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;'}
 									>
@@ -199,7 +202,7 @@
 		<div class="link-results-container">
 			{#if notePage.filteredGlobalBlocks.length > 0}
 				<ul class="link-results-list">
-					{#each notePage.filteredGlobalBlocks as block, i}
+					{#each notePage.filteredGlobalBlocks as block, i (block.id ?? i)}
 						<li>
 							<button
 								class="link-result-btn"
@@ -262,7 +265,11 @@
 				</div>
 			</div>
 			<div class="preview-sidebar">
-				<button class="icon-btn" onclick={() => notePage.previewNoteDialog?.close()} title="Close Preview">
+				<button
+					class="icon-btn"
+					onclick={() => notePage.previewNoteDialog?.close()}
+					title="Close Preview"
+				>
 					<svg
 						viewBox="0 0 24 24"
 						width="24"
@@ -295,7 +302,11 @@
 	{/if}
 </dialog>
 
-<dialog bind:this={notePage.navigationWarningDialog} class="dialog math-dialog" onclose={notePage.cancelNavigation}>
+<dialog
+	bind:this={notePage.navigationWarningDialog}
+	class="dialog math-dialog"
+	onclose={notePage.cancelNavigation}
+>
 	<div class="dialog-content">
 		<h3 style="margin-top: 0;">Unsaved Changes</h3>
 		<p style="color: var(--text-secondary); margin-bottom: var(--space-6);">
@@ -335,7 +346,9 @@
 			This note will be permanently deleted. This action cannot be undone.
 		</p>
 		<div class="dialog-actions">
-			<button class="secondary" onclick={() => notePage.deleteMainNoteDialog?.close()}>Cancel</button>
+			<button class="secondary" onclick={() => notePage.deleteMainNoteDialog?.close()}
+				>Cancel</button
+			>
 			<button
 				class="danger"
 				onclick={() => {
@@ -356,7 +369,9 @@
 		</p>
 		<div class="dialog-actions">
 			<button class="secondary" onclick={() => notePage.detachPdfDialog?.close()}>Cancel</button>
-			<button class="danger" onclick={notePage.confirmDetachPdf} disabled={notePage.isBusy}>Close PDF</button>
+			<button class="danger" onclick={notePage.confirmDetachPdf} disabled={notePage.isBusy}
+				>Close PDF</button
+			>
 		</div>
 	</div>
 </dialog>
@@ -381,7 +396,11 @@
 		/>
 
 		<div class="pdf-grid-container">
-			<button class="pdf-grid-upload-card" onclick={notePage.browseAndAttachPdf} disabled={notePage.isBusy}>
+			<button
+				class="pdf-grid-upload-card"
+				onclick={notePage.browseAndAttachPdf}
+				disabled={notePage.isBusy}
+			>
 				<div class="upload-icon-wrapper">
 					<svg
 						viewBox="0 0 24 24"
@@ -401,7 +420,7 @@
 				<span class="upload-subtext">Choose a PDF from your computer</span>
 			</button>
 
-			{#each notePage.filteredPdfs as pdf, i (pdf.id)}
+			{#each notePage.filteredPdfs as pdf (pdf.id)}
 				<button class="pdf-grid-card" onclick={() => notePage.attachPdf(pdf)}>
 					<div class="pdf-card-icon">
 						<svg

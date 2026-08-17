@@ -2,9 +2,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { tick } from 'svelte';
 import { noteOpened } from '$lib/llamaWarm';
 import type { NoteDocument } from '$lib/types';
+import type { ControllerContext } from '$lib/controller-context';
 
 /** Note loading and backend reconciliation lifecycle. */
-export function createDocumentSession(ctx: Record<string, any>) {
+export function createDocumentSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	async function loadCurrentNote(noteId: string) {
 		ctx.isLoadingNote = true;
 		ctx.toolsReady = false;
@@ -25,7 +27,7 @@ export function createDocumentSession(ctx: Record<string, any>) {
 		ctx.sectionCache = null;
 		ctx.showAttachedNote = false;
 		ctx.note = null;
-	
+
 		try {
 			ctx.note = await invoke<NoteDocument>('load_note', { noteId });
 			const loadedNote = ctx.note;
@@ -35,11 +37,11 @@ export function createDocumentSession(ctx: Record<string, any>) {
 			ctx.noteHistory = [];
 			ctx.versionPreviewContent = null;
 			ctx.activeSidebarTab = 'info';
-	
+
 			const relLower = loadedNote.relativePath.toLowerCase();
 			ctx.isSourceMaterial =
 				relLower.endsWith('.pdf') || relLower.endsWith('.epub') || relLower.endsWith('.html');
-	
+
 			if (ctx.isSourceMaterial) {
 				ctx.sourceMaterialType = relLower.endsWith('.pdf')
 					? 'pdf'
@@ -47,7 +49,7 @@ export function createDocumentSession(ctx: Record<string, any>) {
 						? 'epub'
 						: 'html';
 				ctx.workingDocType = 'md';
-	
+
 				const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
 				const existingScratchpad =
 					allNotes
@@ -71,11 +73,11 @@ export function createDocumentSession(ctx: Record<string, any>) {
 					: relLower.endsWith('.ipynb')
 						? 'ipynb'
 						: 'md';
-	
+
 				ctx.draftTitle = loadedNote.title;
 				ctx.draftBody = loadedNote.body;
 				ctx.draftTags = loadedNote.tags.join(', ');
-	
+
 				if (loadedNote.sourcePdf) {
 					ctx.activeSourceId = loadedNote.sourcePdf;
 					const bytes = await invoke<ArrayBuffer>('read_pdf_binary', {
@@ -100,7 +102,7 @@ export function createDocumentSession(ctx: Record<string, any>) {
 							: sRel.endsWith('.epub')
 								? 'epub'
 								: 'html';
-					} catch (e) {
+					} catch {
 						ctx.sourceMaterialType = 'pdf'; // fallback
 					}
 				} else {
@@ -113,7 +115,7 @@ export function createDocumentSession(ctx: Record<string, any>) {
 					noteOpened(loadedNote.id, 'chat');
 				}
 			}
-	
+
 			ctx.message = '';
 			void ctx.fetchRelatedNotes();
 		} catch (error) {
@@ -130,7 +132,7 @@ export function createDocumentSession(ctx: Record<string, any>) {
 			}
 		}
 	}
-	
+
 	async function refreshCurrentNoteFromBackend(skipEditorUpdate = false) {
 		if (!ctx.note) return;
 		const refreshed = await invoke<NoteDocument>('load_note', { noteId: ctx.note.id });
@@ -142,7 +144,11 @@ export function createDocumentSession(ctx: Record<string, any>) {
 			ctx.draftTitle = refreshed.title;
 			ctx.draftBody = refreshed.body;
 			ctx.draftTags = refreshed.tags.join(', ');
-			if (!skipEditorUpdate && ctx.vditorInstance && ctx.vditorInstance.getValue() !== refreshed.body) {
+			if (
+				!skipEditorUpdate &&
+				ctx.vditorInstance &&
+				ctx.vditorInstance.getValue() !== refreshed.body
+			) {
 				ctx.vditorInstance.setValue(refreshed.body);
 			}
 		} else if (!ctx.isSourceMaterial) {
@@ -175,7 +181,10 @@ export function createDocumentSession(ctx: Record<string, any>) {
 			const saved = await invoke<NoteDocument>('save_note', {
 				noteId: targetId,
 				title: sentTitle,
-				tags: ctx.draftTags.split(',').map((tag: string) => tag.trim()).filter(Boolean),
+				tags: ctx.draftTags
+					.split(',')
+					.map((tag: string) => tag.trim())
+					.filter(Boolean),
 				body: ctx.draftBody,
 				sourcePdf: ctx.activeSourceId,
 				// For source material main notes, annotations belong to the source note, not the scratchpad.
@@ -183,7 +192,10 @@ export function createDocumentSession(ctx: Record<string, any>) {
 			});
 
 			if (ctx.isSourceMaterial && ctx.note.annotations.length > 0) {
-				await invoke('save_pdf_annotations', { noteId: ctx.note.id, annotations: ctx.note.annotations });
+				await invoke('save_pdf_annotations', {
+					noteId: ctx.note.id,
+					annotations: ctx.note.annotations
+				});
 			}
 			if (!ctx.isSourceMaterial) ctx.note = saved;
 			if (ctx.draftTitle === sentTitle) ctx.draftTitle = saved.title;
@@ -220,5 +232,11 @@ export function createDocumentSession(ctx: Record<string, any>) {
 			ctx.isBusy = false;
 		}
 	}
-	return { loadCurrentNote, refreshCurrentNoteFromBackend, saveNote, deleteCurrent, duplicateCurrent };
+	return {
+		loadCurrentNote,
+		refreshCurrentNoteFromBackend,
+		saveNote,
+		deleteCurrent,
+		duplicateCurrent
+	};
 }

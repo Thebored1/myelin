@@ -4,18 +4,20 @@
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 	import { invoke } from '@tauri-apps/api/core';
 	import { listen } from '@tauri-apps/api/event';
-	import { sidebarOpen, showSidebarToggle, noteSidebarOpen } from '$lib/stores';
+	import { sidebarOpen, noteSidebarOpen } from '$lib/stores';
 	import { initializeThemes } from '$lib/theme';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/stores';
 	import { providerAiStatus, type AiStatus } from '$lib/aiStatus';
+	import type { ProviderStatus } from '$lib/types';
 	import '@fontsource-variable/inter';
 	import '@fontsource-variable/jetbrains-mono';
 	import '$lib/styles/theme.css';
 
 	let { children } = $props();
 
-	let appWindow: any = null;
+	let appWindow: ReturnType<typeof getCurrentWindow> | null = null;
 
 	let windowWidth = $state(1024);
 	let wasSmallScreen = $state(false);
@@ -38,10 +40,13 @@
 		let unlistenResize: (() => void) | undefined;
 		let unlistenAiWarmup: (() => void) | undefined;
 		let aiStatusPoll: ReturnType<typeof setInterval> | undefined;
-		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+		if (
+			typeof window !== 'undefined' &&
+			(window as Window & { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__
+		) {
 			const syncAiStatus = async () => {
 				try {
-					const status = await invoke<any>('get_provider_status');
+					const status = await invoke<ProviderStatus>('get_provider_status');
 					aiStatus = providerAiStatus(status, aiStatus);
 				} catch {
 					// Keep the warmup event as the source of truth when status is transiently unavailable.
@@ -64,16 +69,20 @@
 			// restarts while the app is open.
 			aiStatusPoll = setInterval(() => void syncAiStatus(), 2000);
 		}
-		if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
-			appWindow = getCurrentWindow();
+		if (
+			typeof window !== 'undefined' &&
+			(window as Window & { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__
+		) {
+			const currentWindow = getCurrentWindow();
+			appWindow = currentWindow;
 			const syncWindowState = async () => {
 				[isWindowMaximized, isWindowFullscreen] = await Promise.all([
-					appWindow.isMaximized(),
-					appWindow.isFullscreen()
+					currentWindow.isMaximized(),
+					currentWindow.isFullscreen()
 				]);
 			};
 			void syncWindowState();
-			void appWindow
+			void currentWindow
 				.onResized(() => void syncWindowState())
 				.then((unlisten: () => void) => {
 					unlistenResize = unlisten;
@@ -174,7 +183,17 @@
 		}
 	}
 
-	function startResize(direction: string, event: MouseEvent) {
+	type ResizeDirection =
+		| 'East'
+		| 'North'
+		| 'NorthEast'
+		| 'NorthWest'
+		| 'South'
+		| 'SouthEast'
+		| 'SouthWest'
+		| 'West';
+
+	function startResize(direction: ResizeDirection, event: MouseEvent) {
 		if (appWindow && event.buttons === 1) {
 			appWindow.startResizeDragging(direction);
 		}
@@ -292,7 +311,7 @@
 				{/if}
 				<button
 					class="control-btn settings"
-					onclick={() => goto('/settings')}
+					onclick={() => goto(resolve('/settings'))}
 					aria-label="Settings"
 					title="Settings"
 				>
@@ -414,8 +433,8 @@
 				transparent 1px,
 				transparent 7px
 			),
-				radial-gradient(circle at top right, var(--page-glow), transparent 22rem),
-				linear-gradient(180deg, var(--page-gradient-start) 0%, var(--page-gradient-end) 100%);
+			radial-gradient(circle at top right, var(--page-glow), transparent 22rem),
+			linear-gradient(180deg, var(--page-gradient-start) 0%, var(--page-gradient-end) 100%);
 	}
 
 	:global(input),

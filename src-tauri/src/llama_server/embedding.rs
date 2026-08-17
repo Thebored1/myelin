@@ -1,17 +1,14 @@
-use anyhow::{anyhow, bail, Context, Result};
+use super::*;
+use crate::embeddings::EmbeddingPooling;
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use sha2::{Digest, Sha256};
-use super::*;
-use crate::embeddings::EmbeddingPooling;
 pub struct ManagedEmbedServer {
     pub child: Child,
     pub port: u16,
@@ -151,10 +148,7 @@ pub fn resolve_embedding_executable(app_data_dir: &Path) -> Result<PathBuf> {
             "embedding llama-server",
         );
     }
-    let installed = app_data_dir
-        .join("bin")
-        .join("cpu")
-        .join(executable_name());
+    let installed = app_data_dir.join("bin").join("cpu").join(executable_name());
     if installed.is_file() {
         return Ok(installed);
     }

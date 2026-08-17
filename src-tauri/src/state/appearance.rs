@@ -32,7 +32,10 @@ fn load_appearance(app_data_dir: &Path) -> Result<AppearanceSettings> {
 
 fn validate_settings(settings: &AppearanceSettings) -> Result<()> {
     if settings.schema_version != APPEARANCE_SCHEMA_VERSION {
-        return Err(anyhow!("unsupported appearance schema version {}", settings.schema_version));
+        return Err(anyhow!(
+            "unsupported appearance schema version {}",
+            settings.schema_version
+        ));
     }
     let mut ids = std::collections::HashSet::new();
     for theme in &settings.custom_themes {
@@ -41,23 +44,41 @@ fn validate_settings(settings: &AppearanceSettings) -> Result<()> {
             return Err(anyhow!("duplicate custom theme id {}", theme.id));
         }
     }
-    if settings.custom_themes.iter().any(|theme| theme.id == settings.active_theme_id)
-        || matches!(settings.active_theme_id.as_str(), BUILTIN_DARK | BUILTIN_LIGHT)
+    if settings
+        .custom_themes
+        .iter()
+        .any(|theme| theme.id == settings.active_theme_id)
+        || matches!(
+            settings.active_theme_id.as_str(),
+            BUILTIN_DARK | BUILTIN_LIGHT
+        )
     {
         return Ok(());
     }
-    Err(anyhow!("active theme {} does not exist", settings.active_theme_id))
+    Err(anyhow!(
+        "active theme {} does not exist",
+        settings.active_theme_id
+    ))
 }
 
 fn validate_theme(theme: &ColorTheme) -> Result<()> {
     if theme.schema_version != APPEARANCE_SCHEMA_VERSION {
-        return Err(anyhow!("unsupported theme schema version {}", theme.schema_version));
+        return Err(anyhow!(
+            "unsupported theme schema version {}",
+            theme.schema_version
+        ));
     }
-    if theme.id.is_empty() || theme.id.len() > 80 || theme.id == BUILTIN_DARK || theme.id == BUILTIN_LIGHT {
+    if theme.id.is_empty()
+        || theme.id.len() > 80
+        || theme.id == BUILTIN_DARK
+        || theme.id == BUILTIN_LIGHT
+    {
         return Err(anyhow!("invalid or reserved custom theme id"));
     }
     if theme.name.trim().is_empty() || theme.name.chars().count() > 64 {
-        return Err(anyhow!("theme name must contain between 1 and 64 characters"));
+        return Err(anyhow!(
+            "theme name must contain between 1 and 64 characters"
+        ));
     }
     if !matches!(theme.mode.as_str(), "dark" | "light") {
         return Err(anyhow!("theme mode must be light or dark"));
@@ -66,25 +87,39 @@ fn validate_theme(theme: &ColorTheme) -> Result<()> {
         return Err(anyhow!("theme base must be a built-in theme"));
     }
 
-    let contract: serde_json::Value = serde_json::from_str(include_str!("../../../schemas/theme-token-contract.v1.json"))?;
+    let contract: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/theme-token-contract.v1.json"
+    ))?;
     let definitions = contract
         .get("tokens")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| anyhow!("theme token contract is malformed"))?;
     for (id, value) in &theme.tokens {
-        let definition = definitions.get(id).ok_or_else(|| anyhow!("unknown theme token {id}"))?;
-        let raw = value.strip_prefix('#').ok_or_else(|| anyhow!("theme token {id} must be a hex color"))?;
-        if !matches!(raw.len(), 6 | 8) || !raw.chars().all(|character| character.is_ascii_hexdigit()) {
+        let definition = definitions
+            .get(id)
+            .ok_or_else(|| anyhow!("unknown theme token {id}"))?;
+        let raw = value
+            .strip_prefix('#')
+            .ok_or_else(|| anyhow!("theme token {id} must be a hex color"))?;
+        if !matches!(raw.len(), 6 | 8)
+            || !raw.chars().all(|character| character.is_ascii_hexdigit())
+        {
             return Err(anyhow!("theme token {id} must be a hex color"));
         }
-        if raw.len() == 8 && definition.get("alpha").and_then(serde_json::Value::as_bool) != Some(true) {
+        if raw.len() == 8
+            && definition.get("alpha").and_then(serde_json::Value::as_bool) != Some(true)
+        {
             return Err(anyhow!("theme token {id} does not allow transparency"));
         }
     }
     if let Some(palette) = &theme.palette {
         for (id, value) in palette {
-            let raw = value.strip_prefix('#').ok_or_else(|| anyhow!("theme palette color {id} must be a hex color"))?;
-            if !matches!(raw.len(), 6 | 8) || !raw.chars().all(|character| character.is_ascii_hexdigit()) {
+            let raw = value
+                .strip_prefix('#')
+                .ok_or_else(|| anyhow!("theme palette color {id} must be a hex color"))?;
+            if !matches!(raw.len(), 6 | 8)
+                || !raw.chars().all(|character| character.is_ascii_hexdigit())
+            {
                 return Err(anyhow!("theme palette color {id} must be a hex color"));
             }
         }
@@ -98,7 +133,9 @@ fn save_appearance(app_data_dir: &Path, settings: &AppearanceSettings) -> Result
 }
 
 fn publish_appearance(state: &AppState, settings: &AppearanceSettings) -> Result<()> {
-    state.handle.emit("appearance://theme_changed", settings.clone())?;
+    state
+        .handle
+        .emit("appearance://theme_changed", settings.clone())?;
     Ok(())
 }
 
@@ -112,7 +149,9 @@ impl AppState {
         let _guard = self.inner.persistence_lock.lock();
         validate_theme(&theme)?;
         let mut settings = load_appearance(&self.inner.app_data_dir)?;
-        settings.custom_themes.retain(|existing| existing.id != theme.id);
+        settings
+            .custom_themes
+            .retain(|existing| existing.id != theme.id);
         settings.custom_themes.push(theme);
         save_appearance(&self.inner.app_data_dir, &settings)?;
         publish_appearance(self, &settings)?;

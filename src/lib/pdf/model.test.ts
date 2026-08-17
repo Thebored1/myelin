@@ -12,6 +12,15 @@ describe('pdf model', () => {
 		expect(clampPage(1, 0)).toBe(0);
 		expect(fitWidthScale(0, 600, false)).toBe(0);
 		expect(normalizedRect(8, 10, 2, 4)).toEqual([2, 4, 6, 6]);
-		expect(eraserHit([3, 0], [[0, 0], [10, 0]], 3)).toBe(true);
+		expect(
+			eraserHit(
+				[3, 0],
+				[
+					[0, 0],
+					[10, 0]
+				],
+				3
+			)
+		).toBe(true);
 	});
 });

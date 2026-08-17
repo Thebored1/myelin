@@ -1,8 +1,9 @@
 import { composeNoteStreamPreviewWithStatus, locateNoteStreamTarget } from '$lib/noteStreamPreview';
-import { editorNeedsAuthoritativeBody } from '$lib/noteMutation';
+import type { ControllerContext } from '$lib/controller-context';
 
 /** Buffered AI note-write preview and authoritative reconciliation session. */
-export function createStreamingSession(ctx: Record<string, any>) {
+export function createStreamingSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	function beginNoteStream() {
 		ctx.noteStreamBackup = ctx.vditorInstance ? ctx.vditorInstance.getValue() : ctx.draftBody;
 		ctx.noteStreamBuf = '';
@@ -19,7 +20,7 @@ export function createStreamingSession(ctx: Record<string, any>) {
 			: null;
 		scheduleNoteStreamFlush();
 	}
-	
+
 	function scheduleNoteStreamFlush() {
 		if (ctx.noteStreamFlushPending) return;
 		ctx.noteStreamFlushPending = true;
@@ -28,7 +29,7 @@ export function createStreamingSession(ctx: Record<string, any>) {
 			flushNoteStream();
 		});
 	}
-	
+
 	// One editor rebuild per frame, coalescing all deltas that arrived since the
 	// last flush. Restores the caret/selection across the rebuild so streaming
 	// no longer destroys the user's cursor position every token.
@@ -47,12 +48,16 @@ export function createStreamingSession(ctx: Record<string, any>) {
 			const editorEl = ctx.vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
 			const hasSelection =
 				editorEl?.contains(document.activeElement) && window.getSelection()?.rangeCount !== 0;
-			const selectionOffset = editorEl && hasSelection ? ctx.getSelectionTextOffset(editorEl) : null;
+			const selectionOffset =
+				editorEl && hasSelection ? ctx.getSelectionTextOffset(editorEl) : null;
 			ctx.vditorInstance.setValue(result.preview);
 			if (selectionOffset !== null) {
 				const refreshed = ctx.vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
 				if (refreshed) {
-					ctx.restoreSelectionTextOffset(refreshed, Math.min(selectionOffset, result.preview.length));
+					ctx.restoreSelectionTextOffset(
+						refreshed,
+						Math.min(selectionOffset, result.preview.length)
+					);
 				}
 			}
 			// Keep draftBody in sync with the live preview so any mid-stream save
@@ -61,7 +66,7 @@ export function createStreamingSession(ctx: Record<string, any>) {
 			ctx.draftBody = result.preview;
 		}
 	}
-	
+
 	// A token (or several) of the note arrived — buffer it and coalesce the
 	// editor update to the next animation frame.
 	function appendNoteStream(delta: string): boolean {
@@ -70,7 +75,7 @@ export function createStreamingSession(ctx: Record<string, any>) {
 		scheduleNoteStreamFlush();
 		return ctx.noteStreamSpan !== null || !ctx.activeAiEditTarget;
 	}
-	
+
 	// The stream turned out not to be a whole-body replace (append/edit) — undo
 	// the live preview; the authoritative note_written will apply the real change.
 	function cancelNoteStream() {
@@ -79,7 +84,7 @@ export function createStreamingSession(ctx: Record<string, any>) {
 		if (ctx.vditorInstance) ctx.vditorInstance.setValue(ctx.noteStreamBackup);
 		ctx.setupTransclusionObserver();
 	}
-	
+
 	// Authoritative result of a write_note tool call. Sets the final content in
 	// one shot (no fake animation) and reconciles any live-streamed preview.
 	function applyNoteWrite(newContent: string, mode: 'write' | 'append') {
@@ -105,14 +110,23 @@ export function createStreamingSession(ctx: Record<string, any>) {
 		// the authoritative result. The streamed buffer may be stale or may cover
 		// only a cursor/selection target. clearStack resets Vditor's undo history so
 		// Ctrl+Z doesn't walk back through every mid-stream snapshot.
-		if (ctx.vditorInstance && ctx.editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), finalContent)) {
+		if (
+			ctx.vditorInstance &&
+			ctx.editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), finalContent)
+		) {
 			ctx.vditorInstance.setValue(finalContent, true);
 		}
 		// Re-arm the transclusion observer disconnected during streaming and scan
 		// once so the settled content picks up any new links.
 		ctx.setupTransclusionObserver();
 	}
-	
 
-	return { beginNoteStream, scheduleNoteStreamFlush, flushNoteStream, appendNoteStream, cancelNoteStream, applyNoteWrite };
+	return {
+		beginNoteStream,
+		scheduleNoteStreamFlush,
+		flushNoteStream,
+		appendNoteStream,
+		cancelNoteStream,
+		applyNoteWrite
+	};
 }

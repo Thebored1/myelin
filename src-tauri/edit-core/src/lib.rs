@@ -141,7 +141,8 @@ pub fn clean_note_content(content: &str) -> String {
     if let Ok(re) = Regex::new(r"<{1,2}\s*>*\s*|\s*<{1,2}\s*") {
         // Only strip standalone bracket runs (not inside **bold** or normal text).
         // A standlone <, <<, <>, >> preceded by a word boundary or punctuation.
-        if let Ok(standalone) = Regex::new(r"(?:\b|,|;|!|\?|—)\s*<{1,2}\s*>?(?:\s*<{1,2}\s*>?)*") {
+        if let Ok(standalone) = Regex::new(r"(?:\b|,|;|!|\?|—)\s*<{1,2}\s*>?(?:\s*<{1,2}\s*>?)*")
+        {
             s = standalone.replace_all(&s, "\n").into_owned();
         }
         // Also strip leading/trailing bare bracket runs that survive.

@@ -1,13 +1,7 @@
 use super::*;
-use crate::state::AppState;
-use futures_util::StreamExt;
-use rig_core::client::CompletionClient;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::Emitter;
 type ToolParams = fn() -> Value;
 
 pub(super) const TOOL_CONTRACTS: &[(&str, &str, ToolParams)] = &[
@@ -85,10 +79,7 @@ pub(super) const TOOL_CONTRACTS: &[(&str, &str, ToolParams)] = &[
 
 /// Look up a tool's canonical (description, parameters) pair.
 pub(super) fn tool_contract(name: &str) -> Option<(&'static str, &'static str, ToolParams)> {
-    TOOL_CONTRACTS
-        .iter()
-        .copied()
-        .find(|(n, _, _)| *n == name)
+    TOOL_CONTRACTS.iter().copied().find(|(n, _, _)| *n == name)
 }
 
 /// The full schema list served to the wire path (warm-up request, tool gates,

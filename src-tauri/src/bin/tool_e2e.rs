@@ -33,10 +33,16 @@ struct Store {
 
 impl Store {
     fn open_body(&self) -> String {
-        self.notes.get(&self.open_id).map(|n| n.body.clone()).unwrap_or_default()
+        self.notes
+            .get(&self.open_id)
+            .map(|n| n.body.clone())
+            .unwrap_or_default()
     }
     fn open_title(&self) -> String {
-        self.notes.get(&self.open_id).map(|n| n.title.clone()).unwrap_or_default()
+        self.notes
+            .get(&self.open_id)
+            .map(|n| n.title.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -51,12 +57,14 @@ struct ToolCall {
 async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let home = std::env::var("HOME").unwrap_or_default();
-    let model = a.get(1).cloned().unwrap_or_else(|| {
-        format!("{home}/Downloads/Qwen3.5-2B-UD-Q4_K_XL.gguf")
-    });
-    let bin = a.get(2).cloned().unwrap_or_else(|| {
-        format!("{home}/.local/share/com.paper.myelin/bin/cpu/llama-server")
-    });
+    let model = a
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| format!("{home}/Downloads/Qwen3.5-2B-UD-Q4_K_XL.gguf"));
+    let bin = a
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| format!("{home}/.local/share/com.paper.myelin/bin/cpu/llama-server"));
     let port: u16 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(8077);
     let requested_case = a.get(4).map(String::as_str);
     let base = format!("http://127.0.0.1:{port}");
@@ -145,16 +153,11 @@ async fn direct_chat_cache(
             "id_slot": 0
         })
     };
-    let (answer, first_response) = match stream_chat_response(
-        client,
-        base,
-        request(first.messages.clone()),
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
-    };
+    let (answer, first_response) =
+        match stream_chat_response(client, base, request(first.messages.clone())).await {
+            Ok(value) => value,
+            Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
+        };
     let conversation = vec![
         first.messages.last().cloned().unwrap_or(Value::Null),
         json!({"role": "assistant", "content": answer}),
@@ -175,11 +178,11 @@ async fn direct_chat_cache(
         verbose_tool_schemas: false,
         section_context: false,
     });
-    let (_, second_response) = match stream_chat_response(client, base, request(second.messages)).await
-    {
-        Ok(value) => value,
-        Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
-    };
+    let (_, second_response) =
+        match stream_chat_response(client, base, request(second.messages)).await {
+            Ok(value) => value,
+            Err(error) => return ("direct-chat/cache".into(), false, error.to_string()),
+        };
     let prompt = second_response["usage"]["prompt_tokens"]
         .as_u64()
         .or_else(|| second_response["timings"]["prompt_n"].as_u64())
@@ -271,11 +274,7 @@ async fn stream_chat_response(
     Ok((content, telemetry))
 }
 
-async fn run_all(
-    client: &reqwest::Client,
-    base: &str,
-    model: &str,
-) -> Vec<(String, bool, String)> {
+async fn run_all(client: &reqwest::Client, base: &str, model: &str) -> Vec<(String, bool, String)> {
     let mut out = Vec::new();
 
     // ---- write_note: replace (rewrite with headings) ----
@@ -289,7 +288,11 @@ async fn run_all(
         let body = store.open_body();
         // Accept any Markdown heading the model added (# or ##).
         let ok = used.iter().any(|t| t == "write_note") && body.contains("# ");
-        out.push(("write_note/replace".into(), ok, format!("tools={used:?}; body now: {:?}", trunc(&body, 80))));
+        out.push((
+            "write_note/replace".into(),
+            ok,
+            format!("tools={used:?}; body now: {:?}", trunc(&body, 80)),
+        ));
     }
 
     // ---- write_note: append ----
@@ -297,21 +300,41 @@ async fn run_all(
         let mut store = sample_store();
         let before = "Cars are fast.".to_string();
         store.notes.get_mut(&store.open_id).unwrap().body = before.clone();
-        let used = chat(client, base, model,
-            "Append a new paragraph to the note about electric cars.", &mut store).await;
+        let used = chat(
+            client,
+            base,
+            model,
+            "Append a new paragraph to the note about electric cars.",
+            &mut store,
+        )
+        .await;
         let body = store.open_body();
         let ok = used.iter().any(|t| t == "write_note")
             && body.len() > before.len()
             && body.to_lowercase().contains("electric");
-        out.push(("write_note/append".into(), ok, format!("tools={used:?}; grew {}->{} chars", before.len(), body.len())));
+        out.push((
+            "write_note/append".into(),
+            ok,
+            format!(
+                "tools={used:?}; grew {}->{} chars",
+                before.len(),
+                body.len()
+            ),
+        ));
     }
 
     // ---- write_note: edit a word ----
     {
         let mut store = sample_store();
         store.notes.get_mut(&store.open_id).unwrap().body = "The sky is blue today.".into();
-        let used = chat(client, base, model,
-            "In the note, change the word blue to green.", &mut store).await;
+        let used = chat(
+            client,
+            base,
+            model,
+            "In the note, change the word blue to green.",
+            &mut store,
+        )
+        .await;
         let body = store.open_body().to_lowercase();
         // Must contain green, not blue, and NOT be garbled by splicing the whole
         // sentence in place of the word (the bug the harness first caught).
@@ -320,24 +343,45 @@ async fn run_all(
             && !body.contains("blue")
             && !body.contains("the sky is the sky")
             && store.open_body().len() < 40;
-        out.push(("write_note/edit".into(), ok, format!("tools={used:?}; body: {:?}", trunc(&store.open_body(), 80))));
+        out.push((
+            "write_note/edit".into(),
+            ok,
+            format!("tools={used:?}; body: {:?}", trunc(&store.open_body(), 80)),
+        ));
     }
 
     // ---- write_note: clear/delete ----
     {
         let mut store = sample_store();
         store.notes.get_mut(&store.open_id).unwrap().body = "Delete me entirely.".into();
-        let used = chat(client, base, model, "Clear the note completely — make it empty.", &mut store).await;
+        let used = chat(
+            client,
+            base,
+            model,
+            "Clear the note completely — make it empty.",
+            &mut store,
+        )
+        .await;
         let body = store.open_body();
         let ok = used.iter().any(|t| t == "write_note") && body.trim().is_empty();
-        out.push(("write_note/clear".into(), ok, format!("tools={used:?}; body len={}", body.len())));
+        out.push((
+            "write_note/clear".into(),
+            ok,
+            format!("tools={used:?}; body len={}", body.len()),
+        ));
     }
 
     // ---- search_notes ----
     {
         let mut store = sample_store();
-        let used = chat(client, base, model,
-            "Search my other notes for anything about pasta recipes.", &mut store).await;
+        let used = chat(
+            client,
+            base,
+            model,
+            "Search my other notes for anything about pasta recipes.",
+            &mut store,
+        )
+        .await;
         let ok = used.iter().any(|t| t == "search_notes");
         out.push(("search_notes".into(), ok, format!("tools={used:?}")));
     }
@@ -345,9 +389,20 @@ async fn run_all(
     // ---- read_note ----
     {
         let mut store = sample_store();
-        let rid = store.notes.values().find(|n| n.id != store.open_id).map(|n| n.id.clone()).unwrap();
-        let used = chat(client, base, model,
-            &format!("Read the note with id {rid} and tell me what it says."), &mut store).await;
+        let rid = store
+            .notes
+            .values()
+            .find(|n| n.id != store.open_id)
+            .map(|n| n.id.clone())
+            .unwrap();
+        let used = chat(
+            client,
+            base,
+            model,
+            &format!("Read the note with id {rid} and tell me what it says."),
+            &mut store,
+        )
+        .await;
         let ok = used.iter().any(|t| t == "read_note");
         out.push(("read_note".into(), ok, format!("tools={used:?}")));
     }
@@ -355,8 +410,14 @@ async fn run_all(
     // ---- fetch_web_page (real network + real extractor) ----
     {
         let mut store = sample_store();
-        let used = chat(client, base, model,
-            "Fetch the page at https://example.com and summarize it.", &mut store).await;
+        let used = chat(
+            client,
+            base,
+            model,
+            "Fetch the page at https://example.com and summarize it.",
+            &mut store,
+        )
+        .await;
         let ok = used.iter().any(|t| t == "fetch_web_page");
         out.push(("fetch_web_page".into(), ok, format!("tools={used:?}")));
     }
@@ -402,7 +463,10 @@ async fn run_all(
                 used.iter().any(|t| t == "write_note") && body != short && grew && !is_meta(&body);
             eprintln!(
                 "  hammer {}/{}: updated={ok} grew={grew} formatted={formatted} len={} req={:?}",
-                i + 1, rounds, body.len(), trunc(req, 40)
+                i + 1,
+                rounds,
+                body.len(),
+                trunc(req, 40)
             );
             if ok {
                 updated += 1;
@@ -436,7 +500,13 @@ async fn run_all(
             let used = chat(client, base, model, req, &mut store).await;
             let body = store.open_body();
             let ok = body.trim().is_empty();
-            eprintln!("  removal {}/{}: emptied={ok} len={} req={:?}", i + 1, reqs.len(), body.len(), req);
+            eprintln!(
+                "  removal {}/{}: emptied={ok} len={} req={:?}",
+                i + 1,
+                reqs.len(),
+                body.len(),
+                req
+            );
             if ok {
                 cleared += 1;
             }
@@ -468,7 +538,14 @@ async fn run_all(
                 && !is_meta(&body)
                 && lc.contains("ai")
                 && !lc.contains("dog");
-            eprintln!("  expand-it {}/{}: ok={ok} meta={} {}->{} chars", i + 1, rounds, is_meta(&body), short.len(), body.len());
+            eprintln!(
+                "  expand-it {}/{}: ok={ok} meta={} {}->{} chars",
+                i + 1,
+                rounds,
+                is_meta(&body),
+                short.len(),
+                body.len()
+            );
             if ok {
                 grown += 1;
             }
@@ -491,15 +568,23 @@ async fn run_all(
             store.notes.get_mut(&store.open_id).unwrap().body = short.to_string();
             let used = chat(client, base, model, "expand it", &mut store).await;
             let b = store.open_body().to_lowercase();
-            let on_topic = b.contains("mona") || b.contains("lisa") || b.contains("leonardo")
-                || b.contains("painting") || b.contains("louvre");
+            let on_topic = b.contains("mona")
+                || b.contains("lisa")
+                || b.contains("leonardo")
+                || b.contains("painting")
+                || b.contains("louvre");
             let drifted = b.contains("dog");
             let ok = used.iter().any(|t| t == "write_note")
                 && store.open_body().len() > short.len() + 150
                 && on_topic
                 && !drifted
                 && !is_meta(&store.open_body());
-            eprintln!("  mona-lisa {}/{}: ok={ok} on_topic={on_topic} drifted_to_dogs={drifted} len={}", i + 1, rounds, store.open_body().len());
+            eprintln!(
+                "  mona-lisa {}/{}: ok={ok} on_topic={on_topic} drifted_to_dogs={drifted} len={}",
+                i + 1,
+                rounds,
+                store.open_body().len()
+            );
             if ok {
                 on += 1;
             }
@@ -575,13 +660,18 @@ async fn run_all(
         // Web search: an explicit "search the web" request must offer web_search
         // and must NOT offer search_notes (it's not about the user's notes).
         {
-            let tools = agent::select_tools("search the web for the latest rust release", true, false);
+            let tools =
+                agent::select_tools("search the web for the latest rust release", true, false);
             let names: Vec<String> = tools
                 .iter()
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = has(&tools, "web_search") && !has(&tools, "search_notes");
-            out.push(("gate: web search -> web_search, not search_notes".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: web search -> web_search, not search_notes".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // "google ..." is a web-search idiom.
@@ -592,30 +682,44 @@ async fn run_all(
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = has(&tools, "web_search");
-            out.push(("gate: google ... -> web_search".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: google ... -> web_search".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // Document question ("the pdf"): offer search_documents, and since there's
         // no write intent, do NOT offer write_note.
         {
-            let tools = agent::select_tools("what does the pdf say about transformers", true, false);
+            let tools =
+                agent::select_tools("what does the pdf say about transformers", true, false);
             let names: Vec<String> = tools
                 .iter()
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = has(&tools, "search_documents") && !has(&tools, "write_note");
-            out.push(("gate: pdf question -> search_documents, not write_note".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: pdf question -> search_documents, not write_note".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // "according to the paper ..." is a document-grounded question.
         {
-            let tools = agent::select_tools("according to the paper, what is attention", true, false);
+            let tools =
+                agent::select_tools("according to the paper, what is attention", true, false);
             let names: Vec<String> = tools
                 .iter()
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = has(&tools, "search_documents");
-            out.push(("gate: paper question -> search_documents".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: paper question -> search_documents".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // A full URL must offer fetch_web_page.
@@ -626,7 +730,11 @@ async fn run_all(
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = has(&tools, "fetch_web_page");
-            out.push(("gate: full url -> fetch_web_page".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: full url -> fetch_web_page".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // A bare domain (no scheme) must also offer fetch_web_page.
@@ -637,7 +745,11 @@ async fn run_all(
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = has(&tools, "fetch_web_page");
-            out.push(("gate: bare domain -> fetch_web_page".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: bare domain -> fetch_web_page".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // Small talk: no tools at all.
@@ -648,7 +760,11 @@ async fn run_all(
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = tools.is_empty();
-            out.push(("gate: small talk -> no tools".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: small talk -> no tools".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // Note-write intent ("rewrite the note") must offer write_note.
@@ -659,7 +775,11 @@ async fn run_all(
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
             let ok = has(&tools, "write_note");
-            out.push(("gate: rewrite note -> write_note".into(), ok, format!("tools={names:?}")));
+            out.push((
+                "gate: rewrite note -> write_note".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // Searching the user's OTHER notes: offer search_notes + read_note, but NOT
@@ -670,8 +790,14 @@ async fn run_all(
                 .iter()
                 .filter_map(|t| t["function"]["name"].as_str().map(String::from))
                 .collect();
-            let ok = has(&tools, "search_notes") && has(&tools, "read_note") && !has(&tools, "web_search");
-            out.push(("gate: other notes -> search_notes+read_note, not web_search".into(), ok, format!("tools={names:?}")));
+            let ok = has(&tools, "search_notes")
+                && has(&tools, "read_note")
+                && !has(&tools, "web_search");
+            out.push((
+                "gate: other notes -> search_notes+read_note, not web_search".into(),
+                ok,
+                format!("tools={names:?}"),
+            ));
         }
 
         // Edit-thread: a verb-less correction gets write_note ONLY when in an active
@@ -701,9 +827,26 @@ async fn run_all(
 
 fn sample_store() -> Store {
     let mut notes = HashMap::new();
-    notes.insert("note-open".into(), Note { id: "note-open".into(), title: "Working Note".into(), body: "Placeholder.".into() });
-    notes.insert("note-recipe".into(), Note { id: "note-recipe".into(), title: "Pasta Recipe".into(), body: "Boil pasta. Add tomato sauce and basil. Serve hot.".into() });
-    Store { notes, open_id: "note-open".into() }
+    notes.insert(
+        "note-open".into(),
+        Note {
+            id: "note-open".into(),
+            title: "Working Note".into(),
+            body: "Placeholder.".into(),
+        },
+    );
+    notes.insert(
+        "note-recipe".into(),
+        Note {
+            id: "note-recipe".into(),
+            title: "Pasta Recipe".into(),
+            body: "Boil pasta. Add tomato sauce and basil. Serve hot.".into(),
+        },
+    );
+    Store {
+        notes,
+        open_id: "note-open".into(),
+    }
 }
 
 /// One full multi-turn chat. Returns the list of tool names that were invoked,
@@ -790,7 +933,12 @@ async fn chat_t(
         for t in &calls {
             used.push(t.name.clone());
             let result = exec_tool(client, store, &t.name, &t.args).await;
-            eprintln!("  [{}] args={} -> {}", t.name, trunc(&t.args, 120), trunc(&result, 100));
+            eprintln!(
+                "  [{}] args={} -> {}",
+                t.name,
+                trunc(&t.args, 120),
+                trunc(&result, 100)
+            );
             messages.push(json!({"role": "tool", "tool_call_id": t.id, "content": result}));
         }
     }
@@ -820,7 +968,12 @@ async fn exec_tool(client: &reqwest::Client, store: &mut Store, name: &str, args
             store
                 .notes
                 .get(id)
-                .or_else(|| store.notes.values().find(|n| n.title.eq_ignore_ascii_case(id)))
+                .or_else(|| {
+                    store
+                        .notes
+                        .values()
+                        .find(|n| n.title.eq_ignore_ascii_case(id))
+                })
                 .map(|n| n.body.clone())
                 .unwrap_or_else(|| format!("Note '{id}' not found."))
         }
@@ -830,17 +983,32 @@ async fn exec_tool(client: &reqwest::Client, store: &mut Store, name: &str, args
             for n in store.notes.values() {
                 if n.title.to_lowercase().contains(&q)
                     || n.body.to_lowercase().contains(&q)
-                    || q.split_whitespace().any(|w| n.body.to_lowercase().contains(w))
+                    || q.split_whitespace()
+                        .any(|w| n.body.to_lowercase().contains(w))
                 {
-                    hits.push_str(&format!("ID: {} | Title: {}\nSnippet: {}\n\n", n.id, n.title, trunc(&n.body, 80)));
+                    hits.push_str(&format!(
+                        "ID: {} | Title: {}\nSnippet: {}\n\n",
+                        n.id,
+                        n.title,
+                        trunc(&n.body, 80)
+                    ));
                 }
             }
-            if hits.is_empty() { "No results found.".into() } else { hits }
+            if hits.is_empty() {
+                "No results found.".into()
+            } else {
+                hits
+            }
         }
         "fetch_web_page" => {
             let raw = v["url"].as_str().unwrap_or("");
             match normalize_web_url(raw) {
-                Ok(url) => match client.get(&url).header(reqwest::header::USER_AGENT, "Myelin/0.1 e2e").send().await {
+                Ok(url) => match client
+                    .get(&url)
+                    .header(reqwest::header::USER_AGENT, "Myelin/0.1 e2e")
+                    .send()
+                    .await
+                {
                     Ok(resp) => {
                         let body = resp.text().await.unwrap_or_default();
                         let text = html_to_text(&body);
@@ -949,9 +1117,18 @@ fn start_server(bin: &str, model: &str, port: u16) -> std::io::Result<Child> {
         "256"
     };
     let mut args: Vec<String> = vec![
-        "-m".into(), model.into(), "--jinja".into(), "--ctx-size".into(), "4096".into(),
-        "--port".into(), port_s, "--no-warmup".into(), "--parallel".into(), "1".into(),
-        "--cache-reuse".into(), cache_reuse.into(),
+        "-m".into(),
+        model.into(),
+        "--jinja".into(),
+        "--ctx-size".into(),
+        "4096".into(),
+        "--port".into(),
+        port_s,
+        "--no-warmup".into(),
+        "--parallel".into(),
+        "1".into(),
+        "--cache-reuse".into(),
+        cache_reuse.into(),
     ];
     // Optional chat-template override (e.g. the corrected LFM2.5 template that
     // fixes multi-turn tool calling). Set CHAT_TEMPLATE_FILE to A/B test it.

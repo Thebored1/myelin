@@ -3,20 +3,22 @@ import type { NoteDocument, NoteSummary, SearchResponse } from '$lib/types';
 import { parseBlocks } from '../model/links';
 import type { BlockItem } from '../types';
 import { vditorI18n } from '$lib/vditorI18n';
+import type { ControllerContext } from '$lib/controller-context';
 
 type LinkBlockItem = BlockItem & { isFullNote?: boolean };
 
-export function createLinkingSession(ctx: Record<string, any>) {
+export function createLinkingSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	let linkNoteDialog: HTMLDialogElement | undefined = $state();
 	let linkSearchQuery = $state('');
 	let linkSearchResults = $state<NoteSummary[]>([]);
 	let linkSelectedIndex = $state(0);
-	
+
 	let linkDialogMode = $state<'notes' | 'blocks'>('notes');
 	let selectedNoteForBlocks = $state<NoteDocument | null>(null);
-	
+
 	let allNoteBlocks = $state<LinkBlockItem[]>([]);
-	let filteredBlocks = $derived(
+	const filteredBlocks = $derived(
 		linkDialogMode === 'blocks'
 			? linkSearchQuery.trim()
 				? allNoteBlocks.filter(
@@ -25,24 +27,24 @@ export function createLinkingSession(ctx: Record<string, any>) {
 				: [...allNoteBlocks]
 			: []
 	);
-	
+
 	let previewNoteDialog: HTMLDialogElement | undefined = $state();
 	let previewNoteTarget = $state<NoteDocument | null>(null);
 	let previewNoteContainer: HTMLDivElement | undefined = $state();
-	
+
 	$effect(() => {
 		const query = linkSearchQuery;
 		if (linkDialogMode === 'notes') {
 			if (query.trim()) {
 				invoke<SearchResponse>('search_notes', { query }).then((res) => {
-				linkSearchResults = res.results.map((r) => r.note);
+					linkSearchResults = res.results.map((r) => r.note);
 				});
 			} else {
 				linkSearchResults = [];
 			}
 		}
 	});
-	
+
 	async function openPreviewModal(noteId: string) {
 		ctx.isBusy = true;
 		try {
@@ -67,18 +69,18 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			ctx.isBusy = false;
 		}
 	}
-	
+
 	async function handleVditorClick(e: MouseEvent) {
 		const target = e.target as HTMLElement;
-	
+
 		let href = '';
-	
+
 		// 1. Standard HTML links (WYSIWYG or preview modes)
 		const link = target.closest('a');
 		if (link) {
 			href = link.getAttribute('href') || '';
 		}
-	
+
 		// 2. Vditor Instant Rendering (IR) mode links
 		if (!href) {
 			const irLink = target.closest('[data-type="a"]');
@@ -91,9 +93,9 @@ export function createLinkingSession(ctx: Record<string, any>) {
 				}
 			}
 		}
-	
+
 		if (!href) return;
-	
+
 		if (href.startsWith('/notes/')) {
 			e.preventDefault();
 			e.stopPropagation();
@@ -102,20 +104,20 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			await openPreviewModal(targetId);
 		}
 	}
-	
+
 	function handleVditorKeydownCapture(e: KeyboardEvent) {
 		// Prevent WYSIWYG mode shortcut (Cmd/Ctrl + Alt + 7)
 		if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.code === 'Digit7') {
 			e.preventDefault();
 			e.stopPropagation();
 		}
-	
+
 		// Prevent Ctrl+Arrow keys (Up/Down) from scrolling in the editor, but allow Shift for text selection
 		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
 			e.preventDefault();
 			e.stopPropagation();
 		}
-	
+
 		// Vditor has a bug where it freezes during Shift+Arrow selection across nodes.
 		// By completely stopping propagation, the browser's native text selection engine
 		// takes over flawlessly and Vditor's internal range parser never runs.
@@ -123,14 +125,14 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			e.stopImmediatePropagation();
 		}
 	}
-	
+
 	function handleVditorKeyupCapture(e: KeyboardEvent) {
 		// Stop Vditor's keyup processor (which calls expandMarker and freezes)
 		if (e.shiftKey && e.key.startsWith('Arrow')) {
 			e.stopImmediatePropagation();
 		}
 	}
-	
+
 	function handleLinkSearchKeydown(e: KeyboardEvent) {
 		const targetListLength =
 			linkDialogMode === 'notes' ? linkSearchResults.length : filteredBlocks.length;
@@ -151,11 +153,11 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			}
 		}
 	}
-	
+
 	function autofocus(node: HTMLElement) {
 		node.focus();
 	}
-	
+
 	async function selectNoteForBlocks(target: NoteSummary) {
 		ctx.isBusy = true;
 		try {
@@ -173,10 +175,10 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			ctx.isBusy = false;
 		}
 	}
-	
+
 	async function insertBlockLink(block: LinkBlockItem) {
 		if (!selectedNoteForBlocks) return;
-	
+
 		if (block.isFullNote) {
 			ctx.shouldRefocusEditor = true;
 			linkNoteDialog?.close();
@@ -185,7 +187,7 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			ctx.refocusEditorSoon();
 			return;
 		}
-	
+
 		let blockId = block.id;
 		if (!blockId) {
 			blockId = Math.random().toString(16).substring(2, 8);
@@ -199,7 +201,7 @@ export function createLinkingSession(ctx: Record<string, any>) {
 				sourcePdf: selectedNoteForBlocks.sourcePdf,
 				annotations: selectedNoteForBlocks.annotations
 			});
-	
+
 			if (selectedNoteForBlocks.id === ctx.note?.id) {
 				setTimeout(() => {
 					if (ctx.vditorInstance) {
@@ -229,25 +231,25 @@ export function createLinkingSession(ctx: Record<string, any>) {
 				}, 50);
 			}
 		}
-	
+
 		ctx.shouldRefocusEditor = true;
 		linkNoteDialog?.close();
 		const linkText = `[((${blockId}))](/notes/${selectedNoteForBlocks!.id}#${blockId}) `;
 		ctx.insertAtSavedCursor(linkText);
 		ctx.refocusEditorSoon();
 	}
-	
+
 	let globalSearchDialog: HTMLDialogElement | undefined = $state();
 	let globalSearchQuery = $state('');
 	let globalSelectedIndex = $state(0);
-	
+
 	let globalBlocks = $state<LinkBlockItem[]>([]);
-	let filteredGlobalBlocks = $derived(
+	const filteredGlobalBlocks = $derived(
 		globalSearchQuery.trim()
 			? globalBlocks.filter((b) => b.text.toLowerCase().includes(globalSearchQuery.toLowerCase()))
 			: globalBlocks.slice(0, 50)
 	);
-	
+
 	async function openGlobalBlockSearch() {
 		ctx.saveCursorPosition();
 		globalSearchQuery = '';
@@ -257,7 +259,7 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			const input = globalSearchDialog?.querySelector('.link-search-input') as HTMLInputElement;
 			if (input) input.focus();
 		}, 50);
-	
+
 		ctx.isBusy = true;
 		try {
 			const docs = await invoke<NoteDocument[]>('get_all_note_documents');
@@ -277,7 +279,7 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			ctx.isBusy = false;
 		}
 	}
-	
+
 	function handleGlobalSearchKeydown(e: KeyboardEvent) {
 		const targetListLength = filteredGlobalBlocks.length;
 		if (e.key === 'ArrowDown') {
@@ -293,20 +295,20 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			}
 		}
 	}
-	
+
 	async function insertGlobalBlockLink(block: LinkBlockItem) {
 		if (!block.sourceNoteId || !block.sourceNoteTitle) return;
-	
+
 		let blockId = block.id;
 		const isNewBlock = !blockId;
 		if (isNewBlock) {
 			blockId = Math.random().toString(16).substring(2, 8);
 		}
-	
+
 		ctx.shouldRefocusEditor = true;
 		globalSearchDialog?.close();
 		const linkText = `[((${blockId}))](/notes/${block.sourceNoteId}#${blockId}) `;
-	
+
 		if (isNewBlock) {
 			const newBlockText = `${block.original} ((${blockId}))`;
 			ctx.isBusy = true;
@@ -321,11 +323,13 @@ export function createLinkingSession(ctx: Record<string, any>) {
 					sourcePdf: sourceDoc.sourcePdf,
 					annotations: sourceDoc.annotations
 				});
-	
+
 				if (sourceDoc.id === ctx.note?.id) {
 					setTimeout(() => {
 						if (ctx.vditorInstance) {
-							const editorEl = ctx.vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+							const editorEl = ctx.vditorContainer?.querySelector(
+								'.vditor-ir'
+							) as HTMLElement | null;
 							const selectionOffset = editorEl ? ctx.getSelectionTextOffset(editorEl) : null;
 							let currentBody = ctx.vditorInstance.getValue();
 							if (!currentBody.includes(block.original)) {
@@ -350,7 +354,7 @@ export function createLinkingSession(ctx: Record<string, any>) {
 						}
 					}, 50);
 				}
-	
+
 				ctx.insertAtSavedCursor(linkText);
 			} catch (err) {
 				console.error('Failed to append block ID to source note', err);
@@ -365,39 +369,98 @@ export function createLinkingSession(ctx: Record<string, any>) {
 			ctx.refocusEditorSoon();
 		}
 	}
-	
 
 	return {
-		get linkNoteDialog() { return linkNoteDialog; },
-		set linkNoteDialog(value) { linkNoteDialog = value; },
-		get linkSearchQuery() { return linkSearchQuery; },
-		set linkSearchQuery(value) { linkSearchQuery = value; },
-		get linkSearchResults() { return linkSearchResults; },
-		set linkSearchResults(value) { linkSearchResults = value; },
-		get linkSelectedIndex() { return linkSelectedIndex; },
-		set linkSelectedIndex(value) { linkSelectedIndex = value; },
-		get linkDialogMode() { return linkDialogMode; },
-		set linkDialogMode(value) { linkDialogMode = value; },
-		get selectedNoteForBlocks() { return selectedNoteForBlocks; },
-		set selectedNoteForBlocks(value) { selectedNoteForBlocks = value; },
-		get allNoteBlocks() { return allNoteBlocks; },
-		set allNoteBlocks(value) { allNoteBlocks = value; },
-		get filteredBlocks() { return filteredBlocks; },
-		get previewNoteDialog() { return previewNoteDialog; },
-		set previewNoteDialog(value) { previewNoteDialog = value; },
-		get previewNoteTarget() { return previewNoteTarget; },
-		set previewNoteTarget(value) { previewNoteTarget = value; },
-		get previewNoteContainer() { return previewNoteContainer; },
-		set previewNoteContainer(value) { previewNoteContainer = value; },
-		get globalSearchDialog() { return globalSearchDialog; },
-		set globalSearchDialog(value) { globalSearchDialog = value; },
-		get globalSearchQuery() { return globalSearchQuery; },
-		set globalSearchQuery(value) { globalSearchQuery = value; },
-		get globalSelectedIndex() { return globalSelectedIndex; },
-		set globalSelectedIndex(value) { globalSelectedIndex = value; },
-		get globalBlocks() { return globalBlocks; },
-		set globalBlocks(value) { globalBlocks = value; },
-		get filteredGlobalBlocks() { return filteredGlobalBlocks; },
+		get linkNoteDialog() {
+			return linkNoteDialog;
+		},
+		set linkNoteDialog(value) {
+			linkNoteDialog = value;
+		},
+		get linkSearchQuery() {
+			return linkSearchQuery;
+		},
+		set linkSearchQuery(value) {
+			linkSearchQuery = value;
+		},
+		get linkSearchResults() {
+			return linkSearchResults;
+		},
+		set linkSearchResults(value) {
+			linkSearchResults = value;
+		},
+		get linkSelectedIndex() {
+			return linkSelectedIndex;
+		},
+		set linkSelectedIndex(value) {
+			linkSelectedIndex = value;
+		},
+		get linkDialogMode() {
+			return linkDialogMode;
+		},
+		set linkDialogMode(value) {
+			linkDialogMode = value;
+		},
+		get selectedNoteForBlocks() {
+			return selectedNoteForBlocks;
+		},
+		set selectedNoteForBlocks(value) {
+			selectedNoteForBlocks = value;
+		},
+		get allNoteBlocks() {
+			return allNoteBlocks;
+		},
+		set allNoteBlocks(value) {
+			allNoteBlocks = value;
+		},
+		get filteredBlocks() {
+			return filteredBlocks;
+		},
+		get previewNoteDialog() {
+			return previewNoteDialog;
+		},
+		set previewNoteDialog(value) {
+			previewNoteDialog = value;
+		},
+		get previewNoteTarget() {
+			return previewNoteTarget;
+		},
+		set previewNoteTarget(value) {
+			previewNoteTarget = value;
+		},
+		get previewNoteContainer() {
+			return previewNoteContainer;
+		},
+		set previewNoteContainer(value) {
+			previewNoteContainer = value;
+		},
+		get globalSearchDialog() {
+			return globalSearchDialog;
+		},
+		set globalSearchDialog(value) {
+			globalSearchDialog = value;
+		},
+		get globalSearchQuery() {
+			return globalSearchQuery;
+		},
+		set globalSearchQuery(value) {
+			globalSearchQuery = value;
+		},
+		get globalSelectedIndex() {
+			return globalSelectedIndex;
+		},
+		set globalSelectedIndex(value) {
+			globalSelectedIndex = value;
+		},
+		get globalBlocks() {
+			return globalBlocks;
+		},
+		set globalBlocks(value) {
+			globalBlocks = value;
+		},
+		get filteredGlobalBlocks() {
+			return filteredGlobalBlocks;
+		},
 		openPreviewModal,
 		handleVditorClick,
 		handleVditorKeydownCapture,

@@ -48,7 +48,7 @@ export function toTask(task: TaskItem, existing?: Task): Task {
 		done: Boolean(task.done),
 		subtasks: (task.subtasks ?? []).map((subtask, index) => ({
 			id:
-			typeof subtask.id === 'number'
+				typeof subtask.id === 'number'
 					? `legacy-${legacyTaskId}-${subtask.id}`
 					: idOf(subtask.id, `${taskId}-subtask-${index}`),
 			text: subtask.text,

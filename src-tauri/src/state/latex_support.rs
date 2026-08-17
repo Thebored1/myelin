@@ -1,25 +1,10 @@
-pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
-pub(crate) use crate::models::{
-    AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult, Task,
-};
-pub(crate) use crate::sidecar::ManagedSidecar;
-pub(crate) use anyhow::{anyhow, Context, Result};
-pub(crate) use arrow_array::types::Float32Type;
-pub(crate) use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
-pub(crate) use arrow_schema::{DataType, Field, Schema};
-pub(crate) use chrono::Utc;
-pub(crate) use lancedb::connection::Connection;
-pub(crate) use lancedb::{connect, Table};
-pub(crate) use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
+pub(crate) use crate::llama_server::{self};
+pub(crate) use anyhow::{anyhow, Result};
+pub(crate) use notify::{recommended_watcher, RecursiveMode, Watcher};
 pub(crate) use parking_lot::{Mutex, RwLock};
 pub(crate) use reqwest::Client;
 pub(crate) use rig_core::completion::{CompletionError, Prompt, PromptError};
-pub(crate) use serde::{Deserialize, Serialize};
-pub(crate) use sha2::{Digest, Sha256};
-pub(crate) use std::borrow::Cow;
-pub(crate) use std::collections::HashMap;
-pub(crate) use std::ffi::OsStr;
+pub(crate) use serde::Serialize;
 pub(crate) use std::fs;
 pub(crate) use std::hash::{Hash, Hasher};
 pub(crate) use std::path::{Path, PathBuf};
@@ -46,7 +31,8 @@ pub(crate) const QUERY_EMBEDDING_CACHE: &str = "query-embeddings.json";
 /// re-indexed with the source-preserving RAG chunker.
 pub(crate) const NOTE_CHUNKER_VERSION: &str = crate::embeddings::CHUNKER_VERSION;
 pub(crate) const NATIVE_METADATA_DIR: &str = "native-metadata";
-pub(crate) const EMPTY_IPYNB: &str = "{\n  \"cells\": [],\n  \"metadata\": {},\n  \"nbformat\": 4,\n  \"nbformat_minor\": 5\n}\n";
+pub(crate) const EMPTY_IPYNB: &str =
+    "{\n  \"cells\": [],\n  \"metadata\": {},\n  \"nbformat\": 4,\n  \"nbformat_minor\": 5\n}\n";
 pub(crate) const INDEX_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 // Tectonic downloads its LaTeX support bundle (~50 MB on first use) on demand.
 // We pin that package cache to a directory we own under app data so it lands in
@@ -124,9 +110,11 @@ pub(crate) fn tex_package_declaration(line: &str) -> Option<(&'static str, Vec<S
 }
 
 pub(crate) fn has_active_documentclass(source: &str) -> bool {
-    source
-        .lines()
-        .any(|line| tex_line_without_comment(line).trim_start().starts_with("\\documentclass"))
+    source.lines().any(|line| {
+        tex_line_without_comment(line)
+            .trim_start()
+            .starts_with("\\documentclass")
+    })
 }
 
 pub(crate) fn wrap_bare_latex(body: &str) -> TexTransform {
@@ -150,7 +138,10 @@ pub(crate) fn wrap_bare_latex(body: &str) -> TexTransform {
             content_map.push(line_number + 1);
         }
     }
-    let mut lines = DEFAULT_TEX_PREAMBLE.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut lines = DEFAULT_TEX_PREAMBLE
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let mut line_map = vec![0; lines.len()];
     lines.extend(preamble.iter().map(|line| (*line).to_string()));
     line_map.extend(preamble_map);
@@ -160,7 +151,10 @@ pub(crate) fn wrap_bare_latex(body: &str) -> TexTransform {
     line_map.extend(content_map);
     lines.push("\\end{document}".to_string());
     line_map.push(0);
-    TexTransform { source: lines.join("\n"), line_map }
+    TexTransform {
+        source: lines.join("\n"),
+        line_map,
+    }
 }
 
 /// Faithful test entrypoint mirroring [`AppState::compile_latex`]'s transform
@@ -205,11 +199,8 @@ pub(crate) fn ensure_packages(src: &str) -> TexTransform {
     // options (most commonly xcolor), which LaTeX rejects as an option clash.
     // Keep the first declaration—the document author’s options—and discard
     // later duplicates before adding any missing defaults.
-    let managed: std::collections::HashSet<&str> = ENSURE_PACKAGES
-        .iter()
-        .copied()
-        .chain(["xcolor"])
-        .collect();
+    let managed: std::collections::HashSet<&str> =
+        ENSURE_PACKAGES.iter().copied().chain(["xcolor"]).collect();
     let mut seen = std::collections::HashSet::new();
     let mut lines = Vec::new();
     let mut line_map = Vec::new();
@@ -217,7 +208,9 @@ pub(crate) fn ensure_packages(src: &str) -> TexTransform {
         let declaration = tex_package_declaration(line);
         let duplicate = declaration.as_ref().is_some_and(|(kind, packages)| {
             *kind != "pass"
-                && packages.iter().all(|pkg| managed.contains(pkg.as_str()) && seen.contains(pkg))
+                && packages
+                    .iter()
+                    .all(|pkg| managed.contains(pkg.as_str()) && seen.contains(pkg))
         });
         if !duplicate {
             lines.push(line.to_string());
@@ -235,12 +228,20 @@ pub(crate) fn ensure_packages(src: &str) -> TexTransform {
         .filter(|pkg| !seen.contains(*pkg))
         .collect();
     if missing.is_empty() {
-        return TexTransform { source: lines.join("\n"), line_map };
+        return TexTransform {
+            source: lines.join("\n"),
+            line_map,
+        };
     }
     let Some(dc) = lines.iter().position(|line| {
-        tex_line_without_comment(line).trim_start().starts_with("\\documentclass")
+        tex_line_without_comment(line)
+            .trim_start()
+            .starts_with("\\documentclass")
     }) else {
-        return TexTransform { source: lines.join("\n"), line_map };
+        return TexTransform {
+            source: lines.join("\n"),
+            line_map,
+        };
     };
     // Insert after the end of the \documentclass line.
     let injected = missing
@@ -257,7 +258,10 @@ pub(crate) fn ensure_packages(src: &str) -> TexTransform {
     out_map.extend(std::iter::repeat(0).take(missing.len()));
     out.extend(lines.into_iter().skip(dc + 1));
     out_map.extend(line_map.into_iter().skip(dc + 1));
-    TexTransform { source: out.join("\n"), line_map: out_map }
+    TexTransform {
+        source: out.join("\n"),
+        line_map: out_map,
+    }
 }
 
 /// A failed Tectonic run: the engine's high-level message plus the raw TeX log
@@ -307,7 +311,10 @@ pub(crate) fn clear_tectonic_format_cache() {
 /// Compile `tex` to PDF bytes. Self-heals a corrupt format cache: if the engine
 /// claims `\begin{document}` is missing even though our input contains it (the
 /// classic symptom of a broken cached format), drop the format cache and retry.
-pub(crate) fn compile_with_tectonic(tex: &str, input_root: Option<&Path>) -> std::result::Result<Vec<u8>, TexFailure> {
+pub(crate) fn compile_with_tectonic(
+    tex: &str,
+    input_root: Option<&Path>,
+) -> std::result::Result<Vec<u8>, TexFailure> {
     match run_tectonic_session(tex, input_root) {
         Ok(pdf) => Ok(pdf),
         Err(failure)
@@ -324,7 +331,10 @@ pub(crate) fn compile_with_tectonic(tex: &str, input_root: Option<&Path>) -> std
 /// Compile `tex` to PDF bytes, capturing the TeX log on failure. Runs the
 /// Tectonic driver directly (vs. latex_to_pdf) so we can attach a capturing
 /// status backend. Honours TECTONIC_CACHE_DIR set at startup.
-pub(crate) fn run_tectonic_session(tex: &str, input_root: Option<&Path>) -> std::result::Result<Vec<u8>, TexFailure> {
+pub(crate) fn run_tectonic_session(
+    tex: &str,
+    input_root: Option<&Path>,
+) -> std::result::Result<Vec<u8>, TexFailure> {
     use tectonic::config::PersistentConfig;
     use tectonic::driver::{OutputFormat, ProcessingSessionBuilder};
 
@@ -372,9 +382,9 @@ pub(crate) fn run_tectonic_session(tex: &str, input_root: Option<&Path>) -> std:
         .print_stdout(false)
         .output_format(OutputFormat::Pdf)
         .do_not_write_output_files();
-	if let Some(root) = input_root {
-		sb.filesystem_root(root);
-	}
+    if let Some(root) = input_root {
+        sb.filesystem_root(root);
+    }
 
     let mut sess = match sb.create(&mut status) {
         Ok(s) => s,
@@ -500,7 +510,9 @@ pub(crate) fn enforce_slot_cache_budget(slot_dir: &Path, budget_bytes: u64) {
         if path.extension().and_then(|e| e.to_str()) != Some("slot") {
             continue;
         }
-        let Ok(meta) = fs::metadata(&path) else { continue };
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
         total += meta.len();
         entries.push((
             meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
@@ -567,9 +579,10 @@ pub(crate) async fn section_prime_body(
             { "role": "assistant", "content": "" },
         ],
     });
-    if let Some(raw) = template_kwargs.as_deref().and_then(|value| {
-        serde_json::from_str::<serde_json::Value>(value).ok()
-    }) {
+    if let Some(raw) = template_kwargs
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+    {
         body["chat_template_kwargs"] = raw;
     }
     let url = format!("{}/apply-template", config.base_url());

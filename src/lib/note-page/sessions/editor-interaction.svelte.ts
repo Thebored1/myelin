@@ -1,5 +1,8 @@
+import type { ControllerContext } from '$lib/controller-context';
+
 /** Owns focus and selection preservation while dialogs temporarily take focus. */
-export function createEditorInteractionSession(ctx: Record<string, any>) {
+export function createEditorInteractionSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	function focusEditor() {
 		if (!ctx.vditorInstance || !ctx.vditorContainer) return;
 		ctx.vditorInstance.focus();
@@ -49,5 +52,10 @@ export function createEditorInteractionSession(ctx: Record<string, any>) {
 		ctx.shortcutEditorRange = null;
 	}
 
-	return { focusEditor, refocusEditorSoon, captureShortcutEditorTarget, restoreShortcutEditorFocus };
+	return {
+		focusEditor,
+		refocusEditorSoon,
+		captureShortcutEditorTarget,
+		restoreShortcutEditorFocus
+	};
 }

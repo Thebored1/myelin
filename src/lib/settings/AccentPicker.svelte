@@ -85,7 +85,11 @@
 		else if (h < 300) rgb = [x, 0, chroma];
 		else rgb = [chroma, 0, x];
 		return `#${rgb
-			.map((channel) => Math.round((channel + m) * 255).toString(16).padStart(2, '0'))
+			.map((channel) =>
+				Math.round((channel + m) * 255)
+					.toString(16)
+					.padStart(2, '0')
+			)
 			.join('')
 			.toUpperCase()}`;
 	}
@@ -209,7 +213,9 @@
 			aria-valuemax="100"
 			aria-valuenow={Math.round(valueLevel * 100)}
 			aria-valuetext={`saturation ${Math.round(saturation * 100)}%, lightness ${Math.round(valueLevel * 100)}%`}
-			style="--hue-color: {hsvToHex(hue, 1, 1)}; --sv-x: {saturation * 100}%; --sv-y: {(1 - valueLevel) * 100}%;"
+			style="--hue-color: {hsvToHex(hue, 1, 1)}; --sv-x: {saturation * 100}%; --sv-y: {(1 -
+				valueLevel) *
+				100}%;"
 			onpointerdown={onSvPointer}
 			onpointermove={(event) => {
 				if (event.buttons === 1) positionFromPointer(event);
@@ -228,7 +234,7 @@
 				aria-valuenow={Math.round(hue)}
 				aria-valuemin="0"
 				aria-valuemax="360"
-				style="--hue-pos: {hue / 360 * 100}%;"
+				style="--hue-pos: {(hue / 360) * 100}%;"
 				onpointerdown={onHuePointer}
 				onpointermove={(event) => {
 					if (event.buttons === 1) hueFromPointer(event);
@@ -251,9 +257,11 @@
 		</div>
 	</div>
 	<div class="swatch-strip">
-		<button class="swatch-nav" onclick={() => scrollSwatches(-1)} aria-label="Previous swatches">‹</button>
+		<button class="swatch-nav" onclick={() => scrollSwatches(-1)} aria-label="Previous swatches"
+			>‹</button
+		>
 		<div bind:this={swatchStrip} class="swatches">
-			{#each presets as color}
+			{#each presets as color (color)}
 				<button
 					class="swatch"
 					class:active={color === accent}
@@ -264,7 +272,9 @@
 				></button>
 			{/each}
 		</div>
-		<button class="swatch-nav" onclick={() => scrollSwatches(1)} aria-label="More swatches">›</button>
+		<button class="swatch-nav" onclick={() => scrollSwatches(1)} aria-label="More swatches"
+			>›</button
+		>
 	</div>
 </div>
 
@@ -286,8 +296,7 @@
 		cursor: crosshair;
 		touch-action: none;
 		background:
-			linear-gradient(to top, #000, transparent),
-			linear-gradient(to right, #fff, var(--hue-color));
+			linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, var(--hue-color));
 	}
 	.sv-thumb {
 		position: absolute;
@@ -353,7 +362,11 @@
 		border: 1px solid var(--border-default);
 		border-radius: var(--radius-md);
 		padding: 0.4rem 0.5rem;
-		font: 0.8rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+		font:
+			0.8rem/1.2 ui-monospace,
+			SFMono-Regular,
+			Menlo,
+			monospace;
 		letter-spacing: 0.03em;
 		text-transform: uppercase;
 	}
@@ -390,7 +403,9 @@
 		transform: scale(1.1);
 	}
 	.swatch.active {
-		box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 4px var(--accent-100);
+		box-shadow:
+			0 0 0 2px var(--bg-panel),
+			0 0 0 4px var(--accent-100);
 	}
 	.swatch-nav {
 		color: var(--text-secondary);

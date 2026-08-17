@@ -176,7 +176,13 @@ html {
 
 body {
 	background:
-		repeating-linear-gradient(135deg, var(--page-pattern) 0, var(--page-pattern) 1px, transparent 1px, transparent 7px),
+		repeating-linear-gradient(
+			135deg,
+			var(--page-pattern) 0,
+			var(--page-pattern) 1px,
+			transparent 1px,
+			transparent 7px
+		),
 		radial-gradient(circle at top right, var(--page-glow), transparent 22rem),
 		linear-gradient(180deg, var(--page-gradient-start) 0%, var(--page-gradient-end) 100%);
 }

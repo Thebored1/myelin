@@ -47,4 +47,3 @@ export function cursorTarget(text: string, position: number, context = 80): AiEd
 		cursor: true
 	};
 }
-

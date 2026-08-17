@@ -1,30 +1,21 @@
-pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
+use super::*;
 pub(crate) use crate::models::*;
-pub(crate) use crate::sidecar::ManagedSidecar;
 pub(crate) use anyhow::{anyhow, Context, Result};
 pub(crate) use arrow_array::types::Float32Type;
-pub(crate) use arrow_array::{ArrayRef, FixedSizeListArray, Int32Array, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+pub(crate) use arrow_array::{
+    ArrayRef, FixedSizeListArray, Int32Array, Int64Array, RecordBatch, RecordBatchIterator,
+    StringArray,
+};
 pub(crate) use arrow_schema::{DataType, Field, Schema};
 pub(crate) use chrono::Utc;
 pub(crate) use lancedb::connection::Connection;
 pub(crate) use lancedb::{connect, Table};
-pub(crate) use lancedb::query::ExecutableQuery;
-pub(crate) use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
-pub(crate) use parking_lot::{Mutex, RwLock};
-pub(crate) use reqwest::Client;
-pub(crate) use rig_core::completion::{CompletionError, Prompt, PromptError};
-pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use sha2::{Digest, Sha256};
-pub(crate) use std::borrow::Cow;
 pub(crate) use std::collections::HashMap;
 pub(crate) use std::ffi::OsStr;
 pub(crate) use std::fs;
-pub(crate) use std::hash::{Hash, Hasher};
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::sync::Arc;
-pub(crate) use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
-pub(crate) use uuid::Uuid;
-use super::*;
 pub(crate) fn is_hidden_or_ignored(entry: &walkdir::DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     if entry.depth() > 0 && name.starts_with('.') {
@@ -36,7 +27,10 @@ pub(crate) struct WorkspaceScanResult {
     pub(crate) notes: Vec<IndexedNote>,
     pub(crate) issues: Vec<StorageIssue>,
 }
-pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) -> Result<WorkspaceScanResult> {
+pub(crate) fn read_workspace_notes(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+) -> Result<WorkspaceScanResult> {
     let mut notes = Vec::new();
     let mut issues = Vec::new();
     for entry in walkdir::WalkDir::new(workspace)
@@ -67,12 +61,18 @@ pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) 
                 };
                 match doc_result {
                     Ok(document) => {
-                        if let Some(existing) = notes.iter().find(|note: &&IndexedNote| note.document.id == document.id) {
+                        if let Some(existing) = notes
+                            .iter()
+                            .find(|note: &&IndexedNote| note.document.id == document.id)
+                        {
                             issues.push(StorageIssue {
                                 code: "duplicate-note-id".into(),
                                 severity: "error".into(),
                                 path: Some(entry.path().display().to_string()),
-                                message: format!("Note ID conflicts with {}.", existing.document.relative_path),
+                                message: format!(
+                                    "Note ID conflicts with {}.",
+                                    existing.document.relative_path
+                                ),
                                 recoverable: false,
                             });
                             continue;
@@ -96,7 +96,11 @@ pub(crate) fn read_workspace_notes(workspace: &Path, workspace_data_dir: &Path) 
             }
         }
     }
-    notes.sort_by(|left, right| left.document.relative_path.cmp(&right.document.relative_path));
+    notes.sort_by(|left, right| {
+        left.document
+            .relative_path
+            .cmp(&right.document.relative_path)
+    });
     Ok(WorkspaceScanResult { notes, issues })
 }
 pub(crate) fn parse_pdf_file(
@@ -131,11 +135,15 @@ pub(crate) fn parse_pdf_file(
             &format!("{}.annotations.json", id),
         );
         if annotations_path.exists() {
-            let raw = fs::read_to_string(&annotations_path)
-                .with_context(|| format!("failed to read annotations {}", annotations_path.display()))?;
-            Some(serde_json::from_str(&raw)
-                .with_context(|| format!("annotations are invalid at {}", annotations_path.display()))?)
-        } else { None }
+            let raw = fs::read_to_string(&annotations_path).with_context(|| {
+                format!("failed to read annotations {}", annotations_path.display())
+            })?;
+            Some(serde_json::from_str(&raw).with_context(|| {
+                format!("annotations are invalid at {}", annotations_path.display())
+            })?)
+        } else {
+            None
+        }
     };
     let document = NoteDocument {
         id: id.clone(),
@@ -156,11 +164,15 @@ pub(crate) fn parse_pdf_file(
                 &format!("{}.chat.json", id),
             );
             if chats_path.exists() {
-                let raw = fs::read_to_string(&chats_path)
-                    .with_context(|| format!("failed to read chat history {}", chats_path.display()))?;
-                serde_json::from_str(&raw)
-                    .with_context(|| format!("chat history is invalid at {}", chats_path.display()))?
-            } else { Vec::new() }
+                let raw = fs::read_to_string(&chats_path).with_context(|| {
+                    format!("failed to read chat history {}", chats_path.display())
+                })?;
+                serde_json::from_str(&raw).with_context(|| {
+                    format!("chat history is invalid at {}", chats_path.display())
+                })?
+            } else {
+                Vec::new()
+            }
         },
     };
     if !native_metadata_app_path(workspace, workspace_data_dir, path).exists() {
@@ -222,12 +234,9 @@ pub(crate) fn validate_native_body(path: &Path, body: &str) -> Result<()> {
                 path.display()
             )
         })?;
-        let object = notebook.as_object().ok_or_else(|| {
-            anyhow!(
-                "notebook {} must be a JSON object",
-                path.display()
-            )
-        })?;
+        let object = notebook
+            .as_object()
+            .ok_or_else(|| anyhow!("notebook {} must be a JSON object", path.display()))?;
         if !object.get("cells").is_some_and(serde_json::Value::is_array) {
             return Err(anyhow!(
                 "notebook {} must contain a cells array",
@@ -295,7 +304,10 @@ pub(crate) fn read_native_metadata_sidecar(
         .with_context(|| format!("native metadata is invalid at {}", metadata_path.display()))?;
     let relative_path = relative_to_workspace(workspace, path);
     if sidecar.relative_path != relative_path {
-        return Err(anyhow!("native metadata path does not match {}", path.display()));
+        return Err(anyhow!(
+            "native metadata path does not match {}",
+            path.display()
+        ));
     }
     Ok(Some(sidecar.metadata))
 }
@@ -330,8 +342,12 @@ pub(crate) fn write_native_metadata_sidecar(
         metadata: frontmatter_from_document(document),
         relative_path: relative_to_workspace(workspace, path),
     };
-    crate::persistence::atomic_write_json(&metadata_path, &sidecar)
-        .with_context(|| format!("failed to persist native metadata {}", metadata_path.display()))
+    crate::persistence::atomic_write_json(&metadata_path, &sidecar).with_context(|| {
+        format!(
+            "failed to persist native metadata {}",
+            metadata_path.display()
+        )
+    })
 }
 pub(crate) fn write_document_metadata_sidecar(
     workspace: &Path,
@@ -353,7 +369,12 @@ pub(crate) fn write_document_metadata_sidecar(
 pub(crate) fn is_metadata_document(path: &Path) -> bool {
     is_native_text_file(path) || is_binary_document(path)
 }
-pub(crate) fn remove_native_metadata_sidecar(workspace: &Path, workspace_data_dir: &Path, path: &Path) {
+#[cfg(test)]
+pub(crate) fn remove_native_metadata_sidecar(
+    workspace: &Path,
+    workspace_data_dir: &Path,
+    path: &Path,
+) {
     if !is_native_text_file(path) {
         return;
     }
@@ -404,7 +425,10 @@ pub(crate) fn parse_note_file(
     let (file_created, file_updated) = get_file_timestamps(path);
     let created_at = metadata.created_at.clone().unwrap_or(file_created);
     let updated_at = metadata.updated_at.clone().unwrap_or(file_updated);
-    let id = metadata.id.clone().unwrap_or_else(|| stable_id_from_path(path));
+    let id = metadata
+        .id
+        .clone()
+        .unwrap_or_else(|| stable_id_from_path(path));
     let annotations = {
         let annotations_path = sidecar_path(
             workspace,
@@ -413,11 +437,15 @@ pub(crate) fn parse_note_file(
             &format!("{}.annotations.json", id),
         );
         if annotations_path.exists() {
-            let raw = fs::read_to_string(&annotations_path)
-                .with_context(|| format!("failed to read annotations {}", annotations_path.display()))?;
-            Some(serde_json::from_str(&raw)
-                .with_context(|| format!("annotations are invalid at {}", annotations_path.display()))?)
-        } else { None }
+            let raw = fs::read_to_string(&annotations_path).with_context(|| {
+                format!("failed to read annotations {}", annotations_path.display())
+            })?;
+            Some(serde_json::from_str(&raw).with_context(|| {
+                format!("annotations are invalid at {}", annotations_path.display())
+            })?)
+        } else {
+            None
+        }
     };
     let document = NoteDocument {
         id: id.clone(),
@@ -438,10 +466,12 @@ pub(crate) fn parse_note_file(
                 &format!("{}.chat.json", id),
             );
             if chats_path.exists() {
-                let raw = fs::read_to_string(&chats_path)
-                    .with_context(|| format!("failed to read chat history {}", chats_path.display()))?;
-                serde_json::from_str(&raw)
-                    .with_context(|| format!("chat history is invalid at {}", chats_path.display()))?
+                let raw = fs::read_to_string(&chats_path).with_context(|| {
+                    format!("failed to read chat history {}", chats_path.display())
+                })?;
+                serde_json::from_str(&raw).with_context(|| {
+                    format!("chat history is invalid at {}", chats_path.display())
+                })?
             } else {
                 Vec::new()
             }
@@ -461,17 +491,44 @@ pub(crate) fn parse_note_file(
     }
     Ok(document)
 }
-pub(crate) async fn rebuild_lancedb(index_dir: &Path, chunks: &[WorkspaceNoteChunk]) -> Result<Table> {
-    let parent = index_dir.parent().ok_or_else(|| anyhow!("workspace index has no parent directory"))?;
+pub(crate) async fn rebuild_lancedb(
+    index_dir: &Path,
+    chunks: &[WorkspaceNoteChunk],
+) -> Result<Table> {
+    let parent = index_dir
+        .parent()
+        .ok_or_else(|| anyhow!("workspace index has no parent directory"))?;
     fs::create_dir_all(parent)?;
-    let name = index_dir.file_name().and_then(OsStr::to_str).unwrap_or("index");
+    let name = index_dir
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("index");
     let staging_dir = parent.join(format!(".{name}-staging"));
     let previous_dir = parent.join(format!(".{name}-previous"));
-    if staging_dir.exists() { fs::remove_dir_all(&staging_dir).context("failed to clear stale workspace index staging directory")?; }
-    if previous_dir.exists() { fs::remove_dir_all(&previous_dir).context("failed to clear stale workspace index backup")?; }
-    fs::create_dir_all(&staging_dir).context("failed to create workspace index staging directory")?;
-    let dimension = chunks.iter().find_map(|chunk| chunk.vector.as_ref().map(|v| v.len() as i32)).unwrap_or(EMBEDDING_DIM);
-    if dimension <= 0 || chunks.iter().filter_map(|chunk| chunk.vector.as_ref()).any(|vector| vector.len() != dimension as usize || vector.iter().any(|value| !value.is_finite())) { anyhow::bail!("workspace note index contains inconsistent embedding dimensions"); }
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)
+            .context("failed to clear stale workspace index staging directory")?;
+    }
+    if previous_dir.exists() {
+        fs::remove_dir_all(&previous_dir)
+            .context("failed to clear stale workspace index backup")?;
+    }
+    fs::create_dir_all(&staging_dir)
+        .context("failed to create workspace index staging directory")?;
+    let dimension = chunks
+        .iter()
+        .find_map(|chunk| chunk.vector.as_ref().map(|v| v.len() as i32))
+        .unwrap_or(EMBEDDING_DIM);
+    if dimension <= 0
+        || chunks
+            .iter()
+            .filter_map(|chunk| chunk.vector.as_ref())
+            .any(|vector| {
+                vector.len() != dimension as usize || vector.iter().any(|value| !value.is_finite())
+            })
+    {
+        anyhow::bail!("workspace note index contains inconsistent embedding dimensions");
+    }
     let connection = open_database(&staging_dir).await?;
     let schema = Arc::new(Schema::new(vec![
         Field::new("note_id", DataType::Utf8, false),
@@ -490,7 +547,10 @@ pub(crate) async fn rebuild_lancedb(index_dir: &Path, chunks: &[WorkspaceNoteChu
         Field::new("embedding_fingerprint", DataType::Utf8, false),
         Field::new(
             "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dimension),
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                dimension,
+            ),
             true,
         ),
     ]));
@@ -502,26 +562,42 @@ pub(crate) async fn rebuild_lancedb(index_dir: &Path, chunks: &[WorkspaceNoteChu
             .context("failed to create empty lancedb table");
         let _ = table?;
         publish_workspace_index(index_dir, &staging_dir, &previous_dir)?;
-        return open_database(index_dir).await?.open_table(TABLE_NAME).execute().await.context("failed to reopen published workspace index");
+        return open_database(index_dir)
+            .await?
+            .open_table(TABLE_NAME)
+            .execute()
+            .await
+            .context("failed to reopen published workspace index");
     }
     let ids = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.note_id.as_str()));
     let titles = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.title.as_str()));
     let tags = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.tags_text.as_str()));
     let paths = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.path.as_str()));
-    let updated_at = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.updated_at.as_str()));
+    let updated_at =
+        StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.updated_at.as_str()));
     let chunk_indices = Int32Array::from_iter_values(chunks.iter().map(|chunk| chunk.chunk_index));
     let texts = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.text.as_str()));
-    let lexical = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.lexical_text.as_str()));
+    let lexical =
+        StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.lexical_text.as_str()));
     let counts = Int32Array::from_iter_values(chunks.iter().map(|chunk| chunk.token_count));
     let starts = Int64Array::from_iter(chunks.iter().map(|chunk| chunk.char_start));
     let ends = Int64Array::from_iter(chunks.iter().map(|chunk| chunk.char_end));
-    let section_starts = StringArray::from_iter(chunks.iter().map(|chunk| chunk.section_start.as_deref()));
-    let section_ends = StringArray::from_iter(chunks.iter().map(|chunk| chunk.section_end.as_deref()));
-    let fingerprints = StringArray::from_iter_values(chunks.iter().map(|chunk| chunk.embedding_fingerprint.as_str()));
-    let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+    let section_starts =
+        StringArray::from_iter(chunks.iter().map(|chunk| chunk.section_start.as_deref()));
+    let section_ends =
+        StringArray::from_iter(chunks.iter().map(|chunk| chunk.section_end.as_deref()));
+    let fingerprints = StringArray::from_iter_values(
         chunks
             .iter()
-            .map(|chunk| chunk.vector.as_ref().map(|vector| vector.iter().copied().map(Some).collect::<Vec<_>>())),
+            .map(|chunk| chunk.embedding_fingerprint.as_str()),
+    );
+    let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        chunks.iter().map(|chunk| {
+            chunk
+                .vector
+                .as_ref()
+                .map(|vector| vector.iter().copied().map(Some).collect::<Vec<_>>())
+        }),
         dimension,
     );
     let batch = RecordBatch::try_new(
@@ -550,18 +626,39 @@ pub(crate) async fn rebuild_lancedb(index_dir: &Path, chunks: &[WorkspaceNoteChu
         .execute()
         .await
         .context("failed to create lancedb table")?;
-    table.create_index(&["lexical_text"], lancedb::index::Index::FTS(Default::default())).execute().await
+    table
+        .create_index(
+            &["lexical_text"],
+            lancedb::index::Index::FTS(Default::default()),
+        )
+        .execute()
+        .await
         .context("failed to create workspace FTS index")?;
     publish_workspace_index(index_dir, &staging_dir, &previous_dir)?;
-    open_database(index_dir).await?.open_table(TABLE_NAME).execute().await.context("failed to reopen published workspace index")
+    open_database(index_dir)
+        .await?
+        .open_table(TABLE_NAME)
+        .execute()
+        .await
+        .context("failed to reopen published workspace index")
 }
-fn publish_workspace_index(index_dir: &Path, staging_dir: &Path, previous_dir: &Path) -> Result<()> {
-    if index_dir.exists() { fs::rename(index_dir, previous_dir).context("failed to stage previous workspace index")?; }
+fn publish_workspace_index(
+    index_dir: &Path,
+    staging_dir: &Path,
+    previous_dir: &Path,
+) -> Result<()> {
+    if index_dir.exists() {
+        fs::rename(index_dir, previous_dir).context("failed to stage previous workspace index")?;
+    }
     if let Err(error) = fs::rename(staging_dir, index_dir) {
-        if previous_dir.exists() { let _ = fs::rename(previous_dir, index_dir); }
+        if previous_dir.exists() {
+            let _ = fs::rename(previous_dir, index_dir);
+        }
         return Err(error).context("failed to publish workspace index");
     }
-    if previous_dir.exists() { fs::remove_dir_all(previous_dir).context("failed to remove previous workspace index")?; }
+    if previous_dir.exists() {
+        fs::remove_dir_all(previous_dir).context("failed to remove previous workspace index")?;
+    }
     Ok(())
 }
 pub(crate) async fn open_database(index_dir: &Path) -> Result<Connection> {
@@ -584,7 +681,9 @@ pub(crate) fn summarize(document: &NoteDocument) -> NoteSummary {
         backlinks: document.backlinks.clone(),
     }
 }
-pub(crate) fn build_library_facets<'a>(documents: impl Iterator<Item = &'a NoteDocument>) -> LibraryFacets {
+pub(crate) fn build_library_facets<'a>(
+    documents: impl Iterator<Item = &'a NoteDocument>,
+) -> LibraryFacets {
     let mut folders = Vec::new();
     let mut tags = Vec::new();
     for document in documents {
@@ -669,8 +768,7 @@ pub(crate) fn task_files_for(workspace: &Path, id: &str) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .map(|entry| entry.into_path())
         .filter(|path| {
-            is_task_file(path)
-                && path.file_name().and_then(OsStr::to_str) == Some(target.as_str())
+            is_task_file(path) && path.file_name().and_then(OsStr::to_str) == Some(target.as_str())
         })
         .collect::<Vec<_>>();
     paths.sort();

@@ -1,13 +1,4 @@
 use super::*;
-use crate::state::AppState;
-use futures_util::StreamExt;
-use rig_core::client::CompletionClient;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tauri::Emitter;
 /// Word-boundary check: true if any of `words` (lowercase literals/phrases)
 /// appears as a whole word in the already-lowercased `haystack`. Avoids
 /// substring false hits like "fix" inside "prefix" or "add" inside "address".
@@ -84,9 +75,24 @@ pub fn append_request_intent(message: &str) -> bool {
 pub(super) fn existing_note_operation(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     [
-        "edit", "rewrite", "revis", "format", "shorten", "expand", "reorder", "remove",
-        "delete", "replace", "clean", "fix", "change", "update", "summari", "condens",
-        "turn this", "keep the rest",
+        "edit",
+        "rewrite",
+        "revis",
+        "format",
+        "shorten",
+        "expand",
+        "reorder",
+        "remove",
+        "delete",
+        "replace",
+        "clean",
+        "fix",
+        "change",
+        "update",
+        "summari",
+        "condens",
+        "turn this",
+        "keep the rest",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -94,9 +100,18 @@ pub(super) fn existing_note_operation(message: &str) -> bool {
 
 pub fn placement_request_intent(message: &str) -> bool {
     let text = message.to_ascii_lowercase();
-    ["below it", "under it", "after it", "beneath it", "below this", "under this", "after this", "beneath this"]
-        .iter()
-        .any(|phrase| text.contains(phrase))
+    [
+        "below it",
+        "under it",
+        "after it",
+        "beneath it",
+        "below this",
+        "under this",
+        "after this",
+        "beneath this",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
 }
 
 /// opposed to just chatting / asking a question)? Used by `select_tools` to

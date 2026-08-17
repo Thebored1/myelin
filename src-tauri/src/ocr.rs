@@ -3,19 +3,41 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OcrSettings { pub auto_low_text_pages: bool, pub executable_path: Option<String>, pub language: String }
-impl Default for OcrSettings { fn default() -> Self { Self { auto_low_text_pages: true, executable_path: None, language: "eng".into() } } }
+pub struct OcrSettings {
+    pub auto_low_text_pages: bool,
+    pub executable_path: Option<String>,
+    pub language: String,
+}
+impl Default for OcrSettings {
+    fn default() -> Self {
+        Self {
+            auto_low_text_pages: true,
+            executable_path: None,
+            language: "eng".into(),
+        }
+    }
+}
 impl OcrSettings {
     pub fn is_default(&self) -> bool {
         self.auto_low_text_pages && self.executable_path.is_none() && self.language == "eng"
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.language.trim().is_empty() || self.language.len() > 32 || !self.language.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+') {
-            return Err("OCR language must be a short Tesseract language code (for example, eng).".into());
+        if self.language.trim().is_empty()
+            || self.language.len() > 32
+            || !self
+                .language
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+')
+        {
+            return Err(
+                "OCR language must be a short Tesseract language code (for example, eng).".into(),
+            );
         }
         if let Some(path) = &self.executable_path {
-            if path.trim().is_empty() { return Err("OCR executable path cannot be empty when provided.".into()); }
+            if path.trim().is_empty() {
+                return Err("OCR executable path cannot be empty when provided.".into());
+            }
         }
         Ok(())
     }
@@ -23,11 +45,25 @@ impl OcrSettings {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OcrStatus { pub available: bool, pub executable_path: Option<String>, pub configured_language: String, pub auto_low_text_pages: bool, pub language_available: bool, pub version: Option<String>, pub warning: Option<String> }
+pub struct OcrStatus {
+    pub available: bool,
+    pub executable_path: Option<String>,
+    pub configured_language: String,
+    pub auto_low_text_pages: bool,
+    pub language_available: bool,
+    pub version: Option<String>,
+    pub warning: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OcrPageResult { pub page_number: u32, pub text: String, pub confidence: Option<f32>, pub word_count: usize, pub mode: String }
+pub struct OcrPageResult {
+    pub page_number: u32,
+    pub text: String,
+    pub confidence: Option<f32>,
+    pub word_count: usize,
+    pub mode: String,
+}
 
 pub fn status(settings: &OcrSettings) -> OcrStatus {
     OcrStatus {
@@ -41,7 +77,11 @@ pub fn status(settings: &OcrSettings) -> OcrStatus {
     }
 }
 
-pub fn recognize_png(png: &[u8], page_number: u32, settings: &OcrSettings) -> Result<OcrPageResult, String> {
+pub fn recognize_png(
+    png: &[u8],
+    page_number: u32,
+    settings: &OcrSettings,
+) -> Result<OcrPageResult, String> {
     let _ = (png, page_number, settings);
     Err("Bundled OCR is not enabled yet; native PDF extraction is active.".into())
     /*

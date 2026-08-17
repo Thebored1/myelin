@@ -1,6 +1,5 @@
 use super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
+use ::anyhow::{anyhow, Result};
 
 impl AppState {
     pub(crate) fn request_reindex(
@@ -45,12 +44,7 @@ impl AppState {
             // check and await cannot strand this waiter.
             let mut notified = Box::pin(self.inner.index_completion.notified());
             let _ = notified.as_mut().enable();
-            if let Some(completion) = self
-                .inner
-                .index_scheduler
-                .lock()
-                .completion_for(generation)
-            {
+            if let Some(completion) = self.inner.index_scheduler.lock().completion_for(generation) {
                 return completion.map_err(anyhow::Error::msg);
             }
             notified.await;
@@ -285,5 +279,4 @@ impl AppState {
         self.handle.emit("index://status", "completed")?;
         Ok(())
     }
-
 }

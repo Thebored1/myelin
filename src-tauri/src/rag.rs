@@ -66,6 +66,7 @@ pub struct RetrievedChunk {
 
 /// Format ranked passages without allowing retrieval to consume the rest of
 /// the model context. The final chunk is truncated when it reaches the budget.
+#[cfg(test)]
 pub fn pack_passages(chunks: Vec<RetrievedChunk>, char_budget: usize) -> String {
     pack_passages_limited(chunks, char_budget, usize::MAX)
 }
@@ -96,7 +97,12 @@ pub fn pack_passages_limited(
         if excerpt.trim().is_empty() {
             continue;
         }
-        evidence.push_str(&format!("\n\n[{} | document {}]\n{}", chunk_label(&chunk), chunk.doc_id, excerpt.trim()));
+        evidence.push_str(&format!(
+            "\n\n[{} | document {}]\n{}",
+            chunk_label(&chunk),
+            chunk.doc_id,
+            excerpt.trim()
+        ));
         used += excerpt.chars().count();
         packed += 1;
         kept.push(chunk);
@@ -115,8 +121,8 @@ pub fn pack_passages_focused(
     max_chunks: usize,
 ) -> String {
     const STOP: &[&str] = &[
-        "about", "does", "from", "mention", "paper", "tell", "that", "this", "what",
-        "which", "with",
+        "about", "does", "from", "mention", "paper", "tell", "that", "this", "what", "which",
+        "with",
     ];
     let mut terms: Vec<String> = query
         .to_ascii_lowercase()
@@ -135,27 +141,33 @@ pub fn pack_passages_focused(
         if used >= char_budget || packed >= max_chunks {
             break;
         }
-        if chunk.text.trim().is_empty() || !seen.insert(chunk.text.trim().to_string()) || materially_overlaps(&chunk, &kept) {
+        if chunk.text.trim().is_empty()
+            || !seen.insert(chunk.text.trim().to_string())
+            || materially_overlaps(&chunk, &kept)
+        {
             continue;
         }
         let remaining = char_budget - used;
         let text_lower = chunk.text.to_ascii_lowercase();
-        let match_at = terms
-            .iter()
-            .find_map(|term| text_lower.find(term));
+        let match_at = terms.iter().find_map(|term| text_lower.find(term));
         let start = match_at
-            .map(|at| text_lower[..at].chars().count().saturating_sub(remaining / 3))
+            .map(|at| {
+                text_lower[..at]
+                    .chars()
+                    .count()
+                    .saturating_sub(remaining / 3)
+            })
             .unwrap_or(0);
-        let excerpt: String = chunk
-            .text
-            .chars()
-            .skip(start)
-            .take(remaining)
-            .collect();
+        let excerpt: String = chunk.text.chars().skip(start).take(remaining).collect();
         if excerpt.trim().is_empty() {
             continue;
         }
-        evidence.push_str(&format!("\n\n[{} | document {}]\n{}", chunk_label(&chunk), chunk.doc_id, excerpt.trim()));
+        evidence.push_str(&format!(
+            "\n\n[{} | document {}]\n{}",
+            chunk_label(&chunk),
+            chunk.doc_id,
+            excerpt.trim()
+        ));
         used += excerpt.chars().count();
         packed += 1;
         kept.push(chunk);
@@ -166,22 +178,36 @@ pub fn pack_passages_focused(
 fn chunk_label(chunk: &RetrievedChunk) -> String {
     let mut label = chunk.source.clone();
     if let (Some(start), Some(end)) = (chunk.page_start, chunk.page_end) {
-        if start == end { label.push_str(&format!(" · page {start}")); }
-        else { label.push_str(&format!(" · pages {start}–{end}")); }
+        if start == end {
+            label.push_str(&format!(" · page {start}"));
+        } else {
+            label.push_str(&format!(" · pages {start}–{end}"));
+        }
     }
     if let (Some(start), Some(end)) = (&chunk.section_start, &chunk.section_end) {
-        if start == end { label.push_str(&format!(" · {start}")); }
-        else { label.push_str(&format!(" · {start} → {end}")); }
-    } else if let Some(section) = &chunk.section_start { label.push_str(&format!(" · {section}")); }
+        if start == end {
+            label.push_str(&format!(" · {start}"));
+        } else {
+            label.push_str(&format!(" · {start} → {end}"));
+        }
+    } else if let Some(section) = &chunk.section_start {
+        label.push_str(&format!(" · {section}"));
+    }
     label
 }
 
 fn materially_overlaps(candidate: &RetrievedChunk, kept: &[RetrievedChunk]) -> bool {
-    let (Some(start), Some(end)) = (candidate.char_start, candidate.char_end) else { return false; };
+    let (Some(start), Some(end)) = (candidate.char_start, candidate.char_end) else {
+        return false;
+    };
     let length = (end - start).max(1) as f32;
     kept.iter().any(|other| {
-        if other.doc_id != candidate.doc_id { return false; }
-        let (Some(other_start), Some(other_end)) = (other.char_start, other.char_end) else { return false; };
+        if other.doc_id != candidate.doc_id {
+            return false;
+        }
+        let (Some(other_start), Some(other_end)) = (other.char_start, other.char_end) else {
+            return false;
+        };
         let overlap = (end.min(other_end) - start.max(other_start)).max(0) as f32;
         overlap / length >= 0.60
     })
@@ -205,7 +231,10 @@ fn schema(dimension: i32) -> Arc<Schema> {
         Field::new("chunker_version", DataType::Utf8, false),
         Field::new(
             "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dimension),
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                dimension,
+            ),
             true,
         ),
     ]))
@@ -229,9 +258,15 @@ pub fn prepare_schema(index_dir: &Path, dimension: i32) -> Result<bool> {
         chunker: crate::embeddings::CHUNKER_VERSION.into(),
         dimension,
         lexical_version: LEXICAL_VERSION.into(),
-        expected_columns: schema(dimension).fields().iter().map(|field| field.name().clone()).collect(),
+        expected_columns: schema(dimension)
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect(),
     };
-    let current = std::fs::read(&marker_path).ok().and_then(|raw| serde_json::from_slice::<SchemaMarker>(&raw).ok());
+    let current = std::fs::read(&marker_path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<SchemaMarker>(&raw).ok());
     let compatible = current.is_some_and(|marker| {
         marker.version == expected.version
             && marker.chunker == expected.chunker
@@ -240,8 +275,13 @@ pub fn prepare_schema(index_dir: &Path, dimension: i32) -> Result<bool> {
             && marker.expected_columns == expected.expected_columns
     });
     let reset = index_dir.exists() && !compatible;
-    if reset { std::fs::remove_dir_all(index_dir).with_context(|| format!("failed to reset derived rag index {}", index_dir.display()))?; }
-    std::fs::create_dir_all(index_dir).with_context(|| format!("failed to create rag index {}", index_dir.display()))?;
+    if reset {
+        std::fs::remove_dir_all(index_dir).with_context(|| {
+            format!("failed to reset derived rag index {}", index_dir.display())
+        })?;
+    }
+    std::fs::create_dir_all(index_dir)
+        .with_context(|| format!("failed to create rag index {}", index_dir.display()))?;
     if !compatible {
         let temp = marker_path.with_extension("json.tmp");
         std::fs::write(&temp, serde_json::to_vec_pretty(&expected)?)?;
@@ -261,14 +301,35 @@ async fn open(index_dir: &Path, dimension: i32) -> Result<Connection> {
 async fn open_or_create(conn: &Connection, dimension: i32) -> Result<Table> {
     let table = match conn.open_table(RAG_TABLE).execute().await {
         Ok(t) => {
-            let actual = t.schema().await.context("failed to inspect rag table schema")?;
+            let actual = t
+                .schema()
+                .await
+                .context("failed to inspect rag table schema")?;
             let expected = schema(dimension);
-            let compatible = actual.fields().iter().zip(expected.fields()).all(|(actual, expected)| actual.name() == expected.name() && actual.data_type() == expected.data_type() && actual.is_nullable() == expected.is_nullable())
-                && actual.fields().len() == expected.fields().len();
-            if compatible { Ok(t) } else {
-                log::warn!("[rag] live schema disagrees with marker; recreating derived document table");
-                conn.drop_table(RAG_TABLE).await.context("failed to reset incompatible rag table")?;
-                conn.create_empty_table(RAG_TABLE, schema(dimension)).execute().await.context("failed to recreate rag table")
+            let compatible =
+                actual
+                    .fields()
+                    .iter()
+                    .zip(expected.fields())
+                    .all(|(actual, expected)| {
+                        actual.name() == expected.name()
+                            && actual.data_type() == expected.data_type()
+                            && actual.is_nullable() == expected.is_nullable()
+                    })
+                    && actual.fields().len() == expected.fields().len();
+            if compatible {
+                Ok(t)
+            } else {
+                log::warn!(
+                    "[rag] live schema disagrees with marker; recreating derived document table"
+                );
+                conn.drop_table(RAG_TABLE)
+                    .await
+                    .context("failed to reset incompatible rag table")?;
+                conn.create_empty_table(RAG_TABLE, schema(dimension))
+                    .execute()
+                    .await
+                    .context("failed to recreate rag table")
             }
         }
         Err(_) => conn
@@ -279,16 +340,32 @@ async fn open_or_create(conn: &Connection, dimension: i32) -> Result<Table> {
     }?;
     // Marker files cannot prove an FTS index exists. Inspect the live table
     // before returning it and repair a missing lexical index immediately.
-    let indices = table.list_indices().await.context("failed to inspect rag indexes")?;
-    let has_fts = indices.iter().any(|index| index.columns.iter().any(|column| column == "lexical_text") && matches!(index.index_type, lancedb::index::IndexType::FTS));
+    let indices = table
+        .list_indices()
+        .await
+        .context("failed to inspect rag indexes")?;
+    let has_fts = indices.iter().any(|index| {
+        index.columns.iter().any(|column| column == "lexical_text")
+            && matches!(index.index_type, lancedb::index::IndexType::FTS)
+    });
     if !has_fts {
-        table.create_index(&["lexical_text"], lancedb::index::Index::FTS(Default::default())).execute().await.context("failed to create rag FTS index")?;
+        table
+            .create_index(
+                &["lexical_text"],
+                lancedb::index::Index::FTS(Default::default()),
+            )
+            .execute()
+            .await
+            .context("failed to create rag FTS index")?;
     }
     Ok(table)
 }
 
 pub async fn contains_document(index_dir: &Path, doc_id: &str) -> Result<bool> {
-    let conn = connect(index_dir.to_string_lossy().as_ref()).execute().await.context("failed to open rag db")?;
+    let conn = connect(index_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .context("failed to open rag db")?;
     let table = match conn.open_table(RAG_TABLE).execute().await {
         Ok(table) => table,
         Err(_) => return Ok(false),
@@ -315,21 +392,36 @@ pub async fn contains_document(index_dir: &Path, doc_id: &str) -> Result<bool> {
 /// ones. The delete is a no-op on first ingest.
 pub async fn upsert_document(index_dir: &Path, doc_id: &str, chunks: Vec<DocChunk>) -> Result<()> {
     if chunks.is_empty() {
-        let conn = connect(index_dir.to_string_lossy().as_ref()).execute().await.context("failed to open rag db")?;
+        let conn = connect(index_dir.to_string_lossy().as_ref())
+            .execute()
+            .await
+            .context("failed to open rag db")?;
         if let Ok(table) = conn.open_table(RAG_TABLE).execute().await {
-            let _ = table.delete(&format!("doc_id = '{}'", doc_id.replace('\'', "''"))).await;
+            let _ = table
+                .delete(&format!("doc_id = '{}'", doc_id.replace('\'', "''")))
+                .await;
         }
         return Ok(());
     }
-    let dimension = chunks.first().map(|chunk| chunk.vector.len() as i32).unwrap_or(DIM);
-    if dimension <= 0 || chunks.iter().any(|chunk| chunk.vector.len() != dimension as usize) { anyhow::bail!("RAG document contains inconsistent embedding dimensions"); }
+    let dimension = chunks
+        .first()
+        .map(|chunk| chunk.vector.len() as i32)
+        .unwrap_or(DIM);
+    if dimension <= 0
+        || chunks
+            .iter()
+            .any(|chunk| chunk.vector.len() != dimension as usize)
+    {
+        anyhow::bail!("RAG document contains inconsistent embedding dimensions");
+    }
     let conn = open(index_dir, dimension).await?;
     let table = open_or_create(&conn, dimension).await?;
     let doc_ids = StringArray::from_iter_values(chunks.iter().map(|c| c.doc_id.as_str()));
     let sources = StringArray::from_iter_values(chunks.iter().map(|c| c.source.as_str()));
     let indices = Int32Array::from_iter_values(chunks.iter().map(|c| c.chunk_index));
     let texts = StringArray::from_iter_values(chunks.iter().map(|c| c.text.as_str()));
-    let lexical_texts = StringArray::from_iter_values(chunks.iter().map(|c| c.lexical_text.as_str()));
+    let lexical_texts =
+        StringArray::from_iter_values(chunks.iter().map(|c| c.lexical_text.as_str()));
     let token_counts = Int32Array::from_iter_values(chunks.iter().map(|c| c.token_count));
     let char_starts = Int64Array::from_iter(chunks.iter().map(|c| c.char_start));
     let char_ends = Int64Array::from_iter(chunks.iter().map(|c| c.char_end));
@@ -337,8 +429,10 @@ pub async fn upsert_document(index_dir: &Path, doc_id: &str, chunks: Vec<DocChun
     let page_ends = Int32Array::from_iter(chunks.iter().map(|c| c.page_end));
     let section_starts = StringArray::from_iter(chunks.iter().map(|c| c.section_start.as_deref()));
     let section_ends = StringArray::from_iter(chunks.iter().map(|c| c.section_end.as_deref()));
-    let tokenizer_modes = StringArray::from_iter_values(chunks.iter().map(|c| c.tokenizer_mode.as_str()));
-    let chunker_versions = StringArray::from_iter_values(chunks.iter().map(|c| c.chunker_version.as_str()));
+    let tokenizer_modes =
+        StringArray::from_iter_values(chunks.iter().map(|c| c.tokenizer_mode.as_str()));
+    let chunker_versions =
+        StringArray::from_iter_values(chunks.iter().map(|c| c.chunker_version.as_str()));
     let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
         chunks
             .iter()
@@ -381,7 +475,10 @@ pub async fn upsert_document(index_dir: &Path, doc_id: &str, chunks: Vec<DocChun
     // Best-effort BM25 full-text index on a derived lexical representation.
     // Ignored if it already exists or the build lacks FTS — vector search still works.
     let _ = table
-        .create_index(&["lexical_text"], lancedb::index::Index::FTS(Default::default()))
+        .create_index(
+            &["lexical_text"],
+            lancedb::index::Index::FTS(Default::default()),
+        )
         .execute()
         .await;
     Ok(())
@@ -406,8 +503,16 @@ fn rows_from_batch(batch: &RecordBatch) -> Vec<RetrievedChunk> {
     let dists = batch
         .column_by_name("_distance")
         .and_then(|c| c.as_any().downcast_ref::<Float32Array>().cloned());
-    let int64 = |name: &str| batch.column_by_name(name).and_then(|c| c.as_any().downcast_ref::<Int64Array>().cloned());
-    let int32 = |name: &str| batch.column_by_name(name).and_then(|c| c.as_any().downcast_ref::<Int32Array>().cloned());
+    let int64 = |name: &str| {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>().cloned())
+    };
+    let int32 = |name: &str| {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<Int32Array>().cloned())
+    };
     let optional_string = |name: &str| str_col(name);
     let token_counts = int32("token_count");
     let char_starts = int64("char_start");
@@ -419,19 +524,43 @@ fn rows_from_batch(batch: &RecordBatch) -> Vec<RetrievedChunk> {
 
     (0..batch.num_rows())
         .map(|i| RetrievedChunk {
-            doc_id: doc_ids.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
-            source: sources.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+            doc_id: doc_ids
+                .as_ref()
+                .map(|a| a.value(i).to_string())
+                .unwrap_or_default(),
+            source: sources
+                .as_ref()
+                .map(|a| a.value(i).to_string())
+                .unwrap_or_default(),
             chunk_index: indices.as_ref().map(|a| a.value(i)).unwrap_or(0),
-            text: texts.as_ref().map(|a| a.value(i).to_string()).unwrap_or_default(),
+            text: texts
+                .as_ref()
+                .map(|a| a.value(i).to_string())
+                .unwrap_or_default(),
             distance: dists.as_ref().map(|a| a.value(i)).unwrap_or(0.0),
-            bm25_score: scores.as_ref().and_then(|a| (!a.is_null(i)).then(|| a.value(i))).filter(|value| value.is_finite()),
+            bm25_score: scores
+                .as_ref()
+                .and_then(|a| (!a.is_null(i)).then(|| a.value(i)))
+                .filter(|value| value.is_finite()),
             token_count: token_counts.as_ref().map(|a| a.value(i)).unwrap_or(0),
-            char_start: char_starts.as_ref().and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
-            char_end: char_ends.as_ref().and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
-            page_start: page_starts.as_ref().and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
-            page_end: page_ends.as_ref().and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
-            section_start: section_starts.as_ref().and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
-            section_end: section_ends.as_ref().and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
+            char_start: char_starts
+                .as_ref()
+                .and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
+            char_end: char_ends
+                .as_ref()
+                .and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
+            page_start: page_starts
+                .as_ref()
+                .and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
+            page_end: page_ends
+                .as_ref()
+                .and_then(|a| (!a.is_null(i)).then(|| a.value(i))),
+            section_start: section_starts
+                .as_ref()
+                .and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
+            section_end: section_ends
+                .as_ref()
+                .and_then(|a| (!a.is_null(i)).then(|| a.value(i).to_string())),
         })
         .collect()
 }
@@ -461,7 +590,8 @@ async fn vector_hits(
     if let Some(filter) = doc_filter(doc_ids) {
         query = query.only_if(filter);
     }
-    let mut stream = query.limit(k)
+    let mut stream = query
+        .limit(k)
         .execute()
         .await
         .context("rag vector search")?;
@@ -480,20 +610,17 @@ async fn fts_hits(
 ) -> Result<Vec<RetrievedChunk>> {
     let analysis = crate::retrieval_pipeline::RetrievalQuery::analyze_cached(query_text);
     let fts_query = analysis.fts_query();
-    if fts_query.is_empty() { return Ok(Vec::new()); }
-    let mut query = table
-        .query()
-        .full_text_search(
-            lancedb::index::scalar::FullTextSearchQuery::new(fts_query)
-                .columns(Some(vec!["lexical_text".to_string()])),
-        );
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut query = table.query().full_text_search(
+        lancedb::index::scalar::FullTextSearchQuery::new(fts_query)
+            .columns(Some(vec!["lexical_text".to_string()])),
+    );
     if let Some(filter) = doc_filter(doc_ids) {
         query = query.only_if(filter);
     }
-    let mut stream = query.limit(k)
-        .execute()
-        .await
-        .context("rag fts search")?;
+    let mut stream = query.limit(k).execute().await.context("rag fts search")?;
     let mut out = Vec::new();
     while let Some(batch) = stream.try_next().await.context("rag fts stream")? {
         out.extend(rows_from_batch(&batch));
@@ -507,24 +634,54 @@ async fn adjacent_hits(table: &Table, seeds: &[RetrievedChunk]) -> Result<Vec<Re
         let doc = seed.doc_id.replace('\'', "''");
         let before = seed.chunk_index.saturating_sub(1);
         let after = seed.chunk_index.saturating_add(1);
-        clauses.push(format!("(doc_id = '{doc}' AND chunk_index IN ({before}, {after}))"));
+        clauses.push(format!(
+            "(doc_id = '{doc}' AND chunk_index IN ({before}, {after}))"
+        ));
     }
-    if clauses.is_empty() { return Ok(Vec::new()); }
-    let mut stream = table.query().only_if(clauses.join(" OR ")).execute().await.context("rag adjacent chunk lookup")?;
+    if clauses.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stream = table
+        .query()
+        .only_if(clauses.join(" OR "))
+        .execute()
+        .await
+        .context("rag adjacent chunk lookup")?;
     let mut chunks = Vec::new();
-    while let Some(batch) = stream.try_next().await.context("rag adjacent chunk stream")? { chunks.extend(rows_from_batch(&batch)); }
+    while let Some(batch) = stream
+        .try_next()
+        .await
+        .context("rag adjacent chunk stream")?
+    {
+        chunks.extend(rows_from_batch(&batch));
+    }
     Ok(chunks)
 }
 
 fn should_expand_neighbors(intent: crate::retrieval_pipeline::RetrievalIntent) -> bool {
-    matches!(intent, crate::retrieval_pipeline::RetrievalIntent::BroadSummary | crate::retrieval_pipeline::RetrievalIntent::Quotation | crate::retrieval_pipeline::RetrievalIntent::Comparison | crate::retrieval_pipeline::RetrievalIntent::Synthesis)
+    matches!(
+        intent,
+        crate::retrieval_pipeline::RetrievalIntent::BroadSummary
+            | crate::retrieval_pipeline::RetrievalIntent::Quotation
+            | crate::retrieval_pipeline::RetrievalIntent::Comparison
+            | crate::retrieval_pipeline::RetrievalIntent::Synthesis
+    )
 }
 
-fn append_neighbors(mut seeds: Vec<RetrievedChunk>, neighbors: Vec<RetrievedChunk>) -> Vec<RetrievedChunk> {
+fn append_neighbors(
+    mut seeds: Vec<RetrievedChunk>,
+    neighbors: Vec<RetrievedChunk>,
+) -> Vec<RetrievedChunk> {
     let mut seen = std::collections::HashSet::new();
-    for seed in &seeds { seen.insert((seed.doc_id.clone(), seed.chunk_index)); }
+    for seed in &seeds {
+        seen.insert((seed.doc_id.clone(), seed.chunk_index));
+    }
     for neighbor in neighbors {
-        if seen.insert((neighbor.doc_id.clone(), neighbor.chunk_index)) && !materially_overlaps(&neighbor, &seeds) { seeds.push(neighbor); }
+        if seen.insert((neighbor.doc_id.clone(), neighbor.chunk_index))
+            && !materially_overlaps(&neighbor, &seeds)
+        {
+            seeds.push(neighbor);
+        }
     }
     seeds
 }
@@ -536,19 +693,40 @@ pub async fn search_fts_only(
     k: usize,
     doc_ids: Option<&[String]>,
 ) -> Result<Vec<RetrievedChunk>> {
-    let conn = connect(index_dir.to_string_lossy().as_ref()).execute().await.context("failed to open rag db")?;
-    let table = conn.open_table(RAG_TABLE).execute().await.context("document index is not initialized")?;
+    let conn = connect(index_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+        .context("failed to open rag db")?;
+    let table = conn
+        .open_table(RAG_TABLE)
+        .execute()
+        .await
+        .context("document index is not initialized")?;
     let query = crate::retrieval_pipeline::RetrievalQuery::analyze_cached(query_text);
-    let hits = fts_hits(&table, query_text, crate::retrieval_pipeline::FTS_POOL, doc_ids).await?;
+    let hits = fts_hits(
+        &table,
+        query_text,
+        crate::retrieval_pipeline::FTS_POOL,
+        doc_ids,
+    )
+    .await?;
     Ok(crate::retrieval_pipeline::select_diverse(
         crate::retrieval_pipeline::rank_candidates(&query, Vec::new(), hits, k),
         query.intent,
         doc_ids.is_some_and(|ids| ids.len() == 1),
-    ).into_iter().map(|candidate| candidate.chunk).collect())
+    )
+    .into_iter()
+    .map(|candidate| candidate.chunk)
+    .collect())
 }
 
 /// Vector-only search (kept for tests / when there is no query text).
-pub async fn search(index_dir: &Path, query_vec: Vec<f32>, k: usize) -> Result<Vec<RetrievedChunk>> {
+#[cfg(test)]
+pub async fn search(
+    index_dir: &Path,
+    query_vec: Vec<f32>,
+    k: usize,
+) -> Result<Vec<RetrievedChunk>> {
     let conn = open(index_dir, query_vec.len() as i32).await?;
     let table = match conn.open_table(RAG_TABLE).execute().await {
         Ok(t) => t,
@@ -606,13 +784,21 @@ pub async fn search_hybrid(
         crate::retrieval_pipeline::rank_candidates(&query, vec_hits, fts, k),
         query.intent,
         doc_ids.is_some_and(|ids| ids.len() == 1),
-    ).into_iter().map(|candidate| candidate.chunk).collect::<Vec<_>>();
+    )
+    .into_iter()
+    .map(|candidate| candidate.chunk)
+    .collect::<Vec<_>>();
     if should_expand_neighbors(query.intent) {
         match adjacent_hits(&table, &seeds).await {
             Ok(neighbors) => Ok(append_neighbors(seeds, neighbors)),
-            Err(error) => { log::warn!("[rag] adjacent chunk lookup failed; returning seeds: {error:#}"); Ok(seeds) }
+            Err(error) => {
+                log::warn!("[rag] adjacent chunk lookup failed; returning seeds: {error:#}");
+                Ok(seeds)
+            }
         }
-    } else { Ok(seeds) }
+    } else {
+        Ok(seeds)
+    }
 }
 
 #[cfg(test)]
@@ -635,12 +821,18 @@ mod tests {
     async fn ingest_search_and_replace_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         // Two chunks: one near 0.1, one near 0.9.
-        upsert_document(dir.path(), "d1", vec![chunk("d1", 0, 0.1), chunk("d1", 1, 0.9)])
-            .await
-            .unwrap();
+        upsert_document(
+            dir.path(),
+            "d1",
+            vec![chunk("d1", 0, 0.1), chunk("d1", 1, 0.9)],
+        )
+        .await
+        .unwrap();
 
         // Query closest to the 0.9 vector → chunk_index 1 ranks first.
-        let res = search(dir.path(), vec![0.9; DIM as usize], 5).await.unwrap();
+        let res = search(dir.path(), vec![0.9; DIM as usize], 5)
+            .await
+            .unwrap();
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].chunk_index, 1);
         assert_eq!(res[0].doc_id, "d1");
@@ -649,7 +841,9 @@ mod tests {
         upsert_document(dir.path(), "d1", vec![chunk("d1", 0, 0.5)])
             .await
             .unwrap();
-        let res2 = search(dir.path(), vec![0.5; DIM as usize], 5).await.unwrap();
+        let res2 = search(dir.path(), vec![0.5; DIM as usize], 5)
+            .await
+            .unwrap();
         assert_eq!(res2.len(), 1);
         assert_eq!(res2[0].chunk_index, 0);
     }
@@ -657,7 +851,9 @@ mod tests {
     #[tokio::test]
     async fn search_missing_table_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let res = search(dir.path(), vec![0.0; DIM as usize], 5).await.unwrap();
+        let res = search(dir.path(), vec![0.0; DIM as usize], 5)
+            .await
+            .unwrap();
         assert!(res.is_empty());
     }
 
@@ -667,7 +863,9 @@ mod tests {
         let err = search_hybrid(dir.path(), vec![0.0; DIM as usize], "query", 5, None)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("document index is not initialized"));
+        assert!(err
+            .to_string()
+            .contains("document index is not initialized"));
     }
 
     #[test]
@@ -678,9 +876,13 @@ mod tests {
         std::fs::write(dir.path().join("derived-only"), "stale").unwrap();
         assert!(prepare_schema(dir.path(), DIM).unwrap());
         assert!(!dir.path().join("derived-only").exists());
-        let current: SchemaMarker = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+        let current: SchemaMarker =
+            serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
         assert_eq!(current.version, RAG_SCHEMA_VERSION);
-        assert!(current.expected_columns.iter().any(|column| column == "lexical_text"));
+        assert!(current
+            .expected_columns
+            .iter()
+            .any(|column| column == "lexical_text"));
     }
 
     #[test]
@@ -738,9 +940,15 @@ mod tests {
         upsert_document(dir.path(), "d", docs).await.unwrap();
         // Hybrid: BM25 should surface chunk 1 on the text terms even though the
         // query vector is nearer chunk 0. Just assert the merge runs and returns.
-        let res = search_hybrid(dir.path(), vec![0.1; DIM as usize], "attention transformers", 5, None)
-            .await
-            .unwrap();
+        let res = search_hybrid(
+            dir.path(),
+            vec![0.1; DIM as usize],
+            "attention transformers",
+            5,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!res.is_empty());
         assert!(res.iter().any(|c| c.chunk_index == 1));
     }
@@ -771,10 +979,15 @@ mod tests {
         assert!(hits.iter().all(|hit| hit.doc_id == "note-a"));
 
         let pair = vec!["note-a".to_string(), "note-b".to_string()];
-        let pair_hits =
-            search_hybrid(dir.path(), vec![0.5; DIM as usize], "chunk", 10, Some(&pair))
-                .await
-                .unwrap();
+        let pair_hits = search_hybrid(
+            dir.path(),
+            vec![0.5; DIM as usize],
+            "chunk",
+            10,
+            Some(&pair),
+        )
+        .await
+        .unwrap();
         assert!(pair_hits.iter().any(|hit| hit.doc_id == "note-a"));
         assert!(pair_hits.iter().any(|hit| hit.doc_id == "note-b"));
     }

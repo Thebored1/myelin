@@ -1,9 +1,12 @@
 import { goto, beforeNavigate } from '$app/navigation';
-import type { GitCommit, NoteDocument } from '$lib/types';
+import { resolve } from '$app/paths';
+import type { GitCommit } from '$lib/types';
 import { invoke } from '@tauri-apps/api/core';
+import type { ControllerContext } from '$lib/controller-context';
 
 /** Owns history previews and unsaved-navigation protection. */
-export function createNavigationSession(ctx: Record<string, any>) {
+export function createNavigationSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	let isProgrammaticNavigation = $state(false);
 	let pendingNavigationUrl = $state('');
 	let pendingBack = $state(false);
@@ -15,7 +18,7 @@ export function createNavigationSession(ctx: Record<string, any>) {
 			const history = await invoke<GitCommit[]>('get_note_history', { noteId: ctx.note.id });
 			ctx.noteHistory = history
 				.filter((c) => c.message && c.message.trim() !== '')
-				.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+				.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
 		} catch (e) {
 			console.error('Failed to fetch history:', e);
 		} finally {
@@ -27,7 +30,10 @@ export function createNavigationSession(ctx: Record<string, any>) {
 		if (!ctx.note) return;
 		ctx.isBusy = true;
 		try {
-			let rawContent = await invoke<string>('get_note_version', { noteId: ctx.note.id, commitHash });
+			let rawContent = await invoke<string>('get_note_version', {
+				noteId: ctx.note.id,
+				commitHash
+			});
 			if (rawContent.match(/^---\r?\n/)) {
 				const match = rawContent.match(/^---\r?\n[\s\S]*?\n---\r?\n/);
 				if (match) rawContent = rawContent.slice(match[0].length);
@@ -46,7 +52,10 @@ export function createNavigationSession(ctx: Record<string, any>) {
 		if (!ctx.note) return;
 		ctx.isBusy = true;
 		try {
-			let rawContent = await invoke<string>('get_note_version', { noteId: ctx.note.id, commitHash });
+			let rawContent = await invoke<string>('get_note_version', {
+				noteId: ctx.note.id,
+				commitHash
+			});
 			if (rawContent.match(/^---\r?\n/)) {
 				const match = rawContent.match(/^---\r?\n[\s\S]*?\n---\r?\n/);
 				if (match) rawContent = rawContent.slice(match[0].length);
@@ -72,13 +81,15 @@ export function createNavigationSession(ctx: Record<string, any>) {
 			return;
 		}
 		isProgrammaticNavigation = true;
+		// URL is supplied by the internal navigation guard or a trusted caller.
+		// eslint-disable-next-line svelte/no-navigation-without-resolve
 		void goto(url);
 	}
 
 	function navigateBack() {
 		isProgrammaticNavigation = true;
 		if (typeof window !== 'undefined' && window.history.length > 1) history.back();
-		else void goto('/');
+		else void goto(resolve('/'));
 	}
 
 	function goBack() {
@@ -120,6 +131,8 @@ export function createNavigationSession(ctx: Record<string, any>) {
 		}
 		if (pendingNavigationUrl) {
 			isProgrammaticNavigation = true;
+			// URL was captured from SvelteKit's beforeNavigate event.
+			// eslint-disable-next-line svelte/no-navigation-without-resolve
 			void goto(pendingNavigationUrl);
 			pendingNavigationUrl = '';
 		}
@@ -141,11 +154,23 @@ export function createNavigationSession(ctx: Record<string, any>) {
 		handleBeforeUnload,
 		confirmNavigation,
 		cancelNavigation,
-		get isProgrammaticNavigation() { return isProgrammaticNavigation; },
-		set isProgrammaticNavigation(value) { isProgrammaticNavigation = value; },
-		get pendingNavigationUrl() { return pendingNavigationUrl; },
-		set pendingNavigationUrl(value) { pendingNavigationUrl = value; },
-		get pendingBack() { return pendingBack; },
-		set pendingBack(value) { pendingBack = value; }
+		get isProgrammaticNavigation() {
+			return isProgrammaticNavigation;
+		},
+		set isProgrammaticNavigation(value) {
+			isProgrammaticNavigation = value;
+		},
+		get pendingNavigationUrl() {
+			return pendingNavigationUrl;
+		},
+		set pendingNavigationUrl(value) {
+			pendingNavigationUrl = value;
+		},
+		get pendingBack() {
+			return pendingBack;
+		},
+		set pendingBack(value) {
+			pendingBack = value;
+		}
 	};
 }

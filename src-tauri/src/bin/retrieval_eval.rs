@@ -10,7 +10,10 @@ fn main() {
         .build()
         .expect("create Tokio runtime");
     match runtime.block_on(myelin_lib::retrieval_eval::run_baseline(&corpus, &queries)) {
-        Ok(report) => println!("{}", serde_json::to_string_pretty(&report).expect("serialize report")),
+        Ok(report) => println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize report")
+        ),
         Err(error) => {
             eprintln!("retrieval evaluation failed: {error:#}");
             std::process::exit(1);

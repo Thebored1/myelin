@@ -1,13 +1,20 @@
 import { onDestroy } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { goto } from '$app/navigation';
+import { resolve } from '$app/paths';
 import type { AppSnapshot, IndexState, ProviderStatus } from '$lib/types';
-import { backendPreference as normalizeBackendPreference, configMatchPositions as findConfigMatches, inferencePayload, openharnPayload, recommendedBeeBackend as chooseBeeBackend } from '$lib/settings/model';
-import type { OpenharnForm } from '$lib/settings/types';
+import type { OcrStatus } from './types';
+import {
+	backendPreference as normalizeBackendPreference,
+	recommendedBeeBackend as chooseBeeBackend
+} from '$lib/settings/model';
 import { createSettingsLifecycle } from './lifecycle.svelte';
 import { createSettingsShortcuts } from './shortcuts.svelte';
+import { createAiConfigController, type AiConfigStatus } from './ai-config';
+import { createRetrievalController } from './retrieval';
+import { createSettingsPersistence } from './persistence';
+import { createBoundController } from '$lib/controllerView';
 export function createSettingsController() {
 	type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 
@@ -65,11 +72,33 @@ export function createSettingsController() {
 	let startWithSystem = $state(false);
 	let backgroundError = $state('');
 	const shortcuts = createSettingsShortcuts({
-		get quickShortcut() { return quickShortcut; },
-		get quickRecording() { return quickRecording; }, set quickRecording(value) { quickRecording = value; },
-		get quickShortcutError() { return quickShortcutError; }, set quickShortcutError(value) { quickShortcutError = value; },
-		get chatShortcutRecording() { return chatShortcutRecording; }, set chatShortcutRecording(value) { chatShortcutRecording = value; },
-		get chatShortcutError() { return chatShortcutError; }, set chatShortcutError(value) { chatShortcutError = value; }
+		get quickShortcut() {
+			return quickShortcut;
+		},
+		get quickRecording() {
+			return quickRecording;
+		},
+		set quickRecording(value) {
+			quickRecording = value;
+		},
+		get quickShortcutError() {
+			return quickShortcutError;
+		},
+		set quickShortcutError(value) {
+			quickShortcutError = value;
+		},
+		get chatShortcutRecording() {
+			return chatShortcutRecording;
+		},
+		set chatShortcutRecording(value) {
+			chatShortcutRecording = value;
+		},
+		get chatShortcutError() {
+			return chatShortcutError;
+		},
+		set chatShortcutError(value) {
+			chatShortcutError = value;
+		}
 	});
 	const { applyShortcut, startRecording, startChatShortcutRecording } = shortcuts;
 	const hasGpuBuild = () =>
@@ -102,7 +131,7 @@ export function createSettingsController() {
 						? 'cuda'
 						: nvidiaDetected
 							? 'cuda'
-						: 'vulkan';
+							: 'vulkan';
 		if (!installedBackends.includes(need)) {
 			return {
 				level: 'warn',
@@ -125,17 +154,17 @@ export function createSettingsController() {
 						? installed('metal')
 							? 'metal'
 							: 'cpu'
-					: backendPreference === 'cuda'
-						? installed('cuda')
-							? 'cuda'
-							: 'cpu'
-						: nvidiaDetected && installed('cuda')
-							? 'cuda'
-							: installed('vulkan')
-								? 'vulkan'
-								: installed('metal')
-									? 'metal'
-									: 'cpu';
+						: backendPreference === 'cuda'
+							? installed('cuda')
+								? 'cuda'
+								: 'cpu'
+							: nvidiaDetected && installed('cuda')
+								? 'cuda'
+								: installed('vulkan')
+									? 'vulkan'
+									: installed('metal')
+										? 'metal'
+										: 'cpu';
 
 		if (backendPreference !== 'cpu' && backendFellBack) {
 			return {
@@ -177,29 +206,6 @@ export function createSettingsController() {
 	let saved = $state(false);
 	let enableJupyterExecution = $state(false);
 
-	// openharn sidecar settings (Settings > Agent).
-	type OpenharnSettings = {
-		port: number | null;
-		bin_path: string | null;
-		tool_mode: 'auto' | 'native' | 'prompt';
-		strict: boolean;
-		prompt_tools: boolean;
-		call_only: boolean;
-		no_think: boolean;
-		tool_choice: string | null;
-		template_kwargs: string | null;
-		narrow: boolean;
-		slm: boolean;
-		max_calls: number | null;
-		total_max: number | null;
-		tool_timeout_secs: number | null;
-		tool_subset: string | null;
-		base_url: string | null;
-		external_enabled: boolean;
-		external_base_url: string | null;
-		external_model: string | null;
-		external_api_key: string | null;
-	};
 	let ohPort = $state<number | null>(null);
 	let ohBinPath = $state('');
 	let ohToolMode = $state<'auto' | 'native' | 'prompt'>('auto');
@@ -218,19 +224,133 @@ export function createSettingsController() {
 	let externalModel = $state('');
 	let externalApiKey = $state('');
 	let ohSaving = $state(false);
-	type AiConfigStatus = {
-		configPath: string;
-		schemaPath: string;
-		candidateHash: string | null;
-		appliedHash: string | null;
-		hasUnappliedChanges: boolean;
-		validationState: string;
-		activeProfile: string | null;
-		runtimeId: string | null;
-		modelPath: string | null;
-		aiAvailable: boolean;
-		errors: { path: string; category: string; message: string }[];
-	};
+	const persistence = createSettingsPersistence({
+		get currentModelPath() {
+			return currentModelPath;
+		},
+		get contextSize() {
+			return contextSize;
+		},
+		get gpuLayers() {
+			return gpuLayers;
+		},
+		get threads() {
+			return threads;
+		},
+		get temperature() {
+			return temperature;
+		},
+		get topP() {
+			return topP;
+		},
+		get maxTurns() {
+			return maxTurns;
+		},
+		get extraArgs() {
+			return extraArgs;
+		},
+		set extraArgs(value) {
+			extraArgs = value;
+		},
+		get backendPreference() {
+			return backendPreference;
+		},
+		get thinking() {
+			return thinking;
+		},
+		get autoOffload() {
+			return autoOffload;
+		},
+		get ohPort() {
+			return ohPort;
+		},
+		get ohBinPath() {
+			return ohBinPath;
+		},
+		set ohBinPath(value) {
+			ohBinPath = value;
+		},
+		get ohToolMode() {
+			return ohToolMode;
+		},
+		get ohStrict() {
+			return ohStrict;
+		},
+		set ohStrict(value) {
+			ohStrict = value;
+		},
+		get ohPromptTools() {
+			return ohPromptTools;
+		},
+		set ohPromptTools(value) {
+			ohPromptTools = value;
+		},
+		get ohCallOnly() {
+			return ohCallOnly;
+		},
+		set ohCallOnly(value) {
+			ohCallOnly = value;
+		},
+		get ohNoThink() {
+			return ohNoThink;
+		},
+		get ohToolChoice() {
+			return ohToolChoice;
+		},
+		get ohTemplateKwargs() {
+			return ohTemplateKwargs;
+		},
+		get ohMaxCalls() {
+			return ohMaxCalls;
+		},
+		get ohTotalMax() {
+			return ohTotalMax;
+		},
+		get ohToolTimeout() {
+			return ohToolTimeout;
+		},
+		get ohBaseUrl() {
+			return ohBaseUrl;
+		},
+		get externalEnabled() {
+			return externalEnabled;
+		},
+		get externalBaseUrl() {
+			return externalBaseUrl;
+		},
+		get externalModel() {
+			return externalModel;
+		},
+		get externalApiKey() {
+			return externalApiKey;
+		},
+		set isSaving(value: boolean) {
+			isSaving = value;
+		},
+		set saved(value: boolean) {
+			saved = value;
+		},
+		set ohSaving(value: boolean) {
+			ohSaving = value;
+		},
+		get enableJupyterExecution() {
+			return enableJupyterExecution;
+		},
+		set enableJupyterExecution(value) {
+			enableJupyterExecution = value;
+		}
+	});
+	const {
+		saveModelPath,
+		saveAdvancedConfig,
+		debounceSave,
+		addExtraArg,
+		removeExtraArg,
+		toggleJupyterExecution,
+		pickOpenharnBin,
+		changeToolMode,
+		saveOpenharn
+	} = persistence;
 	let aiConfig = $state<AiConfigStatus | null>(null);
 	let aiConfigBusy = $state(false);
 	let aiConfigMessage = $state('');
@@ -240,71 +360,78 @@ export function createSettingsController() {
 	let aiConfigSearchInput: HTMLInputElement;
 	let aiConfigEditor: HTMLTextAreaElement;
 	let aiConfigSearchIndex = $state(-1);
-	function configMatchPositions() {
-		return findConfigMatches(aiConfigText, aiConfigSearch);
-	}
-	function gotoConfigMatch(direction = 1) {
-		const positions = configMatchPositions();
-		if (!positions.length) return;
-		aiConfigSearchIndex = (aiConfigSearchIndex + direction + positions.length) % positions.length;
-		const start = positions[aiConfigSearchIndex];
-		const end = start + aiConfigSearch.trim().length;
-		aiConfigEditor?.focus();
-		aiConfigEditor?.setSelectionRange(start, end);
-		if (aiConfigEditor) {
-			const lineHeight = parseFloat(getComputedStyle(aiConfigEditor).lineHeight) || 20;
-			const line = aiConfigText.slice(0, start).split('\n').length - 1;
-			aiConfigEditor.scrollTop = Math.max(0, line * lineHeight - aiConfigEditor.clientHeight / 2);
-		}
-	}
-	function handleConfigSearchKeydown(event: KeyboardEvent) {
-		if (event.key === 'Enter') { event.preventDefault(); gotoConfigMatch(event.shiftKey ? -1 : 1); }
-	}
 	function handleAiConfigKeydown(event: KeyboardEvent) {
-		if (!showAiConfig || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return;
+		if (!showAiConfig || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f')
+			return;
 		event.preventDefault();
 		event.stopPropagation();
 		aiConfigSearchInput?.focus();
 		aiConfigSearchInput?.select();
 	}
-	function configMatchCount() {
-		return configMatchPositions().length;
-	}
-	async function refreshAiConfig() {
-		aiConfig = await invoke<AiConfigStatus>('get_ai_config_status');
-	}
-	async function validateAiConfig() {
-		aiConfigBusy = true; aiConfigMessage = '';
-		try { aiConfig = await invoke<AiConfigStatus>('validate_ai_config'); aiConfigMessage = 'Configuration validated.'; }
-		catch (e) { aiConfigMessage = String(e); await refreshAiConfig(); }
-		finally { aiConfigBusy = false; }
-	}
-	async function applyAiConfig() {
-		if (!aiConfig?.candidateHash) return;
-		aiConfigBusy = true; aiConfigMessage = '';
-		try { aiConfig = await invoke<AiConfigStatus>('apply_ai_config', { candidateHash: aiConfig.candidateHash }); aiConfigMessage = 'Configuration applied.'; }
-		catch (e) { aiConfigMessage = String(e); }
-		finally { aiConfigBusy = false; }
-	}
-	async function copyAiConfigPath() {
-		if (aiConfig?.configPath) await navigator.clipboard?.writeText(aiConfig.configPath);
-	}
-	async function openAiConfig() {
-		try { await invoke('open_ai_config_file'); aiConfigText = await invoke<string>('read_ai_config'); showAiConfig = true; }
-		catch (e) { aiConfigMessage = String(e); }
-	}
-	async function saveAiConfigText() {
-		aiConfigBusy = true;
-		try { await invoke('save_ai_config', { contents: aiConfigText }); await refreshAiConfig(); showAiConfig = false; aiConfigMessage = 'Configuration saved. Validate it before applying.'; }
-		catch (e) { aiConfigMessage = String(e); }
-		finally { aiConfigBusy = false; }
-	}
+	const aiConfigController = createAiConfigController({
+		get aiConfig() {
+			return aiConfig;
+		},
+		set aiConfig(value) {
+			aiConfig = value;
+		},
+		get aiConfigBusy() {
+			return aiConfigBusy;
+		},
+		set aiConfigBusy(value) {
+			aiConfigBusy = value;
+		},
+		get aiConfigMessage() {
+			return aiConfigMessage;
+		},
+		set aiConfigMessage(value) {
+			aiConfigMessage = value;
+		},
+		get showAiConfig() {
+			return showAiConfig;
+		},
+		set showAiConfig(value) {
+			showAiConfig = value;
+		},
+		get aiConfigText() {
+			return aiConfigText;
+		},
+		set aiConfigText(value) {
+			aiConfigText = value;
+		},
+		get aiConfigSearch() {
+			return aiConfigSearch;
+		},
+		get aiConfigSearchInput() {
+			return aiConfigSearchInput;
+		},
+		get aiConfigEditor() {
+			return aiConfigEditor;
+		},
+		get aiConfigSearchIndex() {
+			return aiConfigSearchIndex;
+		},
+		set aiConfigSearchIndex(value) {
+			aiConfigSearchIndex = value;
+		}
+	});
+	const {
+		gotoConfigMatch,
+		handleConfigSearchKeydown,
+		configMatchCount,
+		refreshAiConfig,
+		validateAiConfig,
+		applyAiConfig,
+		copyAiConfigPath,
+		openAiConfig,
+		saveAiConfigText
+	} = aiConfigController;
 	// Web search + embeddings/RAG + model compatibility (Phase 5).
 	let searxngUrl = $state('');
 	let embedModelPath = $state('');
 	let rerankerModelPath = $state('');
 	let modelDownloadError = $state('');
-	let ocrStatus = $state<any>(null);
+	let ocrStatus = $state<OcrStatus | null>(null);
 	let ocrSaving = $state(false);
 	let downloadingModel = $state('');
 	type ProfileInfo = {
@@ -318,47 +445,44 @@ export function createSettingsController() {
 	};
 	let modelProfiles = $state<ProfileInfo[]>([]);
 
-	async function saveSearxng() {
-		await invoke('set_searxng_url', { url: searxngUrl.trim() || null });
-	}
-	async function pickEmbedModel() {
-		const picked = await open({
-			multiple: false,
-			filters: [{ name: 'GGUF model', extensions: ['gguf'] }]
-		});
-		if (typeof picked === 'string') {
-			await invoke('set_embed_model_path', { path: picked });
-			embedModelPath = picked;
+	const retrievalController = createRetrievalController({
+		get searxngUrl() {
+			return searxngUrl;
+		},
+		get embedModelPath() {
+			return embedModelPath;
+		},
+		set embedModelPath(value) {
+			embedModelPath = value;
+		},
+		get rerankerModelPath() {
+			return rerankerModelPath;
+		},
+		set rerankerModelPath(value) {
+			rerankerModelPath = value;
+		},
+		set modelDownloadError(value: string) {
+			modelDownloadError = value;
+		},
+		set downloadingModel(value: string) {
+			downloadingModel = value;
+		},
+		set ocrSaving(value: boolean) {
+			ocrSaving = value;
+		},
+		set ocrStatus(value: OcrStatus | null) {
+			ocrStatus = value;
 		}
-	}
-	async function clearEmbedModel() {
-		embedModelPath = '';
-		await invoke('set_embed_model_path', { path: null });
-	}
-	async function pickRerankerModel() {
-		const picked = await open({ multiple: false, filters: [{ name: 'GGUF model', extensions: ['gguf'] }] });
-		if (typeof picked === 'string') { await invoke('set_reranker_model_path', { path: picked }); rerankerModelPath = picked; }
-	}
-	async function clearRerankerModel() { rerankerModelPath = ''; await invoke('set_reranker_model_path', { path: null }); }
-	async function downloadBuiltInModel(id: string) {
-		modelDownloadError = ''; downloadingModel = id;
-		try {
-			const path = await invoke<string>('download_built_in_model', { id });
-			if (id.startsWith('nomic-')) embedModelPath = path; else rerankerModelPath = path;
-		} catch (error) { modelDownloadError = String(error); }
-		finally { downloadingModel = ''; }
-	}
-
-	async function saveOcrSettings(next: { autoLowTextPages: boolean; executablePath?: string | null; language: string }) {
-		ocrSaving = true;
-		try {
-			ocrStatus = await invoke('set_ocr_settings', { settings: next });
-		} catch (error) {
-			modelDownloadError = String(error);
-		} finally {
-			ocrSaving = false;
-		}
-	}
+	});
+	const {
+		saveSearxng,
+		pickEmbedModel,
+		clearEmbedModel,
+		pickRerankerModel,
+		clearRerankerModel,
+		downloadBuiltInModel,
+		saveOcrSettings
+	} = retrievalController;
 
 	async function refreshSnapshot() {
 		const snapshot = await invoke<AppSnapshot>('get_snapshot');
@@ -388,7 +512,7 @@ export function createSettingsController() {
 		if (typeof window !== 'undefined' && window.history.length > 1) {
 			history.back();
 		} else {
-			goto('/');
+			goto(resolve('/'));
 		}
 	}
 
@@ -397,62 +521,342 @@ export function createSettingsController() {
 		refreshSnapshot,
 		loadProviderStatus,
 		normalizeBackendPreference,
-		get downloadableBackends() { return downloadableBackends; }, set downloadableBackends(value) { downloadableBackends = value; },
-		get downloadableBeeBackends() { return downloadableBeeBackends; }, set downloadableBeeBackends(value) { downloadableBeeBackends = value; },
-		get backendPreference() { return backendPreference; }, set backendPreference(value) { backendPreference = value; },
-		get thinking() { return thinking; }, set thinking(value) { thinking = value; },
-		get autoOffload() { return autoOffload; }, set autoOffload(value) { autoOffload = value; },
-		get deterministicTools() { return deterministicTools; }, set deterministicTools(value) { deterministicTools = value; },
-		get toolGating() { return toolGating; }, set toolGating(value) { toolGating = value; },
-		get promptCache() { return promptCache; }, set promptCache(value) { promptCache = value; },
-		get recommendedThreads() { return recommendedThreads; }, set recommendedThreads(value) { recommendedThreads = value; },
-		get llamaCache() { return llamaCache; }, set llamaCache(value) { llamaCache = value; },
-		get searxngUrl() { return searxngUrl; }, set searxngUrl(value) { searxngUrl = value; },
-		get embedModelPath() { return embedModelPath; }, set embedModelPath(value) { embedModelPath = value; },
-		get rerankerModelPath() { return rerankerModelPath; }, set rerankerModelPath(value) { rerankerModelPath = value; },
-		get modelDownloadError() { return modelDownloadError; }, set modelDownloadError(value) { modelDownloadError = value; },
-		get ocrStatus() { return ocrStatus; }, set ocrStatus(value) { ocrStatus = value; },
-		get ocrSaving() { return ocrSaving; }, set ocrSaving(value) { ocrSaving = value; },
-		get downloadingModel() { return downloadingModel; }, set downloadingModel(value) { downloadingModel = value; },
-		get quickShortcut() { return quickShortcut; }, set quickShortcut(value) { quickShortcut = value; },
-		get startWithSystem() { return startWithSystem; }, set startWithSystem(value) { startWithSystem = value; },
-		get ohPort() { return ohPort; }, set ohPort(value) { ohPort = value; },
-		get ohBinPath() { return ohBinPath; }, set ohBinPath(value) { ohBinPath = value; },
-		get ohToolMode() { return ohToolMode; }, set ohToolMode(value) { ohToolMode = value; },
-		get ohStrict() { return ohStrict; }, set ohStrict(value) { ohStrict = value; },
-		get ohPromptTools() { return ohPromptTools; }, set ohPromptTools(value) { ohPromptTools = value; },
-		get ohCallOnly() { return ohCallOnly; }, set ohCallOnly(value) { ohCallOnly = value; },
-		get ohNoThink() { return ohNoThink; }, set ohNoThink(value) { ohNoThink = value; },
-		get ohToolChoice() { return ohToolChoice; }, set ohToolChoice(value) { ohToolChoice = value; },
-		get ohTemplateKwargs() { return ohTemplateKwargs; }, set ohTemplateKwargs(value) { ohTemplateKwargs = value; },
-		get ohMaxCalls() { return ohMaxCalls; }, set ohMaxCalls(value) { ohMaxCalls = value; },
-		get ohTotalMax() { return ohTotalMax; }, set ohTotalMax(value) { ohTotalMax = value; },
-		get ohToolTimeout() { return ohToolTimeout; }, set ohToolTimeout(value) { ohToolTimeout = value; },
-		get ohBaseUrl() { return ohBaseUrl; }, set ohBaseUrl(value) { ohBaseUrl = value; },
-		get externalEnabled() { return externalEnabled; }, set externalEnabled(value) { externalEnabled = value; },
-		get externalBaseUrl() { return externalBaseUrl; }, set externalBaseUrl(value) { externalBaseUrl = value; },
-		get externalModel() { return externalModel; }, set externalModel(value) { externalModel = value; },
-		get externalApiKey() { return externalApiKey; }, set externalApiKey(value) { externalApiKey = value; },
-		get modelProfiles() { return modelProfiles; }, set modelProfiles(value) { modelProfiles = value; },
-		get currentModelPath() { return currentModelPath; }, set currentModelPath(value) { currentModelPath = value; },
-		get contextSize() { return contextSize; }, set contextSize(value) { contextSize = value; },
-		get gpuLayers() { return gpuLayers; }, set gpuLayers(value) { gpuLayers = value; },
-		get threads() { return threads; }, set threads(value) { threads = value; },
-		get temperature() { return temperature; }, set temperature(value) { temperature = value; },
-		get topP() { return topP; }, set topP(value) { topP = value; },
-		get maxTurns() { return maxTurns; }, set maxTurns(value) { maxTurns = value; },
-		get extraArgs() { return extraArgs; }, set extraArgs(value) { extraArgs = value; },
-		get enableJupyterExecution() { return enableJupyterExecution; }, set enableJupyterExecution(value) { enableJupyterExecution = value; },
-		get latexCache() { return latexCache; }, set latexCache(value) { latexCache = value; },
-		get latexDownloading() { return latexDownloading; }, set latexDownloading(value) { latexDownloading = value; },
-		get latexDownloadBytes() { return latexDownloadBytes; }, set latexDownloadBytes(value) { latexDownloadBytes = value; },
-		get latexError() { return latexError; }, set latexError(value) { latexError = value; },
-		get activeBackend() { return activeBackend; }, set activeBackend(value) { activeBackend = value; },
-		get activeEngine() { return activeEngine; }, set activeEngine(value) { activeEngine = value; },
-		get backendFellBack() { return backendFellBack; }, set backendFellBack(value) { backendFellBack = value; },
-		get beeDownloadActive() { return beeDownloadActive; }, set beeDownloadActive(value) { beeDownloadActive = value; },
-		get download() { return download; }, set download(value) { download = value; },
-		get statusPoll() { return statusPoll; }, set statusPoll(value) { statusPoll = value; },
+		get downloadableBackends() {
+			return downloadableBackends;
+		},
+		set downloadableBackends(value) {
+			downloadableBackends = value;
+		},
+		get downloadableBeeBackends() {
+			return downloadableBeeBackends;
+		},
+		set downloadableBeeBackends(value) {
+			downloadableBeeBackends = value;
+		},
+		get backendPreference() {
+			return backendPreference;
+		},
+		set backendPreference(value) {
+			backendPreference = value;
+		},
+		get thinking() {
+			return thinking;
+		},
+		set thinking(value) {
+			thinking = value;
+		},
+		get autoOffload() {
+			return autoOffload;
+		},
+		set autoOffload(value) {
+			autoOffload = value;
+		},
+		get deterministicTools() {
+			return deterministicTools;
+		},
+		set deterministicTools(value) {
+			deterministicTools = value;
+		},
+		get toolGating() {
+			return toolGating;
+		},
+		set toolGating(value) {
+			toolGating = value;
+		},
+		get promptCache() {
+			return promptCache;
+		},
+		set promptCache(value) {
+			promptCache = value;
+		},
+		get recommendedThreads() {
+			return recommendedThreads;
+		},
+		set recommendedThreads(value) {
+			recommendedThreads = value;
+		},
+		get llamaCache() {
+			return llamaCache;
+		},
+		set llamaCache(value) {
+			llamaCache = value;
+		},
+		get searxngUrl() {
+			return searxngUrl;
+		},
+		set searxngUrl(value) {
+			searxngUrl = value;
+		},
+		get embedModelPath() {
+			return embedModelPath;
+		},
+		set embedModelPath(value) {
+			embedModelPath = value;
+		},
+		get rerankerModelPath() {
+			return rerankerModelPath;
+		},
+		set rerankerModelPath(value) {
+			rerankerModelPath = value;
+		},
+		get modelDownloadError() {
+			return modelDownloadError;
+		},
+		set modelDownloadError(value) {
+			modelDownloadError = value;
+		},
+		get ocrStatus() {
+			return ocrStatus;
+		},
+		set ocrStatus(value) {
+			ocrStatus = value;
+		},
+		get ocrSaving() {
+			return ocrSaving;
+		},
+		set ocrSaving(value) {
+			ocrSaving = value;
+		},
+		get downloadingModel() {
+			return downloadingModel;
+		},
+		set downloadingModel(value) {
+			downloadingModel = value;
+		},
+		get quickShortcut() {
+			return quickShortcut;
+		},
+		set quickShortcut(value) {
+			quickShortcut = value;
+		},
+		get startWithSystem() {
+			return startWithSystem;
+		},
+		set startWithSystem(value) {
+			startWithSystem = value;
+		},
+		get ohPort() {
+			return ohPort;
+		},
+		set ohPort(value) {
+			ohPort = value;
+		},
+		get ohBinPath() {
+			return ohBinPath;
+		},
+		set ohBinPath(value) {
+			ohBinPath = value;
+		},
+		get ohToolMode() {
+			return ohToolMode;
+		},
+		set ohToolMode(value) {
+			ohToolMode = value;
+		},
+		get ohStrict() {
+			return ohStrict;
+		},
+		set ohStrict(value) {
+			ohStrict = value;
+		},
+		get ohPromptTools() {
+			return ohPromptTools;
+		},
+		set ohPromptTools(value) {
+			ohPromptTools = value;
+		},
+		get ohCallOnly() {
+			return ohCallOnly;
+		},
+		set ohCallOnly(value) {
+			ohCallOnly = value;
+		},
+		get ohNoThink() {
+			return ohNoThink;
+		},
+		set ohNoThink(value) {
+			ohNoThink = value;
+		},
+		get ohToolChoice() {
+			return ohToolChoice;
+		},
+		set ohToolChoice(value) {
+			ohToolChoice = value;
+		},
+		get ohTemplateKwargs() {
+			return ohTemplateKwargs;
+		},
+		set ohTemplateKwargs(value) {
+			ohTemplateKwargs = value;
+		},
+		get ohMaxCalls() {
+			return ohMaxCalls;
+		},
+		set ohMaxCalls(value) {
+			ohMaxCalls = value;
+		},
+		get ohTotalMax() {
+			return ohTotalMax;
+		},
+		set ohTotalMax(value) {
+			ohTotalMax = value;
+		},
+		get ohToolTimeout() {
+			return ohToolTimeout;
+		},
+		set ohToolTimeout(value) {
+			ohToolTimeout = value;
+		},
+		get ohBaseUrl() {
+			return ohBaseUrl;
+		},
+		set ohBaseUrl(value) {
+			ohBaseUrl = value;
+		},
+		get externalEnabled() {
+			return externalEnabled;
+		},
+		set externalEnabled(value) {
+			externalEnabled = value;
+		},
+		get externalBaseUrl() {
+			return externalBaseUrl;
+		},
+		set externalBaseUrl(value) {
+			externalBaseUrl = value;
+		},
+		get externalModel() {
+			return externalModel;
+		},
+		set externalModel(value) {
+			externalModel = value;
+		},
+		get externalApiKey() {
+			return externalApiKey;
+		},
+		set externalApiKey(value) {
+			externalApiKey = value;
+		},
+		get modelProfiles() {
+			return modelProfiles;
+		},
+		set modelProfiles(value) {
+			modelProfiles = value;
+		},
+		get currentModelPath() {
+			return currentModelPath;
+		},
+		set currentModelPath(value) {
+			currentModelPath = value;
+		},
+		get contextSize() {
+			return contextSize;
+		},
+		set contextSize(value) {
+			contextSize = value;
+		},
+		get gpuLayers() {
+			return gpuLayers;
+		},
+		set gpuLayers(value) {
+			gpuLayers = value;
+		},
+		get threads() {
+			return threads;
+		},
+		set threads(value) {
+			threads = value;
+		},
+		get temperature() {
+			return temperature;
+		},
+		set temperature(value) {
+			temperature = value;
+		},
+		get topP() {
+			return topP;
+		},
+		set topP(value) {
+			topP = value;
+		},
+		get maxTurns() {
+			return maxTurns;
+		},
+		set maxTurns(value) {
+			maxTurns = value;
+		},
+		get extraArgs() {
+			return extraArgs;
+		},
+		set extraArgs(value) {
+			extraArgs = value;
+		},
+		get enableJupyterExecution() {
+			return enableJupyterExecution;
+		},
+		set enableJupyterExecution(value) {
+			enableJupyterExecution = value;
+		},
+		get latexCache() {
+			return latexCache;
+		},
+		set latexCache(value) {
+			latexCache = value;
+		},
+		get latexDownloading() {
+			return latexDownloading;
+		},
+		set latexDownloading(value) {
+			latexDownloading = value;
+		},
+		get latexDownloadBytes() {
+			return latexDownloadBytes;
+		},
+		set latexDownloadBytes(value) {
+			latexDownloadBytes = value;
+		},
+		get latexError() {
+			return latexError;
+		},
+		set latexError(value) {
+			latexError = value;
+		},
+		get activeBackend() {
+			return activeBackend;
+		},
+		set activeBackend(value) {
+			activeBackend = value;
+		},
+		get activeEngine() {
+			return activeEngine;
+		},
+		set activeEngine(value) {
+			activeEngine = value;
+		},
+		get backendFellBack() {
+			return backendFellBack;
+		},
+		set backendFellBack(value) {
+			backendFellBack = value;
+		},
+		get beeDownloadActive() {
+			return beeDownloadActive;
+		},
+		set beeDownloadActive(value) {
+			beeDownloadActive = value;
+		},
+		get download() {
+			return download;
+		},
+		set download(value) {
+			download = value;
+		},
+		get statusPoll() {
+			return statusPoll;
+		},
+		set statusPoll(value) {
+			statusPoll = value;
+		}
 	});
 
 	async function downloadLatexSupport() {
@@ -540,261 +944,581 @@ export function createSettingsController() {
 		}
 	}
 
-	async function saveModelPath() {
-		if (!currentModelPath) return;
-
-		isSaving = true;
-		saved = false;
-		try {
-			await invoke('set_llama_model_path', { modelPath: currentModelPath });
-			saved = true;
-			setTimeout(() => {
-				saved = false;
-			}, 3000);
-		} catch (error) {
-			console.error('Failed to save model path:', error);
-			alert('Failed to save model path: ' + error);
-		} finally {
-			isSaving = false;
-		}
-	}
-
-	async function saveAdvancedConfig() {
-		isSaving = true;
-		saved = false;
-		try {
-			await invoke('set_llama_advanced_config', inferencePayload({
-				contextSize,
-				gpuLayers,
-				threads,
-				temperature,
-				topP,
-				maxTurns,
-				extraArgs,
-				backendPreference,
-				thinking,
-				autoOffload
-			}));
-			saved = true;
-			setTimeout(() => {
-				saved = false;
-			}, 3000);
-		} catch (error) {
-			console.error('Failed to save advanced config:', error);
-			alert('Failed to save advanced config: ' + error);
-		} finally {
-			isSaving = false;
-		}
-	}
-
-	let saveTimeout: ReturnType<typeof setTimeout>;
-	function debounceSave() {
-		clearTimeout(saveTimeout);
-		saveTimeout = setTimeout(saveAdvancedConfig, 500);
-	}
-
-	function addExtraArg() {
-		extraArgs.push('');
-		debounceSave();
-	}
-
-	function removeExtraArg(index: number) {
-		extraArgs.splice(index, 1);
-		debounceSave();
-	}
-
-	function toggleJupyterExecution() {
-		enableJupyterExecution = !enableJupyterExecution;
-		localStorage.setItem('myelin_jupyter_exec', enableJupyterExecution.toString());
-	}
-
-	async function pickOpenharnBin() {
-		const picked = await open({ multiple: false, title: 'Choose openharn-myelin binary' });
-		if (typeof picked === 'string') {
-			ohBinPath = picked;
-			await saveOpenharn();
-		}
-	}
-
-	function changeToolMode() {
-		if (ohToolMode !== 'prompt') {
-			ohStrict = false;
-			ohCallOnly = false;
-			ohPromptTools = false;
-		}
-		void saveOpenharn();
-	}
-
-	async function saveOpenharn() {
-		ohSaving = true;
-		try {
-			const settings: OpenharnForm = {
-				port: ohPort,
-				binPath: ohBinPath,
-				toolMode: ohToolMode,
-				strict: ohStrict,
-				promptTools: ohPromptTools,
-				callOnly: ohCallOnly,
-				noThink: ohNoThink,
-				toolChoice: ohToolChoice,
-				templateKwargs: ohTemplateKwargs,
-				maxCalls: ohMaxCalls,
-				totalMax: ohTotalMax,
-				toolTimeoutSecs: ohToolTimeout,
-				baseUrl: ohBaseUrl,
-				externalEnabled,
-				externalBaseUrl,
-				externalModel,
-				externalApiKey
-			};
-			await invoke('set_openharn_settings', { settings: openharnPayload(settings) });
-			saved = true;
-			setTimeout(() => {
-				saved = false;
-			}, 3000);
-		} catch (error) {
-			console.error('Failed to save agent settings:', error);
-			alert('Failed to save agent settings: ' + error);
-		} finally {
-			ohSaving = false;
-		}
-	}
-
 	function dispose() {
 		if (statusPoll) clearInterval(statusPoll);
-		if (saveTimeout) clearTimeout(saveTimeout);
+		persistence.dispose();
 	}
 
-	return {
-		get currentModelPath() { return currentModelPath; }, set currentModelPath(value) { currentModelPath = value; },
-		get contextSize() { return contextSize; }, set contextSize(value) { contextSize = value; },
-		get gpuLayers() { return gpuLayers; }, set gpuLayers(value) { gpuLayers = value; },
-		get threads() { return threads; }, set threads(value) { threads = value; },
-		get recommendedThreads() { return recommendedThreads; }, set recommendedThreads(value) { recommendedThreads = value; },
-		get temperature() { return temperature; }, set temperature(value) { temperature = value; },
-		get topP() { return topP; }, set topP(value) { topP = value; },
-		get maxTurns() { return maxTurns; }, set maxTurns(value) { maxTurns = value; },
-		get thinking() { return thinking; }, set thinking(value) { thinking = value; },
-		get autoOffload() { return autoOffload; }, set autoOffload(value) { autoOffload = value; },
-		get deterministicTools() { return deterministicTools; }, set deterministicTools(value) { deterministicTools = value; },
-		get toolGating() { return toolGating; }, set toolGating(value) { toolGating = value; },
-		get promptCache() { return promptCache; }, set promptCache(value) { promptCache = value; },
-		get llamaCache() { return llamaCache; }, set llamaCache(value) { llamaCache = value; },
-		get extraArgs() { return extraArgs; }, set extraArgs(value) { extraArgs = value; },
-		get activeWorkspacePath() { return activeWorkspacePath; }, set activeWorkspacePath(value) { activeWorkspacePath = value; },
-		get indexState() { return indexState; }, set indexState(value) { indexState = value; },
-		get activeProvider() { return activeProvider; }, set activeProvider(value) { activeProvider = value; },
-		get inferenceEngine() { return inferenceEngine; }, set inferenceEngine(value) { inferenceEngine = value; },
-		get activeEngine() { return activeEngine; }, set activeEngine(value) { activeEngine = value; },
-		get installedBeeBackends() { return installedBeeBackends; }, set installedBeeBackends(value) { installedBeeBackends = value; },
-		get downloadableBeeBackends() { return downloadableBeeBackends; }, set downloadableBeeBackends(value) { downloadableBeeBackends = value; },
-		get beeDownloadActive() { return beeDownloadActive; }, set beeDownloadActive(value) { beeDownloadActive = value; },
-		get backendPreference() { return backendPreference; }, set backendPreference(value) { backendPreference = value; },
-		get downloadableBackends() { return downloadableBackends; }, set downloadableBackends(value) { downloadableBackends = value; },
-		get download() { return download; }, set download(value) { download = value; },
-		get activeBackend() { return activeBackend; }, set activeBackend(value) { activeBackend = value; },
-		get nvidiaDetected() { return nvidiaDetected; }, set nvidiaDetected(value) { nvidiaDetected = value; },
-		get gpuAvailable() { return gpuAvailable; }, set gpuAvailable(value) { gpuAvailable = value; },
-		get gpus() { return gpus; }, set gpus(value) { gpus = value; },
-		get installedBackends() { return installedBackends; }, set installedBackends(value) { installedBackends = value; },
-		get backendFellBack() { return backendFellBack; }, set backendFellBack(value) { backendFellBack = value; },
-		get providerHealthy() { return providerHealthy; }, set providerHealthy(value) { providerHealthy = value; },
-		get providerDetail() { return providerDetail; }, set providerDetail(value) { providerDetail = value; },
-		get latexCache() { return latexCache; }, set latexCache(value) { latexCache = value; },
-		get latexDownloading() { return latexDownloading; }, set latexDownloading(value) { latexDownloading = value; },
-		get latexDownloadBytes() { return latexDownloadBytes; }, set latexDownloadBytes(value) { latexDownloadBytes = value; },
-		get latexError() { return latexError; }, set latexError(value) { latexError = value; },
-		get quickShortcut() { return quickShortcut; }, set quickShortcut(value) { quickShortcut = value; },
-		get quickRecording() { return quickRecording; }, set quickRecording(value) { quickRecording = value; },
-		get quickShortcutError() { return quickShortcutError; }, set quickShortcutError(value) { quickShortcutError = value; },
-		get chatShortcutRecording() { return chatShortcutRecording; }, set chatShortcutRecording(value) { chatShortcutRecording = value; },
-		get chatShortcutError() { return chatShortcutError; }, set chatShortcutError(value) { chatShortcutError = value; },
-		get startWithSystem() { return startWithSystem; }, set startWithSystem(value) { startWithSystem = value; },
-		get backgroundError() { return backgroundError; }, set backgroundError(value) { backgroundError = value; },
-		get statusPoll() { return statusPoll; }, set statusPoll(value) { statusPoll = value; },
-		get isSaving() { return isSaving; }, set isSaving(value) { isSaving = value; },
-		get isRebuilding() { return isRebuilding; }, set isRebuilding(value) { isRebuilding = value; },
-		get saved() { return saved; }, set saved(value) { saved = value; },
-		get enableJupyterExecution() { return enableJupyterExecution; }, set enableJupyterExecution(value) { enableJupyterExecution = value; },
-		get ohPort() { return ohPort; }, set ohPort(value) { ohPort = value; },
-		get ohBinPath() { return ohBinPath; }, set ohBinPath(value) { ohBinPath = value; },
-		get ohToolMode() { return ohToolMode; }, set ohToolMode(value) { ohToolMode = value; },
-		get ohStrict() { return ohStrict; }, set ohStrict(value) { ohStrict = value; },
-		get ohPromptTools() { return ohPromptTools; }, set ohPromptTools(value) { ohPromptTools = value; },
-		get ohCallOnly() { return ohCallOnly; }, set ohCallOnly(value) { ohCallOnly = value; },
-		get ohNoThink() { return ohNoThink; }, set ohNoThink(value) { ohNoThink = value; },
-		get ohToolChoice() { return ohToolChoice; }, set ohToolChoice(value) { ohToolChoice = value; },
-		get ohTemplateKwargs() { return ohTemplateKwargs; }, set ohTemplateKwargs(value) { ohTemplateKwargs = value; },
-		get ohMaxCalls() { return ohMaxCalls; }, set ohMaxCalls(value) { ohMaxCalls = value; },
-		get ohTotalMax() { return ohTotalMax; }, set ohTotalMax(value) { ohTotalMax = value; },
-		get ohToolTimeout() { return ohToolTimeout; }, set ohToolTimeout(value) { ohToolTimeout = value; },
-		get ohBaseUrl() { return ohBaseUrl; }, set ohBaseUrl(value) { ohBaseUrl = value; },
-		get externalEnabled() { return externalEnabled; }, set externalEnabled(value) { externalEnabled = value; },
-		get externalBaseUrl() { return externalBaseUrl; }, set externalBaseUrl(value) { externalBaseUrl = value; },
-		get externalModel() { return externalModel; }, set externalModel(value) { externalModel = value; },
-		get externalApiKey() { return externalApiKey; }, set externalApiKey(value) { externalApiKey = value; },
-		get ohSaving() { return ohSaving; }, set ohSaving(value) { ohSaving = value; },
-		get aiConfig() { return aiConfig; }, set aiConfig(value) { aiConfig = value; },
-		get aiConfigBusy() { return aiConfigBusy; }, set aiConfigBusy(value) { aiConfigBusy = value; },
-		get aiConfigMessage() { return aiConfigMessage; }, set aiConfigMessage(value) { aiConfigMessage = value; },
-		get showAiConfig() { return showAiConfig; }, set showAiConfig(value) { showAiConfig = value; },
-		get aiConfigText() { return aiConfigText; }, set aiConfigText(value) { aiConfigText = value; },
-		get aiConfigSearch() { return aiConfigSearch; }, set aiConfigSearch(value) { aiConfigSearch = value; },
-		get aiConfigSearchInput() { return aiConfigSearchInput; }, set aiConfigSearchInput(value) { aiConfigSearchInput = value; },
-		get aiConfigEditor() { return aiConfigEditor; }, set aiConfigEditor(value) { aiConfigEditor = value; },
-		get aiConfigSearchIndex() { return aiConfigSearchIndex; }, set aiConfigSearchIndex(value) { aiConfigSearchIndex = value; },
-		get searxngUrl() { return searxngUrl; }, set searxngUrl(value) { searxngUrl = value; },
-		get embedModelPath() { return embedModelPath; }, set embedModelPath(value) { embedModelPath = value; },
-		get modelProfiles() { return modelProfiles; }, set modelProfiles(value) { modelProfiles = value; },
-		get saveTimeout() { return saveTimeout; }, set saveTimeout(value) { saveTimeout = value; },
-		get formatMB() { return formatMB; },
-		get hasGpuBuild() { return hasGpuBuild; },
-		get backendLabel() { return backendLabel; },
-		get recommendedBeeBackend() { return recommendedBeeBackend; },
-		get gpuIssue() { return gpuIssue; },
-		get computeStatus() { return computeStatus; },
-		applyShortcut,
-		startRecording,
-		startChatShortcutRecording,
-		selectBackend,
-		configMatchPositions,
-		gotoConfigMatch,
-		handleConfigSearchKeydown,
-		handleAiConfigKeydown,
-		configMatchCount,
-		refreshAiConfig,
-		validateAiConfig,
-		applyAiConfig,
-		copyAiConfigPath,
-		openAiConfig,
-		saveAiConfigText,
-		saveSearxng,
-		pickEmbedModel,
-		clearEmbedModel,
-		pickRerankerModel,
-		clearRerankerModel,
-		downloadBuiltInModel,
-		saveOcrSettings,
-		refreshSnapshot,
-		loadProviderStatus,
-		goBack,
-		downloadLatexSupport,
-		downloadBackend,
-		selectInferenceEngine,
-		changeWorkspace,
-		rebuildIndex,
-		selectModel,
-		saveModelPath,
-		saveAdvancedConfig,
-		debounceSave,
-		addExtraArg,
-		removeExtraArg,
-		toggleJupyterExecution,
-		pickOpenharnBin,
-		changeToolMode,
-		saveOpenharn,
-		dispose
-	};
+	return createBoundController(
+		() => ({
+			currentModelPath: (() => {
+				return currentModelPath;
+			})(),
+			contextSize: (() => {
+				return contextSize;
+			})(),
+			gpuLayers: (() => {
+				return gpuLayers;
+			})(),
+			threads: (() => {
+				return threads;
+			})(),
+			recommendedThreads: (() => {
+				return recommendedThreads;
+			})(),
+			temperature: (() => {
+				return temperature;
+			})(),
+			topP: (() => {
+				return topP;
+			})(),
+			maxTurns: (() => {
+				return maxTurns;
+			})(),
+			thinking: (() => {
+				return thinking;
+			})(),
+			autoOffload: (() => {
+				return autoOffload;
+			})(),
+			deterministicTools: (() => {
+				return deterministicTools;
+			})(),
+			toolGating: (() => {
+				return toolGating;
+			})(),
+			promptCache: (() => {
+				return promptCache;
+			})(),
+			llamaCache: (() => {
+				return llamaCache;
+			})(),
+			extraArgs: (() => {
+				return extraArgs;
+			})(),
+			activeWorkspacePath: (() => {
+				return activeWorkspacePath;
+			})(),
+			indexState: (() => {
+				return indexState;
+			})(),
+			activeProvider: (() => {
+				return activeProvider;
+			})(),
+			inferenceEngine: (() => {
+				return inferenceEngine;
+			})(),
+			activeEngine: (() => {
+				return activeEngine;
+			})(),
+			installedBeeBackends: (() => {
+				return installedBeeBackends;
+			})(),
+			downloadableBeeBackends: (() => {
+				return downloadableBeeBackends;
+			})(),
+			beeDownloadActive: (() => {
+				return beeDownloadActive;
+			})(),
+			backendPreference: (() => {
+				return backendPreference;
+			})(),
+			downloadableBackends: (() => {
+				return downloadableBackends;
+			})(),
+			download: (() => {
+				return download;
+			})(),
+			activeBackend: (() => {
+				return activeBackend;
+			})(),
+			nvidiaDetected: (() => {
+				return nvidiaDetected;
+			})(),
+			gpuAvailable: (() => {
+				return gpuAvailable;
+			})(),
+			gpus: (() => {
+				return gpus;
+			})(),
+			installedBackends: (() => {
+				return installedBackends;
+			})(),
+			backendFellBack: (() => {
+				return backendFellBack;
+			})(),
+			providerHealthy: (() => {
+				return providerHealthy;
+			})(),
+			providerDetail: (() => {
+				return providerDetail;
+			})(),
+			latexCache: (() => {
+				return latexCache;
+			})(),
+			latexDownloading: (() => {
+				return latexDownloading;
+			})(),
+			latexDownloadBytes: (() => {
+				return latexDownloadBytes;
+			})(),
+			latexError: (() => {
+				return latexError;
+			})(),
+			quickShortcut: (() => {
+				return quickShortcut;
+			})(),
+			quickRecording: (() => {
+				return quickRecording;
+			})(),
+			quickShortcutError: (() => {
+				return quickShortcutError;
+			})(),
+			chatShortcutRecording: (() => {
+				return chatShortcutRecording;
+			})(),
+			chatShortcutError: (() => {
+				return chatShortcutError;
+			})(),
+			startWithSystem: (() => {
+				return startWithSystem;
+			})(),
+			backgroundError: (() => {
+				return backgroundError;
+			})(),
+			statusPoll: (() => {
+				return statusPoll;
+			})(),
+			isSaving: (() => {
+				return isSaving;
+			})(),
+			isRebuilding: (() => {
+				return isRebuilding;
+			})(),
+			saved: (() => {
+				return saved;
+			})(),
+			enableJupyterExecution: (() => {
+				return enableJupyterExecution;
+			})(),
+			ohPort: (() => {
+				return ohPort;
+			})(),
+			ohBinPath: (() => {
+				return ohBinPath;
+			})(),
+			ohToolMode: (() => {
+				return ohToolMode;
+			})(),
+			ohStrict: (() => {
+				return ohStrict;
+			})(),
+			ohPromptTools: (() => {
+				return ohPromptTools;
+			})(),
+			ohCallOnly: (() => {
+				return ohCallOnly;
+			})(),
+			ohNoThink: (() => {
+				return ohNoThink;
+			})(),
+			ohToolChoice: (() => {
+				return ohToolChoice;
+			})(),
+			ohTemplateKwargs: (() => {
+				return ohTemplateKwargs;
+			})(),
+			ohMaxCalls: (() => {
+				return ohMaxCalls;
+			})(),
+			ohTotalMax: (() => {
+				return ohTotalMax;
+			})(),
+			ohToolTimeout: (() => {
+				return ohToolTimeout;
+			})(),
+			ohBaseUrl: (() => {
+				return ohBaseUrl;
+			})(),
+			externalEnabled: (() => {
+				return externalEnabled;
+			})(),
+			externalBaseUrl: (() => {
+				return externalBaseUrl;
+			})(),
+			externalModel: (() => {
+				return externalModel;
+			})(),
+			externalApiKey: (() => {
+				return externalApiKey;
+			})(),
+			ohSaving: (() => {
+				return ohSaving;
+			})(),
+			aiConfig: (() => {
+				return aiConfig;
+			})(),
+			aiConfigBusy: (() => {
+				return aiConfigBusy;
+			})(),
+			aiConfigMessage: (() => {
+				return aiConfigMessage;
+			})(),
+			showAiConfig: (() => {
+				return showAiConfig;
+			})(),
+			aiConfigText: (() => {
+				return aiConfigText;
+			})(),
+			aiConfigSearch: (() => {
+				return aiConfigSearch;
+			})(),
+			aiConfigSearchInput: (() => {
+				return aiConfigSearchInput;
+			})(),
+			aiConfigEditor: (() => {
+				return aiConfigEditor;
+			})(),
+			aiConfigSearchIndex: (() => {
+				return aiConfigSearchIndex;
+			})(),
+			searxngUrl: (() => {
+				return searxngUrl;
+			})(),
+			embedModelPath: (() => {
+				return embedModelPath;
+			})(),
+			rerankerModelPath: (() => {
+				return rerankerModelPath;
+			})(),
+			modelDownloadError: (() => {
+				return modelDownloadError;
+			})(),
+			ocrStatus: (() => {
+				return ocrStatus;
+			})(),
+			downloadingModel: (() => {
+				return downloadingModel;
+			})(),
+			modelProfiles: (() => {
+				return modelProfiles;
+			})(),
+			formatMB: (() => {
+				return formatMB;
+			})(),
+			hasGpuBuild: (() => {
+				return hasGpuBuild;
+			})(),
+			backendLabel: (() => {
+				return backendLabel;
+			})(),
+			recommendedBeeBackend: (() => {
+				return recommendedBeeBackend;
+			})(),
+			gpuIssue: (() => {
+				return gpuIssue;
+			})(),
+			computeStatus: (() => {
+				return computeStatus;
+			})()
+		}),
+		{
+			currentModelPath: (value) => {
+				currentModelPath = value;
+			},
+			contextSize: (value) => {
+				contextSize = value;
+			},
+			gpuLayers: (value) => {
+				gpuLayers = value;
+			},
+			threads: (value) => {
+				threads = value;
+			},
+			recommendedThreads: (value) => {
+				recommendedThreads = value;
+			},
+			temperature: (value) => {
+				temperature = value;
+			},
+			topP: (value) => {
+				topP = value;
+			},
+			maxTurns: (value) => {
+				maxTurns = value;
+			},
+			thinking: (value) => {
+				thinking = value;
+			},
+			autoOffload: (value) => {
+				autoOffload = value;
+			},
+			deterministicTools: (value) => {
+				deterministicTools = value;
+			},
+			toolGating: (value) => {
+				toolGating = value;
+			},
+			promptCache: (value) => {
+				promptCache = value;
+			},
+			llamaCache: (value) => {
+				llamaCache = value;
+			},
+			extraArgs: (value) => {
+				extraArgs = value;
+			},
+			activeWorkspacePath: (value) => {
+				activeWorkspacePath = value;
+			},
+			indexState: (value) => {
+				indexState = value;
+			},
+			activeProvider: (value) => {
+				activeProvider = value;
+			},
+			inferenceEngine: (value) => {
+				inferenceEngine = value;
+			},
+			activeEngine: (value) => {
+				activeEngine = value;
+			},
+			installedBeeBackends: (value) => {
+				installedBeeBackends = value;
+			},
+			downloadableBeeBackends: (value) => {
+				downloadableBeeBackends = value;
+			},
+			beeDownloadActive: (value) => {
+				beeDownloadActive = value;
+			},
+			backendPreference: (value) => {
+				backendPreference = value;
+			},
+			downloadableBackends: (value) => {
+				downloadableBackends = value;
+			},
+			download: (value) => {
+				download = value;
+			},
+			activeBackend: (value) => {
+				activeBackend = value;
+			},
+			nvidiaDetected: (value) => {
+				nvidiaDetected = value;
+			},
+			gpuAvailable: (value) => {
+				gpuAvailable = value;
+			},
+			gpus: (value) => {
+				gpus = value;
+			},
+			installedBackends: (value) => {
+				installedBackends = value;
+			},
+			backendFellBack: (value) => {
+				backendFellBack = value;
+			},
+			providerHealthy: (value) => {
+				providerHealthy = value;
+			},
+			providerDetail: (value) => {
+				providerDetail = value;
+			},
+			latexCache: (value) => {
+				latexCache = value;
+			},
+			latexDownloading: (value) => {
+				latexDownloading = value;
+			},
+			latexDownloadBytes: (value) => {
+				latexDownloadBytes = value;
+			},
+			latexError: (value) => {
+				latexError = value;
+			},
+			quickShortcut: (value) => {
+				quickShortcut = value;
+			},
+			quickRecording: (value) => {
+				quickRecording = value;
+			},
+			quickShortcutError: (value) => {
+				quickShortcutError = value;
+			},
+			chatShortcutRecording: (value) => {
+				chatShortcutRecording = value;
+			},
+			chatShortcutError: (value) => {
+				chatShortcutError = value;
+			},
+			startWithSystem: (value) => {
+				startWithSystem = value;
+			},
+			backgroundError: (value) => {
+				backgroundError = value;
+			},
+			statusPoll: (value) => {
+				statusPoll = value;
+			},
+			isSaving: (value) => {
+				isSaving = value;
+			},
+			isRebuilding: (value) => {
+				isRebuilding = value;
+			},
+			saved: (value) => {
+				saved = value;
+			},
+			enableJupyterExecution: (value) => {
+				enableJupyterExecution = value;
+			},
+			ohPort: (value) => {
+				ohPort = value;
+			},
+			ohBinPath: (value) => {
+				ohBinPath = value;
+			},
+			ohToolMode: (value) => {
+				ohToolMode = value;
+			},
+			ohStrict: (value) => {
+				ohStrict = value;
+			},
+			ohPromptTools: (value) => {
+				ohPromptTools = value;
+			},
+			ohCallOnly: (value) => {
+				ohCallOnly = value;
+			},
+			ohNoThink: (value) => {
+				ohNoThink = value;
+			},
+			ohToolChoice: (value) => {
+				ohToolChoice = value;
+			},
+			ohTemplateKwargs: (value) => {
+				ohTemplateKwargs = value;
+			},
+			ohMaxCalls: (value) => {
+				ohMaxCalls = value;
+			},
+			ohTotalMax: (value) => {
+				ohTotalMax = value;
+			},
+			ohToolTimeout: (value) => {
+				ohToolTimeout = value;
+			},
+			ohBaseUrl: (value) => {
+				ohBaseUrl = value;
+			},
+			externalEnabled: (value) => {
+				externalEnabled = value;
+			},
+			externalBaseUrl: (value) => {
+				externalBaseUrl = value;
+			},
+			externalModel: (value) => {
+				externalModel = value;
+			},
+			externalApiKey: (value) => {
+				externalApiKey = value;
+			},
+			ohSaving: (value) => {
+				ohSaving = value;
+			},
+			aiConfig: (value) => {
+				aiConfig = value;
+			},
+			aiConfigBusy: (value) => {
+				aiConfigBusy = value;
+			},
+			aiConfigMessage: (value) => {
+				aiConfigMessage = value;
+			},
+			showAiConfig: (value) => {
+				showAiConfig = value;
+			},
+			aiConfigText: (value) => {
+				aiConfigText = value;
+			},
+			aiConfigSearch: (value) => {
+				aiConfigSearch = value;
+			},
+			aiConfigSearchInput: (value) => {
+				aiConfigSearchInput = value;
+			},
+			aiConfigEditor: (value) => {
+				aiConfigEditor = value;
+			},
+			aiConfigSearchIndex: (value) => {
+				aiConfigSearchIndex = value;
+			},
+			searxngUrl: (value) => {
+				searxngUrl = value;
+			},
+			embedModelPath: (value) => {
+				embedModelPath = value;
+			},
+			rerankerModelPath: (value) => {
+				rerankerModelPath = value;
+			},
+			modelDownloadError: (value) => {
+				modelDownloadError = value;
+			},
+			ocrStatus: (value) => {
+				ocrStatus = value;
+			},
+			downloadingModel: (value) => {
+				downloadingModel = value;
+			},
+			modelProfiles: (value) => {
+				modelProfiles = value;
+			}
+		},
+		{
+			applyShortcut,
+			startRecording,
+			startChatShortcutRecording,
+			selectBackend,
+			gotoConfigMatch,
+			handleConfigSearchKeydown,
+			handleAiConfigKeydown,
+			configMatchCount,
+			refreshAiConfig,
+			validateAiConfig,
+			applyAiConfig,
+			copyAiConfigPath,
+			openAiConfig,
+			saveAiConfigText,
+			saveSearxng,
+			pickEmbedModel,
+			clearEmbedModel,
+			pickRerankerModel,
+			clearRerankerModel,
+			downloadBuiltInModel,
+			saveOcrSettings,
+			refreshSnapshot,
+			loadProviderStatus,
+			goBack,
+			downloadLatexSupport,
+			downloadBackend,
+			selectInferenceEngine,
+			changeWorkspace,
+			rebuildIndex,
+			selectModel,
+			saveModelPath,
+			saveAdvancedConfig,
+			debounceSave,
+			addExtraArg,
+			removeExtraArg,
+			toggleJupyterExecution,
+			pickOpenharnBin,
+			changeToolMode,
+			saveOpenharn,
+			dispose
+		}
+	);
 }
 
 export type SettingsController = ReturnType<typeof createSettingsController>;

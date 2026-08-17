@@ -3,9 +3,11 @@ import { page } from '$app/state';
 import { noteSidebarOpen, showSidebarToggle } from '$lib/stores';
 import { noteClosed } from '$lib/llamaWarm';
 import { installAiEventBridge } from './aiEvents.svelte';
+import type { ControllerContext } from '$lib/controller-context';
 
 /** Owns route loading, DOM listeners, AI event wiring, and note teardown. */
-export function createNotePageLifecycle(ctx: Record<string, any>) {
+export function createNotePageLifecycle(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	let debugTraceEl = $state<HTMLDivElement | undefined>();
 
 	onMount(() => {
@@ -18,10 +20,12 @@ export function createNotePageLifecycle(ctx: Record<string, any>) {
 			savedInteractionMode = localStorage.getItem('myelin_ai_interaction_mode');
 			savedSidebarWidth = localStorage.getItem('myelin_sidebar_width');
 		} catch (error) {
-			ctx.message = 'Browser preferences could not be read; changes remain available for this session.';
+			ctx.message =
+				'Browser preferences could not be read; changes remain available for this session.';
 			console.warn('Could not read note preferences', error);
 		}
-		ctx.aiInteractionMode = savedInteractionMode === 'operation' || savedInteractionMode === 'write' ? 'write' : 'chat';
+		ctx.aiInteractionMode =
+			savedInteractionMode === 'operation' || savedInteractionMode === 'write' ? 'write' : 'chat';
 		if (savedSidebarWidth) {
 			const parsed = parseInt(savedSidebarWidth, 10);
 			if (!isNaN(parsed)) {
@@ -31,7 +35,7 @@ export function createNotePageLifecycle(ctx: Record<string, any>) {
 		}
 		showSidebarToggle.set(true);
 		const mql = window.matchMedia('(max-width: 1200px)');
-		const handleMediaChange = (_event: MediaQueryListEvent) => {};
+		const handleMediaChange = () => {};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', ctx.handleGlobalSelectionChange);
 		document.addEventListener('mousedown', ctx.onDocMouseDown, true);
@@ -59,7 +63,8 @@ export function createNotePageLifecycle(ctx: Record<string, any>) {
 		for (const timeout of ctx.approvalTimeouts.values()) clearTimeout(timeout);
 		ctx.approvalTimeouts.clear();
 		const aiNoteId = ctx.activeAiNoteId();
-		if (aiNoteId && ctx.chatMessages.length) void ctx.persistChatHistory(aiNoteId, ctx.chatMessages);
+		if (aiNoteId && ctx.chatMessages.length)
+			void ctx.persistChatHistory(aiNoteId, ctx.chatMessages);
 		noteClosed();
 		if (ctx.toolbarResizeObserver) ctx.toolbarResizeObserver.disconnect();
 		ctx.editorSession.dispose();
@@ -93,7 +98,11 @@ export function createNotePageLifecycle(ctx: Record<string, any>) {
 	});
 
 	return {
-		get debugTraceEl() { return debugTraceEl; },
-		set debugTraceEl(value: HTMLDivElement | undefined) { debugTraceEl = value; }
+		get debugTraceEl() {
+			return debugTraceEl;
+		},
+		set debugTraceEl(value: HTMLDivElement | undefined) {
+			debugTraceEl = value;
+		}
 	};
 }

@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type { ChatMessage } from '$lib/types';
+import type { NotePageContext } from '$lib/controller-context';
 
 /** The mutable view-model boundary consumed by the AI event bridge. */
-export type AiEventContext = Record<string, any>;
+export type AiEventContext = NotePageContext;
 
 /** Subscribe to all AI and LaTeX progress events used by the note page. */
 export function installAiEventBridge(ctx: AiEventContext): () => void {
@@ -43,7 +45,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			else if (ctx.armedSelection) setTimeout(ctx.reselectAfterEdit, 60);
 		}
 	).then((fn) => (unlistenNoteWritten = fn));
-	
+
 	listen<{ noteId: string; requestId: string }>('ai://note_stream_start', (event) => {
 		if (
 			!ctx.note ||
@@ -62,7 +64,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			};
 		}
 	}).then((fn) => (unlistenNoteStreamStart = fn));
-	
+
 	listen<{ noteId: string; requestId: string; delta: string }>('ai://note_delta', (event) => {
 		if (
 			!ctx.note ||
@@ -73,7 +75,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 		ctx.appendNoteStream(event.payload.delta);
 		ctx.setStreamingStatus('Writing replacement…');
 	}).then((fn) => (unlistenNoteDelta = fn));
-	
+
 	listen<{ noteId: string; requestId: string }>('ai://note_stream_cancel', (event) => {
 		if (
 			!ctx.note ||
@@ -83,7 +85,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			return;
 		ctx.cancelNoteStream();
 	}).then((fn) => (unlistenNoteStreamCancel = fn));
-	
+
 	listen<{ tool: string; details: string; mutatesNote?: boolean }>('ai://chat_tool', (event) => {
 		if (!ctx.activeChatRequestId) return;
 		let lastStartTime = Date.now();
@@ -100,11 +102,11 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 				]
 			};
 		}
-		ctx.chatMessages = ctx.chatMessages.map((m: any) => {
+		ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) => {
 			if (m.isStreaming) {
 				lastStartTime = m.startTime || lastStartTime;
-			// On a note edit, drop the model's pre-tool prose — it tends to
-			// duplicate the note content that's already shown in the editor.
+				// On a note edit, drop the model's pre-tool prose — it tends to
+				// duplicate the note content that's already shown in the editor.
 				return { ...m, isStreaming: false, content: event.payload.mutatesNote ? '' : m.content };
 			}
 			return m;
@@ -129,7 +131,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			setTimeout(() => ctx.scrollChatToBottom(true), 100);
 		}
 	}).then((fn) => (unlistenTool = fn));
-	
+
 	listen<{ id: string; tool: string; title: string; content: string }>(
 		'ai://tool_approval_request',
 		(event) => {
@@ -140,7 +142,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 				event.payload.id,
 				setTimeout(() => {
 					const pending = ctx.chatMessages.find(
-						(m: any) => m.isApprovalRequest && m.approvalId === event.payload.id
+						(m: ChatMessage) => m.isApprovalRequest && m.approvalId === event.payload.id
 					);
 					if (pending && pending.approvalStatus === 'pending') {
 						void ctx.resolveApproval(event.payload.id, false);
@@ -148,7 +150,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 				}, ctx.APPROVAL_TIMEOUT_MS)
 			);
 			let lastStartTime = Date.now();
-			ctx.chatMessages = ctx.chatMessages.map((m: any) => {
+			ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) => {
 				if (m.isStreaming) {
 					lastStartTime = m.startTime || lastStartTime;
 					return { ...m, isStreaming: false };
@@ -156,7 +158,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 				return m;
 			});
 			ctx.chatMessages = [
-			...ctx.chatMessages,
+				...ctx.chatMessages,
 				{
 					role: 'assistant',
 					content: '',
@@ -180,7 +182,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			}
 		}
 	).then((fn) => (unlistenApproval = fn));
-	
+
 	listen<{ delta: string; requestId: string }>('ai://chat_chunk', (event) => {
 		if (ctx.activeChatRequestId !== event.payload.requestId) return;
 		// Buffer deltas and apply once per frame; applying on every token
@@ -194,12 +196,16 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			});
 		}
 	}).then((fn) => (unlistenChunk = fn));
-	
+
 	listen<{ requestId: string; tools?: { name: string; details: string }[] }>(
 		'ai://chat_done',
 		(event) => {
 			void ctx.finishStreamingChatMessage(event.payload.requestId, event.payload.tools || []);
-			if (ctx.activeChatRequestId === event.payload.requestId && ctx.showDebugWindow && ctx.debugInfo) {
+			if (
+				ctx.activeChatRequestId === event.payload.requestId &&
+				ctx.showDebugWindow &&
+				ctx.debugInfo
+			) {
 				ctx.debugInfo = {
 					...ctx.debugInfo,
 					done: Date.now(),
@@ -208,7 +214,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			}
 		}
 	).then((fn) => (unlistenDone = fn));
-	
+
 	listen<{
 		requestId: string;
 		promptTokens: number;
@@ -226,7 +232,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			ctx.debugInfo.generationEnd = Date.now();
 		}
 	}).then((fn) => (unlistenUsage = fn));
-	
+
 	listen<{ requestId: string; message: string; tools?: { name: string; details: string }[] }>(
 		'ai://chat_error',
 		(event) => {
@@ -237,7 +243,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			);
 		}
 	).then((fn) => (unlistenError = fn));
-	
+
 	listen<{ status: 'started' | 'ready' | 'failed'; message?: string }>(
 		'ai://llama_warmup',
 		(event) => {
@@ -249,7 +255,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			}
 		}
 	).then((fn) => (unlistenAiWarmup = fn));
-	
+
 	// Whole-document section pre-cache progress (shown over the document pane).
 	let unlistenSectionCache: UnlistenFn | undefined;
 	listen<{
@@ -260,57 +266,27 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 		sectionTotal?: number;
 		label: string;
 		profile?: 'shared' | 'chat' | 'write' | '';
-			failed?: number;
-			failedDetails?: string[];
-			finished?: boolean;
-	}>(
-		'ai://section_cache_progress',
-		(event) => {
-			const {
-				done,
-				total,
-				sectionDone = 0,
-				sectionTotal = Math.max(1, total),
-				label,
-				profile = '',
-				failed = 0,
-				failedDetails = [],
-				finished = false
-			} = event.payload;
-			if (finished || done >= total) {
-				if (event.payload.noteId !== ctx.activeAiNoteId()) return;
-				if (!ctx.sectionCache) return;
-				ctx.sectionCache = {
-					...ctx.sectionCache,
-					done,
-					total: Math.max(total, 1),
-					sectionDone,
-					sectionTotal,
-					label,
-					profile,
-					failed,
-					failedDetails,
-					finished: true,
-					elapsedMs: Math.max(0, performance.now() - ctx.sectionCache.startedAt)
-				};
-				return;
-			}
+		failed?: number;
+		failedDetails?: string[];
+		finished?: boolean;
+	}>('ai://section_cache_progress', (event) => {
+		const {
+			done,
+			total,
+			sectionDone = 0,
+			sectionTotal = Math.max(1, total),
+			label,
+			profile = '',
+			failed = 0,
+			failedDetails = [],
+			finished = false
+		} = event.payload;
+		if (finished || done >= total) {
 			if (event.payload.noteId !== ctx.activeAiNoteId()) return;
+			if (!ctx.sectionCache) return;
 			ctx.sectionCache = {
-				...(ctx.sectionCache ?? {
-					done: 0,
-					total: Math.max(total, 1),
-					sectionDone: 0,
-					sectionTotal,
-					label: '',
-					profile: '',
-					startedAt: performance.now(),
-					finished: false,
-					failed: 0,
-					failedDetails: [],
-					elapsedMs: null
-				}),
-				done: Math.max(done, 0),
+				...ctx.sectionCache,
+				done,
 				total: Math.max(total, 1),
 				sectionDone,
 				sectionTotal,
@@ -318,19 +294,51 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 				profile,
 				failed,
 				failedDetails,
-				finished: false,
-				elapsedMs: null
+				finished: true,
+				elapsedMs: Math.max(0, performance.now() - ctx.sectionCache.startedAt)
 			};
+			return;
 		}
-	).then((fn) => (unlistenSectionCache = fn));
-	
+		if (event.payload.noteId !== ctx.activeAiNoteId()) return;
+		ctx.sectionCache = {
+			...(ctx.sectionCache ?? {
+				done: 0,
+				total: Math.max(total, 1),
+				sectionDone: 0,
+				sectionTotal,
+				label: '',
+				profile: '',
+				startedAt: performance.now(),
+				finished: false,
+				failed: 0,
+				failedDetails: [],
+				elapsedMs: null
+			}),
+			done: Math.max(done, 0),
+			total: Math.max(total, 1),
+			sectionDone,
+			sectionTotal,
+			label,
+			profile,
+			failed,
+			failedDetails,
+			finished: false,
+			elapsedMs: null
+		};
+	}).then((fn) => (unlistenSectionCache = fn));
+
 	// Debug event: model behavior, tool calls, grammar config, etc.
 	let unlistenDebug: UnlistenFn | undefined;
 	listen<{ kind: string; msg: string; requestId: string }>('ai://debug_event', (event) => {
 		if (ctx.activeChatRequestId !== event.payload.requestId) return;
-		const entry = ctx.makeDebugTraceEntry(event.payload.kind, event.payload.msg);
-		// Keep every trace even with the panel closed; it is attached to
-		// the completed assistant turn and persisted in chat history.
+		const sensitivePrompt = event.payload.kind === 'model_prompt';
+		const message = sensitivePrompt
+			? `Model prompt omitted from diagnostics (${event.payload.msg.length} characters).`
+			: event.payload.msg;
+		const entry = ctx.makeDebugTraceEntry(event.payload.kind, message);
+		// Keep bounded operational telemetry even with the panel closed, but never
+		// persist full model prompts: they can contain the note body, selections,
+		// retrieved passages, or credentials embedded in user-provided context.
 		ctx.pendingDebugTrace = [...ctx.pendingDebugTrace.slice(-(ctx.MAX_DEBUG_TRACE - 1)), entry];
 		const status = ctx.visibleAiStatus(event.payload.kind, event.payload.msg);
 		if (status) ctx.setStreamingStatus(status);
@@ -348,7 +356,7 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 			};
 		}
 	}).then((fn) => (unlistenDebug = fn));
-	
+
 	// LaTeX support bundle download progress (first compile only).
 	listen<{ phase: string; bytes?: number; message?: string }>('latex://download', (event) => {
 		const p = event.payload;
@@ -365,7 +373,6 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 	invoke<{ warmed: boolean }>('tectonic_cache_status')
 		.then((status) => (ctx.texCacheWarmed = status.warmed))
 		.catch(() => {});
-	
 
 	return () => {
 		if (unlistenChunk) unlistenChunk();

@@ -1,37 +1,20 @@
-pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
-pub(crate) use crate::models::{
-    AppSnapshot, Backlink, ChatTool, IndexState, LibraryFacets, NoteDocument, NoteSummary,
-    ProviderStatus, SearchResponse, SearchResult, Task,
-};
-pub(crate) use crate::sidecar::ManagedSidecar;
-pub(crate) use anyhow::{anyhow, Context, Result};
-pub(crate) use arrow_array::types::Float32Type;
-pub(crate) use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
-pub(crate) use arrow_schema::{DataType, Field, Schema};
+pub(crate) use crate::llama_server::{self};
+pub(crate) use crate::models::ProviderStatus;
+pub(crate) use anyhow::{Context, Result};
 pub(crate) use chrono::Utc;
-pub(crate) use lancedb::connection::Connection;
-pub(crate) use lancedb::{connect, Table};
-pub(crate) use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
-pub(crate) use parking_lot::{Mutex, RwLock};
-pub(crate) use reqwest::Client;
-pub(crate) use rig_core::completion::{CompletionError, Prompt, PromptError};
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use sha2::{Digest, Sha256};
 pub(crate) use std::borrow::Cow;
-pub(crate) use std::collections::HashMap;
 pub(crate) use std::ffi::OsStr;
 pub(crate) use std::fs;
 pub(crate) use std::hash::{Hash, Hasher};
 pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::sync::Arc;
-pub(crate) use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
 pub(crate) use uuid::Uuid;
 
 // GTE-small width. Notes use real embeddings when an embed model is
 
-use super::*;
 use super::documents_helpers::*;
-use super::types::*;
+use super::*;
 
 pub(crate) fn get_file_timestamps(path: &Path) -> (String, String) {
     let fallback = timestamp_now();
@@ -97,7 +80,9 @@ pub(crate) fn normalize(vector: &mut [f32]) {
 }
 
 pub(crate) fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.is_empty() || left.len() != right.len() { return 0.0; }
+    if left.is_empty() || left.len() != right.len() {
+        return 0.0;
+    }
     left.iter()
         .zip(right.iter())
         .map(|(left, right)| left * right)
@@ -390,7 +375,11 @@ fn canonical_workspace_identity(workspace: &Path) -> Result<Vec<u8>> {
             .as_os_str()
             .encode_wide()
             .map(|unit| {
-                let unit = if unit == b'\\' as u16 { b'/' as u16 } else { unit };
+                let unit = if unit == b'\\' as u16 {
+                    b'/' as u16
+                } else {
+                    unit
+                };
                 if (b'A' as u16..=b'Z' as u16).contains(&unit) {
                     unit + 32
                 } else {
@@ -434,26 +423,41 @@ pub(crate) fn prepare_workspace_data_dir(app_data_dir: &Path, workspace: &Path) 
     let mut sources = Vec::new();
     let mut owned_sources = Vec::new();
     let legacy = workspaces.join(&legacy_key);
-    if legacy.exists() { sources.push((legacy, false)); }
+    if legacy.exists() {
+        sources.push((legacy, false));
+    }
     let quarantine = workspaces.join("_legacy-quarantine");
     if quarantine.exists() {
         let mut entries = fs::read_dir(&quarantine)
             .with_context(|| format!("failed to scan {}", quarantine.display()))?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.file_name().and_then(OsStr::to_str).is_some_and(|name| name.starts_with(&format!("{legacy_key}-"))))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(&format!("{legacy_key}-")))
+            })
             .map(|path| (path, true))
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.0.cmp(&right.0));
         sources.extend(entries);
     }
     for (source, quarantined) in sources {
-        copy_workspace_data(&source, &staging, &source.file_name().and_then(OsStr::to_str).unwrap_or("legacy"))?;
+        copy_workspace_data(
+            &source,
+            &staging,
+            &source
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or("legacy"),
+        )?;
         if !quarantined {
             let ownership = source.join("workspace.json");
             let owned = fs::read_to_string(&ownership)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<WorkspaceManifest>(&raw).ok())
-                .is_some_and(|manifest| manifest.canonical_identity == canonical_identity_string(workspace));
+                .is_some_and(|manifest| {
+                    manifest.canonical_identity == canonical_identity_string(workspace)
+                });
             if owned {
                 // Keep the source until the v2 directory has been installed.
                 // If the final rename fails, the next startup can retry from
@@ -475,10 +479,14 @@ pub(crate) fn prepare_workspace_data_dir(app_data_dir: &Path, workspace: &Path) 
         migrated_at: Utc::now().to_rfc3339(),
     };
     crate::persistence::atomic_write_json(&staging.join("workspace.json"), &manifest)?;
-    fs::rename(&staging, &target).with_context(|| format!("failed to install workspace data {}", target.display()))?;
+    fs::rename(&staging, &target)
+        .with_context(|| format!("failed to install workspace data {}", target.display()))?;
     for source in owned_sources {
         if let Err(error) = fs::remove_dir_all(&source) {
-            log::warn!("verified legacy workspace data remains at {}: {error}", source.display());
+            log::warn!(
+                "verified legacy workspace data remains at {}: {error}",
+                source.display()
+            );
         }
     }
     Ok(target)
@@ -486,7 +494,9 @@ pub(crate) fn prepare_workspace_data_dir(app_data_dir: &Path, workspace: &Path) 
 
 pub(crate) fn workspace_storage_issues(data_dir: &Path) -> Vec<StorageIssue> {
     let conflicts = data_dir.join("conflicts");
-    if !conflicts.exists() { return Vec::new(); }
+    if !conflicts.exists() {
+        return Vec::new();
+    }
     walkdir::WalkDir::new(&conflicts)
         .into_iter()
         .filter_map(|entry| entry.ok())
@@ -502,17 +512,25 @@ pub(crate) fn workspace_storage_issues(data_dir: &Path) -> Vec<StorageIssue> {
 }
 
 fn canonical_identity_string(workspace: &Path) -> String {
-    let bytes = canonical_workspace_identity(workspace).unwrap_or_else(|_| workspace.to_string_lossy().as_bytes().to_vec());
+    let bytes = canonical_workspace_identity(workspace)
+        .unwrap_or_else(|_| workspace.to_string_lossy().as_bytes().to_vec());
     format!("{:x}", Sha256::digest(bytes))
 }
 
 fn copy_workspace_data(source: &Path, target: &Path, source_id: &str) -> Result<()> {
-    for entry in walkdir::WalkDir::new(source).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in walkdir::WalkDir::new(source)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         let relative = entry.path().strip_prefix(source).unwrap_or(entry.path());
-        if relative.as_os_str().is_empty() { continue; }
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
         // The v2 manifest is authoritative. Legacy ownership manifests are
         // inspected before copying and must not overwrite the new manifest.
-        if relative == Path::new("workspace.json") { continue; }
+        if relative == Path::new("workspace.json") {
+            continue;
+        }
         let destination = target.join(relative);
         if entry.file_type().is_dir() {
             fs::create_dir_all(&destination)?;
@@ -521,12 +539,16 @@ fn copy_workspace_data(source: &Path, target: &Path, source_id: &str) -> Result<
         if destination.exists() {
             if fs::read(&destination)? != fs::read(entry.path())? {
                 let conflict = target.join("conflicts").join(source_id).join(relative);
-                if let Some(parent) = conflict.parent() { fs::create_dir_all(parent)?; }
+                if let Some(parent) = conflict.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 fs::copy(entry.path(), conflict)?;
             }
             continue;
         }
-        if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::copy(entry.path(), &destination)?;
     }
     Ok(())
@@ -534,10 +556,18 @@ fn copy_workspace_data(source: &Path, target: &Path, source_id: &str) -> Result<
 
 pub(crate) fn default_provider_status(app_data_dir: &Path) -> ProviderStatus {
     if let Ok(info) = llama_server::inspect_provider(app_data_dir) {
-        let configured_engine = llama_server::normalize_engine(info.config.inference_engine.as_deref());
-        let active_engine = info.resolved.as_ref().map(|config| config.inference_engine.clone());
+        let configured_engine =
+            llama_server::normalize_engine(info.config.inference_engine.as_deref());
+        let active_engine = info
+            .resolved
+            .as_ref()
+            .map(|config| config.inference_engine.clone());
         return ProviderStatus {
-            active_provider: if active_engine.as_deref() == Some("beellama") { "BeeLlama".into() } else { "llama.cpp".into() },
+            active_provider: if active_engine.as_deref() == Some("beellama") {
+                "BeeLlama".into()
+            } else {
+                "llama.cpp".into()
+            },
             available_providers: vec!["llama.cpp".into(), "BeeLlama".into()],
             healthy: info.healthy,
             ready: false,

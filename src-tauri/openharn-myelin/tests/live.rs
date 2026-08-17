@@ -28,17 +28,29 @@ fn sidecar_bin() -> PathBuf {
     let target_dir =
         std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| format!("{}/target", manifest));
     for profile in ["debug", "release"] {
-        let p = std::path::Path::new(&target_dir).join(profile).join("openharn-myelin");
+        let p = std::path::Path::new(&target_dir)
+            .join(profile)
+            .join("openharn-myelin");
         if p.exists() {
             return p;
         }
     }
-    panic!("sidecar binary not found under {}/<debug|release>/openharn-myelin", target_dir);
+    panic!(
+        "sidecar binary not found under {}/<debug|release>/openharn-myelin",
+        target_dir
+    );
 }
 
 fn free_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().port()
+}
+
+fn llama_health_url(base: &str) -> String {
+    base.trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string()
+        + "/health"
 }
 
 // Verbatim copy of MYELIN_PREAMBLE (src-tauri/src/agent.rs) — the sidecar appends
@@ -79,16 +91,42 @@ fn tool_schemas() -> Value {
     ])
 }
 
-/// Drive one request through the sidecar and report whether the model emitted a
-/// `write_note` tool call, plus any chat text it produced.
+#[derive(Default)]
+struct LiveOutcome {
+    tools: Vec<String>,
+    tool_arguments: Vec<Value>,
+    chat: String,
+    done: bool,
+    error: bool,
+}
+
+/// Drive one request through the sidecar and record protocol-level behavior.
 async fn run_mode(
     client: &reqwest::Client,
     sidecar_base: &str,
     llama_base: &str,
     request_id: &str,
     options: Value,
-) -> (bool, String) {
-    let user_msg = "NOTE: (empty)\n\nUser request: write a poem about the sea in the note";
+) -> LiveOutcome {
+    run_request(
+        client,
+        sidecar_base,
+        llama_base,
+        request_id,
+        "NOTE: (empty)\n\nUser request: write a poem about the sea in the note",
+        options,
+    )
+    .await
+}
+
+async fn run_request(
+    client: &reqwest::Client,
+    sidecar_base: &str,
+    llama_base: &str,
+    request_id: &str,
+    user_msg: &str,
+    options: Value,
+) -> LiveOutcome {
     let req = json!({
         "request_id": request_id,
         "base_url": llama_base,
@@ -98,6 +136,7 @@ async fn run_mode(
             {"role": "user", "content": user_msg}
         ],
         "tools": tool_schemas(),
+        "temperature": 0.0,
         "max_tokens": 256,
         "options": options,
     });
@@ -109,14 +148,17 @@ async fn run_mode(
         .send()
         .await
         .expect("POST /v1/chat/stream");
-    assert!(resp.status().is_success(), "chat/stream HTTP {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "chat/stream HTTP {}",
+        resp.status()
+    );
 
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut event_name = String::new();
     let mut data = String::new();
-    let mut saw_write_note = false;
-    let mut chat = String::new();
+    let mut outcome = LiveOutcome::default();
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.expect("stream chunk");
@@ -132,15 +174,24 @@ async fn run_mode(
                             let name = v["name"].as_str().unwrap_or("?").to_string();
                             let args = v["arguments"].as_str().unwrap_or("{}");
                             eprintln!("[live]   TOOL CALL: {name} args={args}");
-                            if name == "write_note" {
-                                saw_write_note = true;
-                            }
+                            outcome.tools.push(name.clone());
+                            outcome
+                                .tool_arguments
+                                .push(serde_json::from_str(args).unwrap_or_else(|_| json!({})));
                             client
                                 .post(format!("{}/v1/tool-result", sidecar_base))
                                 .json(&json!({
                                     "request_id": request_id,
                                     "tool_call_id": v["id"].as_str().unwrap_or(""),
-                                    "result": "Note successfully updated with ID: test-note",
+                                    "result": if name == "write_note" {
+                                        "Note successfully updated with ID: test-note"
+                                    } else if name == "search_notes" {
+                                        "Found other note: machine learning notes"
+                                    } else if name == "read_note" {
+                                        "Title: Other Note\n\nMachine learning notes"
+                                    } else {
+                                        "Read-only result"
+                                    },
                                 }))
                                 .send()
                                 .await
@@ -149,12 +200,18 @@ async fn run_mode(
                         "chat_chunk" => {
                             if let Some(d) = serde_json::from_str::<Value>(&data).ok() {
                                 if let Some(delta) = d["delta"].as_str() {
-                                    chat.push_str(delta);
+                                    outcome.chat.push_str(delta);
                                 }
                             }
                         }
-                        "done" => eprintln!("[live]   DONE"),
-                        "error" => eprintln!("[live]   ERROR: {data}"),
+                        "done" => {
+                            outcome.done = true;
+                            eprintln!("[live]   DONE");
+                        }
+                        "error" => {
+                            outcome.error = true;
+                            eprintln!("[live]   ERROR: {data}");
+                        }
                         _ => {}
                     }
                     event_name.clear();
@@ -169,23 +226,27 @@ async fn run_mode(
             }
         }
     }
-    (saw_write_note, chat)
+    outcome
 }
 
 #[tokio::test]
 async fn live_lfm2_writes_note() {
-    let llama_base = std::env::var("LLAMA_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:39300/v1".to_string());
+    let llama_base =
+        std::env::var("LLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:39300/v1".to_string());
 
     let probe = reqwest::Client::new();
     let reachable = probe
-        .get(format!("{}/health", llama_base))
+        .get(llama_health_url(&llama_base))
         .timeout(Duration::from_secs(3))
         .send()
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
     if !reachable {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI live test requires a reachable pinned llama-server at {llama_base}"
+        );
         eprintln!("[live] SKIP: no llama-server at {llama_base} (set LLAMA_URL and start one)");
         return;
     }
@@ -214,7 +275,7 @@ async fn live_lfm2_writes_note() {
 
     // Mode A: the settings the user enabled — strict + prompt_tools.
     eprintln!("\n[live] ===== MODE A: strict + prompt_tools (current settings) =====");
-    let (a_called, a_chat) = run_mode(
+    let a = run_mode(
         &client,
         &sidecar_base,
         &llama_base,
@@ -223,17 +284,22 @@ async fn live_lfm2_writes_note() {
             "strict": true, "prompt_tools": true, "no_think": false,
             "max_calls": 1, "total_max": 4, "tool_timeout_secs": 120, "max_tokens": 1024
         }),
-    ).await;
-    eprintln!("[live] MODE A chat text:\n{a_chat}");
+    )
+    .await;
+    eprintln!("[live] MODE A chat text:\n{}", a.chat);
     eprintln!(
         "[live] MODE A: write_note was{} called",
-        if a_called { "" } else { " NOT" }
+        if a.tools.iter().any(|tool| tool == "write_note") {
+            ""
+        } else {
+            " NOT"
+        }
     );
 
     // Mode B: native tool calling (strict/prompt_tools OFF) — Myelin's corrected
     // LFM2 template is built for this; may work where prompt-tools doesn't.
     eprintln!("\n[live] ===== MODE B: native tools (strict/prompt_tools OFF) =====");
-    let (b_called, b_chat) = run_mode(
+    let b = run_mode(
         &client,
         &sidecar_base,
         &llama_base,
@@ -242,11 +308,16 @@ async fn live_lfm2_writes_note() {
             "strict": false, "prompt_tools": false, "no_think": false,
             "max_calls": 1, "total_max": 4, "tool_timeout_secs": 120, "max_tokens": 1024
         }),
-    ).await;
-    eprintln!("[live] MODE B chat text:\n{b_chat}");
+    )
+    .await;
+    eprintln!("[live] MODE B chat text:\n{}", b.chat);
     eprintln!(
         "[live] MODE B: write_note was{} called",
-        if b_called { "" } else { " NOT" }
+        if b.tools.iter().any(|tool| tool == "write_note") {
+            ""
+        } else {
+            " NOT"
+        }
     );
 
     // Mode C: force the write_note tool via native tool_choice (the reliable
@@ -254,7 +325,7 @@ async fn live_lfm2_writes_note() {
     // which this model/server ignores). This is the fix for weak models that
     // chat instead of calling.
     eprintln!("\n[live] ===== MODE C: force_tool=write_note (native tool_choice) =====");
-    let (c_called, c_chat) = run_mode(
+    let c = run_mode(
         &client,
         &sidecar_base,
         &llama_base,
@@ -264,18 +335,23 @@ async fn live_lfm2_writes_note() {
             "force_tool": "write_note",
             "max_calls": 1, "total_max": 4, "tool_timeout_secs": 120, "max_tokens": 1024
         }),
-    ).await;
-    eprintln!("[live] MODE C chat text:\n{c_chat}");
+    )
+    .await;
+    eprintln!("[live] MODE C chat text:\n{}", c.chat);
     eprintln!(
         "[live] MODE C: write_note was{} called",
-        if c_called { "" } else { " NOT" }
+        if c.tools.iter().any(|tool| tool == "write_note") {
+            ""
+        } else {
+            " NOT"
+        }
     );
 
     // Mode D: the host has already classified this operation and requires a
     // mutation. Restrict the schema to the relevant tool and remove the text
     // branch from prompt-tools grammar.
     eprintln!("\n[live] ===== MODE D: prompt-tools call-only + write_note subset =====");
-    let (d_called, d_chat) = run_mode(
+    let d = run_mode(
         &client,
         &sidecar_base,
         &llama_base,
@@ -286,17 +362,33 @@ async fn live_lfm2_writes_note() {
             "tool_subset": ["write_note"],
             "max_calls": 1, "total_max": 4, "tool_timeout_secs": 120, "max_tokens": 1024
         }),
-    ).await;
-    eprintln!("[live] MODE D chat text:\n{d_chat}");
+    )
+    .await;
+    eprintln!("[live] MODE D chat text:\n{}", d.chat);
     eprintln!(
         "[live] MODE D: write_note was{} called",
-        if d_called { "" } else { " NOT" }
+        if d.tools.iter().any(|tool| tool == "write_note") {
+            ""
+        } else {
+            " NOT"
+        }
+    );
+    assert!(
+        d.done && !d.error,
+        "mutating request must finish cleanly: done={}, error={}",
+        d.done,
+        d.error
+    );
+    assert_eq!(
+        d.tools.as_slice(),
+        ["write_note"],
+        "mutation must terminate after the intended single tool call"
     );
 
     // Mode E: keep the model's native LFM call format but force a call and
     // expose only the relevant mutation schema.
     eprintln!("\n[live] ===== MODE E: native required + write_note subset =====");
-    let (e_called, e_chat) = run_mode(
+    let e = run_mode(
         &client,
         &sidecar_base,
         &llama_base,
@@ -307,14 +399,147 @@ async fn live_lfm2_writes_note() {
             "tool_subset": ["write_note"],
             "max_calls": 1, "total_max": 4, "tool_timeout_secs": 120, "max_tokens": 1024
         }),
-    ).await;
-    eprintln!("[live] MODE E chat text:\n{e_chat}");
+    )
+    .await;
+    eprintln!("[live] MODE E chat text:\n{}", e.chat);
     eprintln!(
         "[live] MODE E: write_note was{} called",
-        if e_called { "" } else { " NOT" }
+        if e.tools.iter().any(|tool| tool == "write_note") {
+            ""
+        } else {
+            " NOT"
+        }
     );
 
-    let _ = child.kill();
+    // Chat mode: a normal question must produce text without an unintended
+    // mutation or read-only tool call.
+    eprintln!("\n[live] ===== CHAT: answer without mutation =====");
+    let chat = run_request(
+        &client,
+        &sidecar_base,
+        &llama_base,
+        "live-chat",
+        "What is two plus two? Answer briefly.",
+        json!({
+            "chat_mode": true, "strict": false, "prompt_tools": false,
+            "friendly_results": true, "intent_is_tool": false,
+            "max_calls": 1, "total_max": 2, "tool_timeout_secs": 120, "max_tokens": 256
+        }),
+    )
+    .await;
+    assert!(
+        chat.done && !chat.error,
+        "chat request must complete cleanly"
+    );
+    assert!(
+        !chat.chat.trim().is_empty(),
+        "chat request must return a nonempty answer"
+    );
+    assert!(
+        chat.tools.is_empty(),
+        "chat request must not call tools: {:?}",
+        chat.tools
+    );
+
+    // Read-only routing: search and read requests must select their named
+    // read-only tool, not a write tool or a generic answer.
+    let search = run_request(
+        &client,
+        &sidecar_base,
+        &llama_base,
+        "live-search",
+        "Search my other notes for machine learning.",
+        json!({
+            "strict": true, "prompt_tools": true, "friendly_results": true,
+            "call_only": true, "intent_is_tool": true, "chat_mode": true,
+            "tool_subset": ["search_notes"],
+            "max_calls": 1, "total_max": 2, "tool_timeout_secs": 120, "max_tokens": 512
+        }),
+    )
+    .await;
+    assert!(
+        search.done && !search.error,
+        "search request must complete cleanly"
+    );
+    assert_eq!(
+        search.tools.as_slice(),
+        ["search_notes"],
+        "search must select search_notes"
+    );
+
+    let read = run_request(
+        &client,
+        &sidecar_base,
+        &llama_base,
+        "live-read",
+        "Read my other note with id other.",
+        json!({
+            "strict": true, "prompt_tools": true, "friendly_results": true,
+            "call_only": true, "intent_is_tool": true, "chat_mode": true,
+            "tool_subset": ["read_note"],
+            "max_calls": 1, "total_max": 2, "tool_timeout_secs": 120, "max_tokens": 512
+        }),
+    )
+    .await;
+    assert!(
+        read.done && !read.error,
+        "read request must complete cleanly"
+    );
+    assert_eq!(
+        read.tools.as_slice(),
+        ["read_note"],
+        "read must select read_note"
+    );
+
+    assert!(
+        d.tool_arguments
+            .first()
+            .and_then(|args| args["content"].as_str())
+            .is_some_and(|content| !content.trim().is_empty()),
+        "write request must carry nonempty note content"
+    );
+
+    // Cancellation: cancel immediately after headers and require the sidecar
+    // to close with a recoverable completion rather than hanging.
+    let cancel_id = "live-cancel";
+    let cancel_response = client
+        .post(format!("{sidecar_base}/v1/chat/stream"))
+        .json(&json!({
+            "request_id": cancel_id,
+            "base_url": llama_base,
+            "model": "lfm2",
+            "messages": [{"role": "user", "content": "Write a detailed essay about the sea."}],
+            "tools": tool_schemas(),
+            "max_tokens": 2048,
+            "options": {"generation_timeout_secs": 120}
+        }))
+        .timeout(Duration::from_secs(300))
+        .send()
+        .await
+        .expect("start live cancellation request");
+    assert!(cancel_response.status().is_success());
+    let mut cancel_stream = cancel_response.bytes_stream();
+    let cancel_response = client
+        .post(format!("{sidecar_base}/v1/cancel"))
+        .json(&json!({"request_id": cancel_id}))
+        .send()
+        .await
+        .expect("cancel live request");
+    assert!(cancel_response.status().is_success());
+    let mut cancelled_bytes = Vec::new();
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(10), cancel_stream.next())
+        .await
+        .expect("cancelled live stream timeout")
+    {
+        cancelled_bytes.extend_from_slice(&chunk.expect("cancelled live stream chunk"));
+    }
+    assert!(
+        String::from_utf8_lossy(&cancelled_bytes).contains("event: done"),
+        "cancellation must end with done"
+    );
+
+    child.kill().expect("stop sidecar");
+    child.wait().expect("wait for sidecar shutdown");
 
     // Focused gate. Mode D is the strongest constraint the harness owns
     // (grammar-constrained prompt-tools, call-only, write_note-only schema): a
@@ -323,7 +548,7 @@ async fn live_lfm2_writes_note() {
     // A/B/C/E depend on the model's native FC health and stay advisory
     // (their `[live] MODE x: write_note was/was NOT called` lines above).
     assert!(
-        d_called,
+        d.tools.iter().any(|tool| tool == "write_note"),
         "MODE D (strict prompt-tools + call_only + write_note subset) produced no write_note call"
     );
 }

@@ -71,8 +71,12 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("cannot atomically write a path without a parent"))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create persistence directory {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create persistence directory {}",
+            parent.display()
+        )
+    })?;
 
     let name = file_name_for(path);
     let backup = parent.join(format!(".{name}.backup-{}", Uuid::new_v4()));
@@ -91,7 +95,10 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let had_target = path.exists();
     if had_target {
         fs::rename(path, &backup).with_context(|| {
-            format!("failed to preserve existing {} before replacement", path.display())
+            format!(
+                "failed to preserve existing {} before replacement",
+                path.display()
+            )
         })?;
     }
 
@@ -156,11 +163,18 @@ impl FileTransaction {
 
         for (index, mutation) in mutations.into_iter().enumerate() {
             let operation = match mutation {
-                FileMutation::Write { root, relative_path, bytes } => {
+                FileMutation::Write {
+                    root,
+                    relative_path,
+                    bytes,
+                } => {
                     let target = resolve_path(root, &workspace, &workspace_data, &relative_path)?;
-                    let parent = target.parent().ok_or_else(|| anyhow!("write target has no parent"))?;
+                    let parent = target
+                        .parent()
+                        .ok_or_else(|| anyhow!("write target has no parent"))?;
                     fs::create_dir_all(parent)?;
-                    let staged = parent.join(format!(".{}.txn-{id}-{index}", file_name_for(&target)));
+                    let staged =
+                        parent.join(format!(".{}.txn-{id}-{index}", file_name_for(&target)));
                     fs::write(&staged, &bytes)?;
                     File::open(&staged)?.sync_all()?;
                     JournalOperation {
@@ -178,7 +192,10 @@ impl FileTransaction {
                         applied: false,
                     }
                 }
-                FileMutation::Delete { root, relative_path } => {
+                FileMutation::Delete {
+                    root,
+                    relative_path,
+                } => {
                     let target = resolve_path(root, &workspace, &workspace_data, &relative_path)?;
                     JournalOperation {
                         kind: JournalKind::Delete,
@@ -250,15 +267,19 @@ impl FileTransaction {
         Ok(())
     }
 
-fn apply_operation(&mut self, index: usize) -> Result<()> {
+    fn apply_operation(&mut self, index: usize) -> Result<()> {
         let operation = &mut self.journal.operations[index];
         let root_path = resolve_root(operation.root, &self.workspace, &self.workspace_data);
         let target = root_path.join(&operation.target);
         match operation.kind {
             JournalKind::Write => {
-                let staged = operation.staged.as_ref().ok_or_else(|| anyhow!("write transaction is missing its staged file"))?;
+                let staged = operation
+                    .staged
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("write transaction is missing its staged file"))?;
                 if let Some(expected_hash) = &operation.expected_hash {
-                    if target.exists() && hash_file(&target).ok().as_deref() == Some(expected_hash) {
+                    if target.exists() && hash_file(&target).ok().as_deref() == Some(expected_hash)
+                    {
                         return Ok(());
                     }
                 }
@@ -268,7 +289,8 @@ fn apply_operation(&mut self, index: usize) -> Result<()> {
                         .as_ref()
                         .ok_or_else(|| anyhow!("write transaction is missing its backup path"))?;
                     if !backup.exists() {
-                        fs::rename(&target, backup).with_context(|| format!("failed to preserve {}", target.display()))?;
+                        fs::rename(&target, backup)
+                            .with_context(|| format!("failed to preserve {}", target.display()))?;
                     }
                 }
                 if let Err(error) = fs::rename(staged, &target) {
@@ -277,7 +299,8 @@ fn apply_operation(&mut self, index: usize) -> Result<()> {
                             let _ = fs::rename(backup, &target);
                         }
                     }
-                    return Err(error).with_context(|| format!("failed to install {}", target.display()));
+                    return Err(error)
+                        .with_context(|| format!("failed to install {}", target.display()));
                 }
             }
             JournalKind::Delete => {
@@ -289,15 +312,24 @@ fn apply_operation(&mut self, index: usize) -> Result<()> {
                     .as_ref()
                     .ok_or_else(|| anyhow!("delete transaction is missing its backup path"))?;
                 if !backup.exists() {
-                    fs::rename(&target, backup).with_context(|| format!("failed to stage deletion of {}", target.display()))?;
+                    fs::rename(&target, backup).with_context(|| {
+                        format!("failed to stage deletion of {}", target.display())
+                    })?;
                 }
             }
             JournalKind::Move => {
-                let source = root_path.join(operation.source.as_ref().ok_or_else(|| anyhow!("move transaction is missing its source"))?);
+                let source = root_path.join(
+                    operation
+                        .source
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("move transaction is missing its source"))?,
+                );
                 if !source.exists() && target.exists() {
                     return Ok(());
                 }
-                if let Some(parent) = target.parent() { fs::create_dir_all(parent)?; }
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 if target.exists() {
                     let backup = operation
                         .backup
@@ -307,7 +339,13 @@ fn apply_operation(&mut self, index: usize) -> Result<()> {
                         fs::rename(&target, backup)?;
                     }
                 }
-                fs::rename(&source, &target).with_context(|| format!("failed to move {} to {}", source.display(), target.display()))?;
+                fs::rename(&source, &target).with_context(|| {
+                    format!(
+                        "failed to move {} to {}",
+                        source.display(),
+                        target.display()
+                    )
+                })?;
             }
         }
         Ok(())
@@ -317,23 +355,38 @@ fn apply_operation(&mut self, index: usize) -> Result<()> {
 pub(crate) fn recover_transactions(workspace_data: &Path) -> Result<Vec<anyhow::Error>> {
     let transaction_dir = workspace_data.join("transactions");
     let mut errors = Vec::new();
-    let Ok(entries) = fs::read_dir(&transaction_dir) else { return Ok(errors) };
+    let Ok(entries) = fs::read_dir(&transaction_dir) else {
+        return Ok(errors);
+    };
     for entry in entries.flatten() {
-        if entry.path().extension().and_then(|v| v.to_str()) != Some("json") { continue; }
-        match fs::read(&entry.path()).and_then(|bytes| serde_json::from_slice::<TransactionJournal>(&bytes).map_err(std::io::Error::other)) {
+        if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
+            continue;
+        }
+        match fs::read(&entry.path()).and_then(|bytes| {
+            serde_json::from_slice::<TransactionJournal>(&bytes).map_err(std::io::Error::other)
+        }) {
             Ok(mut journal) => {
-                if let Err(error) = recover_journal(&mut journal, &entry.path()).and_then(|_| cleanup_journal(&journal).and_then(|_| fs::remove_file(entry.path()).map_err(Into::into))) {
+                if let Err(error) = recover_journal(&mut journal, &entry.path()).and_then(|_| {
+                    cleanup_journal(&journal)
+                        .and_then(|_| fs::remove_file(entry.path()).map_err(Into::into))
+                }) {
                     errors.push(error.context("failed to recover persistence transaction"));
                 }
             }
             Err(error) => {
                 let quarantine = transaction_dir.join("quarantine");
                 let _ = fs::create_dir_all(&quarantine);
-                let destination = quarantine.join(format!("{}-{}", file_name_for(&entry.path()), Uuid::new_v4()));
+                let destination = quarantine.join(format!(
+                    "{}-{}",
+                    file_name_for(&entry.path()),
+                    Uuid::new_v4()
+                ));
                 if let Err(move_error) = fs::rename(entry.path(), destination) {
                     errors.push(anyhow!("malformed persistence journal could not be quarantined: {error}; {move_error}"));
                 } else {
-                    errors.push(anyhow!("malformed persistence journal was quarantined: {error}"));
+                    errors.push(anyhow!(
+                        "malformed persistence journal was quarantined: {error}"
+                    ));
                 }
             }
         }
@@ -348,7 +401,9 @@ fn recover_journal(journal: &mut TransactionJournal, journal_path: &Path) -> Res
     journal.state = "applying".into();
     write_journal(journal_path, journal)?;
     for index in 0..journal.operations.len() {
-        if journal.operations[index].applied { continue; }
+        if journal.operations[index].applied {
+            continue;
+        }
         let mut transaction = FileTransaction {
             workspace: journal.workspace.clone(),
             workspace_data: journal.workspace_data.clone(),
@@ -368,10 +423,14 @@ fn recover_journal(journal: &mut TransactionJournal, journal_path: &Path) -> Res
 fn cleanup_journal(journal: &TransactionJournal) -> Result<()> {
     for operation in &journal.operations {
         if let Some(backup) = &operation.backup {
-            if backup.exists() { fs::remove_file(backup)?; }
+            if backup.exists() {
+                fs::remove_file(backup)?;
+            }
         }
         if let Some(staged) = &operation.staged {
-            if staged.exists() { fs::remove_file(staged)?; }
+            if staged.exists() {
+                fs::remove_file(staged)?;
+            }
         }
     }
     Ok(())
@@ -382,11 +441,28 @@ fn write_journal(path: &Path, journal: &TransactionJournal) -> Result<()> {
 }
 
 fn resolve_root<'a>(root: MutationRoot, workspace: &'a Path, workspace_data: &'a Path) -> &'a Path {
-    match root { MutationRoot::Workspace => workspace, MutationRoot::WorkspaceData => workspace_data }
+    match root {
+        MutationRoot::Workspace => workspace,
+        MutationRoot::WorkspaceData => workspace_data,
+    }
 }
 
-fn resolve_path(root: MutationRoot, workspace: &Path, workspace_data: &Path, relative: &Path) -> Result<PathBuf> {
-    if relative.is_absolute() || relative.components().any(|component| matches!(component, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+fn resolve_path(
+    root: MutationRoot,
+    workspace: &Path,
+    workspace_data: &Path,
+    relative: &Path,
+) -> Result<PathBuf> {
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
         return Err(anyhow!("persistence path must remain relative to its root"));
     }
     Ok(resolve_root(root, workspace, workspace_data).join(relative))
@@ -397,7 +473,9 @@ fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 fn hash_file(path: &Path) -> Result<String> {
-    Ok(hash_bytes(&fs::read(path).with_context(|| format!("failed to verify {}", path.display()))?))
+    Ok(hash_bytes(&fs::read(path).with_context(|| {
+        format!("failed to verify {}", path.display())
+    })?))
 }
 
 fn file_name_for(path: &Path) -> &str {
@@ -408,7 +486,9 @@ fn file_name_for(path: &Path) -> &str {
 
 fn sync_parent(path: &Path) {
     #[cfg(unix)]
-    if let Ok(file) = File::open(path) { let _ = file.sync_all(); }
+    if let Ok(file) = File::open(path) {
+        let _ = file.sync_all();
+    }
 }
 
 #[cfg(test)]
@@ -435,15 +515,34 @@ mod tests {
             workspace.path(),
             data.path(),
             vec![
-                FileMutation::Write { root: MutationRoot::Workspace, relative_path: PathBuf::from("new.json"), bytes: b"new".to_vec() },
-                FileMutation::Move { root: MutationRoot::Workspace, from: PathBuf::from("source.md"), to: PathBuf::from("moved.md") },
-                FileMutation::Delete { root: MutationRoot::Workspace, relative_path: PathBuf::from("new.json") },
+                FileMutation::Write {
+                    root: MutationRoot::Workspace,
+                    relative_path: PathBuf::from("new.json"),
+                    bytes: b"new".to_vec(),
+                },
+                FileMutation::Move {
+                    root: MutationRoot::Workspace,
+                    from: PathBuf::from("source.md"),
+                    to: PathBuf::from("moved.md"),
+                },
+                FileMutation::Delete {
+                    root: MutationRoot::Workspace,
+                    relative_path: PathBuf::from("new.json"),
+                },
             ],
-        ).unwrap().commit().unwrap();
+        )
+        .unwrap()
+        .commit()
+        .unwrap();
         assert!(!source.exists());
         assert!(workspace.path().join("moved.md").exists());
         assert!(!workspace.path().join("new.json").exists());
-        assert_eq!(fs::read_dir(data.path().join("transactions")).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_dir(data.path().join("transactions"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -453,7 +552,10 @@ mod tests {
         let result = FileTransaction::new(
             workspace.path(),
             data.path(),
-            vec![FileMutation::Delete { root: MutationRoot::Workspace, relative_path: PathBuf::from("../outside") }],
+            vec![FileMutation::Delete {
+                root: MutationRoot::Workspace,
+                relative_path: PathBuf::from("../outside"),
+            }],
         );
         assert!(result.is_err());
     }
@@ -467,8 +569,13 @@ mod tests {
         let transaction_id = "interrupted-write";
         let staged = workspace.path().join(".note.md.txn-stage");
         fs::write(&staged, b"new").unwrap();
-        let backup = workspace.path().join(format!(".note.md.txn-backup-{transaction_id}"));
-        let journal_path = data.path().join("transactions").join(format!("{transaction_id}.json"));
+        let backup = workspace
+            .path()
+            .join(format!(".note.md.txn-backup-{transaction_id}"));
+        let journal_path = data
+            .path()
+            .join("transactions")
+            .join(format!("{transaction_id}.json"));
         fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
         write_journal(
             &journal_path,

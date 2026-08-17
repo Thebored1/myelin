@@ -1,12 +1,9 @@
 use super::*;
-use crate::state::AppState;
 use futures_util::StreamExt;
-use rig_core::client::CompletionClient;
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
 use tauri::Emitter;
 #[derive(Deserialize, JsonSchema)]
 pub struct SearchNotesArgs {
@@ -20,7 +17,7 @@ pub struct FetchWebPageArgs {
 
 #[derive(Clone)]
 pub struct FetchWebPageTool {
-    pub state: AppState,
+    pub turn: ToolTurnContext,
 }
 
 impl Tool for FetchWebPageTool {
@@ -31,7 +28,8 @@ impl Tool for FetchWebPageTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let (_, description, params) = tool_contract("fetch_web_page").expect("fetch_web_page contract");
+        let (_, description, params) =
+            tool_contract("fetch_web_page").expect("fetch_web_page contract");
         ToolDefinition {
             name: "fetch_web_page".to_string(),
             description: description.to_string(),
@@ -46,8 +44,8 @@ impl Tool for FetchWebPageTool {
         let resolved_addr = crate::web_search::resolve_public_url(&url)
             .await
             .map_err(|message| ToolError { message })?;
-        self.state.record_chat_tool("Fetch Web Page", url.clone());
-        let _ = self.state.handle.emit(
+        self.turn.record_tool("Fetch Web Page", url.clone());
+        let _ = self.turn.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Fetch Web Page", "details": url }),
         );
@@ -62,14 +60,16 @@ impl Tool for FetchWebPageTool {
             .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
             .redirect(reqwest::redirect::Policy::none());
         if let Some(addr) = resolved_addr {
-            if let Some(host) = reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(str::to_string)) {
+            if let Some(host) = reqwest::Url::parse(&url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+            {
                 client_builder = client_builder.resolve(&host, addr);
             }
         }
-        let client = client_builder.build()
-            .map_err(|e| ToolError {
-                message: format!("Failed to build web client: {e}"),
-            })?;
+        let client = client_builder.build().map_err(|e| ToolError {
+            message: format!("Failed to build web client: {e}"),
+        })?;
 
         let response = client
             .get(&url)
@@ -129,7 +129,7 @@ pub struct SearchDocumentsArgs {
 
 #[derive(Clone)]
 pub struct SearchDocumentsTool {
-    pub state: AppState,
+    pub turn: ToolTurnContext,
 }
 
 impl Tool for SearchDocumentsTool {
@@ -140,7 +140,8 @@ impl Tool for SearchDocumentsTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let (_, description, params) = tool_contract("search_documents").expect("search_documents contract");
+        let (_, description, params) =
+            tool_contract("search_documents").expect("search_documents contract");
         ToolDefinition {
             name: "search_documents".to_string(),
             description: description.to_string(),
@@ -150,36 +151,51 @@ impl Tool for SearchDocumentsTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let k = args.count.unwrap_or(5).clamp(1, 10) as usize;
-        let scope = self.state.current_attachment_scope();
+        let scope = self.turn.attachment_scope();
         if scope.is_empty() {
             return Ok("Document search is unavailable because no document is authorized for the active AI workspace.".to_string());
         }
         let scoped_ids = match args.doc_id {
             Some(id) if scope.contains(&id) => vec![id],
             Some(_) => {
-                return Ok("That document is outside the active note and attachment scope.".to_string())
+                return Ok(
+                    "That document is outside the active note and attachment scope.".to_string(),
+                )
             }
             None => scope,
         };
-        self.state
-            .record_chat_tool("Search Documents", args.query.clone());
-        let _ = self.state.handle.emit(
+        self.turn.record_tool("Search Documents", args.query.clone());
+        let _ = self.turn.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
         );
-        let primary_future = self.state.retrieve_chunks_scoped(&args.query, k, Some(&scoped_ids));
-        let planner_future = self.state.plan_complex_retrieval(&args.query);
+        let primary_future = self
+            .turn.state
+            .retrieve_chunks_scoped(&args.query, k, Some(&scoped_ids));
+        let planner_future = self.turn.state.plan_complex_retrieval(&args.query);
         let (mut primary, alternates) = tokio::join!(primary_future, planner_future);
         if let Ok(chunks) = &mut primary {
             if !alternates.is_empty() {
                 let extra = futures_util::future::join_all(alternates.into_iter().map(|query| {
-                    let state = self.state.clone();
+                    let state = self.turn.state.clone();
                     let scoped_ids = scoped_ids.clone();
-                    async move { state.retrieve_chunks_scoped(&query, k, Some(&scoped_ids)).await }
-                })).await;
-                let mut seen = chunks.iter().map(|chunk| (chunk.doc_id.clone(), chunk.chunk_index)).collect::<std::collections::HashSet<_>>();
+                    async move {
+                        state
+                            .retrieve_chunks_scoped(&query, k, Some(&scoped_ids))
+                            .await
+                    }
+                }))
+                .await;
+                let mut seen = chunks
+                    .iter()
+                    .map(|chunk| (chunk.doc_id.clone(), chunk.chunk_index))
+                    .collect::<std::collections::HashSet<_>>();
                 for result in extra.into_iter().flatten() {
-                    for chunk in result { if seen.insert((chunk.doc_id.clone(), chunk.chunk_index)) { chunks.push(chunk); } }
+                    for chunk in result {
+                        if seen.insert((chunk.doc_id.clone(), chunk.chunk_index)) {
+                            chunks.push(chunk);
+                        }
+                    }
                 }
                 chunks.truncate(k);
             }
@@ -205,7 +221,7 @@ pub struct FindInNoteArgs {
 
 #[derive(Clone)]
 pub struct FindInNoteTool {
-    pub state: AppState,
+    pub turn: ToolTurnContext,
 }
 
 impl Tool for FindInNoteTool {
@@ -216,7 +232,8 @@ impl Tool for FindInNoteTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let (_, description, params) = tool_contract("find_in_note").expect("find_in_note contract");
+        let (_, description, params) =
+            tool_contract("find_in_note").expect("find_in_note contract");
         ToolDefinition {
             name: "find_in_note".to_string(),
             description: description.to_string(),
@@ -226,15 +243,15 @@ impl Tool for FindInNoteTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let q = args.query.trim().to_string();
-        self.state.record_chat_tool("Find in Note", q.clone());
-        let _ = self.state.handle.emit(
+        self.turn.record_tool("Find in Note", q.clone());
+        let _ = self.turn.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Find in Note", "details": q.clone() }),
         );
         if q.is_empty() {
             return Ok("No search term was given.".to_string());
         }
-        let body = self.state.open_note_body().unwrap_or_default();
+        let body = self.turn.open_note_body().unwrap_or_default();
         // Whole-word (boundary) match, not substring: "fix" must not hit
         // "prefix" and "add" must not hit "address".
         let pattern = format!(r"(?i)\b{}\b", regex::escape(&q));

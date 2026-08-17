@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
+	import type { SettingsController } from '$lib/settings/controller.svelte';
 
-	let { settings }: { settings: any } = $props();
-	type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
+	let { settings }: { settings: SettingsController } = $props();
 </script>
 
-		<div style="display: none">
-		{#if true}
+<div style="display: none">
+	{#if true}
 		<section class="settings-section">
 			<h2>Assistant Tooling</h2>
 			<p class="description">
@@ -24,7 +24,7 @@
 				<span class="toggle-text">
 					<span class="toggle-label">
 						<strong>Per-message tool gating</strong>
-						<span class="info" tabindex="0" role="note" aria-label="About per-message tool gating">
+						<span class="info" role="note" aria-label="About per-message tool gating">
 							<span class="info-dot">i</span>
 							<span class="info-pop"
 								>Offers the model only the tools its message seems to need, chosen by keyword
@@ -48,17 +48,13 @@
 				<input
 					type="checkbox"
 					bind:checked={settings.deterministicTools}
-					onchange={() => invoke('set_deterministic_tools', { enabled: settings.deterministicTools })}
+					onchange={() =>
+						invoke('set_deterministic_tools', { enabled: settings.deterministicTools })}
 				/>
 				<span class="toggle-text">
 					<span class="toggle-label">
 						<strong>Deterministic format &amp; find</strong>
-						<span
-							class="info"
-							tabindex="0"
-							role="note"
-							aria-label="About deterministic format and find"
-						>
+						<span class="info" role="note" aria-label="About deterministic format and find">
 							<span class="info-dot">i</span>
 							<span class="info-pop"
 								>In-code correctness assists that don’t withhold tools — they make the result
@@ -92,7 +88,11 @@
 
 			<div class="input-group full-width">
 				<label for="oh_tool_mode">Tool-calling strategy</label>
-				<select id="oh_tool_mode" bind:value={settings.ohToolMode} onchange={settings.changeToolMode}>
+				<select
+					id="oh_tool_mode"
+					bind:value={settings.ohToolMode}
+					onchange={settings.changeToolMode}
+				>
 					<option value="auto">Auto — choose per request</option>
 					<option value="native">Native — use the model's function calls</option>
 					<option value="prompt">Prompt tools — text-form calls with grammar options</option>
@@ -150,7 +150,11 @@
 			<div class="advanced-grid">
 				<div class="input-group">
 					<label for="oh_tool_choice">Native tool choice</label>
-					<select id="oh_tool_choice" bind:value={settings.ohToolChoice} onchange={settings.saveOpenharn}>
+					<select
+						id="oh_tool_choice"
+						bind:value={settings.ohToolChoice}
+						onchange={settings.saveOpenharn}
+					>
 						<option value="">Auto</option>
 						<option value="required">Required — force a native tool call</option>
 						<option value="none">None — disable native tool calls</option>
@@ -232,7 +236,9 @@
 				<div class="path-display" class:empty={!settings.ohBinPath}>
 					{settings.ohBinPath || 'Bundled openharn-myelin (auto-detected)'}
 				</div>
-				<button class="browse-btn" onclick={settings.pickOpenharnBin} disabled={settings.ohSaving}> Browse… </button>
+				<button class="browse-btn" onclick={settings.pickOpenharnBin} disabled={settings.ohSaving}>
+					Browse…
+				</button>
 			</div>
 			<p class="compute-hint">
 				Explicit path to the sidecar binary. Blank = bundled/resource-dir lookup. If it is missing,
@@ -244,7 +250,5 @@
 				request from the active model profile and interaction mode.
 			</p>
 		</section>
-
-		{/if}
-		</div>
-
+	{/if}
+</div>

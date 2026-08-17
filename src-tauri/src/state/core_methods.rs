@@ -1,6 +1,5 @@
-use ::anyhow::{anyhow, Context, Result};
 use super::core::*;
-use super::*;
+use ::anyhow::{anyhow, Context, Result};
 
 impl AppState {
     /// Publish a newly-copied PDF immediately. Attachments should not block the
@@ -9,16 +8,32 @@ impl AppState {
     fn register_copied_pdf(&self, workspace: &Path, path: &Path) -> Result<NoteDocument> {
         let workspace_data_dir = self.workspace_data_dir(workspace);
         let document = parse_pdf_file(workspace, &workspace_data_dir, path)?;
-        let vector = hashed_embedding(&format!("{}\n{}\n{}", document.title, document.tags.join(" "), document.body));
+        let vector = hashed_embedding(&format!(
+            "{}\n{}\n{}",
+            document.title,
+            document.tags.join(" "),
+            document.body
+        ));
         {
             let mut runtime = self.inner.runtime.write();
             if runtime.workspace_path.as_deref() != Some(workspace) {
-                return Err(anyhow!("workspace changed before PDF registration completed"));
+                return Err(anyhow!(
+                    "workspace changed before PDF registration completed"
+                ));
             }
             if runtime.notes.contains_key(&document.id) {
-                return Err(anyhow!("PDF registration produced a duplicate note id: {}", document.id));
+                return Err(anyhow!(
+                    "PDF registration produced a duplicate note id: {}",
+                    document.id
+                ));
             }
-            runtime.notes.insert(document.id.clone(), IndexedNote { document: document.clone(), vector });
+            runtime.notes.insert(
+                document.id.clone(),
+                IndexedNote {
+                    document: document.clone(),
+                    vector,
+                },
+            );
             runtime.index_state.note_count = runtime.notes.len();
         }
         Ok(document)
@@ -113,8 +128,9 @@ impl AppState {
         // OpenHarn settings. Fall back to the legacy mirror only when no valid
         // applied config exists, preserving compatibility during migration.
         let openharn_settings = match crate::ai_config::load_applied(&app_data_dir) {
-            Ok(Some(config)) if crate::ai_config::require_valid(&config).is_ok() =>
-                project_ai_agent_settings(&settings.openharn, &config.agent),
+            Ok(Some(config)) if crate::ai_config::require_valid(&config).is_ok() => {
+                project_ai_agent_settings(&settings.openharn, &config.agent)
+            }
             _ => settings.openharn.clone(),
         };
         let background_settings = settings.background.clone();
@@ -141,54 +157,18 @@ impl AppState {
                 index_scheduler: Mutex::new(IndexScheduler::default()),
                 index_completion: tokio::sync::Notify::new(),
                 tectonic_lock: AsyncMutex::new(()),
-                llama_server: AsyncMutex::new(None),
-                ai_pipeline_lock: AsyncMutex::new(()),
-                ai_pipeline_ready: std::sync::atomic::AtomicBool::new(false),
-                embed_server: AsyncMutex::new(None),
-                reranker_server: AsyncMutex::new(None),
-                reranker_circuit: Mutex::new(RerankerCircuit::default()),
-                sidecar: AsyncMutex::new(None),
-                chat_lock: AsyncMutex::new(()),
-                llama_slot_lock: AsyncMutex::new(()),
-                section_cache_preempt: std::sync::atomic::AtomicBool::new(false),
-                section_cache_resume: tokio::sync::Notify::new(),
+                ai: AiRuntime::new(),
                 openharn_settings: Mutex::new(openharn_settings),
                 background_settings: Mutex::new(background_settings),
                 llama_client: Client::builder()
                     .timeout(std::time::Duration::from_secs(120))
                     .build()
                     .context("failed to create llama HTTP client")?,
-                chat_tools: Mutex::new(Vec::new()),
-                latest_chat_question: Mutex::new(None),
-                current_selection: Mutex::new(None),
-                current_doc_type: Mutex::new(None),
-                current_note_id: Mutex::new(None),
-                last_slot_save: Mutex::new(None),
-                active_slot_cache: Mutex::new(None),
-                section_cache: Mutex::new(None),
-                cancel_ai: std::sync::atomic::AtomicBool::new(false),
-                cancel_notify: tokio::sync::Notify::new(),
-                require_tool_approval: std::sync::atomic::AtomicBool::new(false),
-                deterministic_tools: std::sync::atomic::AtomicBool::new(true),
-                tool_gating: std::sync::atomic::AtomicBool::new(false),
-                targeted_write: std::sync::atomic::AtomicBool::new(false),
-                chat_mode: std::sync::atomic::AtomicBool::new(false),
-                append_only: std::sync::atomic::AtomicBool::new(false),
-                placement_edit: std::sync::atomic::AtomicBool::new(false),
-                oversized_doc: std::sync::atomic::AtomicBool::new(false),
-                tools_supported: std::sync::atomic::AtomicBool::new(true),
                 note_ingest_locks: Mutex::new(HashMap::new()),
                 note_ingest_manifest_lock: AsyncMutex::new(()),
                 query_embedding_cache: Mutex::new(None),
-                prompt_warmup: Mutex::new(None),
-                pending_approvals: Mutex::new(HashMap::new()),
-                conversations: Mutex::new(HashMap::new()),
             }),
         })
-    }
-
-    pub(crate) async fn wait_for_ai_cancel(&self) {
-        self.inner.cancel_notify.notified().await;
     }
 
     pub async fn bootstrap(&self) -> Result<AppSnapshot> {
@@ -196,10 +176,9 @@ impl AppState {
         if let Some(workspace) = workspace {
             crate::git_history::init_repo(&workspace)?;
             let data_dir = prepare_workspace_data_dir(&self.inner.app_data_dir, &workspace)?;
-            self.replace_storage_issues_matching(
-                workspace_storage_issues(&data_dir),
-                |issue| issue.code == "workspace-storage-conflict",
-            );
+            self.replace_storage_issues_matching(workspace_storage_issues(&data_dir), |issue| {
+                issue.code == "workspace-storage-conflict"
+            });
             self.start_watcher(&workspace)?;
             {
                 let mut runtime = self.inner.runtime.write();
@@ -220,10 +199,9 @@ impl AppState {
             .with_context(|| format!("failed to create workspace at {}", workspace.display()))?;
         crate::git_history::init_repo(&workspace)?;
         let data_dir = prepare_workspace_data_dir(&self.inner.app_data_dir, &workspace)?;
-        self.replace_storage_issues_matching(
-            workspace_storage_issues(&data_dir),
-            |issue| issue.code == "workspace-storage-conflict",
-        );
+        self.replace_storage_issues_matching(workspace_storage_issues(&data_dir), |issue| {
+            issue.code == "workspace-storage-conflict"
+        });
 
         {
             let mut runtime = self.inner.runtime.write();
@@ -242,13 +220,15 @@ impl AppState {
 
     pub(crate) fn invalidate_ai_pipeline(&self) {
         self.inner
-            .ai_pipeline_ready
+            .ai
+            .pipeline_ready
             .store(false, std::sync::atomic::Ordering::Release);
     }
 
     pub(crate) fn ai_pipeline_ready(&self) -> bool {
         self.inner
-            .ai_pipeline_ready
+            .ai
+            .pipeline_ready
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -264,6 +244,13 @@ impl AppState {
         annotations: Vec<crate::models::PdfAnnotation>,
     ) -> Result<()> {
         let workspace = self.require_workspace()?;
+        validate_note_storage_id(&note_id)?;
+        let note = self
+            .note_by_id(&note_id)
+            .ok_or_else(|| anyhow!("PDF note not found: {note_id}"))?;
+        if !note.relative_path.to_ascii_lowercase().ends_with(".pdf") {
+            anyhow::bail!("note is not a PDF: {note_id}");
+        }
         let _persistence_guard = self.inner.persistence_lock.lock();
         let workspace_data_dir = self.workspace_data_dir(&workspace);
         let annotations_dir = workspace_data_dir.join("annotations");
@@ -301,20 +288,16 @@ impl AppState {
         // workspace root. Even a file already in the workspace is copied so a
         // second attachment gets its own source identity and annotations.
         let target_dir = match &notebook {
-            Some(name)
-                if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") =>
-            {
+            Some(name) if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") => {
                 let safe = sanitize_relative_folder(name)?;
                 let dir = workspace.join(folder_to_relative_path(&safe));
-                fs::create_dir_all(&dir)
-                    .map_err(|e| anyhow!("failed to open notebook: {}", e))?;
+                fs::create_dir_all(&dir).map_err(|e| anyhow!("failed to open notebook: {}", e))?;
                 dir
             }
             _ => workspace.clone(),
         };
         let dest = unique_pdf_path(&target_dir, file_name);
-        fs::copy(&src, &dest)
-            .map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
+        fs::copy(&src, &dest).map_err(|e| anyhow!("failed to copy PDF to workspace: {}", e))?;
 
         self.register_copied_pdf(&workspace, &dest)
     }
@@ -338,13 +321,10 @@ impl AppState {
             return Err(anyhow!("PDF file not found: {}", source.relative_path));
         }
         let target_dir = match &notebook {
-            Some(name)
-                if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") =>
-            {
+            Some(name) if !name.trim().is_empty() && !name.trim().eq_ignore_ascii_case("root") => {
                 let safe = sanitize_relative_folder(name)?;
                 let dir = workspace.join(folder_to_relative_path(&safe));
-                fs::create_dir_all(&dir)
-                    .map_err(|e| anyhow!("failed to open notebook: {}", e))?;
+                fs::create_dir_all(&dir).map_err(|e| anyhow!("failed to open notebook: {}", e))?;
                 dir
             }
             _ => workspace.clone(),
@@ -357,7 +337,10 @@ impl AppState {
             .map_err(|e| anyhow!("failed to copy PDF for attachment: {}", e))?;
 
         let document = self.register_copied_pdf(&workspace, &dest)?;
-        if let Err(error) = self.clone_document_ingestion(&source.id, &document.id).await {
+        if let Err(error) = self
+            .clone_document_ingestion(&source.id, &document.id)
+            .await
+        {
             log::debug!("cached PDF chunks could not be reused for attachment: {error}");
         }
         Ok(document)
@@ -373,13 +356,21 @@ impl AppState {
         let custom_note_order = normalized_custom_order(&runtime.custom_note_order, &runtime.notes);
         let notes = sort_summaries_by_custom_order(note_summaries, &custom_note_order);
         let mut storage_issues = runtime.storage_issues.clone();
-        for file_name in ["llama-server.json", "ai-config.json", "ai-config.applied.json"] {
+        for file_name in [
+            "llama-server.json",
+            "ai-config.json",
+            "ai-config.applied.json",
+        ] {
             let path = self.inner.app_data_dir.join(file_name);
             if path.exists() {
                 let malformed = fs::read_to_string(&path)
                     .ok()
                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).err());
-                if malformed.is_some() && !storage_issues.iter().any(|issue| issue.path.as_deref() == Some(path.to_string_lossy().as_ref())) {
+                if malformed.is_some()
+                    && !storage_issues
+                        .iter()
+                        .any(|issue| issue.path.as_deref() == Some(path.to_string_lossy().as_ref()))
+                {
                     storage_issues.push(StorageIssue {
                         code: "configuration-corrupt".into(),
                         severity: "error".into(),
@@ -406,22 +397,24 @@ impl AppState {
     }
 
     pub fn shutdown_servers_sync(&self) {
-        if let Ok(mut guard) = self.inner.llama_server.try_lock() {
+        if let Ok(mut guard) = self.inner.ai.llama_server.try_lock() {
             if let Some(server) = guard.as_mut() {
                 let _ = server.child.kill();
             }
         }
-        if let Ok(mut guard) = self.inner.embed_server.try_lock() {
+        if let Ok(mut guard) = self.inner.ai.embed_server.try_lock() {
             if let Some(server) = guard.as_mut() {
                 let _ = server.child.kill();
             }
         }
-        if let Ok(mut guard) = self.inner.reranker_server.try_lock() {
+        if let Ok(mut guard) = self.inner.ai.reranker_server.try_lock() {
             if let Some(server) = guard.as_mut() {
                 let _ = server.child.kill();
             }
         }
-        if let Ok(mut guard) = self.inner.sidecar.try_lock() { *guard = None; }
+        if let Ok(mut guard) = self.inner.ai.sidecar.try_lock() {
+            *guard = None;
+        }
     }
 
     pub(crate) fn require_workspace(&self) -> Result<PathBuf> {
@@ -456,7 +449,10 @@ impl AppState {
                     let runtime = state.inner.runtime.read();
                     let known = binary_paths.iter().all(|path| {
                         let relative = relative_to_workspace(&workspace_path, path);
-                        runtime.notes.values().any(|note| note.document.relative_path == relative)
+                        runtime
+                            .notes
+                            .values()
+                            .any(|note| note.document.relative_path == relative)
                     });
                     if known {
                         return;
@@ -468,9 +464,7 @@ impl AppState {
                     return;
                 }
 
-                if let Some(receipt) =
-                    state.request_reindex(workspace_path.clone(), true)
-                {
+                if let Some(receipt) = state.request_reindex(workspace_path.clone(), true) {
                     // A burst only needs one UI invalidation. Further events are
                     // folded into the pending generation or the single dirty rerun.
                     if receipt.spawn_worker {
@@ -489,15 +483,21 @@ impl AppState {
     /// pending slot, so event bursts cannot build an unbounded queue of scans.
     /// Holding the runtime read guard through scheduler insertion prevents a
     /// late event from an old watcher replacing a newer workspace request.
-    pub(crate) async fn ensure_llama_server(&self, config: &llama_server::ResolvedLlamaConfig) -> Result<()> {
-        let _ = self.handle.emit("ai://debug_event", serde_json::json!({
-            "kind": "startup",
-            "msg": format!(
-                "Starting {} / checking llama-server readiness",
-                if config.inference_engine == "beellama" { "BeeLlama" } else { "llama.cpp" }
-            )
-        }));
-        let mut guard = self.inner.llama_server.lock().await;
+    pub(crate) async fn ensure_llama_server(
+        &self,
+        config: &llama_server::ResolvedLlamaConfig,
+    ) -> Result<()> {
+        let _ = self.handle.emit(
+            "ai://debug_event",
+            serde_json::json!({
+                "kind": "startup",
+                "msg": format!(
+                    "Starting {} / checking llama-server readiness",
+                    if config.inference_engine == "beellama" { "BeeLlama" } else { "llama.cpp" }
+                )
+            }),
+        );
+        let mut guard = self.inner.ai.llama_server.lock().await;
 
         if let Some(server) = guard.as_mut() {
             if config.accepts_running(&server.config)
@@ -566,6 +566,4 @@ impl AppState {
         *guard = Some(server);
         Ok(())
     }
-
-
 }

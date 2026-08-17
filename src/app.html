@@ -11,7 +11,11 @@
 			try {
 				var bootstrap = JSON.parse(localStorage.getItem('myelin_theme_bootstrap_v1') || 'null');
 				var hex = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
-				if (bootstrap && (bootstrap.mode === 'light' || bootstrap.mode === 'dark') && bootstrap.tokens) {
+				if (
+					bootstrap &&
+					(bootstrap.mode === 'light' || bootstrap.mode === 'dark') &&
+					bootstrap.tokens
+				) {
 					document.documentElement.dataset.theme = bootstrap.mode;
 					document.documentElement.dataset.themeId = String(bootstrap.themeId || 'myelin-dark');
 					Object.keys(bootstrap.tokens).forEach(function (key) {

@@ -13,80 +13,10 @@
 
 use serde_json::{json, Value};
 
-/// A single tool result can be huge; cap it so one result can't blow the context.
-pub const TOOL_RESULT_CAP: usize = 4_000;
-
-pub fn cap_result_with(mut s: String, cap: usize) -> String {
-    if s.chars().count() > cap {
-        s = s.chars().take(cap).collect();
-        s.push_str(
-            "\n…[result truncated — narrow your search (a more specific query) if you need more]",
-        );
-    }
-    s
-}
-
-/// Trim the conversation to fit `max_chars`, always keeping the system message
-/// and the CURRENT user turn (the latest user message plus the assistant/tool
-/// messages that follow it). Only OLDEST whole turns may be dropped — a user
-/// message plus the assistant/tool messages after it — so a tool result is
-/// never orphaned from its call and the in-flight request is never lost.
-///
-/// The system message (which embeds the note body) is fixed context and is
-/// never counted against the budget: the host sizes it separately, so charging
-/// it here would silently wipe the entire conversation on long notes.
-///
-/// Returns true when the history was actually shortened (so callers can detect
-/// a futile retry when the budget cannot shrink the prompt any further).
-pub fn fit_context(history: &mut Vec<Value>, max_chars: usize) -> bool {
-    if history.len() < 3 {
-        return false;
-    }
-    let fixed_len = if history[0]["role"] == "system" {
-        history[0].to_string().len()
-    } else {
-        0
-    };
-    let total = |h: &[Value]| -> usize {
-        h.iter()
-            .map(|m| m.to_string().len())
-            .sum::<usize>()
-            .saturating_sub(fixed_len)
-    };
-    let mut changed = false;
-    while total(history) > max_chars && history.len() > 3 {
-        // The current turn (last user message onward) must never be dropped.
-        let Some(current_user) = history.iter().rposition(|m| m["role"] == "user") else {
-            break;
-        };
-        // End of the OLDEST whole turn: the next user message after index 1.
-        let mut end = 2;
-        while end < current_user && history[end]["role"] != "user" {
-            end += 1;
-        }
-        // Nothing droppable remains without removing the current request.
-        if end >= history.len() || end > current_user {
-            break;
-        }
-        history.drain(1..end);
-        changed = true;
-    }
-    changed
-}
-
-/// In reasoning-off mode a hybrid-thinking model still leaks a (shortened) chain
-/// of thought into the content wrapped in stray `<think>…</think>` tags. Keep
-/// only the real answer: everything after the last `</think>`, tags removed.
-pub fn strip_think(s: &str) -> String {
-    let tail = match s.rfind("</think>") {
-        Some(i) => &s[i + "</think>".len()..],
-        None => s,
-    };
-    tail.replace("<think>", "")
-        .replace("</think>", "")
-        .trim()
-        .to_string()
-}
+mod context;
+mod decompose;
+pub use context::*;
+pub use decompose::harness_decompose;
 
 /// The first required parameter of a tool (used to map a positional text call
 /// like `web_search(rust release)` onto `{"query": "..."}`). Schema-driven so it
@@ -203,19 +133,17 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
     // which cannot safely handle parentheses inside generated Markdown.
     if s.contains("<|tool_call_start|>")
         && schemas.as_array().is_some_and(|items| {
-        items
-            .iter()
-            .any(|tool| tool["function"]["name"].as_str() == Some("write_note"))
+            items
+                .iter()
+                .any(|tool| tool["function"]["name"].as_str() == Some("write_note"))
         })
     {
         if let Some((generated, true, quote_end)) = extract_lfm_content_value_with_end(s) {
             let tail = &s[quote_end..];
             let call_closed = tail.contains(')');
-            let native_frame_closed = !s.contains("<|tool_call_start|>")
-                || tail.contains("<|tool_call_end|>");
-            if call_closed
-                && native_frame_closed
-                && !note_content_has_protocol_residue(&generated)
+            let native_frame_closed =
+                !s.contains("<|tool_call_start|>") || tail.contains("<|tool_call_end|>");
+            if call_closed && native_frame_closed && !note_content_has_protocol_residue(&generated)
             {
                 return Some(vec![json!({
                     "id": "call_lfm_text_0",
@@ -225,6 +153,46 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
                         "arguments": json!({ "content": generated }).to_string()
                     }
                 })]);
+            }
+        }
+    }
+
+    // Some LFM2 Q2 generations emit the tool wrapper and a valid Markdown
+    // body, but leave the JSON string closing quote out and place the template
+    // marker </content> before the wrapper closes. Recover only this narrow,
+    // schema-checked shape; ordinary malformed JSON must still be rejected.
+    if s.contains("</content>")
+        || s.contains("}</tool_call>")
+            && s.contains("write_note")
+            && schemas.as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|tool| tool["function"]["name"].as_str() == Some("write_note"))
+            })
+    {
+        if let Some(content_key) = s.find("\"content\"") {
+            let after_key = &s[content_key + "\"content\"".len()..];
+            let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+            let quote = after_colon.chars().next()?;
+            if quote == '"' || quote == '\'' {
+                let body = &after_colon[quote.len_utf8()..];
+                let marker = body
+                    .find("</content>")
+                    .or_else(|| body.find("}</tool_call>"));
+                if let Some(marker) = marker {
+                    let body = body[..marker].trim_end_matches('」');
+                    let (generated, _, _) = decode_partial_quoted(body, quote);
+                    if !generated.is_empty() && !note_content_has_protocol_residue(&generated) {
+                        return Some(vec![json!({
+                            "id": "call_lfm_recovered_0",
+                            "type": "function",
+                            "function": {
+                                "name": "write_note",
+                                "arguments": json!({ "content": generated }).to_string()
+                            }
+                        })]);
+                    }
+                }
             }
         }
     }
@@ -323,14 +291,12 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
             // malformed Pythonic call (e.g. write_note(foo="…")) previously
             // became a structured call missing `content` — with an unknown-key
             // model error it now fails loudly at argument validation instead.
-            let tool_schema = schemas
-                .as_array()
-                .and_then(|arr| {
-                    arr.iter()
-                        .find(|t| t["function"]["name"].as_str() == Some(name))
-                });
-            if let Some(props) = tool_schema
-                .and_then(|t| t["function"]["parameters"]["properties"].as_object())
+            let tool_schema = schemas.as_array().and_then(|arr| {
+                arr.iter()
+                    .find(|t| t["function"]["name"].as_str() == Some(name))
+            });
+            if let Some(props) =
+                tool_schema.and_then(|t| t["function"]["parameters"]["properties"].as_object())
             {
                 obj.retain(|k, _| props.contains_key(k));
             }
@@ -390,28 +356,29 @@ fn tool_prompt(schemas: &Value) -> String {
         let sections: [(&str, &[&str]); 6] = [
             (
                 "--- Read & Search ---",
-                &["search_notes", "read_note", "search_documents", "find_in_note"],
+                &[
+                    "search_notes",
+                    "read_note",
+                    "search_documents",
+                    "find_in_note",
+                ],
             ),
-            (
-                "--- Web Fetch ---",
-                &["fetch_web_page", "web_search"],
-            ),
+            ("--- Web Fetch ---", &["fetch_web_page", "web_search"]),
             (
                 "--- Edit: Add Content ---",
-                &["write_note", "append_note", "prepend_note", "insert_after_line"],
+                &[
+                    "write_note",
+                    "append_note",
+                    "prepend_note",
+                    "insert_after_line",
+                ],
             ),
             (
                 "--- Edit: Change or Remove ---",
                 &["replace_in_note", "delete_in_note"],
             ),
-            (
-                "--- Formatting ---",
-                &["format_note"],
-            ),
-            (
-                "--- Notebooks ---",
-                &["edit_notebook"],
-            ),
+            ("--- Formatting ---", &["format_note"]),
+            ("--- Notebooks ---", &["edit_notebook"]),
         ];
 
         for (header, tool_names) in sections {
@@ -747,364 +714,5 @@ pub fn note_content_has_protocol_residue(content: &str) -> bool {
     myelin_edit_core::note_content_has_protocol_residue(content)
 }
 
-
-
-/// The harness-as-crutch decomposer. A weak quantized model cannot split a
-/// multi-operation request into N tool calls on its own (the dominant BFCL
-/// failure). So the harness does the decomposition itself — purely from the
-/// request text and the tool schemas, no model call — and later drives the
-/// model to fill ONE forced slot per planned sub-operation. The model still
-/// supplies the arguments (what it is good at, one call at a time); the
-/// harness supplies the structure (count + which tool + focus) the model
-/// cannot.
-///
-/// Returns an ordered plan: one `(tool_name, clause)` per sub-operation.
-/// Empty request or no matching tool yields an empty plan (caller falls back
-/// to single-shot).
-pub fn harness_decompose(request: &str, tools: &Value) -> Vec<(String, String)> {
-    let req = request.trim();
-    if req.is_empty() {
-        return Vec::new();
-    }
-
-    // 1) Split the request into clauses on conjunctions / punctuation that signal
-    //    independent operations.
-    let clause_split = regex::Regex::new(
-        r"(?i)\b(?:,|;| and | plus | then | also | as well as | along with |&|/)\b",
-    )
-    .unwrap();
-    let mut clauses: Vec<String> = clause_split
-        .split(req)
-        .map(|c| c.trim().to_string())
-        .filter(|c| !c.is_empty())
-        .collect();
-    if clauses.is_empty() {
-        clauses.push(req.to_string());
-    }
-
-    // 2) Tokenize each clause into lowercased alnum words for keyword matching.
-    let word_re = regex::Regex::new(r"[a-z0-9_]+").unwrap();
-
-    // Precompute per-tool keyword sets (name + description + parameter names + enum values).
-    let mut tool_kw: Vec<(String, Vec<String>)> = Vec::new();
-    if let Some(arr) = tools.as_array() {
-        for t in arr {
-            let f = if t["function"].is_object() {
-                &t["function"]
-            } else {
-                t
-            };
-            let name = f["name"].as_str().unwrap_or("").to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let mut kw = Vec::new();
-            let d = f["description"].as_str().unwrap_or("").to_lowercase();
-            kw.extend(word_re.find_iter(&d).map(|m| m.as_str().to_string()));
-            // include the dotted name pieces too
-            kw.extend(name.split(['.', '_']).map(|s| s.to_string()));
-            if let Some(props) = f["parameters"]["properties"].as_object() {
-                for (pk, pv) in props {
-                    kw.extend(pk.split(['.', '_']).map(|s| s.to_string()));
-                    if let Some(en) = pv["enum"].as_array() {
-                        for e in en {
-                            if let Some(s) = e.as_str() {
-                                kw.extend(
-                                    word_re
-                                        .find_iter(&s.to_lowercase())
-                                        .map(|m| m.as_str().to_string()),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            tool_kw.push((name, kw));
-        }
-    }
-
-    // 3) Score each clause against each tool; pick the best tool for that clause.
-    fn score(clause_words: &[String], tool_words: &[String]) -> f64 {
-        if clause_words.is_empty() || tool_words.is_empty() {
-            return 0.0;
-        }
-        let mut hit = 0;
-        for w in clause_words {
-            if w.len() >= 3 && tool_words.iter().any(|t| t == w) {
-                hit += 1;
-            }
-        }
-        hit as f64 / clause_words.len() as f64
-    }
-
-    let mut plan: Vec<(String, String)> = Vec::new();
-    for clause in &clauses {
-        let cwords: Vec<String> = word_re
-            .find_iter(&clause.to_lowercase())
-            .map(|m| m.as_str().to_string())
-            .collect();
-        let mut best: Option<(f64, &String)> = None;
-        for (name, kw) in &tool_kw {
-            let s = score(&cwords, kw);
-            if s > 0.0 {
-                if best.as_ref().map(|(bs, _)| s > *bs).unwrap_or(true) {
-                    best = Some((s, name));
-                }
-            }
-        }
-        if let Some((_, name)) = best {
-            plan.push((name.clone(), clause.clone()));
-        }
-    }
-
-    plan
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn schemas() -> Value {
-        json!([
-            {"type":"function","function":{"name":"web_search","description":"Search the web.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
-            {"type":"function","function":{"name":"write_note","description":"Set note.","parameters":{"type":"object","properties":{"content":{"type":"string"},"mode":{"type":"string","enum":["replace","append"]}},"required":["content"]}}}
-        ])
-    }
-
-    #[test]
-    fn parses_granite_text_tool_call() {
-        let c = r#"<tool_call>[{"arguments": {"query": "rust release"}, "name": "web_search"}]"#;
-        let calls = parse_text_tool_calls(c, &schemas()).expect("should parse");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["function"]["name"], "web_search");
-        let args = calls[0]["function"]["arguments"].as_str().unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(args).unwrap()["query"],
-            "rust release"
-        );
-    }
-
-    #[test]
-    fn parses_chat_template_closing_tool_wrapper() {
-        let c = r#"<tool_call>[{"arguments":{"content":"A short essay."},"name":"write_note"}]</tool_call>"#;
-        let calls = parse_text_tool_calls(c, &schemas()).expect("should parse");
-        assert_eq!(calls[0]["function"]["name"], "write_note");
-        let args = calls[0]["function"]["arguments"].as_str().unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(args).unwrap()["content"],
-            "A short essay."
-        );
-    }
-
-    #[test]
-    fn extracts_partial_lfm_native_content() {
-        assert_eq!(
-            extract_partial_content(
-                r##"<|tool_call_start|>[write_note(content="# Sea\nThe sea is va"##
-            )
-            .as_deref(),
-            Some("# Sea\nThe sea is va")
-        );
-        assert_eq!(
-            extract_partial_content(r#"write_note(content='hello wo"#).as_deref(),
-            Some("hello wo")
-        );
-    }
-
-    #[test]
-    fn detects_generated_tool_protocol_residue() {
-        assert!(note_content_has_protocol_residue(
-            "# Essay\nUseful prose.\n/content>}   > write_note(content="
-        ));
-        assert!(note_content_has_protocol_residue(
-            "# Essay\nUseful prose.</tool_call>"
-        ));
-        assert!(!note_content_has_protocol_residue(
-            "# Rust\nUse `write_note(content)` as an ordinary API example."
-        ));
-    }
-
-    #[test]
-    fn ignores_prose_and_unknown_tools() {
-        assert!(parse_text_tool_calls("The note now has three sections.", &schemas()).is_none());
-        assert!(parse_text_tool_calls("", &schemas()).is_none());
-        // unknown tool name in `name(...)` form must not be picked up
-        assert!(parse_text_tool_calls("fs::write(a.txt)", &schemas()).is_none());
-    }
-
-    #[test]
-    fn positional_maps_to_first_required() {
-        let calls = parse_text_tool_calls("web_search(latest rust)", &schemas()).expect("parse");
-        let args = calls[0]["function"]["arguments"].as_str().unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(args).unwrap()["query"],
-            "latest rust"
-        );
-    }
-
-    #[test]
-    fn parses_lfm_pythonic_named_arguments() {
-        let calls = parse_text_tool_calls(
-            r#"write_note(content="Sea, sky, and shore", mode="replace")"#,
-            &schemas(),
-        )
-        .expect("parse");
-        let args: Value =
-            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
-        assert_eq!(args["content"], "Sea, sky, and shore");
-        assert_eq!(args["mode"], "replace");
-    }
-
-    #[test]
-    fn parses_framed_lfm_content_with_markdown_parentheses() {
-        let calls = parse_text_tool_calls(
-            r##"<|tool_call_start|>[write_note(content="# Links\nUse [Rust](https://rust-lang.org).")]<|tool_call_end|>"##,
-            &schemas(),
-        )
-        .expect("parse framed LFM call");
-        let args: Value =
-            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            args["content"],
-            "# Links\nUse [Rust](https://rust-lang.org)."
-        );
-    }
-
-    #[test]
-    fn pythonic_unknown_keys_are_dropped() {
-        // A hallucinated kwarg must not smuggle a malformed call through:
-        // `foo` is not in the write_note schema and gets dropped.
-        let calls = parse_text_tool_calls(
-            r#"write_note(content="hello", foo="bar")"#,
-            &schemas(),
-        )
-        .expect("parse");
-        let args: Value =
-            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
-        assert_eq!(args["content"], "hello");
-        assert!(args.get("foo").is_none());
-        // A call whose ENTIRE argument set is unknown is discarded, not
-        // forwarded to the host as a content-less write_note.
-        assert!(
-            parse_text_tool_calls(r#"write_note(wrong_key="boom")"#, &schemas()).is_none(),
-            "all-unknown Pythonic call must be discarded"
-        );
-    }
-
-    #[test]
-    fn pythonic_calls_missing_required_arguments_are_rejected() {
-        assert!(parse_text_tool_calls(r#"write_note(mode="replace")"#, &schemas()).is_none());
-        assert!(parse_text_tool_calls(
-            r#"write_note(content=None, mode="replace")"#,
-            &schemas()
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn grammar_names_tools_and_has_text_escape() {
-        let g = tool_grammar(&schemas(), "call | text");
-        assert!(g.contains("root ::= call | text"));
-        assert!(g.contains(r#""\"write_note\""#));
-        assert!(g.contains(r#""\"content\""#));
-        assert!(g.contains("string ::= "));
-        // Raw newlines, carriage returns, and tabs are excluded from JSON strings.
-        assert!(g.contains(r#"[^"\\\n\r\t]"#));
-        assert!(g.contains("t-"));
-        // The new compact grammar has no ws rules and no recursive value/object.
-        assert!(!g.contains("ws ::="));
-        assert!(!g.contains("value ::= object"));
-    }
-
-    #[test]
-    fn extract_partial_content_mid_string() {
-        assert_eq!(
-            extract_partial_content(r#"{"content":"hello wo"#).as_deref(),
-            Some("hello wo")
-        );
-        assert_eq!(
-            extract_partial_content(r#"{"mode":"replace","content":"hi"}"#).as_deref(),
-            Some("hi")
-        );
-        assert_eq!(extract_partial_content(r#"{"mode":"replace""#), None);
-    }
-
-    #[test]
-    fn fit_context_keeps_system_and_whole_turns() {
-        let mut h = vec![
-            json!({"role":"system","content":"sys"}),
-            json!({"role":"user","content":"a".repeat(50)}),
-            json!({"role":"assistant","content":"b".repeat(50)}),
-            json!({"role":"user","content":"c".repeat(50)}),
-            json!({"role":"assistant","content":"d".repeat(50)}),
-        ];
-        fit_context(&mut h, 200);
-        assert_eq!(h[0]["role"], "system");
-        assert!(h.len() < 5);
-        // The latest user turn survives trimming.
-        assert_eq!(h.last().unwrap()["content"], "d".repeat(50));
-    }
-
-    #[test]
-    fn fit_context_never_drops_the_current_user_turn() {
-        // A single-turn multi-tool exchange: [system, user, assistant(tool_calls),
-        // tool, ...]. The current user request and its tool results must survive
-        // even when the conversation alone exceeds the budget.
-        let mut h = vec![
-            json!({"role":"system","content":"sys"}),
-            json!({"role":"user","content":"search then write".repeat(40)}),
-            json!({"role":"assistant","content":null,"tool_calls":[json!({"id":"1","function":{"name":"search_notes","arguments":"{}"}})]}),
-            json!({"role":"tool","tool_call_id":"1","content":"result".repeat(40)}),
-        ];
-        let changed = fit_context(&mut h, 200);
-        assert!(!changed, "the only turn must never be dropped");
-        assert_eq!(h.len(), 4);
-        assert_eq!(h[1]["content"], "search then write".repeat(40));
-        assert_eq!(h[3]["tool_call_id"], "1");
-    }
-
-    #[test]
-    fn fit_context_excludes_the_note_bearing_system_from_budget() {
-        // The system message embeds the note body; it must not consume the
-        // conversation budget, or the model would see zero prior turns on long
-        // notes even though the host persisted them.
-        let mut h = vec![
-            json!({"role":"system","content":"n".repeat(20_000)}),
-            json!({"role":"user","content":"old q".repeat(10)}),
-            json!({"role":"assistant","content":"old a".repeat(10)}),
-            json!({"role":"user","content":"new q".repeat(10)}),
-        ];
-        fit_context(&mut h, 100);
-        assert_eq!(h[0]["role"], "system");
-        // The oldest turn is dropped, the current user turn is kept.
-        assert_eq!(h[1]["content"], "new q".repeat(10));
-        assert_eq!(h.len(), 2);
-    }
-
-    #[test]
-    fn decompose_single_call() {
-        let plan = harness_decompose("write a note about rust", &schemas());
-        assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].0, "write_note");
-    }
-
-    #[test]
-    fn decompose_multi_call() {
-        let plan = harness_decompose("search the web for rust and write a note", &schemas());
-        assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].0, "web_search");
-        assert_eq!(plan[1].0, "write_note");
-    }
-
-    #[test]
-    fn decompose_no_match() {
-        let plan = harness_decompose("hello how are you today", &schemas());
-        assert_eq!(plan.len(), 0);
-    }
-
-    #[test]
-    fn decompose_empty() {
-        let plan = harness_decompose("", &schemas());
-        assert_eq!(plan.len(), 0);
-    }
-}
+mod tests;

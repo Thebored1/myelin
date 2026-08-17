@@ -1,13 +1,7 @@
 use super::*;
+use crate::ai_turn::ToolTurnContext;
 use crate::state::AppState;
-use futures_util::StreamExt;
 use rig_core::client::CompletionClient;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tauri::Emitter;
 pub fn build_myelin_agent(
     state: AppState,
     base_url: &str,
@@ -16,6 +10,7 @@ pub fn build_myelin_agent(
     temperature: f64,
     max_turns: usize,
 ) -> rig_core::agent::Agent<impl rig_core::completion::CompletionModel> {
+    let turn = ToolTurnContext::standalone(state);
     let client = rig_core::providers::openai::Client::builder()
         .api_key("sk-fake")
         .base_url(base_url)
@@ -30,45 +25,44 @@ pub fn build_myelin_agent(
         .temperature(temperature)
         .default_max_turns(max_turns)
         .tool(ReadNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(WriteNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(AppendNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(PrependNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(ReplaceInNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(InsertAfterLineTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(DeleteInNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(FormatNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(FetchWebPageTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(WebSearchTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(SearchDocumentsTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(FindInNoteTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
         .tool(SearchNotesTool {
-            state: state.clone(),
+            turn: turn.clone(),
         })
-        .tool(EditNotebookTool { state })
+        .tool(EditNotebookTool { turn })
         .build()
 }
-

@@ -1,6 +1,6 @@
 use super::super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
+use crate::ai_turn::{ToolTurnContext, TurnMode, TurnPolicy, TurnCancellation};
+use ::anyhow::{anyhow, Result};
 impl AppState {
     pub async fn ask_ai_stream(
         &self,
@@ -12,13 +12,13 @@ impl AppState {
         interaction_mode: Option<String>,
         active_section: Option<crate::models::ActiveSection>,
     ) -> Result<()> {
-        let _chat_guard = match self.inner.chat_lock.try_lock() {
+        let _chat_guard = match self.inner.ai.chat_lock.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
                 self.request_ai_cancel();
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    self.inner.chat_lock.lock(),
+                    self.inner.ai.chat_lock.lock(),
                 )
                 .await
                 .map_err(|_| anyhow!("The previous AI request did not stop within 10 seconds."))?
@@ -37,21 +37,12 @@ impl AppState {
             Some("edit") => "edit",
             Some(mode) => return Err(anyhow!("unknown AI interaction mode: {mode}")),
         };
-        self.inner.targeted_write.store(
-            interaction_mode == "write",
-            std::sync::atomic::Ordering::SeqCst,
-        );
-        self.reset_chat_tools();
-        self.inner
-            .cancel_ai
-            .store(false, std::sync::atomic::Ordering::Release);
-        self.set_latest_chat_question(question.clone());
         let selection = selection.filter(|s| s.cursor || !s.text.trim().is_empty());
-        self.set_current_selection(selection.clone());
         let doc_type = doc_type.unwrap_or_else(|| "md".to_string());
-        self.set_current_doc_type(Some(doc_type.clone()));
-        self.set_current_note_id(note_id.clone());
+        let cancellation = TurnCancellation::default();
+        self.install_turn_cancellation(cancellation.clone());
         self.pause_section_cache_for_turn();
+        let mut turn_tools = Vec::new();
         let result: Result<()> = async {
             let setup_started = std::time::Instant::now();
             let _ = self.handle.emit(
@@ -98,8 +89,6 @@ impl AppState {
                 }),
             );
             let deterministic_tools = false;
-            self.set_deterministic_tools_runtime(deterministic_tools);
-            self.set_tool_gating_runtime(config.tool_gating);
             let ctx_tokens = if external_model {
                 config.context_size as usize
             } else {
@@ -458,14 +447,28 @@ impl AppState {
                     "requestId": request_id,
                 }),
             );
-            self.set_turn_tool_policy(
-                interaction_mode == "chat",
-                append_only && !has_selection,
-                placement && has_selection && interaction_mode != "write",
-                prompt_shape.oversized,
-                supports_tools,
+            let nid = note.id.clone();
+            let tool_turn = ToolTurnContext::new(
+                self.clone(),
+                nid.clone(),
+                question.clone(),
+                selection.clone(),
+                doc_type.clone(),
+                TurnMode::parse(interaction_mode).expect("interaction mode validated above"),
+                TurnPolicy {
+                    require_tool_approval: self.is_tool_approval_required(),
+                    deterministic_tools,
+                    tool_gating: config.tool_gating,
+                    targeted_write: interaction_mode == "write",
+                    chat_mode: interaction_mode == "chat",
+                    append_only: append_only && !has_selection,
+                    placement_edit: placement && has_selection && interaction_mode != "write",
+                    oversized_doc: prompt_shape.oversized,
+                    notebook: doc_type == "ipynb",
+                    tools_supported: supports_tools,
+                },
+                cancellation.clone(),
             );
-            let nid = self.current_note_id().unwrap_or_default();
             let mut convo = if isolated_edit { Vec::new() } else { self.conversation(&nid) };
             if convo.is_empty() && !isolated_edit {
                 convo = chat_history_to_messages(&note.chat_history);
@@ -480,7 +483,7 @@ impl AppState {
             if !external_model {
                 self.finish_prompt_warmup().await;
             }
-            let _slot_guard = self.inner.llama_slot_lock.lock().await;
+            let _slot_guard = self.inner.ai.llama_slot_lock.lock().await;
             let fast_document_answer = interaction_mode == "chat"
                 && (retrieval_evidence_ready || active_section_request)
                 && !crate::agent::wants_other_notes(&model_question)
@@ -492,19 +495,31 @@ impl AppState {
             } else {
                 convo.clone()
             };
+            let turn_context = crate::ai_turn::ChatTurnContext {
+                note_id: note.id.clone(),
+                mode: interaction_mode.to_string(),
+                question: model_question.clone(),
+                selection: selection.clone(),
+                active_section: active_section.clone(),
+                retrieval_backed,
+                retrieval_evidence_ready,
+                external_model,
+                context_size: ctx_tokens,
+                supports_tools: supports_tools && !fast_document_answer,
+            };
             let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
-                mode: interaction_mode,
+                mode: &turn_context.mode,
                 doc_type: &doc_type,
                 note_title: &note.title,
                 system_context: &stable_context,
                 conversation: &turn_conversation,
-                question: &model_question,
+                question: &turn_context.question,
                 mode_policy: mode_instruction,
                 turn_instructions: &turn_instructions,
                 has_open_note: true,
                 edit_thread,
-                oversized: retrieval_backed,
-                supports_tools: supports_tools && !fast_document_answer,
+                oversized: turn_context.retrieval_backed,
+                supports_tools: turn_context.supports_tools,
                 verbose_tool_schemas: config.verbose_tool_schemas,
                 section_context: active_section_request,
             });
@@ -564,7 +579,7 @@ impl AppState {
                 );
                 }
             } else {
-                *self.inner.active_slot_cache.lock() = None;
+                *self.inner.ai.active_slot_cache.lock() = None;
             }
             let tool_names: Vec<String> = tools
                 .iter()
@@ -595,8 +610,8 @@ impl AppState {
                     "requestId": request_id,
                 }),
             );
-            let final_messages = crate::sidecar::run_chat(
-                self,
+            let final_messages_result = crate::sidecar::run_chat(
+                &tool_turn,
                 &config,
                 messages,
                 tools,
@@ -608,7 +623,9 @@ impl AppState {
                 selection.is_some(),
                 interaction_mode == "write",
             )
-            .await?;
+            .await;
+            turn_tools = tool_turn.take_tools();
+            let final_messages = final_messages_result?;
             if !isolated_edit {
                 convo.push(serde_json::json!({
                     "role": "user",
@@ -658,31 +675,28 @@ impl AppState {
         }
         .await;
         self.resume_section_cache_after_turn();
-        self.clear_latest_chat_question();
-        self.clear_current_note_id();
+        self.clear_turn_cancellation();
         drop(_chat_guard);
         match result {
             Ok(()) => {
-                let tools = self.take_chat_tools();
                 self.handle.emit(
                     "ai://chat_done",
                     serde_json::json!({
                         "requestId": request_id,
-                        "tools": tools
+                        "tools": turn_tools.clone()
                     }),
                 )?;
                 Ok(())
             }
             Err(error) => {
                 let message = error.to_string();
-                let tools = self.take_chat_tools();
                 log::error!("AI chat failed: {message}");
                 let _ = self.handle.emit(
                     "ai://chat_error",
                     serde_json::json!({
                         "requestId": request_id,
                         "message": message,
-                        "tools": tools
+                        "tools": turn_tools
                     }),
                 );
                 Err(error)

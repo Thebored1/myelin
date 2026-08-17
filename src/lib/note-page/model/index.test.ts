@@ -31,18 +31,30 @@ describe('note document model', () => {
 				sourceNoteTitle: 'Note'
 			}
 		]);
-		expect(transclusionTarget('/notes/hello%20world#a1b2c3')).toEqual({ noteId: 'hello world', blockId: 'a1b2c3' });
+		expect(transclusionTarget('/notes/hello%20world#a1b2c3')).toEqual({
+			noteId: 'hello world',
+			blockId: 'a1b2c3'
+		});
 	});
 
 	it('matches selections by anchor proximity', () => {
 		expect(nearestIndexOf('x target y target', 'target', 10)).toBe(11);
-		expect(selectionTarget('0123456789', 3, 6)).toMatchObject({ text: '345', before: '012', after: '6789' });
+		expect(selectionTarget('0123456789', 3, 6)).toMatchObject({
+			text: '345',
+			before: '012',
+			after: '6789'
+		});
 		expect(cursorTarget('abcdef', 3)).toMatchObject({ cursor: true, before: 'abc', after: 'def' });
 	});
 
 	it('reduces only events for the active request', () => {
 		const initial = [{ role: 'assistant', content: 'old', isStreaming: true }];
-		expect(reduceChatEvent(initial, { type: 'chunk', requestId: 'other', delta: '!' }, 'active')).toBe(initial);
-		expect(reduceChatEvent(initial, { type: 'chunk', requestId: 'active', delta: '!' }, 'active')[0].content).toBe('old!');
+		expect(
+			reduceChatEvent(initial, { type: 'chunk', requestId: 'other', delta: '!' }, 'active')
+		).toBe(initial);
+		expect(
+			reduceChatEvent(initial, { type: 'chunk', requestId: 'active', delta: '!' }, 'active')[0]
+				.content
+		).toBe('old!');
 	});
 });

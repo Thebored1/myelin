@@ -1,5 +1,5 @@
 <script lang="ts">
-	import SettingsLegacy from '$lib/settings/SettingsLegacy.svelte';
+	import SettingsPage from '$lib/settings/SettingsPage.svelte';
 </script>
 
-<SettingsLegacy />
+<SettingsPage />

@@ -1,5 +1,8 @@
+import type { ControllerContext } from '$lib/controller-context';
+
 /** Editor selection and cursor mapping session. */
-export function createSelectionSession(ctx: Record<string, any>) {
+export function createSelectionSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	type SelectionTarget = {
 		text: string;
 		before: string;
@@ -10,10 +13,10 @@ export function createSelectionSession(ctx: Record<string, any>) {
 	function getSelectionTextOffset(editorEl: HTMLElement): number | null {
 		const selection = window.getSelection();
 		if (!selection || selection.rangeCount === 0) return null;
-	
+
 		const range = selection.getRangeAt(0);
 		if (!editorEl.contains(range.endContainer)) return null;
-	
+
 		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
 		let offset = 0;
 		let node: Node | null;
@@ -24,10 +27,10 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			}
 			offset += textLength;
 		}
-	
+
 		return offset;
 	}
-	
+
 	// Text offset of a (container, offset) point within the editor's rendered text.
 	function textOffsetOf(editorEl: HTMLElement, container: Node, offset: number): number | null {
 		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
@@ -39,7 +42,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		}
 		return null;
 	}
-	
+
 	// Occurrence of `needle` in `hay` whose start is closest to `hint` (disambiguates repeats).
 	function nearestIndexOf(hay: string, needle: string, hint: number): number {
 		let best = -1;
@@ -56,7 +59,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		}
 		return best;
 	}
-	
+
 	// Map the current editor selection to a source-markdown span + surrounding
 	// context. In Vditor IR mode the rendered text ≈ the source for prose, so the
 	// tree-walked offsets usually map straight in; we validate and fall back to a
@@ -73,11 +76,11 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		if (!editorEl.contains(range.commonAncestorContainer)) return null;
 		const selText = sel.toString();
 		if (!selText.trim()) return null;
-	
+
 		const source = ctx.vditorInstance.getValue();
 		const startOff = textOffsetOf(editorEl, range.startContainer, range.startOffset);
 		const endOff = textOffsetOf(editorEl, range.endContainer, range.endOffset);
-	
+
 		let s = -1;
 		let e = -1;
 		if (startOff != null && endOff != null && source.slice(startOff, endOff) === selText) {
@@ -88,7 +91,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			if (s >= 0) e = s + selText.length;
 		}
 		if (s < 0) return null;
-	
+
 		const N = 40;
 		return {
 			text: source.slice(s, e),
@@ -96,7 +99,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			after: source.slice(e, Math.min(source.length, e + N))
 		};
 	}
-	
+
 	function computeSourceCursor(): SelectionTarget | null {
 		if (!ctx.vditorInstance || !ctx.vditorContainer) return null;
 		const editorEl = ctx.vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
@@ -104,7 +107,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		if (!editorEl || !sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
 		const range = sel.getRangeAt(0);
 		if (!editorEl.contains(range.startContainer)) return null;
-	
+
 		let renderedOffset = textOffsetOf(editorEl, range.startContainer, range.startOffset);
 		if (renderedOffset == null) {
 			try {
@@ -129,11 +132,11 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			cursor: true
 		};
 	}
-	
+
 	function clearArmedSelection() {
 		ctx.armedSelection = null;
 	}
-	
+
 	// Keep the captured selection only while the user moves into the prompt.
 	// Any other click clears it; a new editor drag captures a fresh selection.
 	function onDocMouseDown(e: MouseEvent) {
@@ -141,7 +144,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		if (target?.closest('.prompt-box')) return;
 		if (ctx.armedSelection) clearArmedSelection();
 	}
-	
+
 	function captureEditorSelection() {
 		if (!ctx.vditorContainer) return;
 		const editorEl = ctx.vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
@@ -170,7 +173,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			ctx.writeTargetNotice = false;
 		}
 	}
-	
+
 	function captureExternalTarget(target: SelectionTarget | null) {
 		if (!target) {
 			clearArmedSelection();
@@ -184,7 +187,7 @@ export function createSelectionSession(ctx: Record<string, any>) {
 		};
 		ctx.writeTargetNotice = false;
 	}
-	
+
 	// After the AI edits the armed selection, update its source anchors so an
 	// immediate follow-up can target the replacement without extra decoration.
 	function reselectAfterEdit() {
@@ -215,22 +218,24 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			words
 		};
 	}
-	
+
 	function armedEditTarget(): SelectionTarget | null {
 		if (!ctx.armedSelection) return null;
-		const { chars: _chars, words: _words, ...target } = ctx.armedSelection;
+		const { chars, words, ...target } = ctx.armedSelection;
+		void chars;
+		void words;
 		return target;
 	}
-	
+
 	function onSelectionChange() {
 		clearTimeout(ctx.selDebounce);
 		ctx.selDebounce = setTimeout(captureEditorSelection, 120);
 	}
-	
+
 	function restoreSelectionTextOffset(editorEl: HTMLElement, targetOffset: number) {
 		const selection = window.getSelection();
 		if (!selection) return;
-	
+
 		const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
 		let offset = 0;
 		let node: Node | null;
@@ -247,40 +252,40 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			}
 			offset = nextOffset;
 		}
-	
+
 		editorEl.focus();
 	}
-	
+
 	function saveCursorPosition() {
 		if (!ctx.vditorInstance || !ctx.vditorContainer) return;
 		const editorEl = ctx.vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		const selection = window.getSelection();
 		if (!editorEl || !selection || selection.rangeCount === 0) return;
-	
+
 		const range = selection.getRangeAt(0);
 		if (!editorEl.contains(range.commonAncestorContainer)) return;
-	
+
 		ctx.savedEditorRange = range.cloneRange();
 	}
-	
+
 	function insertAtSavedCursor(linkText: string) {
 		if (!ctx.vditorInstance || !ctx.vditorContainer) return;
 		const editorEl = ctx.vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		if (!editorEl) return;
-	
+
 		ctx.focusEditor();
-	
+
 		const selection = window.getSelection();
 		if (ctx.savedEditorRange && selection) {
 			selection.removeAllRanges();
 			selection.addRange(ctx.savedEditorRange);
 		}
-	
+
 		const inserted = document.execCommand('insertText', false, linkText);
 		if (!inserted) {
 			ctx.vditorInstance.insertValue(linkText, true);
 		}
-	
+
 		ctx.savedEditorRange = null;
 		ctx.focusEditor();
 		ctx.draftBody = ctx.vditorInstance.getValue();
@@ -302,7 +307,6 @@ export function createSelectionSession(ctx: Record<string, any>) {
 			if (selection.containsNode(link, true)) link.classList.add('force-expand');
 		});
 	}
-	
 
 	return {
 		getSelectionTextOffset,

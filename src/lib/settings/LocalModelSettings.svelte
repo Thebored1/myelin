@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
+	import type { SettingsController } from '$lib/settings/controller.svelte';
 
-	let { settings }: { settings: any } = $props();
+	let { settings }: { settings: SettingsController } = $props();
 	type BackendPref = 'auto' | 'cuda' | 'vulkan' | 'metal' | 'cpu';
 </script>
 
-
-		<div style="display: none">
-		{#if true}
+<div style="display: none">
+	{#if true}
 		<section class="settings-section">
 			<h2>Local AI Model Configuration</h2>
 			<p class="description">
@@ -21,7 +21,9 @@
 				<div class="path-display" class:empty={!settings.currentModelPath}>
 					{settings.currentModelPath || 'No model selected'}
 				</div>
-				<button class="browse-btn" onclick={settings.selectModel} disabled={settings.isSaving}> Browse... </button>
+				<button class="browse-btn" onclick={settings.selectModel} disabled={settings.isSaving}>
+					Browse...
+				</button>
 			</div>
 
 			<div class="compute-device">
@@ -69,8 +71,11 @@
 			<div class="compute-device">
 				<span class="compute-label">Compute device</span>
 				<div class="segmented" role="group" aria-label="Compute device">
-					{#each [{ value: 'auto', label: 'Auto' }, { value: 'cuda', label: 'CUDA' }, { value: 'vulkan', label: 'Vulkan' }, ...(settings.downloadableBackends.includes('metal') ? [{ value: 'metal', label: 'Metal' }] : []), { value: 'cpu', label: 'CPU' }] as opt}
-						{@const disabled = opt.value !== 'auto' && opt.value !== 'cpu' && !settings.installedBackends.includes(opt.value)}
+					{#each [{ value: 'auto', label: 'Auto' }, { value: 'cuda', label: 'CUDA' }, { value: 'vulkan', label: 'Vulkan' }, ...(settings.downloadableBackends.includes('metal') ? [{ value: 'metal', label: 'Metal' }] : []), { value: 'cpu', label: 'CPU' }] as opt (opt.value)}
+						{@const disabled =
+							opt.value !== 'auto' &&
+							opt.value !== 'cpu' &&
+							!settings.installedBackends.includes(opt.value)}
 						<button
 							type="button"
 							class="segment"
@@ -131,19 +136,26 @@
 			{#if settings.downloadableBackends.length > 0}
 				<div class="backends-list">
 					<span class="compute-label">Installed backends</span>
-					{#each settings.downloadableBackends as b}
+					{#each settings.downloadableBackends as b (b)}
 						{@const installed = settings.installedBackends.includes(b)}
 						{@const busy =
-							settings.download?.backend === b && settings.download?.phase !== 'done' && settings.download?.phase !== 'error'}
+							settings.download?.backend === b &&
+							settings.download?.phase !== 'done' &&
+							settings.download?.phase !== 'error'}
 						<div class="backend-item">
 							<span class="backend-name">{settings.backendLabel(b)}</span>
 							{#if busy}
 								<div class="backend-progress">
 									<div class="backend-bar">
-										<div class="backend-bar-fill" style="width:{settings.download?.percent ?? 0}%"></div>
+										<div
+											class="backend-bar-fill"
+											style="width:{settings.download?.percent ?? 0}%"
+										></div>
 									</div>
 									<span class="backend-progress-text"
-										>{settings.download?.message ?? ''} ({Math.round(settings.download?.percent ?? 0)}%)</span
+										>{settings.download?.message ?? ''} ({Math.round(
+											settings.download?.percent ?? 0
+										)}%)</span
 									>
 								</div>
 							{:else if installed}
@@ -152,7 +164,9 @@
 								<button
 									class="browse-btn"
 									onclick={() => settings.downloadBackend(b)}
-									disabled={!!settings.download && settings.download.phase !== 'done' && settings.download.phase !== 'error'}
+									disabled={!!settings.download &&
+										settings.download.phase !== 'done' &&
+										settings.download.phase !== 'error'}
 								>
 									Download
 								</button>
@@ -201,7 +215,14 @@
 						'No embedding model selected — semantic search uses a lexical fallback'}
 				</div>
 				<button class="browse-btn" onclick={settings.pickEmbedModel}>Browse...</button>
-				<button class="browse-btn" disabled={settings.downloadingModel === 'nomic-embed-text-v1.5-q4-k-m'} onclick={() => settings.downloadBuiltInModel('nomic-embed-text-v1.5-q4-k-m')}>{settings.downloadingModel === 'nomic-embed-text-v1.5-q4-k-m' ? 'Downloading…' : 'Download recommended'}</button>
+				<button
+					class="browse-btn"
+					disabled={settings.downloadingModel === 'nomic-embed-text-v1.5-q4-k-m'}
+					onclick={() => settings.downloadBuiltInModel('nomic-embed-text-v1.5-q4-k-m')}
+					>{settings.downloadingModel === 'nomic-embed-text-v1.5-q4-k-m'
+						? 'Downloading…'
+						: 'Download recommended'}</button
+				>
 				{#if settings.embedModelPath}
 					<button class="browse-btn" onclick={settings.clearEmbedModel}>Clear</button>
 				{/if}
@@ -209,25 +230,82 @@
 
 			<br />
 			<h2>Reranker — Final Evidence Ordering</h2>
-			<p class="description">Optional resident English cross-encoder. It only reranks ambiguous agent document retrieval; ordinary note search stays fast and never calls it.</p>
+			<p class="description">
+				Optional resident English cross-encoder. It only reranks ambiguous agent document retrieval;
+				ordinary note search stays fast and never calls it.
+			</p>
 			<div class="model-picker">
-				<div class="path-display" class:empty={!settings.rerankerModelPath}>{settings.rerankerModelPath || 'No reranker selected — calibrated hybrid retrieval remains active'}</div>
+				<div class="path-display" class:empty={!settings.rerankerModelPath}>
+					{settings.rerankerModelPath ||
+						'No reranker selected — calibrated hybrid retrieval remains active'}
+				</div>
 				<button class="browse-btn" onclick={settings.pickRerankerModel}>Browse...</button>
-				<button class="browse-btn" disabled={settings.downloadingModel === 'ms-marco-minilm-l6-v2-q4-k-m'} onclick={() => settings.downloadBuiltInModel('ms-marco-minilm-l6-v2-q4-k-m')}>{settings.downloadingModel === 'ms-marco-minilm-l6-v2-q4-k-m' ? 'Downloading…' : 'Download MiniLM-L6 Q4'}</button>
-				{#if settings.rerankerModelPath}<button class="browse-btn" onclick={settings.clearRerankerModel}>Clear</button>{/if}
+				<button
+					class="browse-btn"
+					disabled={settings.downloadingModel === 'ms-marco-minilm-l6-v2-q4-k-m'}
+					onclick={() => settings.downloadBuiltInModel('ms-marco-minilm-l6-v2-q4-k-m')}
+					>{settings.downloadingModel === 'ms-marco-minilm-l6-v2-q4-k-m'
+						? 'Downloading…'
+						: 'Download MiniLM-L6 Q4'}</button
+				>
+				{#if settings.rerankerModelPath}<button
+						class="browse-btn"
+						onclick={settings.clearRerankerModel}>Clear</button
+					>{/if}
 			</div>
-			{#if settings.modelDownloadError}<p class="compute-hint" style="color: var(--text-error)">{settings.modelDownloadError}</p>{/if}
+			{#if settings.modelDownloadError}<p class="compute-hint" style="color: var(--text-error)">
+					{settings.modelDownloadError}
+				</p>{/if}
 
 			<br />
 			<h2>PDF OCR</h2>
-			<p class="description">OCR is reserved for a future bundled runtime. It is currently dormant and native PDF extraction remains active.</p>
+			<p class="description">
+				OCR is reserved for a future bundled runtime. It is currently dormant and native PDF
+				extraction remains active.
+			</p>
 			{#if settings.ocrStatus}
-				<label class="checkbox-label"><input type="checkbox" checked={settings.ocrStatus.autoLowTextPages ?? true} onchange={(event) => settings.saveOcrSettings({ autoLowTextPages: event.currentTarget.checked, executablePath: settings.ocrStatus.executablePath, language: settings.ocrStatus.configuredLanguage })} disabled /> Automatically OCR low-text pages (inactive until bundled runtime is enabled)</label>
+				<label class="checkbox-label"
+					><input
+						type="checkbox"
+						checked={settings.ocrStatus.autoLowTextPages ?? true}
+						onchange={(event) =>
+							settings.saveOcrSettings({
+								autoLowTextPages: event.currentTarget.checked,
+								executablePath: settings.ocrStatus?.executablePath ?? null,
+								language: settings.ocrStatus?.configuredLanguage ?? 'eng'
+							})}
+						disabled
+					/> Automatically OCR low-text pages (inactive until bundled runtime is enabled)</label
+				>
 				<div class="model-picker">
-					<input class="path-display" value={settings.ocrStatus.executablePath ?? ''} placeholder="Bundled runtime path (future)" onchange={(event) => settings.saveOcrSettings({ autoLowTextPages: settings.ocrStatus.autoLowTextPages ?? true, executablePath: event.currentTarget.value || null, language: settings.ocrStatus.configuredLanguage })} />
-					<input class="path-display" value={settings.ocrStatus.configuredLanguage ?? 'eng'} placeholder="eng" onchange={(event) => settings.saveOcrSettings({ autoLowTextPages: settings.ocrStatus.autoLowTextPages ?? true, executablePath: settings.ocrStatus.executablePath, language: event.currentTarget.value })} />
+					<input
+						class="path-display"
+						value={settings.ocrStatus.executablePath ?? ''}
+						placeholder="Bundled runtime path (future)"
+						onchange={(event) =>
+							settings.saveOcrSettings({
+								autoLowTextPages: settings.ocrStatus?.autoLowTextPages ?? true,
+								executablePath: event.currentTarget.value || null,
+								language: settings.ocrStatus?.configuredLanguage ?? 'eng'
+							})}
+					/>
+					<input
+						class="path-display"
+						value={settings.ocrStatus.configuredLanguage ?? 'eng'}
+						placeholder="eng"
+						onchange={(event) =>
+							settings.saveOcrSettings({
+								autoLowTextPages: settings.ocrStatus?.autoLowTextPages ?? true,
+								executablePath: settings.ocrStatus?.executablePath ?? null,
+								language: event.currentTarget.value
+							})}
+					/>
 				</div>
-				<p class="compute-hint">{settings.ocrStatus.available && settings.ocrStatus.languageAvailable ? `Ready: ${settings.ocrStatus.version ?? 'Tesseract'} (${settings.ocrStatus.configuredLanguage})` : settings.ocrStatus.warning}</p>
+				<p class="compute-hint">
+					{settings.ocrStatus.available && settings.ocrStatus.languageAvailable
+						? `Ready: ${settings.ocrStatus.version ?? 'Tesseract'} (${settings.ocrStatus.configuredLanguage})`
+						: settings.ocrStatus.warning}
+				</p>
 			{/if}
 
 			{#if settings.modelProfiles.length > 0}
@@ -238,7 +316,7 @@
 					Other models run on auto-detected defaults.
 				</p>
 				<div class="backends-list">
-					{#each settings.modelProfiles as p}
+					{#each settings.modelProfiles as p (p.name)}
 						<div class="backend-item">
 							<span class="backend-name">
 								{p.name}{#if p.role === 'embed'}
@@ -288,7 +366,11 @@
 				}}>Clear prompt cache</button
 			>
 			<label class="toggle-row">
-				<input type="checkbox" bind:checked={settings.autoOffload} onchange={settings.debounceSave} />
+				<input
+					type="checkbox"
+					bind:checked={settings.autoOffload}
+					onchange={settings.debounceSave}
+				/>
 				<span class="toggle-text">
 					<strong>Adaptive GPU offload (recommended)</strong>
 					<span class="toggle-hint">
@@ -391,7 +473,7 @@
 			</label>
 
 			<div class="input-group full-width" style="margin-top: 1rem;">
-				<label>
+				<div>
 					Extra Arguments
 					<div style="font-size: 0.8em; color: var(--text-error); margin-top: 4px;">
 						<strong>CRITICAL NOTE:</strong> Because of how system processes work, you cannot put
@@ -399,8 +481,8 @@
 						<code>--threads</code>
 						in one box, click add again, and put <code>8</code> in the next box!
 					</div>
-				</label>
-				{#each settings.extraArgs as arg, i}
+				</div>
+				{#each settings.extraArgs as arg, i (String(arg) + i)}
 					<div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-2);">
 						<input
 							type="text"
@@ -413,7 +495,7 @@
 							class="browse-btn"
 							onclick={() => settings.removeExtraArg(i)}
 							title="Remove argument"
-						style="padding: 0 1rem; color: var(--danger-text); border-color: var(--danger-border);"
+							style="padding: 0 1rem; color: var(--danger-text); border-color: var(--danger-border);"
 						>
 							Remove
 						</button>
@@ -428,6 +510,5 @@
 				</button>
 			</div>
 		</section>
-
-		{/if}
-		</div>
+	{/if}
+</div>

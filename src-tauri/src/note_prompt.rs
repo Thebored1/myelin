@@ -7,6 +7,7 @@ const OUTLINE_CHAR_LIMIT: usize = 8_000;
 const OUTLINE_ENTRY_LIMIT: usize = 200;
 const ORIENTATION_CHAR_LIMIT: usize = 4_000;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteSection {
     pub key: String,
@@ -62,6 +63,7 @@ impl NotePromptShape {
 /// Split a textual document into stable, independently cacheable sections.
 /// Headed formats use their native boundaries; unheaded regions use a separate
 /// synchronous viewer splitter. RAG ingestion uses the exact-token chunker.
+#[cfg(test)]
 pub fn sections(body: &str, relative_path: &str) -> Vec<NoteSection> {
     let lower = relative_path.to_ascii_lowercase();
     if lower.ends_with(".ipynb") {
@@ -71,11 +73,16 @@ pub fn sections(body: &str, relative_path: &str) -> Vec<NoteSection> {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, cell)| {
-                        let kind = cell.get("cell_type").and_then(|v| v.as_str()).unwrap_or("cell");
+                        let kind = cell
+                            .get("cell_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("cell");
                         let text = cell
                             .get("source")
                             .and_then(|v| v.as_array())
-                            .map(|lines| lines.iter().filter_map(|v| v.as_str()).collect::<String>())
+                            .map(|lines| {
+                                lines.iter().filter_map(|v| v.as_str()).collect::<String>()
+                            })
                             .unwrap_or_default();
                         (!text.trim().is_empty()).then(|| NoteSection {
                             key: format!("cell:{}", index + 1),
@@ -95,7 +102,8 @@ pub fn sections(body: &str, relative_path: &str) -> Vec<NoteSection> {
                 .find_map(|command| {
                     let marker = format!("\\{command}{{");
                     line.trim().strip_prefix(&marker).and_then(|rest| {
-                        rest.find('}').map(|end| (format!("{command}: {}", &rest[..end]), *command))
+                        rest.find('}')
+                            .map(|end| (format!("{command}: {}", &rest[..end]), *command))
                     })
                 })
         }
@@ -115,7 +123,11 @@ pub fn sections(body: &str, relative_path: &str) -> Vec<NoteSection> {
         if let Some((label, kind)) = heading(line) {
             if let Some((key, label, text)) = current.take() {
                 if !text.trim().is_empty() {
-                    headed.push(NoteSection { key, label, body: text });
+                    headed.push(NoteSection {
+                        key,
+                        label,
+                        body: text,
+                    });
                 }
             }
             let index = headed.len() + 1;
@@ -127,7 +139,11 @@ pub fn sections(body: &str, relative_path: &str) -> Vec<NoteSection> {
     }
     if let Some((key, label, text)) = current {
         if !text.trim().is_empty() {
-            headed.push(NoteSection { key, label, body: text });
+            headed.push(NoteSection {
+                key,
+                label,
+                body: text,
+            });
         }
     }
     if !headed.is_empty() {
@@ -163,13 +179,29 @@ fn outline(body: &str, relative_path: &str) -> String {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
             if let Some(cells) = value.get("cells").and_then(|v| v.as_array()) {
                 for (index, cell) in cells.iter().enumerate() {
-                    let kind = cell.get("cell_type").and_then(|v| v.as_str()).unwrap_or("cell");
-                    let source = cell.get("source").and_then(|v| v.as_array())
+                    let kind = cell
+                        .get("cell_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("cell");
+                    let source = cell
+                        .get("source")
+                        .and_then(|v| v.as_array())
                         .map(|lines| lines.iter().filter_map(|v| v.as_str()).collect::<String>())
                         .unwrap_or_default();
-                    let label = source.lines().map(str::trim)
-                        .find(|line| !line.is_empty()).unwrap_or("(empty)");
-                    push_entry(&mut entries, format!("- Cell {} ({kind}): {}", index + 1, label.chars().take(160).collect::<String>()), &mut chars);
+                    let label = source
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .unwrap_or("(empty)");
+                    push_entry(
+                        &mut entries,
+                        format!(
+                            "- Cell {} ({kind}): {}",
+                            index + 1,
+                            label.chars().take(160).collect::<String>()
+                        ),
+                        &mut chars,
+                    );
                 }
             }
         }
@@ -193,7 +225,11 @@ fn outline(body: &str, relative_path: &str) -> String {
             }
         }
     }
-    if entries.is_empty() { "(no structural headings found)".into() } else { entries.join("\n") }
+    if entries.is_empty() {
+        "(no structural headings found)".into()
+    } else {
+        entries.join("\n")
+    }
 }
 
 #[cfg(test)]
@@ -213,10 +249,15 @@ mod tests {
     #[test]
     fn latex_and_notebook_outlines() {
         let tex = format!("\\section{{Intro}}\n{}", "x".repeat(5000));
-        assert!(NotePromptShape::build(&tex, "a.tex", 2000).body.contains("section: Intro"));
-        let nb = serde_json::json!({"cells":[{"cell_type":"markdown","source":["# Heading\n"]}]}).to_string()
+        assert!(NotePromptShape::build(&tex, "a.tex", 2000)
+            .body
+            .contains("section: Intro"));
+        let nb = serde_json::json!({"cells":[{"cell_type":"markdown","source":["# Heading\n"]}]})
+            .to_string()
             + &" ".repeat(5000);
-        assert!(NotePromptShape::build(&nb, "a.ipynb", 2000).body.contains("Cell 1 (markdown)"));
+        assert!(NotePromptShape::build(&nb, "a.ipynb", 2000)
+            .body
+            .contains("Cell 1 (markdown)"));
     }
 
     #[test]
@@ -233,14 +274,23 @@ mod tests {
         assert!(headed[0].body.contains("alpha"));
         assert!(headed[1].body.contains("beta"));
 
-        let plain = sections(&(0..500).map(|i| format!("word{i}")).collect::<Vec<_>>().join(" "), "a.md");
+        let plain = sections(
+            &(0..500)
+                .map(|i| format!("word{i}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            "a.md",
+        );
         assert!(plain.len() > 1);
         assert_eq!(plain[0].key, "chunk:0");
     }
 
     #[test]
     fn sections_use_tex_commands_and_notebook_cells() {
-        let tex = sections("\\section{Intro}\nalpha\n\\subsection{Detail}\nbeta", "a.tex");
+        let tex = sections(
+            "\\section{Intro}\nalpha\n\\subsection{Detail}\nbeta",
+            "a.tex",
+        );
         assert_eq!(tex[0].label, "section: Intro");
         let notebook = serde_json::json!({
             "cells": [
@@ -249,6 +299,12 @@ mod tests {
             ]
         });
         let cells = sections(&notebook.to_string(), "a.ipynb");
-        assert_eq!(cells.iter().map(|cell| cell.key.as_str()).collect::<Vec<_>>(), ["cell:1", "cell:2"]);
+        assert_eq!(
+            cells
+                .iter()
+                .map(|cell| cell.key.as_str())
+                .collect::<Vec<_>>(),
+            ["cell:1", "cell:2"]
+        );
     }
 }

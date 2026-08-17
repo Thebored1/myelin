@@ -13,7 +13,10 @@ export function validateTheme(theme: ColorTheme): string[] {
 	if (theme.mode !== 'dark' && theme.mode !== 'light') issues.push('Theme mode is invalid.');
 	if (!theme.baseThemeId) issues.push('Theme base is missing.');
 
-	if (theme.tokens !== undefined && (typeof theme.tokens !== 'object' || Array.isArray(theme.tokens))) {
+	if (
+		theme.tokens !== undefined &&
+		(typeof theme.tokens !== 'object' || Array.isArray(theme.tokens))
+	) {
 		issues.push('Theme tokens must be an object.');
 	}
 	for (const [id, value] of Object.entries(theme.tokens ?? {})) {
@@ -31,7 +34,10 @@ export function validateTheme(theme: ColorTheme): string[] {
 		}
 	}
 
-	if (theme.palette !== undefined && (typeof theme.palette !== 'object' || Array.isArray(theme.palette))) {
+	if (
+		theme.palette !== undefined &&
+		(typeof theme.palette !== 'object' || Array.isArray(theme.palette))
+	) {
 		issues.push('Theme palette must be an object.');
 	}
 	for (const [id, value] of Object.entries(theme.palette ?? {})) {
@@ -49,7 +55,9 @@ export function normalizeTheme(theme: ColorTheme): ColorTheme {
 		if (definition) tokens[id as keyof ThemeTokens] = normalizeHex(value, definition.alpha);
 	}
 	const palette = theme.palette
-		? Object.fromEntries(Object.entries(theme.palette).map(([key, value]) => [key, normalizeHex(value)]))
+		? Object.fromEntries(
+				Object.entries(theme.palette).map(([key, value]) => [key, normalizeHex(value)])
+			)
 		: undefined;
 	return { ...theme, tokens, palette };
 }

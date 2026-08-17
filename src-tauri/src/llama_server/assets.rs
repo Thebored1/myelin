@@ -1,16 +1,8 @@
-use anyhow::{anyhow, bail, Context, Result};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::env;
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
-use std::time::Duration;
-use sha2::{Digest, Sha256};
 use super::*;
+use anyhow::{anyhow, bail, Context, Result};
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 pub fn assets_for_backend(backend: &str) -> Vec<String> {
     let tag = LLAMA_RELEASE_TAG;
     if cfg!(target_os = "windows") {
@@ -105,15 +97,33 @@ pub fn bee_download_url(asset: &str) -> String {
 
 pub fn bee_asset_sha256(asset: &str) -> Option<&'static str> {
     match asset {
-        "beellama-v0.4.1-bin-macos-arm64.tar.gz" => Some("2f33977bc987699a6c46bd08e870a689eaa57a620dfb537907d9c71102d066bb"),
-        "beellama-v0.4.1-bin-ubuntu-arm64.tar.gz" => Some("5bcc101afc4cd73cbe8832bb41bb47ebbae8a1eff52751929c1b0f8b73ef863a"),
-        "beellama-v0.4.1-bin-ubuntu-cuda-12.4-x64.tar.gz" => Some("acae04c79a9b2e48b8ea46ab0da369973b0481813003bc4623cd907d8b61bd8c"),
-        "beellama-v0.4.1-bin-ubuntu-vulkan-x64.tar.gz" => Some("2a33854daca03bcd0fd568789513fd430594861ce4139f44c9ccb5c9a09cbaac"),
-        "beellama-v0.4.1-bin-ubuntu-x64.tar.gz" => Some("19c67b1ac686af1e7e497f530f6b27aa144dd1ae20e3d6a9c4d5582b4d5be115"),
-        "beellama-v0.4.1-bin-win-cpu-x64.zip" => Some("d724f89533810686709528ab5eb7ecd9998c6aab529e68f6570f588e4ce0964b"),
-        "beellama-v0.4.1-bin-win-cuda-12.4-x64.zip" => Some("d1d6fb46f922ff1dd98aa7ba003ceb94b14aed7b6d30e9dbf6831c7ae4714949"),
-        "beellama-v0.4.1-bin-win-vulkan-x64.zip" => Some("c94479b0f2d675b1fd0370dba1b9e477bda41e592eca6cea8d213315078eea9c"),
-        "beellama-v0.4.1-cudart-win-cuda-12.4-x64.zip" => Some("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"),
+        "beellama-v0.4.1-bin-macos-arm64.tar.gz" => {
+            Some("2f33977bc987699a6c46bd08e870a689eaa57a620dfb537907d9c71102d066bb")
+        }
+        "beellama-v0.4.1-bin-ubuntu-arm64.tar.gz" => {
+            Some("5bcc101afc4cd73cbe8832bb41bb47ebbae8a1eff52751929c1b0f8b73ef863a")
+        }
+        "beellama-v0.4.1-bin-ubuntu-cuda-12.4-x64.tar.gz" => {
+            Some("acae04c79a9b2e48b8ea46ab0da369973b0481813003bc4623cd907d8b61bd8c")
+        }
+        "beellama-v0.4.1-bin-ubuntu-vulkan-x64.tar.gz" => {
+            Some("2a33854daca03bcd0fd568789513fd430594861ce4139f44c9ccb5c9a09cbaac")
+        }
+        "beellama-v0.4.1-bin-ubuntu-x64.tar.gz" => {
+            Some("19c67b1ac686af1e7e497f530f6b27aa144dd1ae20e3d6a9c4d5582b4d5be115")
+        }
+        "beellama-v0.4.1-bin-win-cpu-x64.zip" => {
+            Some("d724f89533810686709528ab5eb7ecd9998c6aab529e68f6570f588e4ce0964b")
+        }
+        "beellama-v0.4.1-bin-win-cuda-12.4-x64.zip" => {
+            Some("d1d6fb46f922ff1dd98aa7ba003ceb94b14aed7b6d30e9dbf6831c7ae4714949")
+        }
+        "beellama-v0.4.1-bin-win-vulkan-x64.zip" => {
+            Some("c94479b0f2d675b1fd0370dba1b9e477bda41e592eca6cea8d213315078eea9c")
+        }
+        "beellama-v0.4.1-cudart-win-cuda-12.4-x64.zip" => {
+            Some("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6")
+        }
         _ => None,
     }
 }

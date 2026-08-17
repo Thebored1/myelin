@@ -125,17 +125,32 @@ pub async fn run_baseline(corpus_path: &Path, queries_path: &Path) -> Result<Eva
         let returned_chunk_ids: Vec<String> = hits.iter().map(|hit| hit.doc_id.clone()).collect();
         let first_relevant_rank = returned_chunk_ids
             .iter()
-            .position(|id| query.relevant_chunk_ids.iter().any(|relevant| relevant == id))
+            .position(|id| {
+                query
+                    .relevant_chunk_ids
+                    .iter()
+                    .any(|relevant| relevant == id)
+            })
             .map(|index| index + 1);
         let relevant_at_5 = returned_chunk_ids
             .iter()
             .take(5)
-            .filter(|id| query.relevant_chunk_ids.iter().any(|relevant| relevant == *id))
+            .filter(|id| {
+                query
+                    .relevant_chunk_ids
+                    .iter()
+                    .any(|relevant| relevant == *id)
+            })
             .count();
         let relevant_at_10 = returned_chunk_ids
             .iter()
             .take(10)
-            .filter(|id| query.relevant_chunk_ids.iter().any(|relevant| relevant == *id))
+            .filter(|id| {
+                query
+                    .relevant_chunk_ids
+                    .iter()
+                    .any(|relevant| relevant == *id)
+            })
             .count();
         let expected = query.relevant_chunk_ids.len().max(1) as f32;
         recall_at_5 += relevant_at_5 as f32 / expected;
@@ -179,7 +194,11 @@ fn normalized_dcg(returned: &[String], relevant: &[String], limit: usize) -> f32
     let ideal = (0..relevant.len().min(limit))
         .map(|index| 1.0 / ((index + 2) as f32).log2())
         .sum::<f32>();
-    if ideal == 0.0 { 0.0 } else { dcg / ideal }
+    if ideal == 0.0 {
+        0.0
+    } else {
+        dcg / ideal
+    }
 }
 
 fn percentile(sorted: &[u128], percentile: usize) -> u128 {
@@ -220,8 +239,10 @@ mod tests {
 
     #[test]
     fn tracked_fixtures_parse() {
-        let corpus: RetrievalCorpus = serde_json::from_str(include_str!("../test-data/retrieval/corpus.json")).unwrap();
-        let queries: RetrievalQueries = serde_json::from_str(include_str!("../test-data/retrieval/queries.json")).unwrap();
+        let corpus: RetrievalCorpus =
+            serde_json::from_str(include_str!("../test-data/retrieval/corpus.json")).unwrap();
+        let queries: RetrievalQueries =
+            serde_json::from_str(include_str!("../test-data/retrieval/queries.json")).unwrap();
         assert!(!corpus.chunks.is_empty());
         assert!(!queries.queries.is_empty());
     }
@@ -229,7 +250,9 @@ mod tests {
     #[test]
     fn ndcg_rewards_early_relevance() {
         let relevant = vec!["a".to_string(), "b".to_string()];
-        assert!(normalized_dcg(&["a".into(), "x".into()], &relevant, 10)
-            > normalized_dcg(&["x".into(), "a".into()], &relevant, 10));
+        assert!(
+            normalized_dcg(&["a".into(), "x".into()], &relevant, 10)
+                > normalized_dcg(&["x".into(), "a".into()], &relevant, 10)
+        );
     }
 }

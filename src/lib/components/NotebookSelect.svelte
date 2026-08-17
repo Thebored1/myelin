@@ -37,7 +37,6 @@
 	});
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_mouse_events_have_key_events a11y_no_noninteractive_element_interactions -->
 <div
 	role="combobox"
 	aria-label="Notebook selector"
@@ -76,7 +75,7 @@
 		<button class="select-option" class:selected={!value} onclick={() => selectNb('')} type="button"
 			>Uncategorized</button
 		>
-		{#each notebooks as nb}
+		{#each notebooks as nb (nb)}
 			<button
 				class="select-option"
 				class:selected={value === nb}

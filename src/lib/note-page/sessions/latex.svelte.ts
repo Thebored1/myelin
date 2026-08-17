@@ -1,8 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
+import type { ControllerContext } from '$lib/controller-context';
 
 /** LaTeX image, compile, preview, and auto-compile lifecycle. */
-export function createLatexSession(ctx: Record<string, any>) {
+export function createLatexSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	async function pickLatexImage(): Promise<string | null> {
 		if (!ctx.note) return null;
 		const selected = await openFileDialog({
@@ -21,7 +23,7 @@ export function createLatexSession(ctx: Record<string, any>) {
 			return null;
 		}
 	}
-	
+
 	// Compile the open .tex note to PDF and show it in the split preview pane.
 	// Shared by the manual button and the debounced auto-compile.
 	async function compileTex(opts: { manual?: boolean } = {}) {
@@ -81,14 +83,15 @@ export function createLatexSession(ctx: Record<string, any>) {
 			ctx.latexDownloadMsg = null;
 		}
 	}
-	
+
 	// The backend serialises compile failures as JSON { message, log, diagnostics }
 	// (line numbers already mapped to editor coordinates). Fall back to plain text.
 	function parseLatexError(e: unknown): {
 		message: string;
 		diagnostics: { line: number; message: string; severity?: 'error' | 'warning' }[];
 	} {
-		const raw = typeof e === 'string' ? e : ((e as any)?.message ?? String(e));
+		const raw =
+			typeof e === 'string' ? e : e instanceof Error ? e.message : JSON.stringify(e) || String(e);
 		try {
 			const parsed = JSON.parse(raw);
 			if (parsed && Array.isArray(parsed.diagnostics)) {
@@ -102,14 +105,14 @@ export function createLatexSession(ctx: Record<string, any>) {
 		}
 		return { message: raw, diagnostics: [] };
 	}
-	
+
 	function closeTexPreview() {
 		ctx.activeSourceBytes = null;
 		ctx.activeSection = null;
 		ctx.sectionCache = null;
 		ctx.showAttachedNote = false;
 	}
-	
+
 	// Debounced auto-compile: a couple of seconds after typing stops, when armed.
 	$effect(() => {
 		const body = ctx.draftBody;
@@ -126,7 +129,6 @@ export function createLatexSession(ctx: Record<string, any>) {
 			if (ctx.texAutoTimer) clearTimeout(ctx.texAutoTimer);
 		};
 	});
-	
 
 	return { pickLatexImage, compileTex, parseLatexError, closeTexPreview };
 }

@@ -1,19 +1,18 @@
+mod ai;
+mod appearance;
 pub(super) mod core;
 mod core_methods;
-mod settings;
-mod latex;
-mod tasks;
-mod retrieval;
-mod ingestion;
-mod runtime;
 #[path = "state/documents_methods.rs"]
 mod documents;
 mod indexing;
-mod ai;
-mod appearance;
+mod ingestion;
+mod latex;
+mod retrieval;
+mod runtime;
+mod settings;
+mod tasks;
 mod workspace_search;
 
+pub use crate::models::StorageIssue;
 pub use core::*;
 pub use settings::{BuiltInModelInfo, RerankerModelStatus};
-pub use crate::models::StorageIssue;
-pub(crate) use crate::persistence::{FileMutation, FileTransaction, MutationRoot};

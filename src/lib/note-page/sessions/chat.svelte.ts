@@ -1,19 +1,38 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { NoteDocument, NoteSnapshot } from '$lib/types';
-import { canApplyReconciledNote, editorNeedsAuthoritativeBody, hasNoteMutation } from '$lib/noteMutation';
+import type { ChatMessage, NoteDocument, NoteSnapshot } from '$lib/types';
+import type { PdfSection } from '$lib/pdf/types';
+import {
+	canApplyReconciledNote,
+	editorNeedsAuthoritativeBody,
+	hasNoteMutation
+} from '$lib/noteMutation';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import type { ControllerContext } from '$lib/controller-context';
 
 type ChatTool = { name: string; details: string };
 
 /** Coordinates request lifecycle, retry/rewind, persistence, and tool approvals. */
-export function createChatSession(ctx: Record<string, any>) {
+export function createChatSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
+	// Render caching is private and is intentionally non-reactive.
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const chatRenderCache = new Map<string, string>();
 
-	function persistableChatHistory(messages: any[]): any[] {
+	function persistableChatHistory(messages: ChatMessage[]): ChatMessage[] {
 		return messages
-			.filter((message) => message.role === 'user' || !!message.content.trim() || !!message.tools?.length || message.error === true)
-			.map(({ statusText: _statusText, ...message }) => ({ ...message, isStreaming: false }));
+			.filter(
+				(message) =>
+					message.role === 'user' ||
+					!!message.content.trim() ||
+					!!message.tools?.length ||
+					message.error === true
+			)
+			.map((message) => {
+				const copy = { ...message };
+				delete copy.statusText;
+				return { ...copy, isStreaming: false };
+			});
 	}
 
 	async function persistChatHistory(noteId = ctx.activeAiNoteId(), messages = ctx.chatMessages) {
@@ -39,11 +58,20 @@ export function createChatSession(ctx: Record<string, any>) {
 		if (!ctx.chatChunkBuf) return;
 		const delta = ctx.chatChunkBuf;
 		ctx.chatChunkBuf = '';
-		ctx.chatMessages = ctx.chatMessages.map((m: any) => m.isStreaming ? { ...m, content: m.content + delta, statusText: undefined } : m);
+		ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) =>
+			m.isStreaming ? { ...m, content: m.content + delta, statusText: undefined } : m
+		);
 		checkpointChatHistory();
 		if (ctx.showDebugWindow && ctx.debugInfo) {
 			if (ctx.debugInfo.firstChunk === null) {
-				ctx.debugInfo = { ...ctx.debugInfo, firstChunk: Date.now(), trace: [...ctx.debugInfo.trace, { time: Date.now(), msg: 'Generation started', kind: 'gen' }] };
+				ctx.debugInfo = {
+					...ctx.debugInfo,
+					firstChunk: Date.now(),
+					trace: [
+						...ctx.debugInfo.trace,
+						{ time: Date.now(), msg: 'Generation started', kind: 'gen' }
+					]
+				};
 			}
 			ctx.debugInfo = { ...ctx.debugInfo, replyChars: ctx.debugInfo.replyChars + delta.length };
 		}
@@ -74,21 +102,32 @@ export function createChatSession(ctx: Record<string, any>) {
 		try {
 			localStorage.setItem('myelin_ai_interaction_mode', mode);
 		} catch (error) {
-			ctx.message = 'AI interaction preference could not be saved; it will reset on the next launch.';
+			ctx.message =
+				'AI interaction preference could not be saved; it will reset on the next launch.';
 			console.warn('Could not save AI interaction mode', error);
 		}
 		if (mode === 'write' && ctx.activeSection) {
 			const aiNoteId = ctx.activeAiNoteId();
-			if (aiNoteId) void invoke('warm_llama_server', { noteId: aiNoteId, interactionMode: mode, activeSection: ctx.activeSection }).catch((error) => console.debug('Write profile warm-up skipped:', error));
+			if (aiNoteId)
+				void invoke('warm_llama_server', {
+					noteId: aiNoteId,
+					interactionMode: mode,
+					activeSection: ctx.activeSection
+				}).catch((error) => console.debug('Write profile warm-up skipped:', error));
 		}
 	}
 
-	function handleActiveSectionChange(section: any) {
+	function handleActiveSectionChange(section: PdfSection) {
 		const changed = ctx.activeSection?.key !== section.key;
 		ctx.activeSection = section;
 		if (!changed) return;
 		const aiNoteId = ctx.activeAiNoteId();
-		if (aiNoteId) void invoke('warm_llama_server', { noteId: aiNoteId, interactionMode: ctx.aiInteractionMode, activeSection: section }).catch((error) => console.debug('Section profile warm-up skipped:', error));
+		if (aiNoteId)
+			void invoke('warm_llama_server', {
+				noteId: aiNoteId,
+				interactionMode: ctx.aiInteractionMode,
+				activeSection: section
+			}).catch((error) => console.debug('Section profile warm-up skipped:', error));
 	}
 
 	function setToolApproval(require: boolean) {
@@ -97,23 +136,30 @@ export function createChatSession(ctx: Record<string, any>) {
 	}
 
 	function setStreamingStatus(statusText: string | undefined) {
-		const changed = ctx.chatMessages.some((message: any) => message.isStreaming && message.statusText !== statusText);
+		const changed = ctx.chatMessages.some(
+			(message: ChatMessage) => message.isStreaming && message.statusText !== statusText
+		);
 		if (!changed) return;
-		ctx.chatMessages = ctx.chatMessages.map((message: any) => message.isStreaming ? { ...message, statusText } : message);
+		ctx.chatMessages = ctx.chatMessages.map((message: ChatMessage) =>
+			message.isStreaming ? { ...message, statusText } : message
+		);
 		if (ctx.chatMessagesEl) setTimeout(() => ctx.scrollChatToBottom(false), 0);
 	}
 
 	function visibleAiStatus(kind: string, detail: string): string | undefined {
 		if (kind === 'model_prompt' || kind === 'request_serialized') return 'Reading the note…';
-		if (kind === 'response_headers' || kind === 'first_model_delta' || kind === 'gen') return ctx.activeAiComposerMode === 'editor' ? 'Writing replacement…' : 'Writing a response…';
+		if (kind === 'response_headers' || kind === 'first_model_delta' || kind === 'gen')
+			return ctx.activeAiComposerMode === 'editor' ? 'Writing replacement…' : 'Writing a response…';
 		if (kind === 'intent_prompt') return 'Understanding the request…';
 		if (kind === 'tool') {
 			const name = detail.match(/executing\s+([^(]+)/i)?.[1]?.replaceAll('_', ' ');
-			if (ctx.activeAiComposerMode === 'editor' && name?.trim() === 'write note') return 'Applying selected edit…';
+			if (ctx.activeAiComposerMode === 'editor' && name?.trim() === 'write note')
+				return 'Applying selected edit…';
 			return name ? `Using ${name}…` : 'Looking that up…';
 		}
 		if (kind === 'tool_result') return 'Reading the result…';
-		if (kind === 'session' || kind === 'config' || kind === 'tools' || kind === 'wire_mode') return 'Preparing the request…';
+		if (kind === 'session' || kind === 'config' || kind === 'tools' || kind === 'wire_mode')
+			return 'Preparing the request…';
 		return undefined;
 	}
 
@@ -121,8 +167,12 @@ export function createChatSession(ctx: Record<string, any>) {
 		try {
 			await navigator.clipboard.writeText(text);
 			ctx.copiedIdx = idx;
-			setTimeout(() => { if (ctx.copiedIdx === idx) ctx.copiedIdx = null; }, 1200);
-		} catch { /* clipboard unavailable */ }
+			setTimeout(() => {
+				if (ctx.copiedIdx === idx) ctx.copiedIdx = null;
+			}, 1200);
+		} catch {
+			/* clipboard unavailable */
+		}
 	}
 	async function stopActiveChat(): Promise<boolean> {
 		if (!ctx.activeChatRequestId && !ctx.isChatStreaming) return true;
@@ -226,7 +276,8 @@ export function createChatSession(ctx: Record<string, any>) {
 		// routing for a Chat submission.
 		const interactionMode = ctx.aiInteractionMode === 'write' ? 'write' : 'chat';
 		const composerMode = interactionMode === 'write' ? 'editor' : 'chat';
-		const selection = composerMode === 'editor' ? editorTarget : editorTarget?.cursor ? null : editorTarget;
+		const selection =
+			composerMode === 'editor' ? editorTarget : editorTarget?.cursor ? null : editorTarget;
 		ctx.activeAiEditTarget = composerMode === 'editor' ? selection : null;
 		// Show the user's prompt before any save/PDF preparation can block or fail.
 		// Previously the input was cleared first, then these awaits ran, making the
@@ -238,17 +289,26 @@ export function createChatSession(ctx: Record<string, any>) {
 			draftTags: ctx.draftTags,
 			chatLength
 		};
-		ctx.chatMessages = [...ctx.chatMessages, { role: 'user', content: userText, snapshotId: requestId, snapshot }];
+		ctx.chatMessages = [
+			...ctx.chatMessages,
+			{ role: 'user', content: userText, snapshotId: requestId, snapshot }
+		];
 		ctx.chatInput = '';
 		if (ctx.chatTextareaEl) ctx.chatTextareaEl.style.height = 'auto';
 		try {
-			if ((ctx.isSourceMaterial && ctx.showAttachedNote) || ctx.saveStatus !== 'saved') await ctx.saveNote();
+			if ((ctx.isSourceMaterial && ctx.showAttachedNote) || ctx.saveStatus !== 'saved')
+				await ctx.saveNote();
 			if (ctx.pdfIngestionPromise) await ctx.pdfIngestionPromise;
 		} catch (error) {
 			console.error('Chat preparation failed:', error);
 			ctx.chatMessages = [
 				...ctx.chatMessages,
-				{ role: 'assistant', content: extractChatErrorMessage(error), error: true, endTime: Date.now() }
+				{
+					role: 'assistant',
+					content: extractChatErrorMessage(error),
+					error: true,
+					endTime: Date.now()
+				}
 			];
 			ctx.message = 'The note could not be prepared for AI.';
 			ctx.checkpointChatHistory(0);
@@ -317,7 +377,10 @@ export function createChatSession(ctx: Record<string, any>) {
 			await invoke('save_note', {
 				noteId: aiNoteId,
 				title: snapshot.draftTitle,
-				tags: snapshot.draftTags.split(',').map((t: string) => t.trim()).filter(Boolean),
+				tags: snapshot.draftTags
+					.split(',')
+					.map((t: string) => t.trim())
+					.filter(Boolean),
 				body: snapshot.noteBody,
 				sourcePdf: ctx.activeSourceId,
 				annotations: ctx.isSourceMaterial ? [] : ctx.note.annotations
@@ -339,7 +402,8 @@ export function createChatSession(ctx: Record<string, any>) {
 	function mergeChatTools(existing: ChatTool[] = [], incoming: ChatTool[] = []) {
 		const merged = [...existing];
 		for (const tool of incoming) {
-			if (!merged.some((entry) => entry.name === tool.name && entry.details === tool.details)) merged.push(tool);
+			if (!merged.some((entry) => entry.name === tool.name && entry.details === tool.details))
+				merged.push(tool);
 		}
 		return merged;
 	}
@@ -353,14 +417,21 @@ export function createChatSession(ctx: Record<string, any>) {
 			ctx.draftTitle = refreshed.title;
 			ctx.draftBody = refreshed.body;
 			ctx.draftTags = refreshed.tags.join(', ');
-			if (ctx.workingDocType === 'md' && ctx.vditorInstance && editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), refreshed.body)) {
+			if (
+				ctx.workingDocType === 'md' &&
+				ctx.vditorInstance &&
+				editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), refreshed.body)
+			) {
 				ctx.vditorInstance.setValue(refreshed.body);
 			}
 		} else {
 			ctx.draftTitle = refreshed.title;
 			ctx.draftBody = refreshed.body;
 			ctx.draftTags = refreshed.tags.join(', ');
-			if (ctx.vditorInstance && editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), refreshed.body)) {
+			if (
+				ctx.vditorInstance &&
+				editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), refreshed.body)
+			) {
 				ctx.vditorInstance.setValue(refreshed.body);
 			}
 		}
@@ -372,8 +443,16 @@ export function createChatSession(ctx: Record<string, any>) {
 		ctx.flushChatChunks();
 		const requestNoteId = ctx.activeChatNoteId;
 		ctx.cancelNoteStream();
-		ctx.chatMessages = ctx.chatMessages.map((m: any) =>
-			m.isStreaming ? { ...m, isStreaming: false, statusText: undefined, endTime: Date.now(), debugTrace: ctx.pendingDebugTrace } : m
+		ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) =>
+			m.isStreaming
+				? {
+						...m,
+						isStreaming: false,
+						statusText: undefined,
+						endTime: Date.now(),
+						debugTrace: ctx.pendingDebugTrace
+					}
+				: m
 		);
 		if (ctx.chatPersistTimer) {
 			clearTimeout(ctx.chatPersistTimer);
@@ -395,21 +474,32 @@ export function createChatSession(ctx: Record<string, any>) {
 
 	function extractChatErrorMessage(error: unknown): string {
 		if (typeof error === 'string' && error.trim()) return error;
-		if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message.trim()) return error.message;
+		if (
+			error &&
+			typeof error === 'object' &&
+			'message' in error &&
+			typeof error.message === 'string' &&
+			error.message.trim()
+		)
+			return error.message;
 		return 'Failed to generate response.';
 	}
 
 	function failStreamingChatMessage(requestId: string, errorMsg: string, tools: ChatTool[] = []) {
 		if (ctx.activeChatRequestId !== requestId) return;
 		const previewWasReverted = ctx.noteStreaming;
-		if (previewWasReverted && !errorMsg.includes('Live preview reverted; no changes were saved.')) errorMsg += ' Live preview reverted; no changes were saved.';
+		if (previewWasReverted && !errorMsg.includes('Live preview reverted; no changes were saved.'))
+			errorMsg += ' Live preview reverted; no changes were saved.';
 		if (ctx.showDebugWindow && ctx.debugInfo) {
 			const finishedAt = Date.now();
 			ctx.debugInfo = {
 				...ctx.debugInfo,
 				done: finishedAt,
 				generationEnd: ctx.debugInfo.generationStart ? finishedAt : ctx.debugInfo.generationEnd,
-				trace: [...ctx.debugInfo.trace, { time: finishedAt, msg: `Error: ${errorMsg}`, kind: 'error' }]
+				trace: [
+					...ctx.debugInfo.trace,
+					{ time: finishedAt, msg: `Error: ${errorMsg}`, kind: 'error' }
+				]
 			};
 		}
 		ctx.activeChatRequestId = null;
@@ -417,10 +507,18 @@ export function createChatSession(ctx: Record<string, any>) {
 		ctx.activeAiComposerMode = null;
 		ctx.cancelNoteStream();
 		ctx.activeAiEditTarget = null;
-		ctx.chatMessages = ctx.chatMessages.map((m: any) =>
+		ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) =>
 			m.isStreaming
-				? { ...m, isStreaming: false, statusText: undefined, error: true, content: m.content + '\n\n' + errorMsg, tools, endTime: Date.now() }
-			: m
+				? {
+						...m,
+						isStreaming: false,
+						statusText: undefined,
+						error: true,
+						content: m.content + '\n\n' + errorMsg,
+						tools,
+						endTime: Date.now()
+					}
+				: m
 		);
 		if (ctx.chatPersistTimer) {
 			clearTimeout(ctx.chatPersistTimer);
@@ -436,8 +534,10 @@ export function createChatSession(ctx: Record<string, any>) {
 			clearTimeout(timeout);
 			ctx.approvalTimeouts.delete(id);
 		}
-		ctx.chatMessages = ctx.chatMessages.map((m: any) =>
-			m.isApprovalRequest && m.approvalId === id ? { ...m, approvalStatus: approved ? 'approved' : 'rejected' } : m
+		ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) =>
+			m.isApprovalRequest && m.approvalId === id
+				? { ...m, approvalStatus: approved ? 'approved' : 'rejected' }
+				: m
 		);
 		await invoke('resolve_tool_approval', { id, approved });
 	}

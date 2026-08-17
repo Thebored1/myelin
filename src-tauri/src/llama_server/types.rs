@@ -1,16 +1,7 @@
-use anyhow::{anyhow, bail, Context, Result};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::env;
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::PathBuf;
+use std::process::Child;
 use std::thread;
-use std::time::Duration;
-use sha2::{Digest, Sha256};
-use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,7 +48,10 @@ impl GpuBackend {
 /// Whether an explicitly selected GPU backend should keep MoE experts in CPU
 /// RAM for this backend attempt. `auto` and CPU fallbacks intentionally do not
 /// enable this policy: they should preserve the normal adaptive placement.
-pub(super) fn gpu_moe_policy_active(config: &ResolvedLlamaConfig, candidate: &BackendCandidate) -> bool {
+pub(super) fn gpu_moe_policy_active(
+    config: &ResolvedLlamaConfig,
+    candidate: &BackendCandidate,
+) -> bool {
     candidate.backend.is_gpu() && config.backend_preference == candidate.backend.label()
 }
 

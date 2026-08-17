@@ -1,8 +1,7 @@
 <script lang="ts">
-import type { HomeController } from '$lib/home/controller.svelte';
-let { home }: { home: HomeController } = $props();
+	import type { HomeController } from '$lib/home/controller.svelte';
+	let { home }: { home: HomeController } = $props();
 </script>
-
 
 <dialog
 	bind:this={home.deleteDialog}
@@ -18,7 +17,7 @@ let { home }: { home: HomeController } = $props();
 			<button class="btn-ghost" onclick={() => home.deleteDialog?.close()}>Cancel</button>
 			<button class="btn-danger" onclick={home.confirmDelete} disabled={home.isBusy}>Delete</button>
 		</div>
-		</div>
+	</div>
 </dialog>
 
 <dialog
@@ -51,8 +50,8 @@ let { home }: { home: HomeController } = $props();
 				disabled={home.isBusy || !home.newNotebookName.trim()}>Create</button
 			>
 		</div>
-		</div>
-	</dialog>
+	</div>
+</dialog>
 
 <dialog
 	bind:this={home.globalSearchDialog}
@@ -105,9 +104,8 @@ let { home }: { home: HomeController } = $props();
 </dialog>
 
 {#if home.isClustersListOpen}
-	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div class="modal-overlay" onclick={home.closeClustersList}>
-		<div class="modal-content" onclick={(e) => e.stopPropagation()}>
+	<div class="modal-overlay" role="presentation" onclick={home.closeClustersList}>
+		<div class="modal-content" role="presentation" onclick={(e) => e.stopPropagation()}>
 			<header class="modal-header">
 				<h2>Clusters ({home.commonplaces.length})</h2>
 				<p class="modal-subtitle">
@@ -119,7 +117,7 @@ let { home }: { home: HomeController } = $props();
 					<p class="cluster-empty">No clusters yet. Link notes together to form connections.</p>
 				{:else}
 					<div class="cluster-list">
-						{#each home.commonplaces as cluster, i}
+						{#each home.commonplaces as cluster, i (i)}
 							<button
 								class="cluster-row"
 								onclick={() => {
@@ -161,9 +159,8 @@ let { home }: { home: HomeController } = $props();
 {/if}
 
 {#if home.isClusterDialogOpen}
-	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-	<div class="modal-overlay" onclick={home.closeClusterDialog}>
-		<div class="modal-content" onclick={(e) => e.stopPropagation()}>
+	<div class="modal-overlay" role="presentation" onclick={home.closeClusterDialog}>
+		<div class="modal-content" role="presentation" onclick={(e) => e.stopPropagation()}>
 			<header class="modal-header">
 				<h2>Cluster Notes ({home.selectedCluster.length})</h2>
 				<p class="modal-subtitle">Select a note to view its contents.</p>
@@ -176,13 +173,21 @@ let { home }: { home: HomeController } = $props();
 						<div class="th-col">Created</div>
 						<div class="th-col">Modified</div>
 					</div>
-					{#each home.selectedCluster as note}
-						<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+					{#each home.selectedCluster as note (note.id)}
 						<div
 							class="table-row"
+							role="button"
+							tabindex="0"
 							onclick={() => {
 								home.closeClusterDialog();
 								home.openNote(note.id);
+							}}
+							onkeydown={(event) => {
+								if (event.key === 'Enter' || event.key === ' ') {
+									event.preventDefault();
+									home.closeClusterDialog();
+									home.openNote(note.id);
+								}
 							}}
 						>
 							<div class="td-col td-primary">{note.title}</div>

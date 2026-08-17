@@ -22,7 +22,12 @@ function walk(directory) {
 
 const files = sourceRoots.flatMap(walk);
 const declared = new Set(Object.keys(contract.tokens).map((token) => `--${token}`));
-const localOnly = new Set(['--sidebar-width', '--swatch-border', '--toolbar-icon-color', '--toolbar-icon-hover-color']);
+const localOnly = new Set([
+	'--sidebar-width',
+	'--swatch-border',
+	'--toolbar-icon-color',
+	'--toolbar-icon-hover-color'
+]);
 const declarationPattern = /(--[a-zA-Z0-9_-]+)\s*:/g;
 for (const path of files) {
 	const source = readFileSync(path, 'utf8');
@@ -58,4 +63,6 @@ if (missing.length) {
 	process.exit(1);
 }
 
-console.log(`Theme contract check passed (${Object.keys(contract.tokens).length} registered tokens).`);
+console.log(
+	`Theme contract check passed (${Object.keys(contract.tokens).length} registered tokens).`
+);

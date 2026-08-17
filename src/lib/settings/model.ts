@@ -18,7 +18,9 @@ export function configMatchPositions(source: string, query: string): number[] {
 export function backendPreference(
 	value: NonNullable<ProviderStatus['config']>['backendPreference'] | undefined
 ): BackendPref {
-	return value === 'cpu' || value === 'vulkan' || value === 'metal' || value === 'cuda' ? value : 'auto';
+	return value === 'cpu' || value === 'vulkan' || value === 'metal' || value === 'cuda'
+		? value
+		: 'auto';
 }
 
 export function providerStatusToForm(status: ProviderStatus): ProviderForm {
@@ -81,7 +83,11 @@ export function openharnPayload(form: OpenharnForm) {
 	};
 }
 
-export function recommendedBeeBackend(preference: BackendPref, downloadable: readonly string[], nvidia: boolean): string {
+export function recommendedBeeBackend(
+	preference: BackendPref,
+	downloadable: readonly string[],
+	nvidia: boolean
+): string {
 	if (preference === 'cpu') return 'cpu';
 	if (downloadable.includes('metal')) return 'metal';
 	if (nvidia && downloadable.includes('cuda')) return 'cuda';

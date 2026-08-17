@@ -1,41 +1,24 @@
-pub(crate) use crate::llama_server::{self, ManagedLlamaServer};
-pub(crate) use crate::models::{
-    AppSnapshot, AppearanceSettings, Backlink, ChatTool, ColorTheme, IndexState, LibraryFacets,
-    NoteDocument, NoteSummary, ProviderStatus, SearchResponse, SearchResult, StorageIssue, Task,
-};
+pub(crate) use crate::llama_server::ManagedLlamaServer;
+pub(crate) use crate::models::{IndexState, NoteDocument, StorageIssue};
 pub(crate) use crate::sidecar::ManagedSidecar;
-pub(crate) use anyhow::{anyhow, Context, Result};
-pub(crate) use arrow_array::types::Float32Type;
-pub(crate) use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
-pub(crate) use arrow_schema::{DataType, Field, Schema};
-pub(crate) use chrono::Utc;
-pub(crate) use lancedb::connection::Connection;
-pub(crate) use lancedb::{connect, Table};
-pub(crate) use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
+pub(crate) use anyhow::Result;
+pub(crate) use notify::RecommendedWatcher;
 pub(crate) use parking_lot::{Mutex, RwLock};
 pub(crate) use reqwest::Client;
-pub(crate) use rig_core::completion::{CompletionError, Prompt, PromptError};
 pub(crate) use serde::{Deserialize, Serialize};
-pub(crate) use sha2::{Digest, Sha256};
-pub(crate) use std::borrow::Cow;
 pub(crate) use std::collections::HashMap;
-pub(crate) use std::ffi::OsStr;
-pub(crate) use std::fs;
-pub(crate) use std::hash::{Hash, Hasher};
-pub(crate) use std::path::{Path, PathBuf};
+pub(crate) use std::path::PathBuf;
 pub(crate) use std::sync::Arc;
-pub(crate) use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle, Emitter, Manager};
-pub(crate) use uuid::Uuid;
+pub(crate) use tauri::{async_runtime::Mutex as AsyncMutex, AppHandle};
 
 // GTE-small width. Notes use real embeddings when an embed model is
 
-use super::*;
 use super::latex_support::*;
 
 #[derive(Clone)]
 pub struct AppState {
     pub handle: AppHandle,
-	pub(crate) inner: Arc<InnerState>,
+    pub(crate) inner: Arc<InnerState>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,12 +52,66 @@ pub(crate) struct IndexRequestReceipt {
     pub(crate) worker_id: Option<u64>,
 }
 
+/// Runtime-owned AI services and their coordination primitives.
+///
+/// Keeping this bundle behind one field makes the ownership boundary explicit:
+/// note/workspace state must not reach across the AI lifecycle, slot cache, or
+/// sidecar locks directly. The individual locks still protect distinct
+/// resources, but their lifetime and teardown now belong to one service.
+pub(crate) struct AiRuntime {
+    pub(crate) llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
+    pub(crate) pipeline_lock: AsyncMutex<()>,
+    pub(crate) pipeline_ready: std::sync::atomic::AtomicBool,
+    pub(crate) embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
+    pub(crate) reranker_server: AsyncMutex<Option<crate::llama_server::ManagedRerankerServer>>,
+    pub(crate) reranker_circuit: Mutex<RerankerCircuit>,
+    pub(crate) sidecar: AsyncMutex<Option<ManagedSidecar>>,
+    pub(crate) chat_lock: AsyncMutex<()>,
+    pub(crate) llama_slot_lock: AsyncMutex<()>,
+    pub(crate) section_cache_preempt: std::sync::atomic::AtomicBool,
+    pub(crate) section_cache_resume: tokio::sync::Notify,
+    pub(crate) active_turn_cancel: Mutex<Option<crate::ai_turn::TurnCancellation>>,
+    pub(crate) require_tool_approval: std::sync::atomic::AtomicBool,
+    pub(crate) deterministic_tools: std::sync::atomic::AtomicBool,
+    pub(crate) tool_gating: std::sync::atomic::AtomicBool,
+    pub(crate) prompt_warmup: Mutex<Option<(u64, tokio::task::JoinHandle<()>)>>,
+    pub(crate) last_slot_save: Mutex<Option<(String, String)>>,
+    pub(crate) active_slot_cache: Mutex<Option<ActiveSlotCache>>,
+    pub(crate) section_cache: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(crate) pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    pub(crate) conversations: Mutex<HashMap<String, Vec<serde_json::Value>>>,
+}
+
+impl AiRuntime {
+    pub(crate) fn new() -> Self {
+        Self {
+            llama_server: AsyncMutex::new(None),
+            pipeline_lock: AsyncMutex::new(()),
+            pipeline_ready: std::sync::atomic::AtomicBool::new(false),
+            embed_server: AsyncMutex::new(None),
+            reranker_server: AsyncMutex::new(None),
+            reranker_circuit: Mutex::new(RerankerCircuit::default()),
+            sidecar: AsyncMutex::new(None),
+            chat_lock: AsyncMutex::new(()),
+            llama_slot_lock: AsyncMutex::new(()),
+            section_cache_preempt: std::sync::atomic::AtomicBool::new(false),
+            section_cache_resume: tokio::sync::Notify::new(),
+            active_turn_cancel: Mutex::new(None),
+            require_tool_approval: std::sync::atomic::AtomicBool::new(false),
+            deterministic_tools: std::sync::atomic::AtomicBool::new(true),
+            tool_gating: std::sync::atomic::AtomicBool::new(false),
+            prompt_warmup: Mutex::new(None),
+            last_slot_save: Mutex::new(None),
+            active_slot_cache: Mutex::new(None),
+            section_cache: Mutex::new(None),
+            pending_approvals: Mutex::new(HashMap::new()),
+            conversations: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 impl IndexScheduler {
-	pub(crate) fn request(
-        &mut self,
-        workspace: PathBuf,
-        debounce: bool,
-    ) -> IndexRequestReceipt {
+    pub(crate) fn request(&mut self, workspace: PathBuf, debounce: bool) -> IndexRequestReceipt {
         self.next_generation = self.next_generation.saturating_add(1);
         let generation = self.next_generation;
         if let Some(pending) = self.pending.as_mut() {
@@ -108,13 +145,13 @@ impl IndexScheduler {
         }
     }
 
-	pub(crate) fn take_pending(&mut self) -> Option<PendingIndexRequest> {
+    pub(crate) fn take_pending(&mut self) -> Option<PendingIndexRequest> {
         let request = self.pending.take()?;
         self.in_flight = Some(request.clone());
         Some(request)
     }
 
-	pub(crate) fn finish_pass(&mut self, generation: u64, error: Option<String>) -> bool {
+    pub(crate) fn finish_pass(&mut self, generation: u64, error: Option<String>) -> bool {
         self.in_flight = None;
         self.last_completion = Some(IndexCompletion { generation, error });
         let has_pending_rerun = self.pending.is_some();
@@ -125,7 +162,7 @@ impl IndexScheduler {
         has_pending_rerun
     }
 
-	pub(crate) fn completion_for(&self, generation: u64) -> Option<Result<(), String>> {
+    pub(crate) fn completion_for(&self, generation: u64) -> Option<Result<(), String>> {
         let completion = self.last_completion.as_ref()?;
         if completion.generation < generation {
             return None;
@@ -136,7 +173,7 @@ impl IndexScheduler {
         })
     }
 
-	pub(crate) fn abort_worker(&mut self, worker_id: u64, message: &str) -> bool {
+    pub(crate) fn abort_worker(&mut self, worker_id: u64, message: &str) -> bool {
         if !self.worker_running || self.active_worker_id != Some(worker_id) {
             return false;
         }
@@ -168,88 +205,17 @@ pub(crate) struct InnerState {
     // Serialises Tectonic runs: concurrent compiles share one format-cache dir and
     // would corrupt it if they built the format at the same time.
     pub(crate) tectonic_lock: AsyncMutex<()>,
-    pub(crate) llama_server: AsyncMutex<Option<ManagedLlamaServer>>,
-    /// Serializes complete AI startup across boot, note-open, and first chat.
-    pub(crate) ai_pipeline_lock: AsyncMutex<()>,
-    pub(crate) ai_pipeline_ready: std::sync::atomic::AtomicBool,
-    pub(crate) embed_server: AsyncMutex<Option<crate::llama_server::ManagedEmbedServer>>,
-    pub(crate) reranker_server: AsyncMutex<Option<crate::llama_server::ManagedRerankerServer>>,
-    pub(crate) reranker_circuit: Mutex<RerankerCircuit>,
-    /// The openharn-myelin agent sidecar: a long-lived `openharn-myelin` process
-    /// that runs the agent loop and calls back to Myelin for tool execution.
-	pub(crate) sidecar: AsyncMutex<Option<ManagedSidecar>>,
-    /// Chat tools read shared per-turn context (open note, selection, question),
-    /// so concurrent requests would overwrite or clear each other's target.
-    pub(crate) chat_lock: AsyncMutex<()>,
-    /// Serializes every operation that reads or mutates llama-server slot 0.
-    /// The page pre-cache, prompt warm-up, real chat, and slot save/restore APIs
-    /// all target the same slot; overlapping them makes the in-memory resident
-    /// page marker disagree with the server's actual KV state.
-    pub(crate) llama_slot_lock: AsyncMutex<()>,
-    /// A real user turn temporarily preempts background section priming. The
-    /// scan remains alive and resumes at its current profile afterward.
-    pub(crate) section_cache_preempt: std::sync::atomic::AtomicBool,
-    pub(crate) section_cache_resume: tokio::sync::Notify,
+    pub(crate) ai: AiRuntime,
     /// Live mirror of the persisted openharn sidecar settings, refreshed on save.
     pub(crate) openharn_settings: Mutex<OpenharnSettings>,
     pub(crate) background_settings: Mutex<BackgroundSettings>,
     pub(crate) llama_client: Client,
-    pub(crate) chat_tools: Mutex<Vec<ChatTool>>,
-    pub(crate) latest_chat_question: Mutex<Option<String>>,
-    /// The editor text selection the user armed for the current chat turn, if any.
-    /// Read by the write_note tool to scope an edit to just that span.
-    pub(crate) current_selection: Mutex<Option<crate::agent::SelectionArg>>,
-    /// The working-doc type of the open document this turn: "md" | "tex" | "ipynb".
-    /// Steers the prompt (LaTeX/notebook vs Markdown) and notebook-aware tools.
-    pub(crate) current_doc_type: Mutex<Option<String>>,
-    pub(crate) current_note_id: Mutex<Option<String>>,
-    pub(crate) cancel_ai: std::sync::atomic::AtomicBool,
-    pub(crate) cancel_notify: tokio::sync::Notify,
-    pub(crate) require_tool_approval: std::sync::atomic::AtomicBool,
-    /// Runtime mirror of config.deterministic_tools, refreshed each chat turn, so
-    /// tools (e.g. the write guard) can read it without re-resolving the config.
-    pub(crate) deterministic_tools: std::sync::atomic::AtomicBool,
-    /// Runtime mirror of config.tool_gating (per-message tool gating), refreshed
-    /// each chat turn alongside `deterministic_tools`.
-    pub(crate) tool_gating: std::sync::atomic::AtomicBool,
-    /// Trusted execution policy for the current serialized chat turn. The model
-    /// sees a stable tool schema for prompt-cache reuse; these flags enforce the
-    /// mode-specific mutation boundary when a tool call reaches Rust.
-    pub(crate) targeted_write: std::sync::atomic::AtomicBool,
-    pub(crate) chat_mode: std::sync::atomic::AtomicBool,
-    pub(crate) append_only: std::sync::atomic::AtomicBool,
-    pub(crate) placement_edit: std::sync::atomic::AtomicBool,
-    pub(crate) oversized_doc: std::sync::atomic::AtomicBool,
-    pub(crate) tools_supported: std::sync::atomic::AtomicBool,
     pub(crate) note_ingest_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     pub(crate) note_ingest_manifest_lock: AsyncMutex<()>,
     /// Persistent cache for normalized question embeddings. Document vectors
     /// live in LanceDB; this avoids repeating the embedding-server call for
     /// repeated retrieval queries.
     pub(crate) query_embedding_cache: Mutex<Option<QueryEmbeddingCacheFile>>,
-    /// At most one note-prefix warm-up should be consuming llama-server at once.
-    /// The key is the exact request prefix; a newer prefix supersedes an older one.
-    pub(crate) prompt_warmup: Mutex<Option<(u64, tokio::task::JoinHandle<()>)>>,
-    /// (note_id, identity) of the most recent successful slot snapshot. Slot 0
-    /// still holds that snapshot's KV when the app quits, so the quit path can
-    /// re-persist it before llama-server dies; the next boot restores it.
-    pub(crate) last_slot_save: Mutex<Option<(String, String)>>,
-    /// Prefix currently resident in slot 0. A section is restored only when
-    /// this identity changes; restoring on every turn would throw away the
-    /// in-RAM history and defeat the point of the cache.
-    pub(crate) active_slot_cache: Mutex<Option<ActiveSlotCache>>,
-    /// The whole-document section pre-cache scan (one prime+save per section).
-    /// Runs independently of the prompt warm-up: it must NOT be aborted by a
-    /// chat turn (finish_prompt_warmup), only by note close / server stop.
-    pub(crate) section_cache: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    pub(crate) pending_approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
-    /// Per-note live conversation as the REAL message array (system-less): user
-    /// turns, assistant turns with tool_calls, and the tool RESULTS. The frontend's
-    /// chat_history keeps only text replies, so this is what lets the model keep
-    /// coherent context across turns — search/fetch results stay as real `tool`
-    /// messages instead of being flattened to a vague summary and lost. Re-sent each
-    /// turn so llama-server reuses the cached prefix (KV cache). Keyed by note id.
-    pub(crate) conversations: Mutex<HashMap<String, Vec<serde_json::Value>>>,
 }
 
 #[derive(Debug, Default)]
@@ -268,7 +234,7 @@ pub(crate) struct IndexWorkerGuard {
 }
 
 impl IndexWorkerGuard {
-	pub(crate) fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -278,14 +244,10 @@ impl Drop for IndexWorkerGuard {
         if !self.armed {
             return;
         }
-        let aborted = self
-            .inner
-            .index_scheduler
-            .lock()
-            .abort_worker(
-                self.worker_id,
-                "index worker stopped before completing its queued work",
-            );
+        let aborted = self.inner.index_scheduler.lock().abort_worker(
+            self.worker_id,
+            "index worker stopped before completing its queued work",
+        );
         if aborted {
             self.inner.index_completion.notify_waiters();
         }
@@ -363,8 +325,14 @@ pub(crate) struct QueryEmbeddingCacheFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
-pub struct BackgroundSettings { pub start_with_system: bool }
-impl BackgroundSettings { fn is_default(&self) -> bool { !self.start_with_system } }
+pub struct BackgroundSettings {
+    pub start_with_system: bool,
+}
+impl BackgroundSettings {
+    fn is_default(&self) -> bool {
+        !self.start_with_system
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -485,24 +453,60 @@ pub(crate) fn project_ai_agent_settings(
     agent: &crate::ai_config::AgentConfig,
 ) -> OpenharnSettings {
     let mut settings = legacy.clone();
-    if let Some(value) = agent.port { settings.port = Some(value); }
-    if let Some(value) = agent.bin_path.clone() { settings.bin_path = Some(value); }
-    if let Some(value) = agent.tool_mode.clone() { settings.tool_mode = value; }
-    if let Some(value) = agent.strict { settings.strict = value; }
-    if let Some(value) = agent.prompt_tools { settings.prompt_tools = value; }
-    if let Some(value) = agent.call_only { settings.call_only = value; }
-    if let Some(value) = agent.no_think { settings.no_think = value; }
-    if let Some(value) = agent.narrow { settings.narrow = value; }
-    if let Some(value) = agent.slm { settings.slm = value; }
-    if let Some(value) = agent.friendly_results { settings.friendly_results = value; }
-    if let Some(value) = agent.max_calls { settings.max_calls = Some(value); }
-    if let Some(value) = agent.total_max { settings.total_max = Some(value); }
-    if let Some(value) = agent.tool_timeout_secs { settings.tool_timeout_secs = Some(value); }
-    if let Some(value) = agent.generation_timeout_secs { settings.generation_timeout_secs = Some(value); }
-    if let Some(value) = agent.tool_subset.clone() { settings.tool_subset = Some(value); }
-    if let Some(value) = agent.base_url_override.clone() { settings.base_url = Some(value); }
-    if let Some(value) = agent.tool_choice.clone() { settings.tool_choice = Some(value); }
-    if let Some(value) = agent.template_kwargs.clone() { settings.template_kwargs = Some(value); }
+    if let Some(value) = agent.port {
+        settings.port = Some(value);
+    }
+    if let Some(value) = agent.bin_path.clone() {
+        settings.bin_path = Some(value);
+    }
+    if let Some(value) = agent.tool_mode.clone() {
+        settings.tool_mode = value;
+    }
+    if let Some(value) = agent.strict {
+        settings.strict = value;
+    }
+    if let Some(value) = agent.prompt_tools {
+        settings.prompt_tools = value;
+    }
+    if let Some(value) = agent.call_only {
+        settings.call_only = value;
+    }
+    if let Some(value) = agent.no_think {
+        settings.no_think = value;
+    }
+    if let Some(value) = agent.narrow {
+        settings.narrow = value;
+    }
+    if let Some(value) = agent.slm {
+        settings.slm = value;
+    }
+    if let Some(value) = agent.friendly_results {
+        settings.friendly_results = value;
+    }
+    if let Some(value) = agent.max_calls {
+        settings.max_calls = Some(value);
+    }
+    if let Some(value) = agent.total_max {
+        settings.total_max = Some(value);
+    }
+    if let Some(value) = agent.tool_timeout_secs {
+        settings.tool_timeout_secs = Some(value);
+    }
+    if let Some(value) = agent.generation_timeout_secs {
+        settings.generation_timeout_secs = Some(value);
+    }
+    if let Some(value) = agent.tool_subset.clone() {
+        settings.tool_subset = Some(value);
+    }
+    if let Some(value) = agent.base_url_override.clone() {
+        settings.base_url = Some(value);
+    }
+    if let Some(value) = agent.tool_choice.clone() {
+        settings.tool_choice = Some(value);
+    }
+    if let Some(value) = agent.template_kwargs.clone() {
+        settings.template_kwargs = Some(value);
+    }
     settings
 }
 
@@ -528,6 +532,8 @@ pub(crate) struct DocumentMetadataSidecar {
     pub(crate) relative_path: String,
 }
 
-fn metadata_schema_version() -> u32 { 2 }
+fn metadata_schema_version() -> u32 {
+    2
+}
 
 pub(crate) type NativeMetadataSidecar = DocumentMetadataSidecar;

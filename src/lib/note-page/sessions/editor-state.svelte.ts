@@ -1,5 +1,8 @@
+import type { ControllerContext } from '$lib/controller-context';
+
 /** Owns note-body insertion, editor destruction, and debounced persistence state. */
-export function createEditorStateSession(ctx: Record<string, any>) {
+export function createEditorStateSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	function appendToNoteBody(content: string) {
 		ctx.showAttachedNote = true;
 		if (ctx.vditorInstance) {

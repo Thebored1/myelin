@@ -14,232 +14,22 @@
 //! env var overrides resolution (handy for local dev / testing).
 
 use crate::llama_server::ResolvedLlamaConfig;
-use crate::state::AppState;
-use anyhow::{anyhow, Context, Result};
+use crate::ai_turn::ToolTurnContext;
+use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
-const SIDECAR_NAME: &str = "openharn-myelin";
-const DEFAULT_PORT: u16 = 8091;
-const SIDECAR_PROTOCOL_VERSION: u64 = 4;
+mod transport;
+use transport::http_client;
 
-/// How long to keep draining the sidecar's SSE stream after posting a cancel
-/// request: it needs a moment to emit its final `done` (with the partial turn)
-/// before the connection can be dropped.
-const CANCEL_DRAIN_SECS: u64 = 15;
-
-/// Reuse loopback connections for health checks and sidecar requests. The
-/// sidecar is long-lived, so constructing a new client for every chat turn
-/// needlessly throws away the connection pool.
-fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
-}
-
-/// A running sidecar process plus the HTTP base we talk to it on.
-pub struct ManagedSidecar {
-    pub base: String,
-    _child: Child,
-}
-
-impl Drop for ManagedSidecar {
-    fn drop(&mut self) {
-        let _ = self._child.kill();
-    }
-}
-
-/// Full target triple for the current platform, used to locate the Tauri
-/// externalBin build (`<name>-<triple>`).
-fn target_triple() -> &'static str {
-    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-    {
-        "x86_64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    {
-        "aarch64-unknown-linux-gnu"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-    {
-        "x86_64-pc-windows-msvc"
-    }
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    {
-        "x86_64-apple-darwin"
-    }
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_os = "linux"),
-        all(target_arch = "aarch64", target_os = "linux"),
-        all(target_arch = "x86_64", target_os = "windows"),
-        all(target_arch = "aarch64", target_os = "macos"),
-        all(target_arch = "x86_64", target_os = "macos")
-    )))]
-    {
-        "unknown"
-    }
-}
-
-/// Resolve the sidecar binary path. Precedence:
-///   1. `OPENHARN_MYELIN_BIN` env var (absolute path).
-///   2. `<resource_dir>/bin/<name>-<target-triple>` (Tauri externalBin).
-///   3. `<resource_dir>/bin/<name>` (already-suffixed / dev bundle).
-fn resolve_sidecar_bin(resource_dir: Option<&Path>) -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("OPENHARN_MYELIN_BIN") {
-        if !explicit.trim().is_empty() {
-            return Some(PathBuf::from(explicit));
-        }
-    }
-    let dir = resource_dir?;
-    let triple = target_triple();
-    let with_ext = if cfg!(target_os = "windows") {
-        format!("{SIDECAR_NAME}.exe")
-    } else {
-        SIDECAR_NAME.to_string()
-    };
-    // Tauri maps `resources/bin` -> `<resource_dir>/bin` at build time, but in
-    // `tauri dev` the source tree (`<resource_dir>/resources/bin`) is used, so
-    // probe both locations (mirrors how llama_server resolves its binaries).
-    let mut roots: Vec<PathBuf> = vec![dir.join("bin"), dir.join("resources").join("bin")];
-    roots.retain(|r| r.is_dir());
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if triple != "unknown" {
-        let suffixed = if cfg!(target_os = "windows") {
-            format!("{SIDECAR_NAME}-{triple}.exe")
-        } else {
-            format!("{SIDECAR_NAME}-{triple}")
-        };
-        for r in &roots {
-            candidates.push(r.join(&suffixed));
-        }
-    }
-    for r in &roots {
-        candidates.push(r.join(&with_ext));
-    }
-    candidates.into_iter().find(|p| p.exists())
-}
-
-/// Spawn the sidecar if it isn't already running, wait for it to report healthy,
-/// and return its HTTP base URL. Idempotent: re-checks the running process and
-/// relaunches if it died.
-pub async fn ensure_sidecar(state: &AppState) -> Result<String> {
-    let mut guard = state.inner.sidecar.lock().await;
-
-    if let Some(sc) = guard.as_ref() {
-        if compatible_health(&sc.base).await {
-            return Ok(sc.base.clone());
-        }
-        // Process died — drop the stale handle (kill is best-effort).
-        *guard = None;
-    }
-
-    let oh = state.openharn_settings();
-    let resource_dir = state.handle.path().resource_dir().ok();
-
-    // Binary resolution: explicit path in settings > OPENHARN_MYELIN_BIN env >
-    // bundled/resource resolution.
-    let bin = oh
-        .bin_path
-        .clone()
-        .filter(|p| !p.trim().is_empty())
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .or_else(|| {
-            std::env::var("OPENHARN_MYELIN_BIN")
-                .ok()
-                .map(|p| PathBuf::from(p))
-                .filter(|p| p.exists())
-        })
-        .or_else(|| resolve_sidecar_bin(resource_dir.as_deref()))
-        .ok_or_else(|| {
-            anyhow!(
-                "openharn-myelin sidecar binary not found. Build it (npm run build:sidecar) and \
-             place it under the app's bin dir, or set its path in Settings > Agent (openharn)."
-            )
-        })?;
-
-    let port = oh
-        .port
-        .filter(|&p| p != 0)
-        .or_else(|| {
-            std::env::var("OPENHARN_MYELIN_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-        })
-        .unwrap_or(DEFAULT_PORT);
-    let base = format!("http://127.0.0.1:{port}");
-
-    log::info!("[sidecar] launching {bin:?} on {base}");
-    let mut command = Command::new(&bin);
-    command.arg("--port").arg(port.to_string());
-    command.stdout(Stdio::null()).stderr(Stdio::null());
-    // Kill the sidecar if the app dies (mirrors llama-server's PR_SET_PDEATHSIG).
-    #[cfg(target_os = "linux")]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        command.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            Ok(())
-        });
-    }
-    let child = command
-        .spawn()
-        .with_context(|| format!("failed to start sidecar at {bin:?}"))?;
-
-    let managed = ManagedSidecar {
-        base: base.clone(),
-        _child: child,
-    };
-
-    // Wait for readiness (the sidecar prints a readiness line, but we just poll
-    // /health so we don't depend on stdout capture).
-    let mut ready = false;
-    for _ in 0..50 {
-        if compatible_health(&base).await {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    if !ready {
-        return Err(anyhow!(
-            "openharn-myelin sidecar at {base} is unavailable or incompatible \
-             (required protocol {SIDECAR_PROTOCOL_VERSION}). Rebuild it with \
-             `npm run build:sidecar:debug`."
-        ));
-    }
-
-    *guard = Some(managed);
-    Ok(base)
-}
-
-async fn compatible_health(base: &str) -> bool {
-    let Ok(response) = http_client()
-        .get(format!("{base}/health"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await
-    else {
-        return false;
-    };
-    if !response.status().is_success() {
-        return false;
-    }
-    response
-        .json::<Value>()
-        .await
-        .ok()
-        .and_then(|health| health["protocol_version"].as_u64())
-        == Some(SIDECAR_PROTOCOL_VERSION)
-}
+mod lifecycle;
+mod recovery;
+mod request_policy;
+pub use lifecycle::{ensure_sidecar, ManagedSidecar, CANCEL_DRAIN_SECS, SIDECAR_PROTOCOL_VERSION};
+use recovery::{conversation_delta, recoverable_assistant_text};
+use request_policy::build as build_request_policy;
 
 /// Run a streaming chat turn through the sidecar. Maps the sidecar's SSE events
 /// onto the same Tauri emissions the in-process loop used (`ai://chat_chunk`,
@@ -247,7 +37,7 @@ async fn compatible_health(base: &str) -> bool {
 /// emits that fire from inside `execute_tool`), and returns the final message
 /// array so `ask_ai_stream` can persist the conversation exactly as before.
 pub async fn run_chat(
-    state: &AppState,
+    turn: &ToolTurnContext,
     config: &ResolvedLlamaConfig,
     messages: Vec<Value>,
     tools: Vec<Value>,
@@ -265,129 +55,36 @@ pub async fn run_chat(
     selection_scoped: bool,
     targeted_write: bool,
 ) -> Result<Vec<Value>> {
+    let state = &turn.state;
     let base = ensure_sidecar(state).await?;
+    let token = state
+        .inner.ai
+        .sidecar
+        .lock()
+        .await
+        .as_ref()
+        .map(|sidecar| sidecar.token.clone())
+        .ok_or_else(|| anyhow!("sidecar disappeared after startup"))?;
 
     let oh = state.openharn_settings();
-    let external = oh.external_ready();
-    // The sidecar reaches llama-server at this base URL. A Settings override
-    // wins (handy if the resolved config's host/port isn't what's listening);
-    // otherwise derive it from the llama config (config.base_url() + "/v1").
-    let llama_base = if external {
-        oh.external_base_url
-            .clone()
-            .unwrap_or_default()
-            .trim_end_matches('/')
-            .to_string()
-    } else {
-        oh.base_url
-            .clone()
-            .filter(|u| !u.trim().is_empty())
-            .unwrap_or_else(|| format!("{}/v1", config.base_url()))
-    };
-    let model = if external {
-        oh.external_model.clone().unwrap_or_default()
-    } else {
-        config.model_name()
-    };
-    let api_key = if external {
-        oh.external_api_key.clone()
-    } else {
-        None
-    };
+    let policy = build_request_policy(
+        &oh,
+        config,
+        intent_is_tool,
+        chat_mode,
+        suppress_chat_output,
+        selection_scoped,
+        targeted_write,
+    );
+    let llama_base = policy.llama_base.clone();
+    let model = policy.model.clone();
+    let api_key = policy.api_key.clone();
 
-    // Tool format is user-controlled. Auto leaves the Openharn per-request
-    // policy in charge; Native always uses the model's native function-call
-    // format; Prompt tools uses text-form calls. Model profiles never force a
-    // format because a setting that helps one model can hurt another.
-    let tool_mode = match oh.tool_mode.trim().to_ascii_lowercase().as_str() {
-        "native" => "native",
-        "prompt" | "prompt_tools" => "prompt",
-        _ => "auto",
-    };
-    let explicit_prompt = tool_mode == "prompt";
-    // Auto is authoritative: ignore legacy manual booleans that may have been
-    // persisted by older builds. Openharn decides native vs prompt-tools per
-    // request and enables prompt-tools only as a recovery path when needed.
-    // Native mode is shared across Chat and Operation so switching modes keeps
-    // the same rendered prompt prefix. Strict prompt-tools remains available as
-    // an explicit setting or as the sidecar's recovery path after native fails.
-    let use_prompt_tools = explicit_prompt;
-    let use_strict = explicit_prompt && (oh.strict || suppress_chat_output);
-    // Operation is an explicit user instruction to act, not a routing hint.
-    // In native function-calling mode `call_only` becomes `tool_choice: required`
-    // below; in prompt-tool mode it selects the call-only grammar.
-    let call_only = suppress_chat_output
-        || (explicit_prompt && oh.call_only && intent_is_tool == Some(true));
+    let tool_mode = policy.tool_mode;
+    // The policy preserves the existing native/prompt-tools selection and
+    // applies the same mutation, chat, and external-endpoint rules for every turn.
 
-    let mut options = json!({
-        "strict": use_strict,
-        "prompt_tools": use_prompt_tools,
-        "prefers_prompt_tools": false,
-        "call_only": call_only,
-        // Model-based intent classification is skipped when the host provides
-        // a deterministic intent_is_tool below. When intent_is_tool is None,
-        // the sidecar defaults to friendly_results=false and enters the tool
-        // loop normally — the per-request policy handles abstention via
-        // harness_decompose (plan_len==0 → NO_TOOL).
-        // An explicit host intent must use the friendly CHAT/TOOL branches,
-        // but it must not run the model classifier: intent_is_tool below is
-        // authoritative and already computed by Myelin.
-        "friendly_results": intent_is_tool.is_some(),
-
-        // Ordinary chat should never surface model reasoning as visible
-        // `<think>` blocks. Operation mode may retain the user's configured
-        // reasoning setting because it can help tool selection/edit quality.
-        "no_think": oh.no_think || chat_mode,
-        // Maple's server-level --reasoning off flag does not stop its template
-        // from entering a thinking turn. Chat must therefore close that turn
-        // explicitly with the assistant prefill; otherwise the model can spend
-        // the whole 768-token budget in hidden reasoning and emit no answer.
-        // Keep the older configured prefill behavior for explicitly no-think
-        // operation profiles that have reasoning enabled.
-        "no_think_prefill": chat_mode || (config.thinking && oh.no_think),
-        "narrow": false,
-        "slm": false,
-        "chat_mode": chat_mode,
-        "selection_scoped": selection_scoped,
-        "targeted_write": targeted_write,
-        "native_first": !explicit_prompt,
-        "external": external,
-    });
-    // Host-computed deterministic intent overrides model-based classification.
-    // The sidecar uses this value directly and skips the separate model
-    // inference that used to cost ~8s per turn.
-    if let Some(is_tool) = intent_is_tool {
-        options["intent_is_tool"] = json!(is_tool);
-    }
-    // Operation mode executes one action per model turn. This gives the model the
-    // real result before it chooses the next action or emits its own completion,
-    // preventing several competing write_note calls from one generation.
-    // Auto mode keeps the existing configured/default limit.
-    options["max_calls"] = json!(if intent_is_tool == Some(true) {
-        1
-    } else {
-        oh.max_calls
-            .unwrap_or(if tool_mode == "prompt" { 3 } else { 1 })
-    });
-    if let Some(tm) = oh.total_max {
-        options["total_max"] = json!(tm);
-    }
-    if let Some(tt) = oh.tool_timeout_secs {
-        options["tool_timeout_secs"] = json!(tt);
-    }
-    if let Some(gt) = oh.generation_timeout_secs {
-        options["generation_timeout_secs"] = json!(gt);
-    }
-
-    // These are explicit user settings. Do not inherit tool_choice or template
-    // kwargs from a model profile; those options can be harmful on larger models.
-    if let Some(tc) = oh.tool_choice.as_ref().filter(|v| !v.trim().is_empty()) {
-        options["tool_choice"] = json!(tc.trim());
-    }
-    if let Some(kw) = oh.template_kwargs.as_ref().filter(|v| !v.trim().is_empty()) {
-        options["template_kwargs"] = json!(kw);
-    }
-
+    let options = policy.options;
     // The epoch identifies this exact note/config/prompt revision. It remains
     // stable for all passes in this request; any changed input naturally yields
     // a different epoch and prevents a stale slot from being treated as valid.
@@ -395,25 +92,21 @@ pub async fn run_chat(
     use std::hash::{Hash, Hasher};
     note_id.hash(&mut epoch_hash);
     config.model_path.hash(&mut epoch_hash);
-    serde_json::to_string(&messages).unwrap_or_default().hash(&mut epoch_hash);
-    serde_json::to_string(&tools).unwrap_or_default().hash(&mut epoch_hash);
+    serde_json::to_string(&messages)
+        .unwrap_or_default()
+        .hash(&mut epoch_hash);
+    serde_json::to_string(&tools)
+        .unwrap_or_default()
+        .hash(&mut epoch_hash);
     let epoch = epoch_hash.finish();
-    let pass_kind = if intent_is_tool == Some(true) {
-        "tool selection"
-    } else {
-        "direct answer"
-    };
+    let pass_kind = policy.pass_kind;
     let submitted_messages = messages.clone();
     // Keep ordinary direct answers bounded. Raising this to the full context
     // made a short question capable of producing thousands of tokens, which
     // looked like an endless/hallucinating generation. The previous 768-token
     // ceiling is intentional; tool turns remain separately bounded because
     // their output is structured arguments/results rather than prose.
-    let max_output_tokens = if chat_mode && intent_is_tool != Some(true) {
-        768
-    } else {
-        4096
-    };
+    let max_output_tokens = policy.max_output_tokens;
     let body = json!({
         "request_id": request_id,
         "base_url": llama_base,
@@ -431,6 +124,7 @@ pub async fn run_chat(
     let client = http_client();
     let resp = client
         .post(format!("{base}/v1/chat/stream"))
+        .bearer_auth(&token)
         .json(&body)
         .send()
         .await
@@ -498,7 +192,7 @@ pub async fn run_chat(
     tokio::pin!(cancel_drain);
 
     loop {
-        if !cancel_sent && state.ai_cancel_requested() {
+        if !cancel_sent && turn.cancellation.is_cancelled() {
             cancel_sent = true;
             emit_debug("cancel", "cancelling sidecar turn");
             let _ = handle.emit(
@@ -510,17 +204,20 @@ pub async fn run_chat(
             // the single llama slot and drop the partial turn).
             let post = client
                 .post(format!("{base}/v1/cancel"))
+                .bearer_auth(&token)
                 .json(&json!({ "request_id": request_id }))
                 .send()
                 .await;
             if let Err(e) = post {
                 log::warn!("[sidecar] cancel request failed: {e}");
             }
-            cancel_drain.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(CANCEL_DRAIN_SECS));
+            cancel_drain
+                .as_mut()
+                .reset(tokio::time::Instant::now() + Duration::from_secs(CANCEL_DRAIN_SECS));
         }
         let chunk = tokio::select! {
             chunk = stream.next() => chunk,
-            _ = state.wait_for_ai_cancel() => continue,
+            _ = turn.cancellation.cancelled() => continue,
             _ = &mut cancel_drain, if cancel_sent => break,
         };
         let Some(chunk) = chunk else { break };
@@ -604,8 +301,8 @@ pub async fn run_chat(
                             // Run the REAL Myelin tool (emits ai://chat_tool and,
                             // for write_note, ai://note_written on its own).
                             let result =
-                                crate::stream_chat::execute_tool(state, &name, &args).await;
-                            if state.ai_cancel_requested() {
+                                crate::stream_chat::execute_tool(turn, &name, &args).await;
+                            if turn.cancellation.is_cancelled() {
                                 // The turn was cancelled while the tool ran (e.g.
                                 // awaiting approval). Do not unblock the harness —
                                 // cancel it so the partial turn closes promptly.
@@ -617,6 +314,7 @@ pub async fn run_chat(
                                 );
                                 let _ = client
                                     .post(format!("{base}/v1/cancel"))
+                                    .bearer_auth(&token)
                                     .json(&json!({ "request_id": request_id }))
                                     .send()
                                     .await;
@@ -631,6 +329,7 @@ pub async fn run_chat(
                             // Unblock the harness.
                             let post = client
                                 .post(format!("{base}/v1/tool-result"))
+                                .bearer_auth(&token)
                                 .json(&json!({
                                     "request_id": request_id,
                                     "tool_call_id": id,
@@ -702,10 +401,7 @@ pub async fn run_chat(
                                     // array as a delta: doing so recursively
                                     // duplicates every prior turn and destroys
                                     // prompt-prefix cache reuse.
-                                    conversation_delta(
-                                        &submitted_messages,
-                                        &final_messages,
-                                    )?
+                                    conversation_delta(&submitted_messages, &final_messages)?
                                 });
                             }
                         }
@@ -725,7 +421,11 @@ pub async fn run_chat(
                                     .as_u64()
                                     .unwrap_or_else(|| pt.saturating_sub(cached));
                                 let ratio = v["cache_reuse_ratio"].as_f64().unwrap_or_else(|| {
-                                    if pt == 0 { 0.0 } else { cached as f64 / pt as f64 }
+                                    if pt == 0 {
+                                        0.0
+                                    } else {
+                                        cached as f64 / pt as f64
+                                    }
                                 });
                                 let _ = handle.emit(
                                     "ai://chat_usage",
@@ -794,65 +494,5 @@ pub async fn run_chat(
     Ok(final_messages)
 }
 
-fn conversation_delta(submitted: &[Value], returned: &[Value]) -> Result<Vec<Value>> {
-    if returned.len() < submitted.len() || returned[..submitted.len()] != *submitted {
-        return Err(anyhow!(
-            "sidecar returned neither new_messages nor a compatible conversation suffix"
-        ));
-    }
-    Ok(returned[submitted.len()..].to_vec())
-}
-
-fn recoverable_assistant_text(messages: &[Value]) -> Option<String> {
-    messages.iter().rev().find_map(|message| {
-        (message["role"].as_str() == Some("assistant") && message["tool_calls"].is_null())
-            .then(|| message["content"].as_str())
-            .flatten()
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-            .map(str::to_string)
-    })
-}
-
 #[cfg(test)]
-mod tests {
-    use super::{conversation_delta, recoverable_assistant_text};
-    use serde_json::json;
-
-    #[test]
-    fn legacy_full_conversation_is_reduced_to_delta() {
-        let submitted = vec![
-            json!({"role": "system", "content": "policy"}),
-            json!({"role": "user", "content": "hello"}),
-        ];
-        let mut returned = submitted.clone();
-        returned.push(json!({"role": "assistant", "content": "hi"}));
-        let delta = conversation_delta(&submitted, &returned).unwrap();
-        assert_eq!(delta, vec![json!({"role": "assistant", "content": "hi"})]);
-    }
-
-    #[test]
-    fn incompatible_full_conversation_is_rejected() {
-        let submitted = vec![json!({"role": "user", "content": "hello"})];
-        let returned = vec![json!({"role": "system", "content": "wrong"})];
-        assert!(conversation_delta(&submitted, &returned).is_err());
-    }
-
-    #[test]
-    fn empty_current_turn_never_recovers_an_older_answer() {
-        let current = vec![json!({"role": "assistant", "content": ""})];
-        assert!(recoverable_assistant_text(&current).is_none());
-    }
-
-    #[test]
-    fn recovery_uses_the_latest_current_assistant_message() {
-        let current = vec![
-            json!({"role": "user", "content": "new question"}),
-            json!({"role": "assistant", "content": "new answer"}),
-        ];
-        assert_eq!(
-            recoverable_assistant_text(&current).as_deref(),
-            Some("new answer")
-        );
-    }
-}
+mod tests;

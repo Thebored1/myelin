@@ -1,5 +1,5 @@
-mod context;
 mod chat;
+mod context;
 mod history;
 mod pipeline;
 mod section_cache;

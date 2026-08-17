@@ -8,7 +8,10 @@ export function clampPage(page: number, pageCount: number): number {
 export function pageOrder(activePage: number, pageCount: number): number[] {
 	if (pageCount <= 0) return [];
 	const active = clampPage(activePage, pageCount) || 1;
-	return [active, ...Array.from({ length: pageCount }, (_, index) => index + 1).filter((page) => page !== active)];
+	return [
+		active,
+		...Array.from({ length: pageCount }, (_, index) => index + 1).filter((page) => page !== active)
+	];
 }
 
 export function fitWidthScale(viewportWidth: number, paneWidth: number, spread: boolean): number {
@@ -18,8 +21,18 @@ export function fitWidthScale(viewportWidth: number, paneWidth: number, spread: 
 	return (paneWidth - reserved - scrollbar) / (viewportWidth * (spread ? 2 : 1));
 }
 
-export function normalizedRect(startX: number, startY: number, endX: number, endY: number): SelectionRect {
-	return [Math.min(startX, endX), Math.min(startY, endY), Math.abs(endX - startX), Math.abs(endY - startY)];
+export function normalizedRect(
+	startX: number,
+	startY: number,
+	endX: number,
+	endY: number
+): SelectionRect {
+	return [
+		Math.min(startX, endX),
+		Math.min(startY, endY),
+		Math.abs(endX - startX),
+		Math.abs(endY - startY)
+	];
 }
 
 export function distanceToSegment(point: PdfPoint, start: PdfPoint, end: PdfPoint): number {

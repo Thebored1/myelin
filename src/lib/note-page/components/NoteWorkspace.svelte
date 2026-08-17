@@ -7,7 +7,8 @@
 
 <div
 	class="editor-shell"
-	class:has-attached-file={!!notePage.note?.sourcePdf || (notePage.isSourceMaterial && !!notePage.activeSourceBytes)}
+	class:has-attached-file={!!notePage.note?.sourcePdf ||
+		(notePage.isSourceMaterial && !!notePage.activeSourceBytes)}
 	class:resizing={notePage.isResizing || notePage.isSidebarResizing}
 >
 	<header class="editor-header">
@@ -67,7 +68,11 @@
 				{/if}
 			</div>
 			{#if notePage.saveStatus === 'unsaved'}
-				<button class="retry-save" onclick={() => void notePage.saveNote()} disabled={notePage.isBusy}>
+				<button
+					class="retry-save"
+					onclick={() => void notePage.saveNote()}
+					disabled={notePage.isBusy}
+				>
 					Retry save
 				</button>
 			{/if}
@@ -101,13 +106,16 @@
 			<section
 				class="pdf-pane"
 				class:tex-pane={notePage.workingDocType === 'tex'}
-				style="position: relative; width: {!notePage.showAttachedNote ? '100%' : `${notePage.splitRatio}%`}"
+				style="position: relative; width: {!notePage.showAttachedNote
+					? '100%'
+					: `${notePage.splitRatio}%`}"
 			>
 				{#if notePage.sectionCache}
 					<div
 						class="section-cache-overlay"
 						class:section-cache-complete={notePage.sectionCache.finished}
-						class:section-cache-failed={notePage.sectionCache.finished && notePage.sectionCache.failed > 0}
+						class:section-cache-failed={notePage.sectionCache.finished &&
+							notePage.sectionCache.failed > 0}
 						role="status"
 						aria-live="polite"
 					>
@@ -121,15 +129,23 @@
 							{#if notePage.sectionCache.finished && notePage.sectionCache.failed > 0}
 								Prepared {notePage.sectionCache.sectionDone}/{notePage.sectionCache.sectionTotal} sections;
 								{notePage.sectionCache.failed} section caches failed.
-								{notePage.sectionCache.failedDetails.length > 0 ? ` Failed: ${notePage.sectionCache.failedDetails.join(', ')}.` : ''}
-								Took {notePage.formatSectionCacheDuration(notePage.sectionCache.elapsedMs ?? 0)}. Reopen to retry.
+								{notePage.sectionCache.failedDetails.length > 0
+									? ` Failed: ${notePage.sectionCache.failedDetails.join(', ')}.`
+									: ''}
+								Took {notePage.formatSectionCacheDuration(notePage.sectionCache.elapsedMs ?? 0)}.
+								Reopen to retry.
 							{:else if notePage.sectionCache.finished}
-								Prepared {notePage.sectionCache.sectionDone}/{notePage.sectionCache.sectionTotal} sections for Chat + Write in
+								Prepared {notePage.sectionCache.sectionDone}/{notePage.sectionCache.sectionTotal} sections
+								for Chat + Write in
 								{notePage.formatSectionCacheDuration(notePage.sectionCache.elapsedMs ?? 0)}
 							{:else}
 								Preparing {notePage.sectionCache.done}/{notePage.sectionCache.total} shared section caches
 								{notePage.sectionCache.label ? ` — ${notePage.sectionCache.label}` : ''}
-								{notePage.sectionCache.profile === 'shared' ? ' · Chat + Write' : notePage.sectionCache.profile ? ` · ${notePage.sectionCache.profile}` : ''}…
+								{notePage.sectionCache.profile === 'shared'
+									? ' · Chat + Write'
+									: notePage.sectionCache.profile
+										? ` · ${notePage.sectionCache.profile}`
+										: ''}…
 							{/if}
 						</span>
 					</div>
@@ -138,7 +154,8 @@
 					<div class="tex-pane-badge">PDF preview</div>
 				{/if}
 				{#if notePage.sourceMaterialType === 'pdf' && notePage.PdfViewerComponent}
-					<svelte:component this={notePage.PdfViewerComponent}
+					{@const PdfViewer = notePage.PdfViewerComponent}
+					<PdfViewer
 						pdfBytes={notePage.activeSourceBytes}
 						annotations={notePage.note?.annotations || []}
 						onQuote={notePage.handlePdfQuote}
@@ -158,7 +175,8 @@
 				{:else if notePage.sourceMaterialType === 'pdf'}
 					<div class="viewer-loading">Loading PDF viewer…</div>
 				{:else if notePage.sourceMaterialType === 'epub' && notePage.EpubViewerComponent}
-					<svelte:component this={notePage.EpubViewerComponent}
+					{@const EpubViewer = notePage.EpubViewerComponent}
+					<EpubViewer
 						epubBytes={notePage.activeSourceBytes}
 						onActiveSection={notePage.handleActiveSectionChange}
 						onSectionsReady={notePage.handleSectionsReady}
@@ -176,11 +194,12 @@
 				{:else if notePage.sourceMaterialType === 'epub'}
 					<div class="viewer-loading">Loading EPUB viewer…</div>
 				{:else if notePage.sourceMaterialType === 'html' && notePage.HtmlViewerComponent}
-						<svelte:component this={notePage.HtmlViewerComponent}
-							htmlBytes={notePage.activeSourceBytes}
+					{@const HtmlViewer = notePage.HtmlViewerComponent}
+					<HtmlViewer
+						htmlBytes={notePage.activeSourceBytes}
 						onActiveSection={notePage.handleActiveSectionChange}
-							onSectionsReady={notePage.handleSectionsReady}
-						/>
+						onSectionsReady={notePage.handleSectionsReady}
+					/>
 					{#if !notePage.showAttachedNote}
 						<button
 							style="position: absolute; top: 10px; right: 10px;"
@@ -210,7 +229,11 @@
 			</section>
 			{#if notePage.showAttachedNote}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div class="resizer" onmousedown={notePage.startResizing} class:resizing={notePage.isResizing}></div>
+				<div
+					class="resizer"
+					onmousedown={notePage.startResizing}
+					class:resizing={notePage.isResizing}
+				></div>
 			{/if}
 		{/if}
 
@@ -223,13 +246,12 @@
 			>
 				<div class="content-area" style="position: relative;">
 					{#if notePage.workingDocType === 'md'}
-						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<div
 							bind:this={notePage.vditorContainer}
 							class="vditor-wrapper"
 							class:tools-loading={!notePage.toolsReady || notePage.vditorLoading}
-							class:has-pdf-note={!!notePage.activeSourceBytes || (!notePage.isSourceMaterial && !!notePage.note)}
+							class:has-pdf-note={!!notePage.activeSourceBytes ||
+								(!notePage.isSourceMaterial && !!notePage.note)}
 							onclickcapture={notePage.handleVditorClick}
 							onkeydowncapture={notePage.handleVditorKeydownCapture}
 							onkeyupcapture={notePage.handleVditorKeyupCapture}
@@ -251,13 +273,15 @@
 							Press <span>{notePage.fullscreenShortcut}</span> to toggle
 						</div>
 					{:else if notePage.workingDocType === 'tex' && notePage.TexEditorComponent}
-						<svelte:component this={notePage.TexEditorComponent}
+						{@const TexEditor = notePage.TexEditorComponent}
+						<TexEditor
 							bind:this={notePage.texEditorInstance}
 							value={notePage.draftBody}
 							onInput={(val: string) => {
 								notePage.lastTexBody = val;
 								notePage.texRevision += 1;
-								if (notePage.texAutoCompile && notePage.texCacheWarmed) notePage.texPreviewStatus = 'pending';
+								if (notePage.texAutoCompile && notePage.texCacheWarmed)
+									notePage.texPreviewStatus = 'pending';
 								notePage.draftBody = val;
 								notePage.triggerAutoSave();
 							}}
@@ -269,7 +293,8 @@
 					{:else if notePage.workingDocType === 'tex'}
 						<div class="editor-loading">Loading LaTeX editor…</div>
 					{:else if notePage.workingDocType === 'ipynb' && notePage.IpynbEditorComponent}
-						<svelte:component this={notePage.IpynbEditorComponent}
+						{@const IpynbEditor = notePage.IpynbEditorComponent}
+						<IpynbEditor
 							bind:this={notePage.ipynbEditorInstance}
 							value={notePage.draftBody}
 							onInput={(val: string) => {
@@ -283,10 +308,7 @@
 					{/if}
 
 					{#if notePage.isSourceMaterial && notePage.activeSourceBytes && notePage.showAttachedNote}
-						<div
-							class="toolbar-close-note-container"
-							style="right: 12px;"
-						>
+						<div class="toolbar-close-note-container" style="right: 12px;">
 							<button
 								class="toolbar-close-note-btn"
 								onclick={notePage.requestDeleteAttachedNote}
@@ -324,8 +346,7 @@
 				</div>
 			</section>
 
-
-		<NoteSidebar {notePage} />
-	{/if}
+			<NoteSidebar {notePage} />
+		{/if}
 	</div>
 </div>

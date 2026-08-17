@@ -1,12 +1,8 @@
 use super::*;
-use crate::state::AppState;
-use futures_util::StreamExt;
-use rig_core::client::CompletionClient;
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
 use tauri::Emitter;
 #[derive(Deserialize, JsonSchema)]
 pub struct ReplaceInNoteArgs {
@@ -18,7 +14,7 @@ pub struct ReplaceInNoteArgs {
 
 #[derive(Clone)]
 pub struct ReplaceInNoteTool {
-    pub state: AppState,
+    pub turn: ToolTurnContext,
 }
 
 impl Tool for ReplaceInNoteTool {
@@ -39,7 +35,7 @@ impl Tool for ReplaceInNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let existing = match self.state.resolve_chat_target_note("") {
+        let existing = match self.turn.resolve_target_note("") {
             Some(n) => n,
             None => {
                 return Ok("No note is currently open to edit.".to_string());
@@ -50,23 +46,31 @@ impl Tool for ReplaceInNoteTool {
 
         match find_tolerant(&existing.body, &args.find) {
             Some((start, end)) => {
-                let new_body = format!("{}{}{}", &existing.body[..start], replacement, &existing.body[end..]);
+                let new_body = format!(
+                    "{}{}{}",
+                    &existing.body[..start],
+                    replacement,
+                    &existing.body[end..]
+                );
 
-                let display_name = if replacement.trim().is_empty() { "Delete Text" } else { "Replace Text" };
+                let display_name = if replacement.trim().is_empty() {
+                    "Delete Text"
+                } else {
+                    "Replace Text"
+                };
                 let preview = format!("Find:\n{}\n\nReplace with:\n{replacement}", args.find);
                 if let Err(msg) =
-                    check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+                    check_tool_approval(&self.turn, display_name, &existing.title, &preview).await
                 {
                     return Ok(msg);
                 }
-                self.state
-                    .record_chat_tool(display_name, existing.title.clone());
-                let _ = self.state.handle.emit(
+                self.turn.record_tool(display_name, existing.title.clone());
+                let _ = self.turn.state.handle.emit(
                     "ai://chat_tool",
                     serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
                 );
 
-                self.state
+                self.turn.state
                     .save_note(
                         existing.id.clone(),
                         existing.title,
@@ -79,7 +83,7 @@ impl Tool for ReplaceInNoteTool {
                     .map_err(|e| ToolError {
                         message: e.to_string(),
                     })?;
-                let _ = self.state.handle.emit(
+                let _ = self.turn.state.handle.emit(
                     "ai://note_written",
                     serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
                 );
@@ -105,7 +109,7 @@ pub struct InsertAfterLineArgs {
 
 #[derive(Clone)]
 pub struct InsertAfterLineTool {
-    pub state: AppState,
+    pub turn: ToolTurnContext,
 }
 
 impl Tool for InsertAfterLineTool {
@@ -126,7 +130,7 @@ impl Tool for InsertAfterLineTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let existing = match self.state.resolve_chat_target_note("") {
+        let existing = match self.turn.resolve_target_note("") {
             Some(n) => n,
             None => {
                 return Ok("No note is currently open to edit.".to_string());
@@ -138,19 +142,36 @@ impl Tool for InsertAfterLineTool {
 
         // An armed selection is authoritative: placement may not target an
         // unrelated model-supplied marker.
-        if let Some(sel) = self.state.current_selection() {
+        if let Some(sel) = self.turn.selection.clone() {
             let plan = selection_insert_after_plan(body, &args.marker, &content, &sel)
                 .map_err(|message| ToolError { message })?;
             let display_name = "Insert After";
             let preview = format!("Insert after '{}':\n\n{content}", args.marker);
-            if let Err(msg) = check_tool_approval(&self.state, display_name, &existing.title, &preview).await {
+            if let Err(msg) =
+                check_tool_approval(&self.turn, display_name, &existing.title, &preview).await
+            {
                 return Ok(msg);
             }
-            self.state.record_chat_tool(display_name, existing.title.clone());
-            let _ = self.state.handle.emit("ai://chat_tool", serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }));
-            self.state.save_note(existing.id.clone(), existing.title, existing.tags, plan.new_body.clone(), existing.source_pdf, Some(existing.annotations)).await.map_err(|e| ToolError { message: e.to_string() })?;
-            let _ = self.state.handle.emit("ai://note_written", serde_json::json!({ "noteId": existing.id, "content": plan.new_body, "mode": "write" }));
-            return Ok(format!("Note successfully updated with ID: {}", existing.id));
+            self.turn.record_tool(display_name, existing.title.clone());
+            let _ = self.turn.state.handle.emit("ai://chat_tool", serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }));
+            self.turn.state
+                .save_note(
+                    existing.id.clone(),
+                    existing.title,
+                    existing.tags,
+                    plan.new_body.clone(),
+                    existing.source_pdf,
+                    Some(existing.annotations),
+                )
+                .await
+                .map_err(|e| ToolError {
+                    message: e.to_string(),
+                })?;
+            let _ = self.turn.state.handle.emit("ai://note_written", serde_json::json!({ "noteId": existing.id, "content": plan.new_body, "mode": "write" }));
+            return Ok(format!(
+                "Note successfully updated with ID: {}",
+                existing.id
+            ));
         }
 
         // Find the marker text in the note body.
@@ -169,18 +190,17 @@ impl Tool for InsertAfterLineTool {
         let display_name = "Insert After";
         let preview = format!("Insert after '{}':\n\n{content}", args.marker);
         if let Err(msg) =
-            check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+            check_tool_approval(&self.turn, display_name, &existing.title, &preview).await
         {
             return Ok(msg);
         }
-        self.state
-            .record_chat_tool(display_name, existing.title.clone());
-        let _ = self.state.handle.emit(
+        self.turn.record_tool(display_name, existing.title.clone());
+        let _ = self.turn.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
         );
 
-        self.state
+        self.turn.state
             .save_note(
                 existing.id.clone(),
                 existing.title,
@@ -193,7 +213,7 @@ impl Tool for InsertAfterLineTool {
             .map_err(|e| ToolError {
                 message: e.to_string(),
             })?;
-        let _ = self.state.handle.emit(
+        let _ = self.turn.state.handle.emit(
             "ai://note_written",
             serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );
@@ -212,7 +232,7 @@ pub struct DeleteInNoteArgs {
 
 #[derive(Clone)]
 pub struct DeleteInNoteTool {
-    pub state: AppState,
+    pub turn: ToolTurnContext,
 }
 
 impl Tool for DeleteInNoteTool {
@@ -233,7 +253,7 @@ impl Tool for DeleteInNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let existing = match self.state.resolve_chat_target_note("") {
+        let existing = match self.turn.resolve_target_note("") {
             Some(n) => n,
             None => {
                 return Ok("No note is currently open to edit.".to_string());
@@ -244,10 +264,10 @@ impl Tool for DeleteInNoteTool {
             Some((start, end)) => {
                 let new_body = format!("{}{}", &existing.body[..start], &existing.body[end..]);
 
-                if self.state.deterministic_tools_enabled()
+                if self.turn.policy.deterministic_tools
                     && new_body.trim().is_empty()
                     && !existing.body.trim().is_empty()
-                    && !wants_clear(&self.state.latest_chat_question())
+                    && !wants_clear(&self.turn.question)
                 {
                     return Ok(
                         "Refused: that would erase the entire note. Use write_note with empty content if you intend to clear it.".to_string(),
@@ -257,18 +277,17 @@ impl Tool for DeleteInNoteTool {
                 let display_name = "Delete Text";
                 let preview = format!("Delete:\n{}", args.target);
                 if let Err(msg) =
-                    check_tool_approval(&self.state, display_name, &existing.title, &preview).await
+                    check_tool_approval(&self.turn, display_name, &existing.title, &preview).await
                 {
                     return Ok(msg);
                 }
-                self.state
-                    .record_chat_tool(display_name, existing.title.clone());
-                let _ = self.state.handle.emit(
+                self.turn.record_tool(display_name, existing.title.clone());
+                let _ = self.turn.state.handle.emit(
                     "ai://chat_tool",
                     serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
                 );
 
-                self.state
+                self.turn.state
                     .save_note(
                         existing.id.clone(),
                         existing.title,
@@ -281,7 +300,7 @@ impl Tool for DeleteInNoteTool {
                     .map_err(|e| ToolError {
                         message: e.to_string(),
                     })?;
-                let _ = self.state.handle.emit(
+                let _ = self.turn.state.handle.emit(
                     "ai://note_written",
                     serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
                 );
@@ -305,7 +324,7 @@ pub struct FormatNoteArgs {
 
 #[derive(Clone)]
 pub struct FormatNoteTool {
-    pub state: AppState,
+    pub turn: ToolTurnContext,
 }
 
 impl Tool for FormatNoteTool {
@@ -333,7 +352,7 @@ impl Tool for FormatNoteTool {
         let requested = args.operation.trim();
         let op = if is_format_op(requested) {
             requested.to_string()
-        } else if let Some(detected) = detect_format_op(&self.state.latest_chat_question()) {
+        } else if let Some(detected) = detect_format_op(&self.turn.question) {
             detected.to_string()
         } else {
             return Ok(format!(
@@ -342,7 +361,7 @@ impl Tool for FormatNoteTool {
             ));
         };
 
-        let existing = match self.state.resolve_chat_target_note("") {
+        let existing = match self.turn.resolve_target_note("") {
             Some(n) => n,
             None => return Ok("No note is currently open to format.".to_string()),
         };
@@ -356,17 +375,16 @@ impl Tool for FormatNoteTool {
 
         let display_name = "Format Note";
         if let Err(msg) =
-            check_tool_approval(&self.state, display_name, &existing.title, &new_body).await
+            check_tool_approval(&self.turn, display_name, &existing.title, &new_body).await
         {
             return Ok(msg);
         }
-        self.state
-            .record_chat_tool(display_name, existing.title.clone());
-        let _ = self.state.handle.emit(
+        self.turn.record_tool(display_name, existing.title.clone());
+        let _ = self.turn.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, pretty), "mutatesNote": true }),
         );
-        self.state
+        self.turn.state
             .save_note(
                 existing.id.clone(),
                 existing.title,
@@ -379,7 +397,7 @@ impl Tool for FormatNoteTool {
             .map_err(|e| ToolError {
                 message: e.to_string(),
             })?;
-        let _ = self.state.handle.emit(
+        let _ = self.turn.state.handle.emit(
             "ai://note_written",
             serde_json::json!({ "noteId": existing.id, "content": new_body, "mode": "write" }),
         );

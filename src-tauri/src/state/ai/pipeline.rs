@@ -1,10 +1,11 @@
 use super::super::core::*;
-use ::anyhow::{anyhow, Context, Result};
-use super::*;
+use ::anyhow::Result;
 
 impl AppState {
-    pub(crate) async fn ensure_external_pipeline_ready(&self) -> Result<llama_server::ResolvedLlamaConfig> {
-        let _pipeline_guard = self.inner.ai_pipeline_lock.lock().await;
+    pub(crate) async fn ensure_external_pipeline_ready(
+        &self,
+    ) -> Result<llama_server::ResolvedLlamaConfig> {
+        let _pipeline_guard = self.inner.ai.pipeline_lock.lock().await;
         let config = llama_server::resolve_config(&self.inner.app_data_dir).unwrap_or_else(|_| {
             let settings = self.openharn_settings();
             llama_server::ResolvedLlamaConfig {
@@ -53,8 +54,10 @@ impl AppState {
     /// Prepare every process/check that would otherwise delay the first model
     /// request. The lock makes startup and a quickly submitted chat share the
     /// same work instead of launching duplicate capability probes.
-    pub(crate) async fn ensure_ai_pipeline_ready(&self) -> Result<llama_server::ResolvedLlamaConfig> {
-        let _pipeline_guard = self.inner.ai_pipeline_lock.lock().await;
+    pub(crate) async fn ensure_ai_pipeline_ready(
+        &self,
+    ) -> Result<llama_server::ResolvedLlamaConfig> {
+        let _pipeline_guard = self.inner.ai.pipeline_lock.lock().await;
         if !self.ai_pipeline_ready() {
             let _ = self.handle.emit(
                 "ai://llama_warmup",
@@ -88,8 +91,8 @@ impl AppState {
         match result {
             Ok(config) => {
                 let announce_ready = !self.ai_pipeline_ready();
-                self.inner
-                    .ai_pipeline_ready
+                self.inner.ai
+                    .pipeline_ready
                     .store(true, std::sync::atomic::Ordering::Release);
                 if announce_ready {
                     let _ = self.handle.emit(
@@ -112,7 +115,7 @@ impl AppState {
 
     pub(crate) async fn cancel_prompt_warmup(&self) {
         let handle = self
-            .inner
+            .inner.ai
             .prompt_warmup
             .lock()
             .take()
@@ -131,7 +134,7 @@ impl AppState {
     /// finished warm-up useful without adding a long cold-start delay.
     pub(crate) async fn finish_prompt_warmup(&self) {
         let handle = self
-            .inner
+            .inner.ai
             .prompt_warmup
             .lock()
             .take()
@@ -150,5 +153,4 @@ impl AppState {
             log::debug!("prompt-cache warm-up exceeded 1 second; proceeding with compact prompt");
         }
     }
-
 }

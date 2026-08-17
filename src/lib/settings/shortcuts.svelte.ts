@@ -2,9 +2,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { chatSidebarShortcut } from '$lib/stores';
 import { shortcutFromEvent, shortcutsCollide } from '$lib/keyboardShortcut';
+import type { ControllerContext } from '$lib/controller-context';
 
 /** Owns quick-capture and chat-sidebar shortcut recording. */
-export function createSettingsShortcuts(ctx: Record<string, any>) {
+export function createSettingsShortcuts(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	async function applyShortcut(combo: string) {
 		if (shortcutsCollide(combo, get(chatSidebarShortcut))) {
 			ctx.quickShortcutError = 'This shortcut is already assigned to the chat sidebar.';
@@ -24,8 +26,16 @@ export function createSettingsShortcuts(ctx: Record<string, any>) {
 		ctx.quickRecording = true;
 		ctx.quickShortcutError = '';
 		const modifiers = [
-			'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight',
-			'MetaLeft', 'MetaRight', 'OSLeft', 'OSRight'
+			'ControlLeft',
+			'ControlRight',
+			'AltLeft',
+			'AltRight',
+			'ShiftLeft',
+			'ShiftRight',
+			'MetaLeft',
+			'MetaRight',
+			'OSLeft',
+			'OSRight'
 		];
 		const cleanup = () => {
 			ctx.quickRecording = false;
@@ -56,8 +66,16 @@ export function createSettingsShortcuts(ctx: Record<string, any>) {
 		ctx.chatShortcutRecording = true;
 		ctx.chatShortcutError = '';
 		const modifiers = [
-			'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'ShiftLeft', 'ShiftRight',
-			'MetaLeft', 'MetaRight', 'OSLeft', 'OSRight'
+			'ControlLeft',
+			'ControlRight',
+			'AltLeft',
+			'AltRight',
+			'ShiftLeft',
+			'ShiftRight',
+			'MetaLeft',
+			'MetaRight',
+			'OSLeft',
+			'OSRight'
 		];
 		const cleanup = () => {
 			ctx.chatShortcutRecording = false;
@@ -72,7 +90,8 @@ export function createSettingsShortcuts(ctx: Record<string, any>) {
 			}
 			const combo = shortcutFromEvent(event);
 			if (!combo) {
-				if (!modifiers.includes(event.code)) ctx.chatShortcutError = 'Use Ctrl, Alt, or Super with another key.';
+				if (!modifiers.includes(event.code))
+					ctx.chatShortcutError = 'Use Ctrl, Alt, or Super with another key.';
 				return;
 			}
 			if (shortcutsCollide(combo, ctx.quickShortcut)) {

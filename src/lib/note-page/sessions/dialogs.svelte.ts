@@ -1,5 +1,8 @@
 /** Owns modal-only workflows that coordinate document and navigation sessions. */
-export function createNotePageDialogs(ctx: Record<string, any>) {
+import type { ControllerContext } from '$lib/controller-context';
+
+export function createNotePageDialogs(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	function requestDeleteMainNote() {
 		ctx.deleteMainNoteDialog?.showModal();
 	}
@@ -10,8 +13,14 @@ export function createNotePageDialogs(ctx: Record<string, any>) {
 
 	async function confirmDeleteAttachedNote() {
 		ctx.deleteAttachedNoteDialog?.close();
-		const targetId = ctx.isSourceMaterial ? ctx.scratchpadSavedId : ctx.note?.sourcePdf ? ctx.note.id : null;
-		const sourceId = ctx.isSourceMaterial ? ctx.activeSourceId : (ctx.note?.sourcePdf ?? ctx.activeSourceId);
+		const targetId = ctx.isSourceMaterial
+			? ctx.scratchpadSavedId
+			: ctx.note?.sourcePdf
+				? ctx.note.id
+				: null;
+		const sourceId = ctx.isSourceMaterial
+			? ctx.activeSourceId
+			: (ctx.note?.sourcePdf ?? ctx.activeSourceId);
 		ctx.isBusy = true;
 		try {
 			if (targetId) await ctx.deleteNote(targetId);
@@ -40,7 +49,8 @@ export function createNotePageDialogs(ctx: Record<string, any>) {
 	}
 
 	function buildPreviewExpandHref() {
-		const targetId = ctx.linkingSession.previewNoteTarget?.sourcePdf ?? ctx.linkingSession.previewNoteTarget?.id;
+		const targetId =
+			ctx.linkingSession.previewNoteTarget?.sourcePdf ?? ctx.linkingSession.previewNoteTarget?.id;
 		const currentNoteId = ctx.note?.id;
 		if (!targetId) return null;
 		const basePath = `/notes/${encodeURIComponent(targetId)}`;

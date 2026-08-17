@@ -1,16 +1,13 @@
-use anyhow::{anyhow, bail, Context, Result};
+use super::*;
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use sha2::{Digest, Sha256};
-use super::*;
 pub async fn start_server(
     client: &Client,
     config: &ResolvedLlamaConfig,
@@ -136,9 +133,8 @@ async fn try_start_candidate(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     if config.prompt_cache {
-        fs::create_dir_all(&slot_save_path).with_context(|| {
-            format!("failed to create slot cache {}", slot_save_path.display())
-        })?;
+        fs::create_dir_all(&slot_save_path)
+            .with_context(|| format!("failed to create slot cache {}", slot_save_path.display()))?;
         command
             .arg("--slot-save-path")
             .arg(&slot_save_path)

@@ -43,9 +43,7 @@ export type ThemeContrastResult = {
 };
 
 export const themeTokenIds = Object.keys(contract.tokens) as ThemeTokenId[];
-export const editableThemeTokenIds = themeTokenIds.filter(
-	(id) => contract.tokens[id].editable
-);
+export const editableThemeTokenIds = themeTokenIds.filter((id) => contract.tokens[id].editable);
 
 export function cssVariableForToken(id: ThemeTokenId): string {
 	return `--${id}`;

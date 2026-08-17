@@ -1,16 +1,9 @@
-use anyhow::{anyhow, bail, Context, Result};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use super::*;
+use anyhow::{anyhow, bail, Result};
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
-use std::time::Duration;
-use sha2::{Digest, Sha256};
-use super::*;
+use std::process::Command;
 pub(super) fn resolve_candidates(
     app_data_dir: &Path,
     workspace_config: &WorkspaceLlamaConfig,

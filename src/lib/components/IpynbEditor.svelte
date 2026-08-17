@@ -1,6 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { loadPyodide } from 'pyodide';
+	import type { PyodideAPI } from 'pyodide';
 
 	interface Props {
 		value: string;
@@ -18,13 +17,19 @@
 	type Cell = {
 		cell_type: 'markdown' | 'code';
 		source: string[];
-		outputs?: any[];
+		outputs?: NotebookOutput[];
 		execution_count?: number | null;
+	};
+
+	type NotebookOutput = {
+		output_type: string;
+		name?: string;
+		text?: string[];
 	};
 
 	type Notebook = {
 		cells: Cell[];
-		metadata: any;
+		metadata: Record<string, unknown>;
 		nbformat: number;
 		nbformat_minor: number;
 	};
@@ -44,7 +49,7 @@
 				notebook = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
 				parseError = null;
 			}
-		} catch (e) {
+		} catch {
 			parseError = 'Invalid notebook JSON';
 		}
 	});
@@ -87,7 +92,7 @@
 		emitAiTarget(activeCellIndex, textarea);
 	}
 
-	let pyodideInstance: any = null;
+	let pyodideInstance: PyodideAPI | null = null;
 	let pyodideLoading = $state(false);
 
 	// The core runtime is shipped with the app under static/pyodide. Resolve the
@@ -98,13 +103,16 @@
 		return new URL('pyodide/', document.baseURI).href;
 	}
 
-	async function getPyodide() {
+	async function getPyodide(): Promise<PyodideAPI> {
 		if (pyodideInstance) return pyodideInstance;
 		if (pyodideLoading)
-			return new Promise((resolve) => setTimeout(async () => resolve(await getPyodide()), 500));
+			return new Promise<PyodideAPI>((resolve) =>
+				setTimeout(async () => resolve(await getPyodide()), 500)
+			);
 
 		pyodideLoading = true;
 		try {
+			const { loadPyodide } = await import('pyodide');
 			pyodideInstance = await loadPyodide({
 				indexURL: pyodideIndexUrl()
 			});
@@ -180,7 +188,7 @@
 					offline; third-party Python packages may require a network connection.
 				</div>
 			{/if}
-			{#each notebook.cells as cell, i}
+			{#each notebook.cells as cell, i (i)}
 				<div class="cell {cell.cell_type}">
 					<div class="cell-header">
 						<span
@@ -208,7 +216,7 @@
 					></textarea>
 					{#if cell.cell_type === 'code' && cell.outputs && cell.outputs.length > 0}
 						<div class="cell-outputs">
-							{#each cell.outputs as out}
+							{#each cell.outputs as out, outputIndex (outputIndex)}
 								{#if out.text}
 									<pre>{out.text.join('')}</pre>
 								{/if}

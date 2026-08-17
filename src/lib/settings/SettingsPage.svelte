@@ -1,17 +1,15 @@
 <script lang="ts">
-import '$lib/settings/settings.css';
-import { invoke } from '@tauri-apps/api/core';
-import { chatSidebarShortcut } from '$lib/stores';
-import { prettyShortcut } from '$lib/keyboardShortcut';
-import { createSettingsController } from '$lib/settings/controller.svelte';
-import type { BackendPref } from '$lib/settings/types';
-import LocalModelSettings from '$lib/settings/LocalModelSettings.svelte';
-import AssistantSettings from '$lib/settings/AssistantSettings.svelte';
-import ThemeSettings from '$lib/settings/ThemeSettings.svelte';
+	import '$lib/settings/settings.css';
+	import { invoke } from '@tauri-apps/api/core';
+	import { chatSidebarShortcut } from '$lib/stores';
+	import { prettyShortcut } from '$lib/keyboardShortcut';
+	import { createSettingsController } from '$lib/settings/controller.svelte';
+	import LocalModelSettings from '$lib/settings/LocalModelSettings.svelte';
+	import AssistantSettings from '$lib/settings/AssistantSettings.svelte';
+	import ThemeSettings from '$lib/settings/ThemeSettings.svelte';
 
-const settings = createSettingsController();
+	const settings = createSettingsController();
 </script>
-
 
 <div class="settings-container">
 	<header class="settings-header">
@@ -45,7 +43,9 @@ const settings = createSettingsController();
 				<div class="info-card">
 					<span class="info-label">Index</span>
 					<span class="info-value"
-						>{settings.indexState ? `${settings.indexState.backend}:${settings.indexState.noteCount} notes` : '—'}</span
+						>{settings.indexState
+							? `${settings.indexState.backend}:${settings.indexState.noteCount} notes`
+							: '—'}</span
 					>
 				</div>
 				<div class="info-card">
@@ -68,32 +68,71 @@ const settings = createSettingsController();
 				and model profiles can be changed without adding fragile UI controls.
 			</p>
 			<div class="info-grid">
-				<div class="info-card"><span class="info-label">Status</span><span class="info-value">{settings.aiConfig?.validationState ?? '—'}</span></div>
-				<div class="info-card"><span class="info-label">Profile</span><span class="info-value">{settings.aiConfig?.activeProfile ?? '—'}</span></div>
-				<div class="info-card"><span class="info-label">Runtime</span><span class="info-value">{settings.aiConfig?.runtimeId ?? '—'}</span></div>
+				<div class="info-card">
+					<span class="info-label">Status</span><span class="info-value"
+						>{settings.aiConfig?.validationState ?? '—'}</span
+					>
+				</div>
+				<div class="info-card">
+					<span class="info-label">Profile</span><span class="info-value"
+						>{settings.aiConfig?.activeProfile ?? '—'}</span
+					>
+				</div>
+				<div class="info-card">
+					<span class="info-label">Runtime</span><span class="info-value"
+						>{settings.aiConfig?.runtimeId ?? '—'}</span
+					>
+				</div>
 			</div>
-			<p class="compute-hint">{settings.aiConfig?.configPath ?? 'AI config path unavailable'}{settings.aiConfig?.hasUnappliedChanges ? ' · unapplied changes' : ''}</p>
+			<p class="compute-hint">
+				{settings.aiConfig?.configPath ?? 'AI config path unavailable'}{settings.aiConfig
+					?.hasUnappliedChanges
+					? ' · unapplied changes'
+					: ''}
+			</p>
 			{#if settings.aiConfig?.errors?.length}
-				<div class="error-box">{#each settings.aiConfig.errors as error}<div><code>{error.path}</code>: {error.message}</div>{/each}</div>
+				<div class="error-box">
+					{#each settings.aiConfig.errors as error, errorIndex (error.path ?? errorIndex)}<div>
+							<code>{error.path}</code>: {error.message}
+						</div>{/each}
+				</div>
 			{/if}
 			{#if settings.aiConfigMessage}<p class="compute-hint">{settings.aiConfigMessage}</p>{/if}
 			<div class="ws-actions">
-				<button class="browse-btn" onclick={settings.openAiConfig} disabled={!settings.aiConfig}>Open config</button>
-				<button class="browse-btn" onclick={settings.copyAiConfigPath} disabled={!settings.aiConfig}>Copy path</button>
-				<button class="browse-btn" onclick={settings.validateAiConfig} disabled={settings.aiConfigBusy}>Validate</button>
-				<button class="browse-btn" onclick={settings.applyAiConfig} disabled={settings.aiConfigBusy || !settings.aiConfig?.candidateHash || settings.aiConfig.validationState !== 'valid'}>Apply</button>
+				<button class="browse-btn" onclick={settings.openAiConfig} disabled={!settings.aiConfig}
+					>Open config</button
+				>
+				<button class="browse-btn" onclick={settings.copyAiConfigPath} disabled={!settings.aiConfig}
+					>Copy path</button
+				>
+				<button
+					class="browse-btn"
+					onclick={settings.validateAiConfig}
+					disabled={settings.aiConfigBusy}>Validate</button
+				>
+				<button
+					class="browse-btn"
+					onclick={settings.applyAiConfig}
+					disabled={settings.aiConfigBusy ||
+						!settings.aiConfig?.candidateHash ||
+						settings.aiConfig.validationState !== 'valid'}>Apply</button
+				>
 			</div>
 		</section>
 
 		<section class="settings-section">
 			<h2>External AI Provider</h2>
 			<p class="description">
-				Use a hosted or separately running OpenAI-compatible model for simple Chat and Write requests.
-				This is independent of the local runtime JSON configuration and does not use Myelin's llama.cpp
-				slots or section KV caches.
+				Use a hosted or separately running OpenAI-compatible model for simple Chat and Write
+				requests. This is independent of the local runtime JSON configuration and does not use
+				Myelin's llama.cpp slots or section KV caches.
 			</p>
 			<label class="toggle-row">
-				<input type="checkbox" bind:checked={settings.externalEnabled} onchange={settings.saveOpenharn} />
+				<input
+					type="checkbox"
+					bind:checked={settings.externalEnabled}
+					onchange={settings.saveOpenharn}
+				/>
 				<span class="toggle-text">
 					<strong>Use external model for Chat and Write</strong>
 					<span class="toggle-hint">Turn off to return to the active local model profile.</span>
@@ -130,18 +169,19 @@ const settings = createSettingsController();
 						placeholder="Optional for local compatible servers"
 						autocomplete="off"
 					/>
-					<p class="compute-hint">Stored locally in Myelin's settings.json and omitted from debug prompts.</p>
+					<p class="compute-hint">
+						Stored locally in Myelin's settings.json and omitted from debug prompts.
+					</p>
 				</div>
 			</div>
 			<p class="compute-hint">
-				The base URL should normally end in <code>/v1</code>. Chat works with text-only providers; Write
-				requires compatible tool/function calling.
+				The base URL should normally end in <code>/v1</code>. Chat works with text-only providers;
+				Write requires compatible tool/function calling.
 			</p>
 		</section>
 
-
-	<LocalModelSettings settings={settings} />
-	<AssistantSettings settings={settings} />
+		<LocalModelSettings {settings} />
+		<AssistantSettings {settings} />
 
 		<ThemeSettings />
 
@@ -154,10 +194,9 @@ const settings = createSettingsController();
 				<div>
 					<h3 style="margin: 0; font-size: 1rem;">Jupyter Code Execution</h3>
 					<p class="description" style="margin-top: 4px;">
-						Runs Python code cells in <code>.ipynb</code> notebooks in-browser via Pyodide
-						(WebAssembly). The core runtime (~14&nbsp;MB) is included with Myelin and initializes on
-						first execution. Third-party Python packages requested by a notebook may require a
-						network connection.
+						Runs Python code cells in <code>.ipynb</code> notebooks in-browser via Pyodide (WebAssembly).
+						The core runtime (~14&nbsp;MB) is included with Myelin and initializes on first execution.
+						Third-party Python packages requested by a notebook may require a network connection.
 					</p>
 				</div>
 				<button class="browse-btn" onclick={settings.toggleJupyterExecution}>
@@ -216,7 +255,11 @@ const settings = createSettingsController();
 						{/if}
 					</p>
 				</div>
-				<button class="browse-btn" onclick={settings.startRecording} disabled={settings.quickRecording}>
+				<button
+					class="browse-btn"
+					onclick={settings.startRecording}
+					disabled={settings.quickRecording}
+				>
 					{settings.quickRecording ? 'Recording…' : 'Change'}
 				</button>
 			</div>
@@ -298,28 +341,79 @@ const settings = createSettingsController();
 	</div>
 </div>
 
-	<svelte:window onkeydown={settings.handleAiConfigKeydown} />
+<svelte:window onkeydown={settings.handleAiConfigKeydown} />
 
 {#if settings.showAiConfig}
-	<div class="config-modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) settings.showAiConfig = false; }}>
-		<section class="config-modal" role="dialog" aria-modal="true" aria-labelledby="ai-config-title">
+	<div
+		class="config-modal-backdrop"
+		role="presentation"
+		onclick={(event) => {
+			if (event.target === event.currentTarget) settings.showAiConfig = false;
+		}}
+	>
+		<div class="config-modal" role="dialog" aria-modal="true" aria-labelledby="ai-config-title">
 			<header class="config-modal-header">
-				<div><h2 id="ai-config-title">AI Configuration</h2><p>{settings.aiConfig?.configPath}</p></div>
-				<button class="icon-btn" aria-label="Close configuration" onclick={() => (settings.showAiConfig = false)}>×</button>
+				<div>
+					<h2 id="ai-config-title">AI Configuration</h2>
+					<p>{settings.aiConfig?.configPath}</p>
+				</div>
+				<button
+					class="icon-btn"
+					aria-label="Close configuration"
+					onclick={() => (settings.showAiConfig = false)}>×</button
+				>
 			</header>
 			<div class="config-search-row">
-				<input class="config-search" bind:this={settings.aiConfigSearchInput} bind:value={settings.aiConfigSearch} oninput={() => (settings.aiConfigSearchIndex = -1)} onkeydown={settings.handleConfigSearchKeydown} placeholder="Search configuration (Ctrl+F)" aria-label="Search configuration" />
-				{#if settings.aiConfigSearch}<span>{settings.configMatchCount() ? `${settings.aiConfigSearchIndex + 1} / ${settings.configMatchCount()}` : '0 matches'}</span>{/if}
-				<button class="config-nav-btn" onclick={() => settings.gotoConfigMatch(-1)} disabled={!settings.configMatchCount()} aria-label="Previous match">↑</button>
-				<button class="config-nav-btn" onclick={() => settings.gotoConfigMatch(1)} disabled={!settings.configMatchCount()} aria-label="Next match">↓</button>
+				<input
+					class="config-search"
+					bind:this={settings.aiConfigSearchInput}
+					bind:value={settings.aiConfigSearch}
+					oninput={() => (settings.aiConfigSearchIndex = -1)}
+					onkeydown={settings.handleConfigSearchKeydown}
+					placeholder="Search configuration (Ctrl+F)"
+					aria-label="Search configuration"
+				/>
+				{#if settings.aiConfigSearch}<span
+						>{settings.configMatchCount()
+							? `${settings.aiConfigSearchIndex + 1} / ${settings.configMatchCount()}`
+							: '0 matches'}</span
+					>{/if}
+				<button
+					class="config-nav-btn"
+					onclick={() => settings.gotoConfigMatch(-1)}
+					disabled={!settings.configMatchCount()}
+					aria-label="Previous match">↑</button
+				>
+				<button
+					class="config-nav-btn"
+					onclick={() => settings.gotoConfigMatch(1)}
+					disabled={!settings.configMatchCount()}
+					aria-label="Next match">↓</button
+				>
 			</div>
-			<textarea class="config-editor" bind:this={settings.aiConfigEditor} bind:value={settings.aiConfigText} spellcheck="false" aria-label="AI configuration JSON"></textarea>
+			<textarea
+				class="config-editor"
+				bind:this={settings.aiConfigEditor}
+				bind:value={settings.aiConfigText}
+				spellcheck="false"
+				aria-label="AI configuration JSON"
+			></textarea>
 			<div class="config-modal-actions">
 				<button class="browse-btn" onclick={() => (settings.showAiConfig = false)}>Cancel</button>
-				<button class="browse-btn" onclick={settings.saveAiConfigText} disabled={settings.aiConfigBusy}>Save</button>
-				<button class="browse-btn primary" onclick={async () => { await settings.saveAiConfigText(); await settings.validateAiConfig(); }}>Save &amp; Validate</button>
+				<button
+					class="browse-btn"
+					onclick={settings.saveAiConfigText}
+					disabled={settings.aiConfigBusy}>Save</button
+				>
+				<button
+					class="browse-btn primary"
+					onclick={async () => {
+						await settings.saveAiConfigText();
+						await settings.validateAiConfig();
+					}}>Save &amp; Validate</button
+				>
 			</div>
-		</section>
+		</div>
 	</div>
 {/if}
 

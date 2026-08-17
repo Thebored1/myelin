@@ -11,7 +11,8 @@ export function readBrowserStorage(
 			code: 'browser-storage',
 			severity: 'warning',
 			path: key,
-			message: 'A browser preference could not be saved; the rest of the library remains available.',
+			message:
+				'A browser preference could not be saved; the rest of the library remains available.',
 			recoverable: true
 		};
 		report(issue, error);

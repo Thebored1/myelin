@@ -186,11 +186,7 @@ export const washDerivedTokenIds = [
 ] as const;
 
 /** Derive the whole app-wide accent family from one input color. */
-export function deriveAccentTokens(
-	accent: string,
-	mode: ThemeMode,
-	panel: string
-): ThemeTokens {
+export function deriveAccentTokens(accent: string, mode: ThemeMode, panel: string): ThemeTokens {
 	const base = normalizeHex(accent);
 	const delta = mode === 'dark' ? 0.1 : -0.1;
 	const selection = compositeOver(base, panel, 0.22);
@@ -226,7 +222,8 @@ export function washSurfaces(
 	const accentOklch = toOklch(accent);
 	if (accentOklch.c < 0.01) return surfaces;
 	const baseChroma = mode === 'dark' ? 0.03 : 0.04;
-	const tinted = (surface: string, chroma: number) => fromOklch(toOklch(surface).l, chroma, accentOklch.h);
+	const tinted = (surface: string, chroma: number) =>
+		fromOklch(toOklch(surface).l, chroma, accentOklch.h);
 	const guarded = (surface: string, chroma: number): string => {
 		let value = tinted(surface, chroma);
 		while (contrastRatio(textPrimary, value) < 4.5 && chroma > 0.004) {
@@ -263,9 +260,7 @@ export function deriveThemeTokens(
 	const page = normalizeHex(palette.page ?? (mode === 'dark' ? '#020202' : '#F4F2EF'));
 	const panel = normalizeHex(palette.panel ?? (mode === 'dark' ? '#1C1B1A' : '#FFFFFF'));
 	const text = normalizeHex(palette.text ?? (mode === 'dark' ? '#EEEEEE' : '#1F1D1C'));
-	const muted = normalizeHex(
-		palette.mutedText ?? (mode === 'dark' ? '#A49D9A' : '#6E6A67')
-	);
+	const muted = normalizeHex(palette.mutedText ?? (mode === 'dark' ? '#A49D9A' : '#6E6A67'));
 	const accent = normalizeHex(palette.accent ?? '#EF6F2E');
 	const danger = normalizeHex(palette.danger ?? '#E05555');
 	const warning = normalizeHex(palette.warning ?? '#E7B85C');
@@ -274,9 +269,32 @@ export function deriveThemeTokens(
 	const dark = '#000000';
 	const light = '#FFFFFF';
 	const textInverse = mode === 'dark' ? dark : light;
-	const neutral = mode === 'dark'
-		? ['#D6D3D2', '#CCC9C7', '#B8B3B0', '#A49D9A', '#8A8380', '#5C5855', '#4D4947', '#3D3A39', '#2E2C2B', '#1F1D1C']
-		: ['#1F1D1C', '#2E2C2B', '#3D3A39', '#4D4947', '#5C5855', '#8A8380', '#A49D9A', '#CCC9C7', '#DDD9D5', '#E8E4E0'];
+	const neutral =
+		mode === 'dark'
+			? [
+					'#D6D3D2',
+					'#CCC9C7',
+					'#B8B3B0',
+					'#A49D9A',
+					'#8A8380',
+					'#5C5855',
+					'#4D4947',
+					'#3D3A39',
+					'#2E2C2B',
+					'#1F1D1C'
+				]
+			: [
+					'#1F1D1C',
+					'#2E2C2B',
+					'#3D3A39',
+					'#4D4947',
+					'#5C5855',
+					'#8A8380',
+					'#A49D9A',
+					'#CCC9C7',
+					'#DDD9D5',
+					'#E8E4E0'
+				];
 	const overlay = mode === 'dark' ? '#FFFFFF0A' : '#0000000A';
 	const strongOverlay = mode === 'dark' ? '#FFFFFF14' : '#00000012';
 	const panelBlur = mode === 'dark' ? '#020202F0' : '#FFFFFFE6';
@@ -318,17 +336,17 @@ export function deriveThemeTokens(
 		'hover-overlay': overlay,
 		'hover-overlay-strong': strongOverlay,
 		'overlay-faint': mode === 'dark' ? '#FFFFFF05' : '#00000006',
-		'scrim': mode === 'dark' ? '#00000099' : '#281F183F',
+		scrim: mode === 'dark' ? '#00000099' : '#281F183F',
 		'scrim-soft': mode === 'dark' ? '#00000080' : '#281F1833',
 		'shadow-color': mode === 'dark' ? '#00000066' : '#3C32201F',
 		'shadow-color-strong': mode === 'dark' ? '#000000CC' : '#3C322033',
-		'danger': danger,
+		danger: danger,
 		'danger-tint': `${danger.slice(0, 7)}1A`,
 		'danger-text': mode === 'dark' ? '#FECACA' : '#B42318',
 		'danger-bg': `${danger.slice(0, 7)}1F`,
 		'danger-bg-strong': `${danger.slice(0, 7)}2E`,
 		'danger-border': `${danger.slice(0, 7)}59`,
-		'success': success,
+		success: success,
 		'success-border': `${success.slice(0, 7)}4D`,
 		'success-fill': `${success.slice(0, 7)}0F`,
 		'warning-border': `${warning.slice(0, 7)}4D`,

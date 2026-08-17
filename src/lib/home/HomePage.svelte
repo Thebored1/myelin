@@ -1,12 +1,12 @@
 <script lang="ts">
-import HomeRail from '$lib/home/components/HomeRail.svelte';
-import HomeMain from '$lib/home/components/HomeMain.svelte';
-import HomeDialogs from '$lib/home/components/HomeDialogs.svelte';
-import '$lib/home/home.css';
-import { sidebarOpen } from '$lib/stores';
-import { createHomeController } from '$lib/home/controller.svelte';
+	import HomeRail from '$lib/home/components/HomeRail.svelte';
+	import HomeMain from '$lib/home/components/HomeMain.svelte';
+	import HomeDialogs from '$lib/home/components/HomeDialogs.svelte';
+	import '$lib/home/home.css';
+	import { sidebarOpen } from '$lib/stores';
+	import { createHomeController } from '$lib/home/controller.svelte';
 
-const home = createHomeController();
+	const home = createHomeController();
 </script>
 
 <svelte:head><title>myelin</title></svelte:head>
@@ -22,7 +22,7 @@ const home = createHomeController();
 {#if home.storageIssues.length}
 	<div class="storage-warning" role="alert">
 		<strong>Some saved data needs attention ({home.storageIssues.length})</strong>
-		{#each home.storageIssues.slice(0, 3) as issue}
+		{#each home.storageIssues.slice(0, 3) as issue, issueIndex (issue.path ?? issueIndex)}
 			<div>{issue.path ? `${issue.path}: ` : ''}{issue.message}</div>
 		{/each}
 	</div>

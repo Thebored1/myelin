@@ -14,7 +14,13 @@
 
 mod agent;
 mod harness;
+mod policy;
+mod protocol;
+mod runner;
+mod runner_entry;
+mod runner_policy;
 mod server;
+mod upstream;
 
 use std::net::SocketAddr;
 

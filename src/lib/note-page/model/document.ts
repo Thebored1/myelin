@@ -19,4 +19,3 @@ export function sourceMaterialType(relativePath: string): SourceMaterialType {
 export function isBinarySource(relativePath: string): boolean {
 	return sourceMaterialType(relativePath) !== null;
 }
-

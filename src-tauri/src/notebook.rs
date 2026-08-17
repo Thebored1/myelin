@@ -81,8 +81,7 @@ fn locate_cell_target(source: &str, target: &CellTarget<'_>) -> Option<(usize, u
         let matches: Vec<usize> = (0..=source.len())
             .filter(|position| {
                 source.is_char_boundary(*position)
-                    && (target.before.is_empty()
-                        || source[..*position].ends_with(target.before))
+                    && (target.before.is_empty() || source[..*position].ends_with(target.before))
                     && (target.after.is_empty() || source[*position..].starts_with(target.after))
             })
             .take(2)
@@ -98,8 +97,7 @@ fn locate_cell_target(source: &str, target: &CellTarget<'_>) -> Option<(usize, u
     while let Some(relative) = source[from..].find(target.text) {
         let start = from + relative;
         let end = start + target.text.len();
-        let before_ok =
-            target.before.is_empty() || source[..start].ends_with(target.before);
+        let before_ok = target.before.is_empty() || source[..start].ends_with(target.before);
         let after_ok = target.after.is_empty() || source[end..].starts_with(target.after);
         if before_ok && after_ok {
             matches.push((start, end));
@@ -113,8 +111,8 @@ fn locate_cell_target(source: &str, target: &CellTarget<'_>) -> Option<(usize, u
 }
 
 fn validate_cell_target(body: &str, target: &CellTarget<'_>) -> Result<(), String> {
-    let parsed: Value = serde_json::from_str(body)
-        .map_err(|e| format!("The notebook isn't valid JSON: {e}"))?;
+    let parsed: Value =
+        serde_json::from_str(body).map_err(|e| format!("The notebook isn't valid JSON: {e}"))?;
     let cells = parsed["cells"]
         .as_array()
         .ok_or_else(|| "This notebook has no cells array.".to_string())?;
@@ -164,9 +162,8 @@ pub fn apply_targeted(
                 "The notebook cursor or selection changed before the edit could be applied."
                     .to_string()
             })?;
-            let mut replacement = String::with_capacity(
-                source.len().saturating_sub(end - start) + op.content.len(),
-            );
+            let mut replacement =
+                String::with_capacity(source.len().saturating_sub(end - start) + op.content.len());
             replacement.push_str(&source[..start]);
             replacement.push_str(op.content);
             replacement.push_str(&source[end..]);
@@ -271,7 +268,12 @@ mod tests {
     fn edit_replaces_source_and_preserves_other_cells() {
         let out = apply(
             NB,
-            &NotebookOp { operation: "edit", index: 0, cell_type: "", content: "# New title" },
+            &NotebookOp {
+                operation: "edit",
+                index: 0,
+                cell_type: "",
+                content: "# New title",
+            },
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -287,7 +289,12 @@ mod tests {
     fn editing_a_code_cell_clears_its_stale_outputs() {
         let out = apply(
             NB,
-            &NotebookOp { operation: "edit", index: 1, cell_type: "", content: "print(2)" },
+            &NotebookOp {
+                operation: "edit",
+                index: 1,
+                cell_type: "",
+                content: "print(2)",
+            },
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -299,7 +306,12 @@ mod tests {
     fn insert_and_delete_shift_cells() {
         let out = apply(
             NB,
-            &NotebookOp { operation: "insert", index: 1, cell_type: "code", content: "y = 2" },
+            &NotebookOp {
+                operation: "insert",
+                index: 1,
+                cell_type: "code",
+                content: "y = 2",
+            },
         )
         .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -309,7 +321,12 @@ mod tests {
 
         let out2 = apply(
             NB,
-            &NotebookOp { operation: "delete", index: 0, cell_type: "", content: "" },
+            &NotebookOp {
+                operation: "delete",
+                index: 0,
+                cell_type: "",
+                content: "",
+            },
         )
         .unwrap();
         let v2: Value = serde_json::from_str(&out2).unwrap();
@@ -319,8 +336,26 @@ mod tests {
 
     #[test]
     fn bad_index_returns_message_not_panic() {
-        assert!(apply(NB, &NotebookOp { operation: "edit", index: 9, cell_type: "", content: "x" }).is_err());
-        assert!(apply("not json", &NotebookOp { operation: "edit", index: 0, cell_type: "", content: "x" }).is_err());
+        assert!(apply(
+            NB,
+            &NotebookOp {
+                operation: "edit",
+                index: 9,
+                cell_type: "",
+                content: "x"
+            }
+        )
+        .is_err());
+        assert!(apply(
+            "not json",
+            &NotebookOp {
+                operation: "edit",
+                index: 0,
+                cell_type: "",
+                content: "x"
+            }
+        )
+        .is_err());
     }
 
     #[test]

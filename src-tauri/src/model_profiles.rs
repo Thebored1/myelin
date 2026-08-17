@@ -94,6 +94,7 @@ pub struct ResolvedProfile {
     pub verbose_tool_schemas: bool,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    #[allow(dead_code)]
     pub is_recurrent_or_hybrid: bool,
     /// Force tool_choice in native FC mode.
     pub tool_choice: Option<String>,
@@ -136,9 +137,13 @@ impl ResolvedProfile {
             self.profile_name = Some(p.name.clone());
         }
         if let Some(role) = p.role.as_deref() {
-            self.role = if role.eq_ignore_ascii_case("embed") { ModelRole::Embed }
-                else if role.eq_ignore_ascii_case("rerank") { ModelRole::Rerank }
-                else { ModelRole::Chat };
+            self.role = if role.eq_ignore_ascii_case("embed") {
+                ModelRole::Embed
+            } else if role.eq_ignore_ascii_case("rerank") {
+                ModelRole::Rerank
+            } else {
+                ModelRole::Chat
+            };
         }
         if p.chat_template.is_some() {
             self.chat_template = p.chat_template.clone();
@@ -169,11 +174,21 @@ impl ResolvedProfile {
             }
         }
         self.verified = p.verified;
-        if p.embedding_dimensions.is_some() { self.embedding_dimensions = p.embedding_dimensions; }
-        if p.embedding_context_tokens.is_some() { self.embedding_context_tokens = p.embedding_context_tokens; }
-        if p.embedding_pooling.is_some() { self.embedding_pooling = p.embedding_pooling.clone(); }
-        if p.embedding_query_prefix.is_some() { self.embedding_query_prefix = p.embedding_query_prefix.clone(); }
-        if p.embedding_document_prefix.is_some() { self.embedding_document_prefix = p.embedding_document_prefix.clone(); }
+        if p.embedding_dimensions.is_some() {
+            self.embedding_dimensions = p.embedding_dimensions;
+        }
+        if p.embedding_context_tokens.is_some() {
+            self.embedding_context_tokens = p.embedding_context_tokens;
+        }
+        if p.embedding_pooling.is_some() {
+            self.embedding_pooling = p.embedding_pooling.clone();
+        }
+        if p.embedding_query_prefix.is_some() {
+            self.embedding_query_prefix = p.embedding_query_prefix.clone();
+        }
+        if p.embedding_document_prefix.is_some() {
+            self.embedding_document_prefix = p.embedding_document_prefix.clone();
+        }
     }
 }
 
@@ -202,11 +217,9 @@ pub fn all_profiles(app_data_dir: &Path) -> Vec<ModelProfile> {
 /// Match strength: a profile specifying both architecture and filename must
 /// match both and wins over an architecture-only family profile.
 fn match_strength(p: &ModelProfile, arch: Option<&str>, filename: &str) -> u8 {
-    if let (Some(pa), Some(pat), Some(a)) = (
-        p.architecture.as_deref(),
-        p.name_pattern.as_deref(),
-        arch,
-    ) {
+    if let (Some(pa), Some(pat), Some(a)) =
+        (p.architecture.as_deref(), p.name_pattern.as_deref(), arch)
+    {
         return if a.eq_ignore_ascii_case(pa)
             && !pat.is_empty()
             && filename.to_lowercase().contains(&pat.to_lowercase())
@@ -302,11 +315,7 @@ mod tests {
         assert_eq!(r.chat_template.as_deref(), Some("lfm25"));
         assert!(r.is_recurrent_or_hybrid);
 
-        let r = resolve(
-            nowhere(),
-            Some(&gguf("lfm2")),
-            "LFM2-8B-A1B-Q4_K_M.gguf",
-        );
+        let r = resolve(nowhere(), Some(&gguf("lfm2")), "LFM2-8B-A1B-Q4_K_M.gguf");
         assert_eq!(r.chat_template.as_deref(), Some("lfm2"));
     }
 

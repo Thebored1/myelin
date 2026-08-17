@@ -13,10 +13,16 @@ export function noteType(note: Pick<NoteSummary, 'relativePath'>): NoteType {
 	return 'md';
 }
 
-export function isAttachmentCopy(note: Pick<NoteSummary, 'relativePath' | 'id'>, referencedIds: ReadonlySet<string>): boolean {
+export function isAttachmentCopy(
+	note: Pick<NoteSummary, 'relativePath' | 'id'>,
+	referencedIds: ReadonlySet<string>
+): boolean {
 	if (!referencedIds.has(note.id)) return false;
 	const name = note.relativePath.split(/[\\/]/).pop()?.toLowerCase() ?? '';
-	return / \d+\.(pdf|epub)$/.test(name) || / [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.(pdf|epub)$/.test(name);
+	return (
+		/ \d+\.(pdf|epub)$/.test(name) ||
+		/ [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.(pdf|epub)$/.test(name)
+	);
 }
 
 export function notebookOf(note: Pick<NoteSummary, 'folder'>): string | null {
@@ -31,11 +37,13 @@ export function filterNotes(
 	attachmentIds: ReadonlySet<string>,
 	pinnedIds: readonly string[]
 ): NoteSummary[] {
-	let result = notes.filter((note) => {
+	const result = notes.filter((note) => {
 		const type = noteType(note);
 		if (filter === 'notes' && !NOTE_GROUP.includes(type)) return false;
-		if (filter === 'documents' && (!DOCUMENT_GROUP.includes(type) || attachmentIds.has(note.id))) return false;
-		if (filter !== 'all' && filter !== 'notes' && filter !== 'documents' && type !== filter) return false;
+		if (filter === 'documents' && (!DOCUMENT_GROUP.includes(type) || attachmentIds.has(note.id)))
+			return false;
+		if (filter !== 'all' && filter !== 'notes' && filter !== 'documents' && type !== filter)
+			return false;
 		if (tag !== null && !note.tags.includes(tag)) return false;
 		if (notebook === null) return notebookOf(note) === null;
 		return note.folder === notebook || note.folder.startsWith(`${notebook}/`);

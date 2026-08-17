@@ -1,13 +1,5 @@
 use super::*;
-use crate::state::AppState;
-use futures_util::StreamExt;
-use rig_core::client::CompletionClient;
-use rig_core::completion::ToolDefinition;
-use rig_core::tool::Tool;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::Emitter;
 /// True when a focused Write request explicitly asks to remove the armed
 /// fragment. This is intentionally separate from `wants_clear`, which only
 /// authorizes emptying the entire note.
@@ -405,10 +397,7 @@ pub fn interaction_mode_tools(mode: &str, oversized: bool) -> Vec<Value> {
 pub fn targeted_write_tools(doc_type: &str) -> Vec<Value> {
     if doc_type.eq_ignore_ascii_case("ipynb") || doc_type.to_ascii_lowercase().ends_with(".ipynb") {
         let mut specs = specs_for(&["edit_notebook"]);
-        if let Some(function) = specs
-            .first_mut()
-            .and_then(|spec| spec.get_mut("function"))
-        {
+        if let Some(function) = specs.first_mut().and_then(|spec| spec.get_mut("function")) {
             function["description"] = serde_json::json!(
                 "Edit only the armed notebook cell target. Use operation \"edit\" and return the replacement source in content."
             );
@@ -428,10 +417,7 @@ pub fn targeted_write_tools(doc_type: &str) -> Vec<Value> {
         specs
     } else {
         let mut specs = specs_for(&["write_note"]);
-        if let Some(function) = specs
-            .first_mut()
-            .and_then(|spec| spec.get_mut("function"))
-        {
+        if let Some(function) = specs.first_mut().and_then(|spec| spec.get_mut("function")) {
             function["description"] = serde_json::json!(
                 "Replace only the armed cursor or text selection with the requested finished content. Send only the new fragment in content."
             );

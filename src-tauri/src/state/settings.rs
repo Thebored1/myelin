@@ -1,6 +1,5 @@
 use super::core::*;
 use ::anyhow::{anyhow, Context, Result};
-use super::*;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,9 +13,23 @@ pub struct RerankerModelStatus {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BuiltInModelInfo { pub id: String, pub name: String, pub kind: String, pub size_bytes: u64, pub installed_path: Option<String> }
+pub struct BuiltInModelInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub size_bytes: u64,
+    pub installed_path: Option<String>,
+}
 
-struct BuiltInModel { id: &'static str, name: &'static str, kind: &'static str, filename: &'static str, url: &'static str, sha256: &'static str, size: u64 }
+struct BuiltInModel {
+    id: &'static str,
+    name: &'static str,
+    kind: &'static str,
+    filename: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    size: u64,
+}
 const BUILT_INS: &[BuiltInModel] = &[
     BuiltInModel { id: "nomic-embed-text-v1.5-q4-k-m", name: "Nomic Embed Text v1.5 (Q4_K_M)", kind: "embedding", filename: "nomic-embed-text-v1.5.Q4_K_M.gguf", url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf", sha256: "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac", size: 84_106_624 },
     BuiltInModel { id: "ms-marco-minilm-l6-v2-q4-k-m", name: "MS MARCO MiniLM-L6-v2 (Q4_K_M)", kind: "reranker", filename: "ms-marco-MiniLM-L6-v2-Q4_K_M.gguf", url: "https://huggingface.co/sinjab/ms-marco-MiniLM-L6-v2-Q4_K_M-GGUF/resolve/main/ms-marco-MiniLM-L6-v2-Q4_K_M.gguf", sha256: "d814d09aa417373ec06320687f3ab2741a1fb6d71f28082f88b3574a7bd0fd95", size: 21_272_256 },
@@ -33,7 +46,10 @@ impl AppState {
         crate::ocr::status(&self.ocr_settings())
     }
 
-    pub fn set_ocr_settings(&self, settings: crate::ocr::OcrSettings) -> Result<crate::ocr::OcrStatus> {
+    pub fn set_ocr_settings(
+        &self,
+        settings: crate::ocr::OcrSettings,
+    ) -> Result<crate::ocr::OcrStatus> {
         settings.validate().map_err(anyhow::Error::msg)?;
         let _lock = self.inner.persistence_lock.lock();
         let mut persisted = crate::state::context::load_settings(&self.inner.app_data_dir)?;
@@ -44,31 +60,87 @@ impl AppState {
 
     pub fn built_in_models(&self) -> Vec<BuiltInModelInfo> {
         let root = self.inner.app_data_dir.join("models");
-        BUILT_INS.iter().map(|model| {
-            let path = root.join(model.filename);
-            BuiltInModelInfo { id: model.id.into(), name: model.name.into(), kind: model.kind.into(), size_bytes: model.size, installed_path: path.is_file().then(|| path.display().to_string()) }
-        }).collect()
+        BUILT_INS
+            .iter()
+            .map(|model| {
+                let path = root.join(model.filename);
+                BuiltInModelInfo {
+                    id: model.id.into(),
+                    name: model.name.into(),
+                    kind: model.kind.into(),
+                    size_bytes: model.size,
+                    installed_path: path.is_file().then(|| path.display().to_string()),
+                }
+            })
+            .collect()
     }
 
     pub async fn download_built_in_model(&self, id: &str) -> Result<String> {
         use futures_util::StreamExt;
         use sha2::{Digest, Sha256};
-        let model = BUILT_INS.iter().find(|model| model.id == id).ok_or_else(|| anyhow!("unknown built-in model '{id}'"))?;
-        let root = self.inner.app_data_dir.join("models"); fs::create_dir_all(&root)?;
-        let target = root.join(model.filename); let temporary = root.join(format!("{}.part", model.filename));
+        let model = BUILT_INS
+            .iter()
+            .find(|model| model.id == id)
+            .ok_or_else(|| anyhow!("unknown built-in model '{id}'"))?;
+        let root = self.inner.app_data_dir.join("models");
+        fs::create_dir_all(&root)?;
+        let target = root.join(model.filename);
+        let temporary = root.join(format!("{}.part", model.filename));
         let result: Result<()> = async {
-            let response = self.inner.llama_client.get(model.url).send().await?.error_for_status()?;
-            if response.content_length().is_some_and(|size| size != model.size) { anyhow::bail!("model download size does not match the built-in manifest"); }
-            let mut file = fs::File::create(&temporary)?; let mut stream = response.bytes_stream(); let mut hash = Sha256::new(); let mut received = 0_u64;
-            while let Some(chunk) = stream.next().await { let chunk = chunk?; received += chunk.len() as u64; if received > model.size { anyhow::bail!("model download exceeds the built-in manifest size"); } std::io::Write::write_all(&mut file, &chunk)?; hash.update(&chunk); }
-            if received != model.size { anyhow::bail!("model download is incomplete ({received} of {} bytes)", model.size); }
-            let actual = format!("{:x}", hash.finalize()); if actual != model.sha256 { anyhow::bail!("model download checksum mismatch"); }
-            fs::rename(&temporary, &target)?; Ok(())
-        }.await;
-        if result.is_err() { let _ = fs::remove_file(&temporary); }
+            let response = self
+                .inner
+                .llama_client
+                .get(model.url)
+                .send()
+                .await?
+                .error_for_status()?;
+            if response
+                .content_length()
+                .is_some_and(|size| size != model.size)
+            {
+                anyhow::bail!("model download size does not match the built-in manifest");
+            }
+            let mut file = fs::File::create(&temporary)?;
+            let mut stream = response.bytes_stream();
+            let mut hash = Sha256::new();
+            let mut received = 0_u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                received += chunk.len() as u64;
+                if received > model.size {
+                    anyhow::bail!("model download exceeds the built-in manifest size");
+                }
+                std::io::Write::write_all(&mut file, &chunk)?;
+                hash.update(&chunk);
+            }
+            if received != model.size {
+                anyhow::bail!(
+                    "model download is incomplete ({received} of {} bytes)",
+                    model.size
+                );
+            }
+            let actual = format!("{:x}", hash.finalize());
+            if actual != model.sha256 {
+                anyhow::bail!("model download checksum mismatch");
+            }
+            fs::rename(&temporary, &target)?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
         result?;
         let path = target.display().to_string();
-        match model.kind { "embedding" => { self.set_embed_model_path(Some(path.clone())).await?; }, "reranker" => { self.set_reranker_model_path(Some(path.clone())).await?; }, _ => unreachable!() }
+        match model.kind {
+            "embedding" => {
+                self.set_embed_model_path(Some(path.clone())).await?;
+            }
+            "reranker" => {
+                self.set_reranker_model_path(Some(path.clone())).await?;
+            }
+            _ => unreachable!(),
+        }
         Ok(path)
     }
     pub fn ai_config_status(&self) -> crate::ai_config::AiConfigStatus {
@@ -79,36 +151,155 @@ impl AppState {
         use futures_util::StreamExt;
         use sha2::{Digest, Sha256};
         let config = crate::ai_config::load(&self.inner.app_data_dir)?;
-        let runtime = config.runtimes.get(runtime_id).ok_or_else(|| anyhow::anyhow!("runtime '{runtime_id}' is not configured"))?.clone();
-        let crate::ai_config::RuntimeSource::Download { url, sha256, archive_format, binary_path } = runtime.source else {
+        crate::ai_config::require_valid(&config)?;
+        let runtime = config
+            .runtimes
+            .get(runtime_id)
+            .ok_or_else(|| anyhow::anyhow!("runtime '{runtime_id}' is not configured"))?
+            .clone();
+        let crate::ai_config::RuntimeSource::Download {
+            url,
+            sha256,
+            archive_format,
+            binary_path,
+        } = runtime.source
+        else {
             anyhow::bail!("runtime '{runtime_id}' is not a downloadable runtime")
         };
-        if !url.starts_with("https://") { anyhow::bail!("runtime download URL must use HTTPS") }
-        let root = self.inner.app_data_dir.join("bin").join("runtimes").join(runtime_id);
+        if !url.starts_with("https://") {
+            anyhow::bail!("runtime download URL must use HTTPS")
+        }
+        let root = self
+            .inner
+            .app_data_dir
+            .join("bin")
+            .join("runtimes")
+            .join(runtime_id);
         let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&staging)?;
         let result: anyhow::Result<()> = async {
-            let response = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).user_agent("Myelin").build()?.get(&url).send().await?.error_for_status()?;
-            if response.content_length().is_some_and(|n| n > 4 * 1024 * 1024 * 1024) { anyhow::bail!("runtime archive exceeds 4 GiB") }
+            let response = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .read_timeout(std::time::Duration::from_secs(120))
+                .user_agent("Myelin")
+                .build()?
+                .get(&url)
+                .send()
+                .await?
+                .error_for_status()?;
+            if response
+                .content_length()
+                .is_some_and(|n| n > 4 * 1024 * 1024 * 1024)
+            {
+                anyhow::bail!("runtime archive exceeds 4 GiB")
+            }
             let archive = staging.join("download");
             let mut file = fs::File::create(&archive)?;
-            let mut hash = Sha256::new(); let mut bytes = 0u64; let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await { let chunk = chunk?; bytes += chunk.len() as u64; if bytes > 4 * 1024 * 1024 * 1024 { anyhow::bail!("runtime archive exceeds 4 GiB") } hash.update(&chunk); std::io::Write::write_all(&mut file, &chunk)?; }
-            drop(file);
-            let actual = format!("{:x}", hash.finalize()); if !actual.eq_ignore_ascii_case(&sha256) { anyhow::bail!("runtime checksum mismatch: expected {sha256}, got {actual}") }
-            let payload = staging.join("payload"); fs::create_dir_all(&payload)?;
-            match archive_format {
-                crate::ai_config::RuntimeArchiveFormat::Raw => { fs::copy(&archive, payload.join(binary_path.as_ref().and_then(|p| p.file_name()).and_then(|p| p.to_str()).unwrap_or("llama-server")))?; }
-                crate::ai_config::RuntimeArchiveFormat::Zip => { let status = std::process::Command::new("unzip").args(["-q", "-:", archive.to_str().unwrap_or_default(), "-d", payload.to_str().unwrap_or_default()]).status()?; if !status.success() { anyhow::bail!("unzip failed") } }
-                crate::ai_config::RuntimeArchiveFormat::TarGz => { let status = std::process::Command::new("tar").args(["--no-absolute-names", "--warning=no-unknown-keyword", "-xzf", archive.to_str().unwrap_or_default(), "-C", payload.to_str().unwrap_or_default()]).status()?; if !status.success() { anyhow::bail!("tar extraction failed") } }
+            let mut hash = Sha256::new();
+            let mut bytes = 0u64;
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                bytes += chunk.len() as u64;
+                if bytes > 4 * 1024 * 1024 * 1024 {
+                    anyhow::bail!("runtime archive exceeds 4 GiB")
+                }
+                hash.update(&chunk);
+                std::io::Write::write_all(&mut file, &chunk)?;
             }
-            let executable = if let Some(relative) = binary_path { payload.join(relative) } else { payload.join("llama-server") };
-            if !executable.is_file() { anyhow::bail!("configured runtime binary was not found at {}", executable.display()) }
-            let installed = root.join(&actual[..16]); fs::create_dir_all(&root)?; if installed.exists() { fs::remove_dir_all(&installed)?; }
+            drop(file);
+            let actual = format!("{:x}", hash.finalize());
+            if !actual.eq_ignore_ascii_case(&sha256) {
+                anyhow::bail!("runtime checksum mismatch: expected {sha256}, got {actual}")
+            }
+            let payload = staging.join("payload");
+            fs::create_dir_all(&payload)?;
+            match archive_format {
+                crate::ai_config::RuntimeArchiveFormat::Raw => {
+                    fs::copy(
+                        &archive,
+                        payload.join(
+                            binary_path
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|p| p.to_str())
+                                .unwrap_or("llama-server"),
+                        ),
+                    )?;
+                }
+                crate::ai_config::RuntimeArchiveFormat::Zip => {
+                    let status = std::process::Command::new("unzip")
+                        .args([
+                            "-q",
+                            archive.to_str().unwrap_or_default(),
+                            "-d",
+                            payload.to_str().unwrap_or_default(),
+                        ])
+                        .status()?;
+                    if !status.success() {
+                        anyhow::bail!("unzip failed")
+                    }
+                }
+                crate::ai_config::RuntimeArchiveFormat::TarGz => {
+                    let status = std::process::Command::new("tar")
+                        .args([
+                            "--no-absolute-names",
+                            "--warning=no-unknown-keyword",
+                            "-xzf",
+                            archive.to_str().unwrap_or_default(),
+                            "-C",
+                            payload.to_str().unwrap_or_default(),
+                        ])
+                        .status()?;
+                    if !status.success() {
+                        anyhow::bail!("tar extraction failed")
+                    }
+                }
+            }
+            let executable = if let Some(relative) = binary_path {
+                payload.join(relative)
+            } else {
+                payload.join("llama-server")
+            };
+            let payload_root = fs::canonicalize(&payload)?;
+            let executable_root = fs::canonicalize(&executable)
+                .with_context(|| format!("runtime binary path is invalid: {}", executable.display()))?;
+            if !executable_root.starts_with(&payload_root) {
+                anyhow::bail!("runtime binary path escapes the extracted payload")
+            }
+            if !executable.is_file() {
+                anyhow::bail!(
+                    "configured runtime binary was not found at {}",
+                    executable.display()
+                )
+            }
+            let installed = root.join(&actual[..16]);
+            fs::create_dir_all(&root)?;
+            if installed.exists() {
+                fs::remove_dir_all(&installed)?;
+            }
             fs::rename(&payload, &installed)?;
-            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; let mode = fs::metadata(&installed)?.permissions().mode(); for entry in walkdir::WalkDir::new(&installed).into_iter().flatten() { if entry.file_type().is_file() { let current = fs::metadata(entry.path())?.permissions().mode(); fs::set_permissions(entry.path(), fs::Permissions::from_mode(if entry.path() == executable { 0o755 } else { current | (mode & 0o111) }))?; } } }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&installed)?.permissions().mode();
+                for entry in walkdir::WalkDir::new(&installed).into_iter().flatten() {
+                    if entry.file_type().is_file() {
+                        let current = fs::metadata(entry.path())?.permissions().mode();
+                        fs::set_permissions(
+                            entry.path(),
+                            fs::Permissions::from_mode(if entry.path() == executable {
+                                0o755
+                            } else {
+                                current | (mode & 0o111)
+                            }),
+                        )?;
+                    }
+                }
+            }
             Ok(())
-        }.await;
+        }
+        .await;
         let _ = fs::remove_dir_all(&staging);
         result
     }
@@ -120,26 +311,62 @@ impl AppState {
     }
 
     pub async fn validate_ai_config(&self) -> anyhow::Result<crate::ai_config::AiConfigStatus> {
-        let _chat_guard = self.inner.chat_lock.try_lock().map_err(|_| anyhow::anyhow!("cannot validate while a model turn is active"))?;
-        let _slot_guard = self.inner.llama_slot_lock.try_lock().map_err(|_| anyhow::anyhow!("cannot validate while a cache operation is active"))?;
+        let _chat_guard = self
+            .inner.ai
+            .chat_lock
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("cannot validate while a model turn is active"))?;
+        let _slot_guard =
+            self.inner.ai.llama_slot_lock.try_lock().map_err(|_| {
+                anyhow::anyhow!("cannot validate while a cache operation is active")
+            })?;
         self.ensure_ai_config()?;
         let config = crate::ai_config::load(&self.inner.app_data_dir)?;
         crate::ai_config::require_valid(&config)?;
-        let profile = config.profiles.get(&config.active_profile).ok_or_else(|| anyhow::anyhow!("active profile is missing"))?;
+        let profile = config
+            .profiles
+            .get(&config.active_profile)
+            .ok_or_else(|| anyhow::anyhow!("active profile is missing"))?;
         if let Some(runtime) = config.runtimes.get(&profile.runtime) {
             match &runtime.source {
-                crate::ai_config::RuntimeSource::Path { executable } if !executable.is_file() => anyhow::bail!("runtime executable does not exist: {}", executable.display()),
+                crate::ai_config::RuntimeSource::Path { executable } if !executable.is_file() => {
+                    anyhow::bail!(
+                        "runtime executable does not exist: {}",
+                        executable.display()
+                    )
+                }
                 crate::ai_config::RuntimeSource::Download { binary_path, .. } => {
-                    let root = self.inner.app_data_dir.join("bin").join("runtimes").join(&profile.runtime);
-                    let found = fs::read_dir(&root).ok().into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()).any(|dir| binary_path.as_ref().map(|p| dir.join(p).is_file()).unwrap_or_else(|| dir.join("llama-server").is_file()));
-                    if !found { anyhow::bail!("downloaded runtime '{}' is not installed", profile.runtime) }
+                    let root = self
+                        .inner
+                        .app_data_dir
+                        .join("bin")
+                        .join("runtimes")
+                        .join(&profile.runtime);
+                    let found = fs::read_dir(&root)
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .any(|dir| {
+                            binary_path
+                                .as_ref()
+                                .map(|p| dir.join(p).is_file())
+                                .unwrap_or_else(|| dir.join("llama-server").is_file())
+                        });
+                    if !found {
+                        anyhow::bail!("downloaded runtime '{}' is not installed", profile.runtime)
+                    }
                 }
                 _ => {}
             }
         }
         let resolved = crate::llama_server::resolve_config(&self.inner.app_data_dir)?;
         if !crate::llama_server::health_check(&self.inner.llama_client, &resolved).await {
-            anyhow::bail!("configured runtime is not healthy at {}", resolved.base_url())
+            anyhow::bail!(
+                "configured runtime is not healthy at {}",
+                resolved.base_url()
+            )
         }
         let request = serde_json::json!({
             "model": resolved.model_name(),
@@ -149,9 +376,18 @@ impl AppState {
             "cache_prompt": true,
             "id_slot": 0
         });
-        let response = self.inner.llama_client.post(format!("{}/v1/chat/completions", resolved.base_url())).json(&request).send().await?.error_for_status()?;
+        let response = self
+            .inner
+            .llama_client
+            .post(format!("{}/v1/chat/completions", resolved.base_url()))
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?;
         let body: serde_json::Value = response.json().await?;
-        if body.get("error").is_some() { anyhow::bail!("runtime rejected cached inference probe: {body}") }
+        if body.get("error").is_some() {
+            anyhow::bail!("runtime rejected cached inference probe: {body}")
+        }
         // The slot endpoints require a filename in the JSON body. Use a
         // unique probe name so validation cannot collide with a real section
         // cache, then remove the temporary file whether the probe succeeds or
@@ -168,8 +404,13 @@ impl AppState {
                 .await?
                 .error_for_status()?;
             let save_body: serde_json::Value = save.json().await?;
-            let saved = save_body.get("n_saved").and_then(|v| v.as_u64()).unwrap_or(0);
-            if saved == 0 { anyhow::bail!("runtime slot save probe returned no saved tokens: {save_body}") }
+            let saved = save_body
+                .get("n_saved")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if saved == 0 {
+                anyhow::bail!("runtime slot save probe returned no saved tokens: {save_body}")
+            }
 
             let restore = self
                 .inner
@@ -180,26 +421,46 @@ impl AppState {
                 .await?
                 .error_for_status()?;
             let restore_body: serde_json::Value = restore.json().await?;
-            let restored = restore_body.get("n_restored").and_then(|v| v.as_u64()).unwrap_or(0);
-            if restored != saved { anyhow::bail!("runtime slot restore probe mismatch: saved {saved}, restored {restored}") }
+            let restored = restore_body
+                .get("n_restored")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if restored != saved {
+                anyhow::bail!(
+                    "runtime slot restore probe mismatch: saved {saved}, restored {restored}"
+                )
+            }
             Ok((saved, restored))
-        }.await;
+        }
+        .await;
         let _ = fs::remove_file(&validation_path);
         let (saved, restored) = probe_result?;
-        log::info!("runtime validation passed: slot save/restore saved={saved} restored={restored}");
+        log::info!(
+            "runtime validation passed: slot save/restore saved={saved} restored={restored}"
+        );
         Ok(self.ai_config_status())
     }
 
-    pub async fn apply_ai_config(&self, candidate_hash: &str) -> anyhow::Result<crate::ai_config::AiConfigStatus> {
-        if self.inner.chat_lock.try_lock().is_err() || self.inner.llama_slot_lock.try_lock().is_err() {
+    pub async fn apply_ai_config(
+        &self,
+        candidate_hash: &str,
+    ) -> anyhow::Result<crate::ai_config::AiConfigStatus> {
+        if self.inner.ai.chat_lock.try_lock().is_err()
+            || self.inner.ai.llama_slot_lock.try_lock().is_err()
+        {
             anyhow::bail!("AI configuration cannot be applied while a model turn or cache operation is active")
         }
         self.ensure_ai_config()?;
         let config = crate::ai_config::load(&self.inner.app_data_dir)?;
         crate::ai_config::require_valid(&config)?;
         let actual = crate::ai_config::canonical_hash(&config)?;
-        if actual != candidate_hash { anyhow::bail!("AI configuration changed after validation; validate it again") }
-        crate::ai_config::write_atomic(&crate::ai_config::applied_path(&self.inner.app_data_dir), &config)?;
+        if actual != candidate_hash {
+            anyhow::bail!("AI configuration changed after validation; validate it again")
+        }
+        crate::ai_config::write_atomic(
+            &crate::ai_config::applied_path(&self.inner.app_data_dir),
+            &config,
+        )?;
         // Apply changes to the in-memory sidecar settings as part of the same
         // lifecycle transition. Without this projection, the next request
         // continued using the legacy settings.json values until process exit,
@@ -208,21 +469,21 @@ impl AppState {
         let projected = project_ai_agent_settings(&self.openharn_settings(), &config.agent);
         *self.inner.openharn_settings.lock() = projected;
         self.invalidate_ai_pipeline();
-        if let Ok(mut guard) = self.inner.sidecar.try_lock() {
+        if let Ok(mut guard) = self.inner.ai.sidecar.try_lock() {
             *guard = None;
         }
-        *self.inner.active_slot_cache.lock() = None;
+        *self.inner.ai.active_slot_cache.lock() = None;
         Ok(self.ai_config_status())
     }
 
     pub fn set_deterministic_tools_runtime(&self, enabled: bool) {
-        self.inner
+        self.inner.ai
             .deterministic_tools
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn set_tool_gating_runtime(&self, enabled: bool) {
-        self.inner
+        self.inner.ai
             .tool_gating
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
@@ -482,7 +743,7 @@ impl AppState {
         let configured_engine =
             crate::llama_server::normalize_engine(info.config.inference_engine.as_deref());
         let healthy = if let Some(config) = &info.resolved {
-            let server = self.inner.llama_server.lock().await;
+            let server = self.inner.ai.llama_server.lock().await;
             if let Some(server) = server.as_ref() {
                 active_backend = Some(server.active_backend.label().to_string());
                 active_engine = Some(server.active_engine.clone());
@@ -522,7 +783,9 @@ impl AppState {
         })
     }
 
-    pub fn background_settings(&self) -> BackgroundSettings { self.inner.background_settings.lock().clone() }
+    pub fn background_settings(&self) -> BackgroundSettings {
+        self.inner.background_settings.lock().clone()
+    }
 
     pub fn set_background_settings(&self, settings: BackgroundSettings) -> Result<()> {
         let mut persisted = load_settings(&self.inner.app_data_dir)?;
@@ -561,11 +824,17 @@ impl AppState {
 
     /// Validate a candidate before changing persistent configuration. Derived
     /// vector data is reset only after the new contract is proven live.
-    pub async fn set_embed_model_path(&self, path: Option<String>) -> Result<crate::embeddings::EmbeddingModelContract> {
+    pub async fn set_embed_model_path(
+        &self,
+        path: Option<String>,
+    ) -> Result<crate::embeddings::EmbeddingModelContract> {
         match path.filter(|path| !path.trim().is_empty()) {
             Some(path) => {
                 let contract = self.validate_embedding_candidate(&path).await?;
-                crate::llama_server::set_embed_model_path(&self.inner.app_data_dir, Some(contract.model_path.display().to_string()))?;
+                crate::llama_server::set_embed_model_path(
+                    &self.inner.app_data_dir,
+                    Some(contract.model_path.display().to_string()),
+                )?;
                 self.invalidate_embedding_derived_data().await?;
                 Ok(contract)
             }
@@ -579,27 +848,54 @@ impl AppState {
 
     pub async fn get_reranker_model_status(&self) -> RerankerModelStatus {
         let configured_path = crate::llama_server::reranker_model_path(&self.inner.app_data_dir);
-        let server = self.inner.reranker_server.lock().await;
+        let server = self.inner.ai.reranker_server.lock().await;
         let ready = server.is_some();
         let context_tokens = server.as_ref().map(|server| server.context_tokens);
-        let model_name = configured_path.as_ref().and_then(|path| PathBuf::from(path).file_name().and_then(|name| name.to_str()).map(str::to_string));
-        RerankerModelStatus { configured_path, state: if ready { "ready".into() } else if model_name.is_some() { "error".into() } else { "none".into() }, model_name, context_tokens, last_error: None }
+        let model_name = configured_path.as_ref().and_then(|path| {
+            PathBuf::from(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        });
+        RerankerModelStatus {
+            configured_path,
+            state: if ready {
+                "ready".into()
+            } else if model_name.is_some() {
+                "error".into()
+            } else {
+                "none".into()
+            },
+            model_name,
+            context_tokens,
+            last_error: None,
+        }
     }
 
-    pub async fn set_reranker_model_path(&self, path: Option<String>) -> Result<RerankerModelStatus> {
+    pub async fn set_reranker_model_path(
+        &self,
+        path: Option<String>,
+    ) -> Result<RerankerModelStatus> {
         match path.filter(|path| !path.trim().is_empty()) {
             Some(path) => {
                 let (model_path, _) = self.validate_reranker_candidate(&path).await?;
-                crate::llama_server::set_reranker_model_path(&self.inner.app_data_dir, Some(model_path.display().to_string()))?;
+                crate::llama_server::set_reranker_model_path(
+                    &self.inner.app_data_dir,
+                    Some(model_path.display().to_string()),
+                )?;
             }
             None => crate::llama_server::set_reranker_model_path(&self.inner.app_data_dir, None)?,
         }
-        if let Some(mut server) = self.inner.reranker_server.lock().await.take() { crate::llama_server::stop_reranker_server(&mut server).await; }
-        *self.inner.reranker_circuit.lock() = crate::state::types::RerankerCircuit::default();
+        if let Some(mut server) = self.inner.ai.reranker_server.lock().await.take() {
+            crate::llama_server::stop_reranker_server(&mut server).await;
+        }
+        *self.inner.ai.reranker_circuit.lock() = crate::state::types::RerankerCircuit::default();
         if crate::llama_server::reranker_model_path(&self.inner.app_data_dir).is_some() {
             let state = self.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = state.ensure_reranker_server().await { log::warn!("reranker did not become resident: {error:#}"); }
+                if let Err(error) = state.ensure_reranker_server().await {
+                    log::warn!("reranker did not become resident: {error:#}");
+                }
             });
         }
         Ok(self.get_reranker_model_status().await)

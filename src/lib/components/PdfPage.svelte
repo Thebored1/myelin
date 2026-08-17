@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { onMount, onDestroy, untrack } from 'svelte';
 	import * as pdfjsLib from 'pdfjs-dist';
-	import type { PdfAnnotation } from '$lib/types';
+	import type { PageViewport, RenderTask } from 'pdfjs-dist';
 
+	// The parent owns annotation callbacks and passes them through the shared
+	// PdfPage contract; this renderer does not invoke them directly.
 	let {
 		pdfDoc,
 		pageNum,
@@ -12,11 +14,14 @@
 		isDrawing,
 		currentPath,
 		currentRect,
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		onAnnotationsChange,
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		onImageExtract,
 		onPointerDown,
 		onPointerMove,
 		onPointerUp,
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		pdfViewerDiv,
 		defaultViewport
 	} = $props();
@@ -29,8 +34,8 @@
 
 	let isVisible = $state(false);
 	let hasRendered = $state(false);
-	let pageViewport: any = $state.raw();
-	let renderTask: any = null;
+	let pageViewport: PageViewport | undefined = $state.raw();
+	let renderTask: RenderTask | null = null;
 
 	$effect(() => {
 		if (!pageViewport && defaultViewport) {
@@ -100,9 +105,12 @@
 				annotationMode: pdfjsLib.AnnotationMode.DISABLE
 			};
 
-			renderTask = page.render(renderContext);
-			await renderTask.promise;
+			const task = page.render(renderContext);
+			renderTask = task;
+			await task.promise;
 
+			// PDF.js owns this layer; Svelte must not reconcile its generated children.
+			// eslint-disable-next-line svelte/no-dom-manipulating
 			textLayerDiv.innerHTML = '';
 			textLayerDiv.style.setProperty('--scale-factor', scale.toString());
 			textLayerDiv.style.setProperty('--total-scale-factor', scale.toString());
@@ -119,8 +127,8 @@
 			await textLayer.render();
 			hasRendered = true;
 			renderTask = null;
-		} catch (error: any) {
-			if (error?.name !== 'RenderingCancelledException') {
+		} catch (error: unknown) {
+			if (!(error instanceof Error && error.name === 'RenderingCancelledException')) {
 				console.error(`Error rendering page ${pageNum}:`, error);
 			}
 			renderTask = null;
@@ -128,17 +136,13 @@
 	}
 
 	$effect(() => {
-		scale;
+		void scale;
 		untrack(() => {
 			hasRendered = false;
 			if (isVisible && pdfDoc) {
 				void renderPage();
 			} else if (pageViewport && pageViewport.scale) {
-				pageViewport = {
-					width: (pageViewport.width / pageViewport.scale) * scale,
-					height: (pageViewport.height / pageViewport.scale) * scale,
-					scale
-				};
+				pageViewport = pageViewport.clone({ scale });
 			}
 		});
 	});
@@ -195,7 +199,7 @@
 				{/if}
 			{:else if ann.type === 'text_highlight'}
 				{#if ann.rects}
-					{#each ann.rects as rect}
+					{#each ann.rects as rect, rectIndex (rectIndex)}
 						<rect
 							x={rect[0]}
 							y={rect[1]}

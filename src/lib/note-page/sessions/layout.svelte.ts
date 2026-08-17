@@ -1,9 +1,12 @@
 import { get } from 'svelte/store';
 import { chatSidebarShortcut, noteSidebarOpen } from '$lib/stores';
 import { shortcutMatches } from '$lib/keyboardShortcut';
+import type { ChatMessage } from '$lib/types';
+import type { ControllerContext } from '$lib/controller-context';
 
 /** Owns note-pane resizing, chat shortcut behavior, and chat scroll state. */
-export function createLayoutSession(ctx: Record<string, any>) {
+export function createLayoutSession(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	function startSidebarResizing(e: MouseEvent) {
 		e.preventDefault();
 		ctx.isSidebarResizing = true;
@@ -22,7 +25,8 @@ export function createLayoutSession(ctx: Record<string, any>) {
 			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
 			const maxSourceRatio = ((rect.width - ctx.PANE_MIN_WIDTH - 10) / rect.width) * 100;
 			const minSourceRatio = (ctx.PANE_MIN_WIDTH / rect.width) * 100;
-			if (maxSourceRatio >= minSourceRatio) ctx.splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxSourceRatio));
+			if (maxSourceRatio >= minSourceRatio)
+				ctx.splitRatio = Math.max(minSourceRatio, Math.min(newRatio, maxSourceRatio));
 		} else if (ctx.isSidebarResizing) {
 			const layoutRect = ctx.mainLayoutEl?.getBoundingClientRect();
 			const containerWidth = layoutRect?.width ?? window.innerWidth;
@@ -48,7 +52,13 @@ export function createLayoutSession(ctx: Record<string, any>) {
 	}
 
 	async function handleChatSidebarShortcut(event: KeyboardEvent) {
-		if (event.repeat || !shortcutMatches(event, get(chatSidebarShortcut)) || !ctx.note || event.defaultPrevented) return;
+		if (
+			event.repeat ||
+			!shortcutMatches(event, get(chatSidebarShortcut)) ||
+			!ctx.note ||
+			event.defaultPrevented
+		)
+			return;
 		event.preventDefault();
 		event.stopPropagation();
 		if (get(noteSidebarOpen) && document.activeElement === ctx.chatTextareaEl) {
@@ -71,12 +81,18 @@ export function createLayoutSession(ctx: Record<string, any>) {
 
 	function scrollChatToBottom(force = false) {
 		if (!ctx.chatMessagesEl) return;
-		if (force || !ctx.userScrolledUp) ctx.chatMessagesEl.scrollTop = ctx.chatMessagesEl.scrollHeight;
+		if (force || !ctx.userScrolledUp)
+			ctx.chatMessagesEl.scrollTop = ctx.chatMessagesEl.scrollHeight;
 	}
 
 	$effect(() => {
 		if (ctx.activeSidebarTab !== 'chat') return;
-		const chatScrollKey = ctx.chatMessages.map((msg: any) => `${msg.role}:${msg.content.length}:${msg.isStreaming ? 1 : 0}:${msg.tools?.length ?? 0}:${msg.error ? 1 : 0}`).join('|');
+		const chatScrollKey = ctx.chatMessages
+			.map(
+				(msg: ChatMessage) =>
+					`${msg.role}:${msg.content.length}:${msg.isStreaming ? 1 : 0}:${msg.tools?.length ?? 0}:${msg.error ? 1 : 0}`
+			)
+			.join('|');
 		void chatScrollKey;
 		void ctx.tick().then(() => scrollChatToBottom());
 	});
@@ -89,7 +105,11 @@ export function createLayoutSession(ctx: Record<string, any>) {
 		handleChatSidebarShortcut,
 		handleChatScroll,
 		scrollChatToBottom,
-		get userScrolledUp() { return ctx.userScrolledUp; },
-		set userScrolledUp(value) { ctx.userScrolledUp = value; }
+		get userScrolledUp() {
+			return ctx.userScrolledUp;
+		},
+		set userScrolledUp(value) {
+			ctx.userScrolledUp = value;
+		}
 	};
 }

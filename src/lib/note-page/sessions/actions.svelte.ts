@@ -1,5 +1,8 @@
+import type { ControllerContext } from '$lib/controller-context';
+
 /** Builds the command surface exposed by the note-page controller. */
-export function createNotePageActions(ctx: Record<string, any>) {
+export function createNotePageActions(rawContext: object) {
+	const ctx = rawContext as ControllerContext;
 	return {
 		appendToNoteBody: ctx.appendToNoteBody,
 		destroyEditorInstance: ctx.destroyEditorInstance,
@@ -44,12 +47,24 @@ export function createNotePageActions(ctx: Record<string, any>) {
 		fetchNoteHistory: ctx.fetchNoteHistory,
 		previewVersion: ctx.previewVersion,
 		restoreVersion: ctx.restoreVersion,
-		get pendingNavigationUrl() { return ctx.navigationSession.pendingNavigationUrl; },
-		set pendingNavigationUrl(value) { ctx.navigationSession.pendingNavigationUrl = value; },
-		get pendingBack() { return ctx.navigationSession.pendingBack; },
-		set pendingBack(value) { ctx.navigationSession.pendingBack = value; },
-		get isProgrammaticNavigation() { return ctx.navigationSession.isProgrammaticNavigation; },
-		set isProgrammaticNavigation(value) { ctx.navigationSession.isProgrammaticNavigation = value; },
+		get pendingNavigationUrl() {
+			return ctx.navigationSession.pendingNavigationUrl;
+		},
+		set pendingNavigationUrl(value) {
+			ctx.navigationSession.pendingNavigationUrl = value;
+		},
+		get pendingBack() {
+			return ctx.navigationSession.pendingBack;
+		},
+		set pendingBack(value) {
+			ctx.navigationSession.pendingBack = value;
+		},
+		get isProgrammaticNavigation() {
+			return ctx.navigationSession.isProgrammaticNavigation;
+		},
+		set isProgrammaticNavigation(value) {
+			ctx.navigationSession.isProgrammaticNavigation = value;
+		},
 		safeNavigate: ctx.safeNavigate,
 		goBack: ctx.goBack,
 		navigateBack: ctx.navigateBack,

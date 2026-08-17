@@ -23,7 +23,11 @@ describe('task persistence mapping', () => {
 			notebook: 'research'
 		});
 		expect(task?.subtasks[0]).toEqual({ id: 'legacy-12-3', text: 'Figure 1', done: true });
-		expect(toTaskItem(task!)).toMatchObject({ text: 'Review paper', dueDate: '2026-08-11', dueTime: '09:30' });
+		expect(toTaskItem(task!)).toMatchObject({
+			text: 'Review paper',
+			dueDate: '2026-08-11',
+			dueTime: '09:30'
+		});
 	});
 
 	it('uses normalized content for idempotent duplicate detection', () => {

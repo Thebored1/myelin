@@ -36,14 +36,7 @@
 		};
 	}
 
-	let app = $state<any>(null);
-	let notebooks = $derived(
-		app
-			? (Array.from(
-					new Set(app.workspaces.flatMap((w: any) => w.documents.map((d: any) => d.notebook)))
-				).filter(Boolean) as string[])
-			: []
-	);
+	let notebooks = $state<string[]>([]);
 	let expandedTaskId = $state<string | number | null>(null);
 	let tasks = $state<TaskItem[]>([]);
 	let tasksLoadedWorkspace = $state<string | null>(null);
@@ -125,10 +118,6 @@
 			saveTasks();
 		}
 	});
-
-	function toggleTask(task: TaskItem) {
-		task.done = !task.done;
-	}
 
 	function onKey(e: KeyboardEvent) {
 		if (e.key === 'Enter') {
@@ -220,7 +209,8 @@
 				(issue) => issue.code.startsWith('task-') || issue.code === 'duplicate-task'
 			);
 			if (taskIssue) taskController.issue = taskIssue.message;
-			else if (taskController.issue && taskController.issue.startsWith('A task')) taskController.issue = '';
+			else if (taskController.issue && taskController.issue.startsWith('A task'))
+				taskController.issue = '';
 		});
 
 		// Each time the global shortcut re-shows the window, clear + refocus.
@@ -262,8 +252,8 @@
 		return () => {
 			ro.disconnect();
 			document.documentElement.classList.remove('quick-window');
-				void unlistenTasks.then((f) => f());
-				void unlistenStorageIssues.then((f) => f());
+			void unlistenTasks.then((f) => f());
+			void unlistenStorageIssues.then((f) => f());
 			void un.then((f) => f());
 			void unfocus.then((f) => f());
 			taskController.dispose();
@@ -391,7 +381,7 @@
 					</div>
 
 					<div class="subtasks-container">
-						{#each draftSubtasks as subtask, i}
+						{#each draftSubtasks as subtask, i (subtask.id ?? i)}
 							<div class="subtask-row">
 								<svg
 									class="subtask-arrow"
@@ -404,6 +394,7 @@
 									class="subtask-circle"
 									class:done={subtask.done}
 									onclick={() => (subtask.done = !subtask.done)}
+									aria-label={subtask.done ? 'Mark subtask incomplete' : 'Mark subtask complete'}
 									tabindex="-1"
 								></button>
 								<input
@@ -470,6 +461,7 @@
 									class="subtask-circle main-task-circle"
 									class:done={task.done}
 									onclick={() => (task.done = !task.done)}
+									aria-label={task.done ? 'Mark task incomplete' : 'Mark task complete'}
 									tabindex="-1"
 								></button>
 								<textarea
@@ -479,13 +471,13 @@
 									bind:value={task.text}
 									onfocus={() => (expandedTaskId = task.id)}
 								></textarea>
-				<button
-					class="task-remove"
-					tabindex="-1"
-					onclick={(e) => {
-						e.preventDefault();
-						void removeTask(task.id);
-					}}>&times;</button
+								<button
+									class="task-remove"
+									tabindex="-1"
+									onclick={(e) => {
+										e.preventDefault();
+										void removeTask(task.id);
+									}}>&times;</button
 								>
 							</div>
 							{#if expandedTaskId === task.id}
@@ -561,7 +553,7 @@
 
 									<div class="subtasks-container">
 										{#if task.subtasks}
-											{#each task.subtasks as subtask, i}
+											{#each task.subtasks as subtask, i (subtask.id ?? i)}
 												<div class="subtask-row">
 													<svg
 														class="subtask-arrow"
@@ -575,6 +567,9 @@
 														class="subtask-circle"
 														class:done={subtask.done}
 														onclick={() => (subtask.done = !subtask.done)}
+														aria-label={subtask.done
+															? 'Mark subtask incomplete'
+															: 'Mark subtask complete'}
 														tabindex="-1"
 													></button>
 													<input
@@ -819,22 +814,6 @@
 	}
 	.field-input::placeholder {
 		color: var(--text-secondary);
-	}
-	.select-new {
-		appearance: none;
-		-webkit-appearance: none;
-		cursor: pointer;
-		font-weight: 500;
-		font-size: 0.95rem;
-		color: var(--text-secondary);
-		padding: 0;
-		background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>');
-		background-repeat: no-repeat;
-		background-position: right center;
-		background-size: 16px;
-		padding-right: 24px;
-		width: auto;
-		flex: none;
 	}
 	.textarea-new {
 		resize: none;
