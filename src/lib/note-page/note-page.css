@@ -759,33 +759,47 @@ button:disabled {
 .sidebar-backdrop {
 	position: absolute;
 	inset: 0;
-	background: var(--scrim-soft);
-	backdrop-filter: blur(var(--blur-sm));
+	/* Keep the editor readable in overlay mode. The backdrop still captures
+	   outside clicks, but it must not blur or dim the work surface underneath. */
+	background: transparent;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
 	z-index: 90;
 	animation: fade-in var(--duration-fast) ease-out;
 }
 
-/* Large unsplit workspaces can dock the sidebar beside the editor.  A
-	   PDF/editor split is intentionally always overlay mode: the editor pane
-	   is only half the window and must not be squeezed by the sidebar. */
-@media (min-width: 1380px) {
-	.main-layout:not(.split-layout) .sidebar {
-		position: relative;
+/* Desktop workspaces dock the sidebar beside the editor. Narrow windows keep
+	   the overlay treatment so the editor retains a usable writing width. */
+@media (min-width: 1200px) {
+	.main-layout .sidebar {
+		position: relative !important;
+		inset: auto !important;
 		transition: none !important;
 		transform: none;
-		margin-right: calc(var(--sidebar-width, 20rem) * -1);
-		/* Docking is allowed only when the editor can retain its pane minimum. */
+		margin-right: calc(var(--sidebar-width, 20rem) * -1) !important;
 		max-width: min(calc(100% - 20rem), 42rem);
 		box-shadow: none;
 		flex-shrink: 0;
 	}
 
-	.main-layout:not(.split-layout) .sidebar.open {
-		transform: none;
-		margin-right: 0;
+	/* The split-layout guard above is intentionally !important; mirror its
+	   specificity here so desktop docking wins in attached PDF/editor notes. */
+	.main-layout.split-layout > .sidebar {
+		position: relative !important;
+		inset: auto !important;
+		margin-right: calc(var(--sidebar-width, 20rem) * -1) !important;
 	}
 
-	.main-layout:not(.split-layout) .sidebar-backdrop {
+	.main-layout .sidebar.open {
+		transform: none;
+		margin-right: 0 !important;
+	}
+
+	.main-layout.split-layout > .sidebar.open {
+		margin-right: 0 !important;
+	}
+
+	.main-layout .sidebar-backdrop {
 		display: none !important;
 	}
 }
