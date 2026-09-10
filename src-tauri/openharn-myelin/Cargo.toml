@@ -23,6 +23,9 @@ regex = "1"
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
+# The app's deterministic note-edit logic (plan_write / apply_format_op /
+# residue check), so on-disk edits stay byte-identical to Myelin's.
+myelin-edit-core = { path = "../edit-core" }
 
 [profile.release]
 opt-level = "z"

@@ -61,10 +61,11 @@ export function locateNoteStreamTarget(
 export function composeNoteStreamPreviewWithStatus(
 	source: string,
 	generated: string,
-	target: NoteStreamTarget | null
+	target: NoteStreamTarget | null,
+	cachedSpan?: [number, number] | null
 ): NoteStreamPreviewResult {
 	if (!target) return { preview: generated, applied: true };
-	const span = locateNoteStreamTarget(source, target);
+	const span = cachedSpan !== undefined ? cachedSpan : locateNoteStreamTarget(source, target);
 	if (!span) return { preview: source, applied: false };
 	return {
 		preview: source.slice(0, span[0]) + generated + source.slice(span[1]),

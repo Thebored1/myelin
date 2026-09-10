@@ -22,9 +22,21 @@ pub struct ModelProfile {
     /// ...or by a case-insensitive substring of the model file name.
     #[serde(default)]
     pub name_pattern: Option<String>,
-    /// "chat" (default) or "embed".
+    /// "chat" (default), "embed", or "rerank".
     #[serde(default)]
     pub role: Option<String>,
+    /// Expected output width for a verified embedding profile. The live server
+    /// remains authoritative and must agree with this value.
+    #[serde(default)]
+    pub embedding_dimensions: Option<usize>,
+    #[serde(default)]
+    pub embedding_context_tokens: Option<usize>,
+    #[serde(default)]
+    pub embedding_pooling: Option<String>,
+    #[serde(default)]
+    pub embedding_query_prefix: Option<String>,
+    #[serde(default)]
+    pub embedding_document_prefix: Option<String>,
     /// Chat-template override: the builtin id "lfm2", or an absolute file path.
     #[serde(default)]
     pub chat_template: Option<String>,
@@ -67,6 +79,7 @@ pub struct ModelProfile {
 pub enum ModelRole {
     Chat,
     Embed,
+    Rerank,
 }
 
 /// The merged result the launcher uses: GGUF-derived defaults overlaid by the
@@ -81,12 +94,18 @@ pub struct ResolvedProfile {
     pub verbose_tool_schemas: bool,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    #[allow(dead_code)]
     pub is_recurrent_or_hybrid: bool,
     /// Force tool_choice in native FC mode.
     pub tool_choice: Option<String>,
     /// Raw JSON for chat_template_kwargs (e.g. {"enable_thinking":false}).
     pub template_kwargs: Option<String>,
     pub verified: bool,
+    pub embedding_dimensions: Option<usize>,
+    pub embedding_context_tokens: Option<usize>,
+    pub embedding_pooling: Option<String>,
+    pub embedding_query_prefix: Option<String>,
+    pub embedding_document_prefix: Option<String>,
 }
 
 impl ResolvedProfile {
@@ -104,6 +123,11 @@ impl ResolvedProfile {
             tool_choice: None,
             template_kwargs: None,
             verified: false,
+            embedding_dimensions: None,
+            embedding_context_tokens: None,
+            embedding_pooling: None,
+            embedding_query_prefix: None,
+            embedding_document_prefix: None,
         }
     }
 
@@ -115,6 +139,8 @@ impl ResolvedProfile {
         if let Some(role) = p.role.as_deref() {
             self.role = if role.eq_ignore_ascii_case("embed") {
                 ModelRole::Embed
+            } else if role.eq_ignore_ascii_case("rerank") {
+                ModelRole::Rerank
             } else {
                 ModelRole::Chat
             };
@@ -148,6 +174,21 @@ impl ResolvedProfile {
             }
         }
         self.verified = p.verified;
+        if p.embedding_dimensions.is_some() {
+            self.embedding_dimensions = p.embedding_dimensions;
+        }
+        if p.embedding_context_tokens.is_some() {
+            self.embedding_context_tokens = p.embedding_context_tokens;
+        }
+        if p.embedding_pooling.is_some() {
+            self.embedding_pooling = p.embedding_pooling.clone();
+        }
+        if p.embedding_query_prefix.is_some() {
+            self.embedding_query_prefix = p.embedding_query_prefix.clone();
+        }
+        if p.embedding_document_prefix.is_some() {
+            self.embedding_document_prefix = p.embedding_document_prefix.clone();
+        }
     }
 }
 
@@ -176,11 +217,9 @@ pub fn all_profiles(app_data_dir: &Path) -> Vec<ModelProfile> {
 /// Match strength: a profile specifying both architecture and filename must
 /// match both and wins over an architecture-only family profile.
 fn match_strength(p: &ModelProfile, arch: Option<&str>, filename: &str) -> u8 {
-    if let (Some(pa), Some(pat), Some(a)) = (
-        p.architecture.as_deref(),
-        p.name_pattern.as_deref(),
-        arch,
-    ) {
+    if let (Some(pa), Some(pat), Some(a)) =
+        (p.architecture.as_deref(), p.name_pattern.as_deref(), arch)
+    {
         return if a.eq_ignore_ascii_case(pa)
             && !pat.is_empty()
             && filename.to_lowercase().contains(&pat.to_lowercase())
@@ -276,11 +315,7 @@ mod tests {
         assert_eq!(r.chat_template.as_deref(), Some("lfm25"));
         assert!(r.is_recurrent_or_hybrid);
 
-        let r = resolve(
-            nowhere(),
-            Some(&gguf("lfm2")),
-            "LFM2-8B-A1B-Q4_K_M.gguf",
-        );
+        let r = resolve(nowhere(), Some(&gguf("lfm2")), "LFM2-8B-A1B-Q4_K_M.gguf");
         assert_eq!(r.chat_template.as_deref(), Some("lfm2"));
     }
 
@@ -292,6 +327,8 @@ mod tests {
             "nomic-embed-text-v1.5.Q4_K_M.gguf",
         );
         assert_eq!(r.role, ModelRole::Embed);
+        assert_eq!(r.embedding_dimensions, Some(768));
+        assert_eq!(r.embedding_query_prefix.as_deref(), Some("search_query: "));
     }
 
     #[test]

@@ -1,0 +1,634 @@
+.settings-container {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	background: var(--bg-page);
+	color: var(--text-primary);
+	font-family: var(--font-sans);
+	overflow-y: auto;
+}
+
+.settings-header {
+	padding: var(--space-6) var(--space-8);
+	border-bottom: 1px solid var(--border-default);
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-4);
+	background: var(--bg-panel);
+}
+
+.back-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-2);
+	background: transparent;
+	border: none;
+	color: var(--text-secondary);
+	font-family: var(--font-sans);
+	font-size: 0.875rem;
+	cursor: pointer;
+	padding: 0;
+	transition: color var(--duration-fast);
+	align-self: flex-start;
+}
+
+.back-btn:hover {
+	color: var(--text-primary);
+}
+
+.settings-header h1 {
+	margin: 0;
+	font-size: 2rem;
+	font-weight: 600;
+	color: var(--text-hero);
+}
+
+.settings-content {
+	padding: var(--space-8);
+	max-width: 800px;
+	width: 100%;
+	margin: 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-6);
+}
+
+.info-grid {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: var(--space-3);
+}
+.info-card {
+	padding: var(--space-4);
+	background: var(--bg-page);
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-sm);
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+}
+.info-label {
+	font-size: 0.6rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.09em;
+	color: var(--neutral-600);
+	font-family: var(--font-mono);
+}
+.info-value {
+	font-size: 0.75rem;
+	color: var(--neutral-300);
+	word-break: break-all;
+	font-family: var(--font-mono);
+}
+.ws-actions {
+	display: flex;
+	gap: var(--space-3);
+}
+
+.settings-section {
+	background: var(--bg-panel);
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-md);
+	padding: var(--space-6);
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-4);
+}
+.config-modal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 100;
+	display: grid;
+	place-items: center;
+	background: var(--scrim);
+	padding: 2rem;
+}
+.config-modal {
+	width: min(900px, 95vw);
+	height: min(760px, 90vh);
+	display: flex;
+	flex-direction: column;
+	background: var(--bg-modal);
+	color: var(--text-primary);
+	border: 1px solid var(--border-default);
+	border-radius: 8px;
+	box-shadow: 0 24px 80px var(--shadow-color-strong);
+	padding: 1rem;
+}
+.config-modal-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: start;
+	gap: 1rem;
+}
+.config-modal-header h2 {
+	margin: 0;
+}
+.config-modal-header p {
+	margin: 0.35rem 0 1rem;
+	color: var(--text-secondary);
+	font-size: 0.8rem;
+	word-break: break-all;
+}
+.config-editor {
+	flex: 1;
+	width: 100%;
+	resize: none;
+	box-sizing: border-box;
+	padding: 1rem;
+	color: var(--text-primary);
+	background: var(--bg-input);
+	border: 1px solid var(--border-default);
+	border-radius: 5px;
+	caret-color: var(--accent-100);
+	font:
+		13px/1.5 ui-monospace,
+		SFMono-Regular,
+		Menlo,
+		monospace;
+}
+.config-search-row {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	margin-bottom: 0.6rem;
+	color: var(--text-secondary);
+	font-size: 0.8rem;
+}
+.config-search {
+	flex: 1;
+	padding: 0.5rem 0.65rem;
+	color: var(--text-primary);
+	background: var(--bg-input);
+	border: 1px solid var(--border-default);
+	border-radius: 4px;
+}
+.config-nav-btn {
+	min-width: 2rem;
+	padding: 0.35rem 0.55rem;
+	color: var(--text-primary);
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-default);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.config-nav-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.config-modal-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 0.6rem;
+	padding-top: 1rem;
+}
+.config-modal-actions .primary {
+	background: var(--accent-100);
+	color: var(--on-accent);
+}
+
+.settings-section h2 {
+	margin: 0;
+	font-size: 1.25rem;
+	font-weight: 500;
+	color: var(--text-hero);
+	font-family: var(--font-sans);
+}
+
+.description {
+	margin: 0;
+	font-size: 0.875rem;
+	color: var(--text-secondary);
+	line-height: 1.5;
+}
+
+code {
+	font-family: var(--font-mono);
+	background: var(--overlay-faint);
+	padding: 0.1em 0.3em;
+	border-radius: var(--radius-xs);
+}
+
+.model-picker {
+	display: flex;
+	gap: var(--space-3);
+	margin-top: var(--space-2);
+}
+
+.path-display {
+	flex: 1;
+	background: var(--bg-page);
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-sm);
+	padding: 0.75rem 1rem;
+	font-family: var(--font-mono);
+	font-size: 0.875rem;
+	color: var(--text-primary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	display: flex;
+	align-items: center;
+}
+
+.path-display.empty {
+	color: var(--text-secondary);
+	font-style: italic;
+}
+
+.compute-device {
+	margin-top: var(--space-4);
+}
+
+.compute-label {
+	display: block;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--text-secondary);
+	margin-bottom: var(--space-2);
+}
+
+.segmented {
+	display: inline-flex;
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-sm);
+	overflow: hidden;
+}
+
+.segment {
+	padding: 0.45rem 1.1rem;
+	background: var(--bg-page);
+	color: var(--text-secondary);
+	border: none;
+	border-right: 1px solid var(--border-default);
+	font-size: 0.85rem;
+	cursor: pointer;
+	transition:
+		background 0.12s,
+		color 0.12s;
+}
+
+.segment:last-child {
+	border-right: none;
+}
+
+.segment:hover {
+	color: var(--text-primary);
+}
+
+.segment.active {
+	background: var(--neutral-800);
+	color: var(--text-primary);
+	font-weight: 600;
+}
+
+.segment:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.device-issue {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-2);
+	margin-top: var(--space-3);
+	padding: 0.6rem 0.9rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-default);
+	font-size: 0.82rem;
+	line-height: 1.45;
+}
+
+.device-issue .issue-icon {
+	flex: 0 0 auto;
+}
+
+.device-issue.error {
+	border-color: var(--danger-border);
+	background: var(--danger-bg);
+	color: var(--text-primary);
+}
+
+.device-issue.warn {
+	border-color: var(--warning-border);
+	background: var(--warning-fill);
+	color: var(--text-primary);
+}
+
+.compute-hint {
+	margin: var(--space-2) 0 0;
+	font-size: 0.8rem;
+	color: var(--text-secondary);
+	line-height: 1.4;
+}
+
+.backend-status {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-2);
+	margin-top: var(--space-3);
+	padding: 0.6rem 0.9rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-default);
+	font-size: 0.85rem;
+	line-height: 1.4;
+	color: var(--text-secondary);
+}
+
+.backend-text {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+}
+
+.backend-text strong {
+	color: var(--text-primary);
+	font-weight: 600;
+}
+
+.backend-dot {
+	flex: 0 0 auto;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	margin-top: 0.35rem;
+	background: var(--text-secondary);
+}
+
+.backends-list {
+	margin-top: var(--space-4);
+}
+
+.backend-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-3);
+	padding: 0.5rem 0;
+	border-bottom: 1px solid var(--border-default);
+}
+
+.backend-name {
+	font-size: 0.9rem;
+	color: var(--text-primary);
+	font-weight: 600;
+}
+
+.backend-installed {
+	font-size: 0.82rem;
+	color: var(--success);
+}
+
+.backend-progress {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	flex: 1;
+	max-width: 70%;
+}
+
+.backend-bar {
+	flex: 1;
+	height: 6px;
+	border-radius: 3px;
+	background: var(--bg-page);
+	overflow: hidden;
+}
+
+.backend-bar-fill {
+	height: 100%;
+	background: var(--accent-100);
+	transition: width 0.2s;
+}
+
+.backend-progress-text {
+	font-size: 0.75rem;
+	color: var(--text-secondary);
+	white-space: nowrap;
+}
+
+.backend-status.gpu {
+	border-color: var(--success-border);
+	background: var(--success-fill);
+}
+
+.backend-status.gpu .backend-dot {
+	background: var(--success);
+}
+
+.backend-status.cpu {
+	border-color: var(--warning-border);
+	background: var(--warning-fill);
+}
+
+.backend-status.cpu .backend-dot {
+	background: var(--warning);
+}
+
+.browse-btn {
+	background: var(--neutral-800);
+	color: var(--text-primary);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-sm);
+	padding: 0 1.5rem;
+	font-family: var(--font-mono);
+	font-size: 0.875rem;
+	cursor: pointer;
+	transition: all var(--duration-fast);
+	white-space: nowrap;
+}
+
+.browse-btn:hover:not(:disabled) {
+	background: var(--neutral-700);
+	border-color: var(--neutral-600);
+}
+
+.browse-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.toggle-row {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-2);
+	margin-top: var(--space-3);
+	cursor: pointer;
+}
+
+.toggle-row input {
+	margin-top: 0.2rem;
+	flex: 0 0 auto;
+}
+
+.toggle-text {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+}
+
+.toggle-text strong {
+	color: var(--text-primary);
+	font-size: 0.9rem;
+}
+
+.toggle-hint {
+	font-size: 0.8rem;
+	color: var(--text-secondary);
+	line-height: 1.4;
+}
+
+.toggle-label {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+
+/* Little circled "i" that reveals detail/caveats on hover or focus, so the
+       long explanation isn't pasted under every toggle. */
+.info {
+	position: relative;
+	display: inline-flex;
+	outline: none;
+}
+
+.info-dot {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	border: 1px solid var(--text-secondary);
+	color: var(--text-secondary);
+	font-size: 0.62rem;
+	font-style: italic;
+	font-weight: 700;
+	line-height: 1;
+	cursor: help;
+	user-select: none;
+}
+
+.info:hover .info-dot,
+.info:focus .info-dot {
+	border-color: var(--text-primary);
+	color: var(--text-primary);
+}
+
+.info-pop {
+	position: absolute;
+	bottom: calc(100% + 8px);
+	left: 0;
+	z-index: 20;
+	width: 320px;
+	max-width: 60vw;
+	padding: 0.6rem 0.7rem;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-default);
+	border-radius: 8px;
+	box-shadow: 0 8px 24px var(--shadow-color);
+	color: var(--text-secondary);
+	font-size: 0.78rem;
+	font-weight: 400;
+	line-height: 1.45;
+	opacity: 0;
+	visibility: hidden;
+	transform: translateY(4px);
+	transition:
+		opacity 0.12s ease,
+		transform 0.12s ease,
+		visibility 0.12s;
+	pointer-events: none;
+}
+
+.info-pop strong {
+	color: var(--text-primary);
+	font-size: inherit;
+}
+
+.info:hover .info-pop,
+.info:focus .info-pop {
+	opacity: 1;
+	visibility: visible;
+	transform: translateY(0);
+}
+
+.advanced-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: var(--space-4);
+	margin-top: var(--space-2);
+}
+
+.input-group {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+
+.input-group.full-width {
+	grid-column: 1 / -1;
+}
+
+.input-group label {
+	font-size: 0.875rem;
+	color: var(--text-secondary);
+	font-family: var(--font-sans);
+}
+
+.input-group input {
+	background: var(--bg-page);
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-sm);
+	padding: 0.75rem 1rem;
+	color: var(--text-primary);
+	font-family: var(--font-mono);
+	font-size: 0.875rem;
+}
+
+.input-group input:focus {
+	outline: none;
+	border-color: var(--accent-200);
+}
+
+/* Adaptive offload manages Context Size + GPU Layers, so they're locked
+       (disabled) when it's on — show that clearly instead of looking editable. */
+.input-group input:disabled {
+	opacity: 0.45;
+	background: var(--bg-panel);
+	color: var(--text-muted);
+	cursor: not-allowed;
+}
+
+.success-message {
+	position: fixed;
+	bottom: var(--space-6);
+	right: var(--space-6);
+	background: var(--bg-panel);
+	border: 1px solid var(--border-default);
+	color: var(--success);
+	padding: var(--space-3) var(--space-4);
+	border-radius: var(--radius-sm);
+	box-shadow:
+		0 4px 6px -1px var(--shadow-color),
+		0 2px 4px -1px var(--shadow-color);
+	font-size: 0.875rem;
+	font-family: var(--font-sans);
+	animation: fade-in var(--duration-fast) ease-out;
+	z-index: 50;
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+}
+
+@keyframes fade-in {
+	from {
+		opacity: 0;
+		transform: translateY(-4px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}

@@ -1,6 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { loadPyodide } from 'pyodide';
+	import type { PyodideAPI } from 'pyodide';
 
 	interface Props {
 		value: string;
@@ -18,13 +17,19 @@
 	type Cell = {
 		cell_type: 'markdown' | 'code';
 		source: string[];
-		outputs?: any[];
+		outputs?: NotebookOutput[];
 		execution_count?: number | null;
+	};
+
+	type NotebookOutput = {
+		output_type: string;
+		name?: string;
+		text?: string[];
 	};
 
 	type Notebook = {
 		cells: Cell[];
-		metadata: any;
+		metadata: Record<string, unknown>;
 		nbformat: number;
 		nbformat_minor: number;
 	};
@@ -44,7 +49,7 @@
 				notebook = { cells: [], metadata: {}, nbformat: 4, nbformat_minor: 5 };
 				parseError = null;
 			}
-		} catch (e) {
+		} catch {
 			parseError = 'Invalid notebook JSON';
 		}
 	});
@@ -87,18 +92,29 @@
 		emitAiTarget(activeCellIndex, textarea);
 	}
 
-	let pyodideInstance: any = null;
+	let pyodideInstance: PyodideAPI | null = null;
 	let pyodideLoading = $state(false);
 
-	async function getPyodide() {
+	// The core runtime is shipped with the app under static/pyodide. Resolve the
+	// relative asset directory at execution time so this works in both Vite dev
+	// mode and the packaged Tauri asset origin. Third-party packages requested by
+	// notebook code remain separate and may still need a network connection.
+	function pyodideIndexUrl() {
+		return new URL('pyodide/', document.baseURI).href;
+	}
+
+	async function getPyodide(): Promise<PyodideAPI> {
 		if (pyodideInstance) return pyodideInstance;
 		if (pyodideLoading)
-			return new Promise((resolve) => setTimeout(async () => resolve(await getPyodide()), 500));
+			return new Promise<PyodideAPI>((resolve) =>
+				setTimeout(async () => resolve(await getPyodide()), 500)
+			);
 
 		pyodideLoading = true;
 		try {
+			const { loadPyodide } = await import('pyodide');
 			pyodideInstance = await loadPyodide({
-				indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/'
+				indexURL: pyodideIndexUrl()
 			});
 			return pyodideInstance;
 		} finally {
@@ -166,7 +182,13 @@
 		<div class="error">{parseError}</div>
 	{:else}
 		<div class="cells">
-			{#each notebook.cells as cell, i}
+			{#if pyodideLoading}
+				<div class="pyodide-banner">
+					Preparing the bundled Pyodide Python runtime (~14&nbsp;MB) — first run only. It runs
+					offline; third-party Python packages may require a network connection.
+				</div>
+			{/if}
+			{#each notebook.cells as cell, i (i)}
 				<div class="cell {cell.cell_type}">
 					<div class="cell-header">
 						<span
@@ -194,7 +216,7 @@
 					></textarea>
 					{#if cell.cell_type === 'code' && cell.outputs && cell.outputs.length > 0}
 						<div class="cell-outputs">
-							{#each cell.outputs as out}
+							{#each cell.outputs as out, outputIndex (outputIndex)}
 								{#if out.text}
 									<pre>{out.text.join('')}</pre>
 								{/if}
@@ -224,6 +246,15 @@
 		border-radius: var(--radius-sm);
 		background: var(--bg-panel);
 		overflow: hidden;
+	}
+	.pyodide-banner {
+		margin-bottom: 1rem;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		background: var(--bg-body);
+		color: var(--text-secondary);
+		font-size: 0.8rem;
 	}
 	.cell-header {
 		padding: 0.25rem 0.5rem;

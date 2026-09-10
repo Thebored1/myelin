@@ -1,12 +1,12 @@
 # Myelin
 
-Cross-platform local-first AI notes app built with Tauri 2, SvelteKit, and a Rust-first core. Myelin is built for students, researchers, and developers, seamlessly supporting multiple document types with zero external dependencies.
+Cross-platform local-first AI notes app built with Tauri 2, SvelteKit, and a Rust-first core. Myelin is built for students, researchers, and developers, with support for multiple document types and locally managed data.
 
 ## Key Features
 
 - **Markdown-first**: Standard `.md` notes are the primary source of truth, parsed and indexed locally.
 - **First-Class LaTeX (`.tex`)**: Edit LaTeX documents directly in the app. Myelin embeds the Tectonic LaTeX engine (written in Rust) to compile documents entirely in-memory and render the PDF side-by-side—no `pdflatex` or massive LaTeX distribution required on the host system.
-- **First-Class Jupyter Notebooks (`.ipynb`)**: Open and run Jupyter notebooks directly in the app. Python execution is powered by Pyodide (WebAssembly), which runs completely inside the browser/webview environment without requiring Python to be installed on the host OS.
+- **First-Class Jupyter Notebooks (`.ipynb`)**: Open and run Jupyter notebooks directly in the app. Python execution is powered by a bundled Pyodide (WebAssembly) runtime, which runs inside the browser/webview without requiring Python to be installed on the host OS. Notebook-requested third-party Python packages may still need to be downloaded.
 - **Split-Pane Viewer**: View source material (PDFs, Web pages, etc.) side-by-side with your working documents.
 - **Local AI & Vector Search**: Uses LanceDB for local vector indexing to provide intelligent search over your notes.
 
@@ -26,11 +26,11 @@ The test never changes user notes. `write_note`, `read_note`, and `search_notes`
 
 ## Setup and Development
 
-Myelin relies heavily on native Rust libraries (like Tectonic) to achieve a zero-dependency runtime.
+Myelin relies heavily on native Rust libraries such as Tectonic. Building from source requires the platform and native-library prerequisites listed below, and some optional features download runtime assets on first use.
 
 ### Prerequisites (All Platforms)
 
-1. **Node.js** (v21.7.3+) and **npm** (v10.5.0+). The current dependency lockfile requires these minimum versions.
+1. **Node.js** (v22.13.0+ on Node 22, or v24+) and **npm** (v10.5.0+). The current dependency lockfile requires these minimum versions.
 2. **Rust** (stable toolchain) and Cargo.
 3. **Tauri native build prerequisites** (C++ Build Tools on Windows, Xcode tools on macOS, WebKitGTK development headers on Linux).
 4. **Protocol Buffers compiler (`protoc`)**. It is required by LanceDB's `lance-encoding` dependency during the Rust build.
@@ -133,6 +133,30 @@ To build for production:
 npm run build:sidecar
 npm run tauri build
 ```
+
+## External OpenAI-compatible models
+
+Myelin can send ordinary Chat and targeted Write requests to a local or remote
+OpenAI-compatible endpoint. This mode is intentionally separate from Myelin's
+local llama-server runtime: it does not send llama.cpp slot, KV-cache, or
+`cache_prompt` fields and does not prepare document section slots.
+
+Configure it in **Settings → Agent (openharn) → External OpenAI-compatible
+model**:
+
+- Enable **Use external model for Chat and Write**.
+- Set the API base URL, including the `/v1` API prefix when required, for
+  example `https://api.openai.com/v1` or `http://127.0.0.1:1234/v1`.
+- Set the provider's model name.
+- Optionally set an API key. It is stored locally in Myelin's `settings.json`
+  and is not included in AI debug prompts.
+
+The endpoint must support streaming OpenAI-compatible chat completions. Chat
+works with text-only providers; Write also requires compatible tool/function
+calling because edits are applied through Myelin's guarded write tools. Disable
+external mode to return to the configured local runtime and section KV-cache
+behavior. See [`notes/external-model-endpoints.md`](notes/external-model-endpoints.md)
+for the implementation details and tradeoffs.
 
 For troubleshooting and platform-specific details, see
 [`docs/openharn-sidecar.md`](docs/openharn-sidecar.md).

@@ -7,15 +7,15 @@ the efficient kernels.
 
 ## The four iterations
 
-| iter | data | rank | eval (tuned, no preamble) | vs base | note |
-|---|---|---|---|---|---|
-| 1 (pilot) | 425 | 8 | 8/11 | base 8/11 | wash (tiny, noisy eval) |
-| 2 | 546, preamble-free | 8 | 24/36 | base+preamble 24/36 | **tie** — LoRA absorbs the preamble |
-| 3 | 1523, academic/math | 16 | 22/49 | base+preamble 27/49 | **regressed** — format over-routing |
-| 4 | 1241, rebalanced | 8 | 26/49 | base+preamble 27/49 | **tie** — regression cured |
+| iter      | data                | rank | eval (tuned, no preamble) | vs base             | note                                |
+| --------- | ------------------- | ---- | ------------------------- | ------------------- | ----------------------------------- |
+| 1 (pilot) | 425                 | 8    | 8/11                      | base 8/11           | wash (tiny, noisy eval)             |
+| 2         | 546, preamble-free  | 8    | 24/36                     | base+preamble 24/36 | **tie** — LoRA absorbs the preamble |
+| 3         | 1523, academic/math | 16   | 22/49                     | base+preamble 27/49 | **regressed** — format over-routing |
+| 4         | 1241, rebalanced    | 8    | 26/49                     | base+preamble 27/49 | **tie** — regression cured          |
 
 Comparisons are tuned (NO system prompt) vs base (the full shipped preamble +
-few-shot card). The tuned model carrying Myelin's behavior with *no preamble* is
+few-shot card). The tuned model carrying Myelin's behavior with _no preamble_ is
 the headline: it ties the prompted baseline while saving ~1,150 tokens/call.
 
 ## What iteration 3 taught us (the regression)
@@ -23,7 +23,7 @@ the headline: it ties the prompted baseline while saving ~1,150 tokens/call.
 Adding more data — heavy on `format_note` (342 examples) at rank 16 — **collapsed
 the write-vs-format decision boundary**. Probed directly (`diag.py`):
 
-- "fix the spelling" → `format_note(strip_markdown)`  (should be `write_note`)
+- "fix the spelling" → `format_note(strip_markdown)` (should be `write_note`)
 - "remove the second item" → `format_note(remove_bullets)`
 - "clear the note" → `search_notes`
 
@@ -34,7 +34,7 @@ edits — confirming it was a data-balance problem, not capacity.
 ## The ceiling
 
 Across iterations the tuned model **oscillates around base (22/24/26 vs 27)** — it
-does not climb past it. The failures are *shared*: base WITH the full preamble and
+does not climb past it. The failures are _shared_: base WITH the full preamble and
 the LoRA fail the **same** hard cases:
 
 - surgical edits: "remove the 2nd item", "remove oranges", "add a line at the end"
@@ -45,7 +45,7 @@ These are a **1 B capacity limit** — neither prompting nor fine-tuning a 1 B c
 them. (Several eval "fails" — hello / thanks — are eval-only: the app gates tools
 off for small talk, so they don't misfire in production.)
 
-What the LoRA *does* win, preamble-free: identity (says "Myelin", never IBM/Granite),
+What the LoRA _does_ win, preamble-free: identity (says "Myelin", never IBM/Granite),
 format-op routing, and equal edit quality at zero prompt cost.
 
 ## Where it stands

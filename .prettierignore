@@ -7,4 +7,13 @@ bun.lockb
 
 # Miscellaneous
 /static/
+/build/
+/.svelte-kit/
+/src-tauri/target/
+/src-tauri/edit-core/target/
+/src-tauri/openharn-myelin/target/
+/src-tauri/resources/bin/
+/docs/
+/notes/
+/preview/
 /src-tauri/gen/

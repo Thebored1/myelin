@@ -1,10 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { invoke } from '@tauri-apps/api/core';
-	import { emit, listen } from '@tauri-apps/api/event';
+	import { listen } from '@tauri-apps/api/event';
 	import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 	import { LogicalSize } from '@tauri-apps/api/dpi';
 	import NotebookSelect from '$lib/components/NotebookSelect.svelte';
+	import { createTaskController } from '$lib/tasks/controller.svelte';
+	import type { TaskItem, TaskSubtask } from '$lib/tasks/types';
+	import type { StorageIssue } from '$lib/types';
 
 	let text = $state('');
 	let workspacePath = $state<string | null>(null);
@@ -33,71 +36,59 @@
 		};
 	}
 
-	let app = $state<any>(null);
-	let notebooks = $derived(
-		app ? Array.from(new Set(app.workspaces.flatMap((w: any) => w.documents.map((d: any) => d.notebook)))).filter(Boolean) as string[] : []
-	);
-	let expandedTaskId = $state<number | null>(null);
-
-	interface TaskSubtask {
-		id: number;
-		text: string;
-		done: boolean;
-	}
-
-	interface TaskItem {
-		id: number;
-		text: string;
-		done: boolean;
-		details?: string;
-		dueDate?: string;
-		dueTime?: string;
-		notebook?: string;
-		subtasks?: TaskSubtask[];
-	}
-
+	let notebooks = $state<string[]>([]);
+	let expandedTaskId = $state<string | number | null>(null);
 	let tasks = $state<TaskItem[]>([]);
+	let tasksLoadedWorkspace = $state<string | null>(null);
 	let activeFilter = $state<'all' | 'active' | 'done'>('all');
+	const taskController = createTaskController();
 
 	let filteredTasks = $derived.by(() => {
-		if (activeFilter === 'active') return tasks.filter(t => !t.done);
-		if (activeFilter === 'done') return tasks.filter(t => t.done);
+		if (activeFilter === 'active') return tasks.filter((t) => !t.done);
+		if (activeFilter === 'done') return tasks.filter((t) => t.done);
 		return tasks;
 	});
 
-	function loadTasks() {
+	async function loadTasks() {
 		if (!workspacePath) return;
-		try {
-			tasks = JSON.parse(localStorage.getItem(`tasks_${workspacePath}`) || '[]');
-		} catch {
-			tasks = [];
-		}
+		tasks = await taskController.load(workspacePath);
+		tasksLoadedWorkspace = workspacePath;
 	}
 
 	function saveTasks() {
 		if (!workspacePath) return;
-		localStorage.setItem(`tasks_${workspacePath}`, JSON.stringify(tasks));
-		emit('tasks://added');
+		taskController.scheduleSave(workspacePath, tasks);
+	}
+
+	async function removeTask(id: string | number) {
+		if (!workspacePath) return;
+		const previous = tasks;
+		tasks = tasks.filter((task) => task.id !== id);
+		if (!(await taskController.remove(workspacePath, id))) {
+			tasks = previous;
+			await loadTasks();
+		}
 	}
 
 	async function loadWorkspace() {
 		try {
 			const snap = await invoke<{ workspacePath?: string }>('get_snapshot');
 			workspacePath = snap.workspacePath ?? null;
-			loadTasks();
+			tasksLoadedWorkspace = null;
+			await loadTasks();
 			notebooks = await invoke<string[]>('list_notebooks');
 		} catch {
 			/* ignore */
 		}
 	}
 
-	function addTask() {
+	async function addTask() {
 		const t = text.trim();
 		if (!t || !workspacePath) return;
-		
-		tasks.push({ 
-			id: Date.now(), 
-			text: t, 
+
+		tasks.push({
+			id: Date.now(),
+			text: t,
 			done: false,
 			details: draftDetails,
 			dueDate: draftDueDate,
@@ -105,30 +96,28 @@
 			notebook: draftNotebook,
 			subtasks: [...draftSubtasks]
 		});
-		
+
 		text = '';
 		draftDetails = '';
 		draftDueDate = '';
 		draftDueTime = '';
 		draftNotebook = '';
 		draftSubtasks = [];
-		
-		saved = true;
-		setTimeout(() => {
-			saved = false;
-		}, 1000);
+
+		const persisted = await taskController.save(workspacePath, tasks);
+		if (persisted) {
+			saved = true;
+			setTimeout(() => {
+				saved = false;
+			}, 1000);
+		}
 	}
 
 	$effect(() => {
-		if (workspacePath) {
-			localStorage.setItem(`tasks_${workspacePath}`, JSON.stringify(tasks));
-			emit('tasks://added');
+		if (workspacePath && tasksLoadedWorkspace === workspacePath) {
+			saveTasks();
 		}
 	});
-
-	function toggleTask(task: TaskItem) {
-		task.done = !task.done;
-	}
 
 	function onKey(e: KeyboardEvent) {
 		if (e.key === 'Enter') {
@@ -170,8 +159,8 @@
 			const focusableElements = root.querySelectorAll<HTMLElement>(
 				'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
 			);
-			
-			const focusable = Array.from(focusableElements).filter(el => {
+
+			const focusable = Array.from(focusableElements).filter((el) => {
 				return el.offsetWidth > 0 || el.offsetHeight > 0 || el === document.activeElement;
 			});
 
@@ -181,7 +170,11 @@
 			const lastElement = focusable[focusable.length - 1];
 
 			if (e.shiftKey) {
-				if (document.activeElement === firstElement || document.activeElement === document.body || !document.activeElement) {
+				if (
+					document.activeElement === firstElement ||
+					document.activeElement === document.body ||
+					!document.activeElement
+				) {
 					e.preventDefault();
 					if (document.activeElement !== firstElement) {
 						firstElement.focus();
@@ -202,6 +195,23 @@
 		shownAt = Date.now();
 		void loadWorkspace();
 		setTimeout(() => inputEl?.focus(), 30);
+		const unlistenTasks = listen<{ workspacePath?: string; source?: string }>(
+			'tasks://sync',
+			(event) => {
+				if (!workspacePath) return;
+				if (event.payload?.workspacePath && event.payload.workspacePath !== workspacePath) return;
+				if (event.payload?.source === 'quick') return;
+				void loadTasks();
+			}
+		);
+		const unlistenStorageIssues = listen<StorageIssue[]>('storage://issues', (event) => {
+			const taskIssue = event.payload.find(
+				(issue) => issue.code.startsWith('task-') || issue.code === 'duplicate-task'
+			);
+			if (taskIssue) taskController.issue = taskIssue.message;
+			else if (taskController.issue && taskController.issue.startsWith('A task'))
+				taskController.issue = '';
+		});
 
 		// Each time the global shortcut re-shows the window, clear + refocus.
 		const un = listen('quick://focus', () => {
@@ -242,8 +252,11 @@
 		return () => {
 			ro.disconnect();
 			document.documentElement.classList.remove('quick-window');
+			void unlistenTasks.then((f) => f());
+			void unlistenStorageIssues.then((f) => f());
 			void un.then((f) => f());
 			void unfocus.then((f) => f());
+			taskController.dispose();
 		};
 	});
 </script>
@@ -253,7 +266,17 @@
 <div class="quick-app-root" bind:this={rootEl}>
 	<div class="quick-card">
 		<div class="quick-row">
-			<svg class="quick-icon" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+			<svg
+				class="quick-icon"
+				viewBox="0 0 24 24"
+				width="20"
+				height="20"
+				stroke="currentColor"
+				stroke-width="2"
+				fill="none"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
 				<polyline points="9 11 12 14 22 4"></polyline>
 				<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
 			</svg>
@@ -276,6 +299,9 @@
 				<kbd>Enter</kbd> to add · <kbd>Esc</kbd> to close
 			{/if}
 		</div>
+		{#if taskController.issue}
+			<div class="task-error" role="alert">{taskController.issue}</div>
+		{/if}
 	</div>
 
 	{#if workspacePath}
@@ -283,59 +309,132 @@
 			<div class="quick-tasks-container draft-card">
 				<div class="task-expanded-details redesigned">
 					<div class="field-row notebook-row">
-						<NotebookSelect bind:value={draftNotebook} notebooks={notebooks} />
+						<NotebookSelect bind:value={draftNotebook} {notebooks} />
 					</div>
 
 					<div class="field-row">
-						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-						<textarea rows="1" use:autoResize onkeydown={onDraftKey} placeholder="Add details (Shift+Enter for new line)" bind:value={draftDetails} class="field-input textarea-new"></textarea>
+						<svg
+							class="field-icon"
+							viewBox="0 0 24 24"
+							stroke="currentColor"
+							stroke-width="2"
+							fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg
+						>
+						<textarea
+							rows="1"
+							use:autoResize
+							onkeydown={onDraftKey}
+							placeholder="Add details (Shift+Enter for new line)"
+							bind:value={draftDetails}
+							class="field-input textarea-new"
+						></textarea>
 					</div>
 
 					<div class="field-row">
-						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+						<svg
+							class="field-icon"
+							viewBox="0 0 24 24"
+							stroke="currentColor"
+							stroke-width="2"
+							fill="none"
+							><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle
+								cx="12"
+								cy="12"
+								r="2"
+							/></svg
+						>
 						<input
 							type="text"
 							placeholder="Add deadline"
 							bind:value={draftDueDate}
 							class="field-input date-time-new"
 							onkeydown={onDraftKey}
-							onfocus={(e) => { e.currentTarget.type = 'date'; if (!draftDueDate) draftDueDate = todayISO(); }}
-							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }}
+							onfocus={(e) => {
+								e.currentTarget.type = 'date';
+								if (!draftDueDate) draftDueDate = todayISO();
+							}}
+							onblur={(e) => {
+								if (!e.currentTarget.value) e.currentTarget.type = 'text';
+							}}
 						/>
 					</div>
 
 					<div class="field-row">
-						<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+						<svg
+							class="field-icon"
+							viewBox="0 0 24 24"
+							stroke="currentColor"
+							stroke-width="2"
+							fill="none"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg
+						>
 						<input
 							type="text"
 							placeholder="Add date/time"
 							bind:value={draftDueTime}
 							class="field-input date-time-new"
 							onkeydown={onDraftKey}
-							onfocus={(e) => e.currentTarget.type = 'time'}
-							onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }}
+							onfocus={(e) => (e.currentTarget.type = 'time')}
+							onblur={(e) => {
+								if (!e.currentTarget.value) e.currentTarget.type = 'text';
+							}}
 						/>
 					</div>
 
 					<div class="subtasks-container">
-						{#each draftSubtasks as subtask, i}
+						{#each draftSubtasks as subtask, i (subtask.id ?? i)}
 							<div class="subtask-row">
-								<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
-								<button class="subtask-circle" class:done={subtask.done} onclick={() => subtask.done = !subtask.done} tabindex="-1"></button>
-								<input type="text" bind:value={subtask.text} class="field-input subtask-input-new" class:done={subtask.done} />
-								<button class="subtask-remove" tabindex="-1" onclick={() => draftSubtasks.splice(i, 1)}>&times;</button>
+								<svg
+									class="subtask-arrow"
+									viewBox="0 0 24 24"
+									stroke="currentColor"
+									stroke-width="2"
+									fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+								>
+								<button
+									class="subtask-circle"
+									class:done={subtask.done}
+									onclick={() => (subtask.done = !subtask.done)}
+									aria-label={subtask.done ? 'Mark subtask incomplete' : 'Mark subtask complete'}
+									tabindex="-1"
+								></button>
+								<input
+									type="text"
+									bind:value={subtask.text}
+									class="field-input subtask-input-new"
+									class:done={subtask.done}
+								/>
+								<button
+									class="subtask-remove"
+									tabindex="-1"
+									onclick={() => draftSubtasks.splice(i, 1)}>&times;</button
+								>
 							</div>
 						{/each}
 						<div class="subtask-row">
-							<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+							<svg
+								class="subtask-arrow"
+								viewBox="0 0 24 24"
+								stroke="currentColor"
+								stroke-width="2"
+								fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+							>
 							<div class="subtask-circle empty"></div>
-							<input type="text" placeholder="Enter title" class="field-input subtask-input-new" onkeydown={(e) => {
-								if (e.key === 'Enter' && e.currentTarget.value.trim()) {
-									e.preventDefault();
-									draftSubtasks.push({ id: Date.now(), text: e.currentTarget.value.trim(), done: false });
-									e.currentTarget.value = '';
-								}
-							}} />
+							<input
+								type="text"
+								placeholder="Enter title"
+								class="field-input subtask-input-new"
+								onkeydown={(e) => {
+									if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+										e.preventDefault();
+										draftSubtasks.push({
+											id: Date.now(),
+											text: e.currentTarget.value.trim(),
+											done: false
+										});
+										e.currentTarget.value = '';
+									}
+								}}
+							/>
 						</div>
 						<div class="subtask-add-hint">Add subtasks</div>
 					</div>
@@ -344,81 +443,176 @@
 		{:else if tasks.length > 0}
 			<div class="quick-tasks-container">
 				<div class="filters">
-					<button class:active={activeFilter === 'all'} onclick={() => activeFilter = 'all'}>All</button>
-					<button class:active={activeFilter === 'active'} onclick={() => activeFilter = 'active'}>Active</button>
-					<button class:active={activeFilter === 'done'} onclick={() => activeFilter = 'done'}>Done</button>
+					<button class:active={activeFilter === 'all'} onclick={() => (activeFilter = 'all')}
+						>All</button
+					>
+					<button class:active={activeFilter === 'active'} onclick={() => (activeFilter = 'active')}
+						>Active</button
+					>
+					<button class:active={activeFilter === 'done'} onclick={() => (activeFilter = 'done')}
+						>Done</button
+					>
 				</div>
 				<div class="task-list">
 					{#each filteredTasks as task (task.id)}
 						<div class="task-card" class:expanded={expandedTaskId === task.id}>
 							<div class="task-item" class:done={task.done}>
-								<button class="subtask-circle main-task-circle" class:done={task.done} onclick={() => task.done = !task.done} tabindex="-1"></button>
+								<button
+									class="subtask-circle main-task-circle"
+									class:done={task.done}
+									onclick={() => (task.done = !task.done)}
+									aria-label={task.done ? 'Mark task incomplete' : 'Mark task complete'}
+									tabindex="-1"
+								></button>
 								<textarea
 									rows="1"
 									use:autoResize
 									class="task-text-input"
 									bind:value={task.text}
-									onfocus={() => expandedTaskId = task.id}
+									onfocus={() => (expandedTaskId = task.id)}
 								></textarea>
-								<button class="task-remove" tabindex="-1" onclick={(e) => { e.preventDefault(); tasks = tasks.filter(t => t.id !== task.id); }}>&times;</button>
+								<button
+									class="task-remove"
+									tabindex="-1"
+									onclick={(e) => {
+										e.preventDefault();
+										void removeTask(task.id);
+									}}>&times;</button
+								>
 							</div>
 							{#if expandedTaskId === task.id}
 								<div class="task-expanded-details redesigned">
 									<div class="field-row notebook-row">
-														<NotebookSelect bind:value={task.notebook} notebooks={notebooks} />
-													</div>
-
-									<div class="field-row">
-										<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-										<textarea rows="1" use:autoResize placeholder="Add details" bind:value={task.details} class="field-input textarea-new"></textarea>
+										<NotebookSelect bind:value={task.notebook} {notebooks} />
 									</div>
 
 									<div class="field-row">
-										<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-										<input 
-											type="text" 
-											placeholder="Add deadline" 
-											bind:value={task.dueDate} 
-											class="field-input date-time-new" 
-											onfocus={(e) => { e.currentTarget.type = 'date'; if (!task.dueDate) task.dueDate = todayISO(); }}
-											onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+										<svg
+											class="field-icon"
+											viewBox="0 0 24 24"
+											stroke="currentColor"
+											stroke-width="2"
+											fill="none"><path d="M4 6h16M4 12h16M4 18h16" /></svg
+										>
+										<textarea
+											rows="1"
+											use:autoResize
+											placeholder="Add details"
+											bind:value={task.details}
+											class="field-input textarea-new"
+										></textarea>
+									</div>
+
+									<div class="field-row">
+										<svg
+											class="field-icon"
+											viewBox="0 0 24 24"
+											stroke="currentColor"
+											stroke-width="2"
+											fill="none"
+											><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle
+												cx="12"
+												cy="12"
+												r="2"
+											/></svg
+										>
+										<input
+											type="text"
+											placeholder="Add deadline"
+											bind:value={task.dueDate}
+											class="field-input date-time-new"
+											onfocus={(e) => {
+												e.currentTarget.type = 'date';
+												if (!task.dueDate) task.dueDate = todayISO();
+											}}
+											onblur={(e) => {
+												if (!e.currentTarget.value) e.currentTarget.type = 'text';
+											}}
 										/>
 									</div>
 
 									<div class="field-row">
-										<svg class="field-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-										<input 
-											type="text" 
-											placeholder="Add date/time" 
-											bind:value={task.dueTime} 
-											class="field-input date-time-new" 
-											onfocus={(e) => e.currentTarget.type = 'time'} 
-											onblur={(e) => { if (!e.currentTarget.value) e.currentTarget.type = 'text'; }} 
+										<svg
+											class="field-icon"
+											viewBox="0 0 24 24"
+											stroke="currentColor"
+											stroke-width="2"
+											fill="none"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg
+										>
+										<input
+											type="text"
+											placeholder="Add date/time"
+											bind:value={task.dueTime}
+											class="field-input date-time-new"
+											onfocus={(e) => (e.currentTarget.type = 'time')}
+											onblur={(e) => {
+												if (!e.currentTarget.value) e.currentTarget.type = 'text';
+											}}
 										/>
 									</div>
 
 									<div class="subtasks-container">
 										{#if task.subtasks}
-											{#each task.subtasks as subtask, i}
+											{#each task.subtasks as subtask, i (subtask.id ?? i)}
 												<div class="subtask-row">
-													<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
-													<button class="subtask-circle" class:done={subtask.done} onclick={() => subtask.done = !subtask.done} tabindex="-1"></button>
-													<input type="text" bind:value={subtask.text} class="field-input subtask-input-new" class:done={subtask.done} />
-													<button class="subtask-remove" tabindex="-1" onclick={() => task.subtasks!.splice(i, 1)}>&times;</button>
+													<svg
+														class="subtask-arrow"
+														viewBox="0 0 24 24"
+														stroke="currentColor"
+														stroke-width="2"
+														fill="none"
+														><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+													>
+													<button
+														class="subtask-circle"
+														class:done={subtask.done}
+														onclick={() => (subtask.done = !subtask.done)}
+														aria-label={subtask.done
+															? 'Mark subtask incomplete'
+															: 'Mark subtask complete'}
+														tabindex="-1"
+													></button>
+													<input
+														type="text"
+														bind:value={subtask.text}
+														class="field-input subtask-input-new"
+														class:done={subtask.done}
+													/>
+													<button
+														class="subtask-remove"
+														tabindex="-1"
+														onclick={() => task.subtasks!.splice(i, 1)}>&times;</button
+													>
 												</div>
 											{/each}
 										{/if}
 										<div class="subtask-row">
-											<svg class="subtask-arrow" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg>
+											<svg
+												class="subtask-arrow"
+												viewBox="0 0 24 24"
+												stroke="currentColor"
+												stroke-width="2"
+												fill="none"
+												><path d="M6 4v6a2 2 0 0 0 2 2h10" /><path d="M15 9l3 3-3 3" /></svg
+											>
 											<div class="subtask-circle empty"></div>
-											<input type="text" placeholder="Enter title" class="field-input subtask-input-new" onkeydown={(e) => {
-												if (e.key === 'Enter' && e.currentTarget.value.trim()) {
-													e.preventDefault();
-													task.subtasks = task.subtasks || [];
-													task.subtasks.push({ id: Date.now(), text: e.currentTarget.value.trim(), done: false });
-													e.currentTarget.value = '';
-												}
-											}} />
+											<input
+												type="text"
+												placeholder="Enter title"
+												class="field-input subtask-input-new"
+												onkeydown={(e) => {
+													if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+														e.preventDefault();
+														task.subtasks = task.subtasks || [];
+														task.subtasks.push({
+															id: Date.now(),
+															text: e.currentTarget.value.trim(),
+															done: false
+														});
+														e.currentTarget.value = '';
+													}
+												}}
+											/>
 										</div>
 										<div class="subtask-add-hint">Add subtasks</div>
 									</div>
@@ -457,11 +651,11 @@
 		background: var(--neutral-700);
 		border-radius: 4px;
 	}
-	/* Readable text selection: orange highlight with dark text (the app default).
-	   A faint white background here left the (dark) selected text near-invisible. */
+	/* Readable text selection: theme orange highlight with dark text (matches
+	   the app-wide selection colors). */
 	:global(html.quick-window ::selection) {
 		background: var(--bg-selection) !important;
-		color: var(--text-inverse) !important;
+		color: var(--text-selection) !important;
 	}
 	.quick-app-root {
 		width: 100vw;
@@ -577,7 +771,7 @@
 	.task-remove:hover {
 		color: var(--danger);
 	}
-	
+
 	.task-expanded-details.redesigned {
 		display: flex;
 		flex-direction: column;
@@ -620,22 +814,6 @@
 	}
 	.field-input::placeholder {
 		color: var(--text-secondary);
-	}
-	.select-new {
-		appearance: none;
-		-webkit-appearance: none;
-		cursor: pointer;
-		font-weight: 500;
-		font-size: 0.95rem;
-		color: var(--text-secondary);
-		padding: 0;
-		background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23888" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>');
-		background-repeat: no-repeat;
-		background-position: right center;
-		background-size: 16px;
-		padding-right: 24px;
-		width: auto;
-		flex: none;
 	}
 	.textarea-new {
 		resize: none;
@@ -707,7 +885,7 @@
 		opacity: 1;
 	}
 	.subtask-remove:hover {
-		color: var(--danger, #ff4444);
+		color: var(--danger);
 	}
 	.subtask-add-hint {
 		margin-left: 56px;
@@ -738,7 +916,7 @@
 		color: var(--text-secondary);
 	}
 	.quick-hint .ok {
-		color: var(--success, #4caf50);
+		color: var(--success);
 	}
 	kbd {
 		background: var(--bg-code);

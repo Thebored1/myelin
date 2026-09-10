@@ -1,0 +1,40 @@
+{
+  "$schema": "./ai-config.schema.json",
+  "version": 1,
+  "activeProfile": "local-maple",
+  "profiles": {
+    "local-maple": {
+      "modelPath": "/models/maple-tq2_0.gguf",
+      "runtime": "maple",
+      "server": { "host": "127.0.0.1", "port": 39281 },
+      "inference": {
+        "contextSize": 24096,
+        "gpuLayers": null,
+        "threads": 8,
+        "backend": "auto",
+        "gpuDevice": null,
+        "temperature": 0.0,
+        "topP": 0.95,
+        "chatFormat": null,
+        "thinking": false,
+        "autoOffload": true,
+        "maxTurns": 4,
+        "extraArgs": []
+      }
+    }
+  },
+  "runtimes": {
+    "maple": {
+      "displayName": "Maple llama-server",
+      "source": { "type": "path", "executable": "/opt/maple/bin/llama-server" },
+      "cacheReuseTokens": 256,
+      "extraArgs": [],
+      "environment": {}
+    }
+  },
+  "cache": { "maxBytes": 8589934592 },
+  "embedding": { "enabled": false },
+  "retrieval": { "searxngUrl": null },
+  "tools": { "deterministic": true, "gating": false },
+  "agent": {}
+}

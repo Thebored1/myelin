@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A single bullet-point subtask. Persisted inside its parent [`Task`] file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -72,6 +73,19 @@ pub struct ChatMessage {
     pub snapshot: Option<NoteSnapshot>,
 }
 
+/// The portion of a document currently visible in a split-pane viewer. The
+/// viewer owns the layout (PDF page, EPUB chapter, HTML viewport, etc.) and
+/// sends the already extracted text so the backend can make it the stable
+/// model-prefix context without re-parsing binary document formats.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveSection {
+    pub key: String,
+    pub content: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteSnapshot {
@@ -113,6 +127,47 @@ pub struct AppSnapshot {
     pub library_facets: LibraryFacets,
     pub provider_status: ProviderStatus,
     pub index_state: IndexState,
+    #[serde(default)]
+    pub storage_issues: Vec<StorageIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageIssue {
+    pub code: String,
+    pub severity: String,
+    pub path: Option<String>,
+    pub message: String,
+    pub recoverable: bool,
+}
+
+/// A user-authored application color theme. Built-in themes are defined by the
+/// frontend and are never persisted in this collection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorTheme {
+    pub schema_version: u32,
+    pub id: String,
+    pub name: String,
+    pub base_theme_id: String,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub tokens: HashMap<String, String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppearanceSettings {
+    pub schema_version: u32,
+    pub active_theme_id: String,
+    #[serde(default)]
+    pub custom_themes: Vec<ColorTheme>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -221,4 +276,8 @@ pub struct SearchResult {
     pub note: NoteSummary,
     pub score: f32,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_excerpt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_section: Option<String>,
 }

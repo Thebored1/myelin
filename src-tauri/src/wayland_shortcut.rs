@@ -51,12 +51,16 @@ async fn run(app: AppHandle, configured: String, app_id: String) -> ashpd::Resul
     let session = shortcuts.create_session().await?;
 
     let trigger = to_portal_trigger(&configured);
-    let new_shortcut =
-        NewShortcut::new("toggle-quick-capture", "Open Myelin quick capture").preferred_trigger(trigger.as_deref());
+    let new_shortcut = NewShortcut::new("toggle-quick-capture", "Open Myelin quick capture")
+        .preferred_trigger(trigger.as_deref());
 
     // Ask the desktop to bind it (may prompt the user the first time).
     shortcuts
-        .bind_shortcuts(&session, &[new_shortcut], &ashpd::WindowIdentifier::default())
+        .bind_shortcuts(
+            &session,
+            &[new_shortcut],
+            &ashpd::WindowIdentifier::default(),
+        )
         .await?;
     log::info!(
         "Wayland global shortcut bound via portal (suggested trigger {:?}); waiting for activation",

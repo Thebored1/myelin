@@ -1,40 +1,31 @@
-import { writable } from 'svelte/store';
+import { get } from 'svelte/store';
+import { ThemeController } from './theme/controller.svelte';
 
-// Light/dark theming. The actual colors live as CSS custom properties in
-// +layout.svelte: `:root` holds the dark defaults, `:root[data-theme='light']`
-// overrides them. This store just flips the `data-theme` attribute on <html>
-// and remembers the choice. A tiny inline script in app.html applies the saved
-// value before first paint so there's no dark-mode flash on light startup.
+export type { AppearanceSettings, ColorTheme, ThemeMode, ThemeTokens } from './theme/types';
 
-export type Theme = 'light' | 'dark';
+export const themeController = new ThemeController();
+export const activeThemeId = themeController.activeThemeId;
+export const availableThemes = themeController.themes;
+export const activeColorTheme = themeController.activeTheme;
+export const themeError = themeController.error;
 
-const STORAGE_KEY = 'myelin_theme';
-
-function readInitial(): Theme {
-	if (typeof document !== 'undefined') {
-		const attr = document.documentElement.dataset.theme;
-		if (attr === 'light' || attr === 'dark') return attr;
+// Compatibility store for existing consumers. New code should use the theme
+// controller and activeColorTheme so custom themes are not reduced to light/dark.
+export const theme = {
+	subscribe(run: (value: 'light' | 'dark') => void) {
+		return themeController.activeTheme.subscribe((value) => run(value.mode));
 	}
-	if (typeof localStorage !== 'undefined') {
-		const saved = localStorage.getItem(STORAGE_KEY);
-		if (saved === 'light' || saved === 'dark') return saved;
-	}
-	return 'dark';
+};
+
+export async function initializeThemes(): Promise<void> {
+	await themeController.mount();
 }
 
-export const theme = writable<Theme>(readInitial());
-
-// Mirror every change to the DOM and localStorage. writable runs this once
-// immediately on subscribe, so importing this module is enough to apply it.
-theme.subscribe((value) => {
-	if (typeof document !== 'undefined') {
-		document.documentElement.dataset.theme = value;
-	}
-	if (typeof localStorage !== 'undefined') {
-		localStorage.setItem(STORAGE_KEY, value);
-	}
-});
+export function disposeThemes(): void {
+	themeController.dispose();
+}
 
 export function toggleTheme(): void {
-	theme.update((t) => (t === 'dark' ? 'light' : 'dark'));
+	const current = get(themeController.activeTheme);
+	void themeController.activate(current.mode === 'dark' ? 'myelin-light' : 'myelin-dark');
 }

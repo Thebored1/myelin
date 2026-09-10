@@ -1,0 +1,34 @@
+{
+  "queries": [
+    {
+      "id": "exact-place",
+      "query": "Where is the Eiffel Tower located?",
+      "relevant_chunk_ids": ["paris-location"]
+    },
+    {
+      "id": "semantic-attention",
+      "query": "How do transformer models relate distant words?",
+      "relevant_chunk_ids": ["attention-mechanism"]
+    },
+    {
+      "id": "identifier",
+      "query": "createIndex req_42A",
+      "relevant_chunk_ids": ["api-identifiers"]
+    },
+    {
+      "id": "url",
+      "query": "v1 rerank top_n endpoint",
+      "relevant_chunk_ids": ["url-reference"]
+    },
+    {
+      "id": "latex",
+      "query": "What does section Methods use for the sum loss?",
+      "relevant_chunk_ids": ["latex-symbols"]
+    },
+    {
+      "id": "cjk",
+      "query": "検索品質 ページ番号 見出し",
+      "relevant_chunk_ids": ["cjk-note"]
+    }
+  ]
+}

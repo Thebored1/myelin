@@ -104,7 +104,7 @@
 			border: 'none'
 		},
 		'.cm-activeLine': {
-			backgroundColor: 'color-mix(in srgb, var(--accent-200, #6ea8fe) 9%, transparent)'
+			backgroundColor: 'color-mix(in srgb, var(--accent-200) 9%, transparent)'
 		},
 		'.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text-primary)' },
 		'.cm-cursor': { borderLeftColor: 'var(--text-primary)' },
@@ -112,7 +112,7 @@
 			{ backgroundColor: 'var(--bg-selection) !important' },
 		'.cm-content ::selection': {
 			backgroundColor: 'var(--bg-selection) !important',
-			color: 'var(--text-inverse) !important'
+			color: 'var(--text-selection) !important'
 		},
 		'&.cm-focused': { outline: 'none' },
 		'.cm-lint-marker': { width: '0.8em', height: '0.8em' }
@@ -120,11 +120,11 @@
 
 	const latexHighlightStyle = HighlightStyle.define([
 		{ tag: [tags.keyword, tags.processingInstruction], color: 'var(--accent-200)' },
-		{ tag: [tags.tagName, tags.typeName, tags.className], color: '#4f7fd5' },
+		{ tag: [tags.tagName, tags.typeName, tags.className], color: 'var(--accent-200)' },
 		{ tag: [tags.string, tags.special(tags.string)], color: 'var(--success)' },
-		{ tag: [tags.number, tags.bool, tags.atom], color: '#9c6ade' },
+		{ tag: [tags.number, tags.bool, tags.atom], color: 'var(--accent-300)' },
 		{ tag: [tags.comment, tags.docComment], color: 'var(--text-secondary)', fontStyle: 'italic' },
-		{ tag: [tags.variableName, tags.propertyName, tags.attributeName], color: '#16856b' },
+		{ tag: [tags.variableName, tags.propertyName, tags.attributeName], color: 'var(--success)' },
 		{ tag: [tags.bracket, tags.paren, tags.punctuation], color: 'var(--neutral-500)' },
 		{ tag: [tags.strong], fontWeight: '700' },
 		{ tag: [tags.emphasis], fontStyle: 'italic' },
@@ -230,14 +230,18 @@
 	function formatLatex() {
 		if (!view) return;
 		let depth = 0;
-		const formatted = view.state.doc.toString().split('\n').map((raw) => {
-			const line = raw.trimEnd();
-			const text = line.trimStart();
-			if (/^\\end\{/.test(text)) depth = Math.max(0, depth - 1);
-			const result = text ? `${'  '.repeat(depth)}${text}` : '';
-			if (/^\\begin\{/.test(text) && !/^\\begin\{document\}/.test(text)) depth += 1;
-			return result;
-		}).join('\n');
+		const formatted = view.state.doc
+			.toString()
+			.split('\n')
+			.map((raw) => {
+				const line = raw.trimEnd();
+				const text = line.trimStart();
+				if (/^\\end\{/.test(text)) depth = Math.max(0, depth - 1);
+				const result = text ? `${'  '.repeat(depth)}${text}` : '';
+				if (/^\\begin\{/.test(text) && !/^\\begin\{document\}/.test(text)) depth += 1;
+				return result;
+			})
+			.join('\n');
 		view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: formatted } });
 		view.focus();
 	}
@@ -311,39 +315,171 @@
 <div style="width: 100%; height: 100%; min-width: 0; display: flex; flex-direction: column;">
 	<div class="tex-toolbar" class:dark={$theme !== 'light'}>
 		<div class="tex-tools">
-			<button class="tex-btn" onclick={() => insertText('\\textbf{', '}')} aria-label="Bold" title="Bold"><svg><use href="#vditor-icon-bold"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertText('\\textit{', '}')} aria-label="Italic" title="Italic"><svg><use href="#vditor-icon-italic"></use></svg></button>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\textbf{', '}')}
+				aria-label="Bold"
+				title="Bold"><svg><use href="#vditor-icon-bold"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\textit{', '}')}
+				aria-label="Italic"
+				title="Italic"><svg><use href="#vditor-icon-italic"></use></svg></button
+			>
 			<details class="tex-heading-menu" bind:this={headingMenu}>
-				<summary class="tex-btn" aria-label="Heading level" title="Heading level"><svg><use href="#vditor-icon-headings"></use></svg></summary>
+				<summary class="tex-btn" aria-label="Heading level" title="Heading level"
+					><svg><use href="#vditor-icon-headings"></use></svg></summary
+				>
 				<div class="tex-heading-popover">
-					<button onclick={(e) => { insertPlaceholder('\\section{', 'Heading', '}'); e.currentTarget.closest('details')?.removeAttribute('open'); }}>Section <span>&lt;Alt+Ctrl+1&gt;</span></button>
-					<button onclick={(e) => { insertPlaceholder('\\subsection{', 'Heading', '}'); e.currentTarget.closest('details')?.removeAttribute('open'); }}>Subsection <span>&lt;Alt+Ctrl+2&gt;</span></button>
-					<button onclick={(e) => { insertPlaceholder('\\subsubsection{', 'Heading', '}'); e.currentTarget.closest('details')?.removeAttribute('open'); }}>Subsubsection <span>&lt;Alt+Ctrl+3&gt;</span></button>
-					<button onclick={(e) => { insertPlaceholder('\\paragraph{', 'Heading', '}'); e.currentTarget.closest('details')?.removeAttribute('open'); }}>Paragraph <span>&lt;Alt+Ctrl+4&gt;</span></button>
-					<button onclick={(e) => { insertPlaceholder('\\subparagraph{', 'Heading', '}'); e.currentTarget.closest('details')?.removeAttribute('open'); }}>Subparagraph <span>&lt;Alt+Ctrl+5&gt;</span></button>
-					<button onclick={(e) => { insertPlaceholder('\\chapter{', 'Heading', '}'); e.currentTarget.closest('details')?.removeAttribute('open'); }}>Chapter <span>&lt;Alt+Ctrl+6&gt;</span></button>
+					<button
+						onclick={(e) => {
+							insertPlaceholder('\\section{', 'Heading', '}');
+							e.currentTarget.closest('details')?.removeAttribute('open');
+						}}>Section <span>&lt;Alt+Ctrl+1&gt;</span></button
+					>
+					<button
+						onclick={(e) => {
+							insertPlaceholder('\\subsection{', 'Heading', '}');
+							e.currentTarget.closest('details')?.removeAttribute('open');
+						}}>Subsection <span>&lt;Alt+Ctrl+2&gt;</span></button
+					>
+					<button
+						onclick={(e) => {
+							insertPlaceholder('\\subsubsection{', 'Heading', '}');
+							e.currentTarget.closest('details')?.removeAttribute('open');
+						}}>Subsubsection <span>&lt;Alt+Ctrl+3&gt;</span></button
+					>
+					<button
+						onclick={(e) => {
+							insertPlaceholder('\\paragraph{', 'Heading', '}');
+							e.currentTarget.closest('details')?.removeAttribute('open');
+						}}>Paragraph <span>&lt;Alt+Ctrl+4&gt;</span></button
+					>
+					<button
+						onclick={(e) => {
+							insertPlaceholder('\\subparagraph{', 'Heading', '}');
+							e.currentTarget.closest('details')?.removeAttribute('open');
+						}}>Subparagraph <span>&lt;Alt+Ctrl+5&gt;</span></button
+					>
+					<button
+						onclick={(e) => {
+							insertPlaceholder('\\chapter{', 'Heading', '}');
+							e.currentTarget.closest('details')?.removeAttribute('open');
+						}}>Chapter <span>&lt;Alt+Ctrl+6&gt;</span></button
+					>
 				</div>
 			</details>
 			<span class="tex-divider"></span>
-			<button class="tex-btn" onclick={() => insertText('$', '$')} aria-label="Inline math" title="Inline math"><svg><use href="#vditor-icon-inline-code"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')} aria-label="Math block" title="Math block"><svg><use href="#vditor-icon-inline-code"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')} aria-label="Bulleted list" title="Bulleted list"><svg><use href="#vditor-icon-list"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertText('\\begin{enumerate}\n\\item ', '\n\\end{enumerate}')} aria-label="Numbered list" title="Numbered list"><svg><use href="#vditor-icon-ordered-list"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertText('\\begin{quote}\n', '\n\\end{quote}')} aria-label="Quote" title="Quote"><svg><use href="#vditor-icon-quote"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertText('\\begin{verbatim}\n', '\n\\end{verbatim}')} aria-label="Code block" title="Code block"><svg><use href="#vditor-icon-code"></use></svg></button>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('$', '$')}
+				aria-label="Inline math"
+				title="Inline math"><svg><use href="#vditor-icon-inline-code"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\begin{equation}\n', '\n\\end{equation}')}
+				aria-label="Math block"
+				title="Math block"><svg><use href="#vditor-icon-inline-code"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\begin{itemize}\n\\item ', '\n\\end{itemize}')}
+				aria-label="Bulleted list"
+				title="Bulleted list"><svg><use href="#vditor-icon-list"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\begin{enumerate}\n\\item ', '\n\\end{enumerate}')}
+				aria-label="Numbered list"
+				title="Numbered list"><svg><use href="#vditor-icon-ordered-list"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\begin{quote}\n', '\n\\end{quote}')}
+				aria-label="Quote"
+				title="Quote"><svg><use href="#vditor-icon-quote"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertText('\\begin{verbatim}\n', '\n\\end{verbatim}')}
+				aria-label="Code block"
+				title="Code block"><svg><use href="#vditor-icon-code"></use></svg></button
+			>
 			<span class="tex-divider"></span>
-			<button class="tex-btn" onclick={() => insertPlaceholder('\\href{url}{', 'text', '}')} aria-label="Link" title="Link"><svg><use href="#vditor-icon-link"></use></svg></button>
-			<button class="tex-btn" onclick={() => void pickImage()} aria-label="Insert image" title="Insert image"><svg><use href="#vditor-icon-upload"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertText('\\begin{table}[ht]\n\\centering\n\\begin{tabular}{ll}\nA & B \\\\\n\\hline\n1 & 2 \\\\\n\\end{tabular}\n\\caption{Caption}\n\\end{table}')} aria-label="Table" title="Table"><svg><use href="#vditor-icon-table"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertPlaceholder('\\cite{', 'key', '}')} aria-label="Citation" title="Citation"><svg><use href="#vditor-icon-link"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertPlaceholder('\\label{', 'label', '}')} aria-label="Label" title="Label"><svg><use href="#vditor-icon-check"></use></svg></button>
-			<button class="tex-btn" onclick={() => insertPlaceholder('\\ref{', 'label', '}')} aria-label="Reference" title="Reference"><svg><use href="#vditor-icon-link"></use></svg></button>
-			<button class="tex-btn" onclick={toggleComment} aria-label="Comment or uncomment" title="Comment or uncomment"><svg><use href="#vditor-icon-comment"></use></svg></button>
-			<button class="tex-btn" onclick={formatLatex} aria-label="Format document" title="Format document"><svg><use href="#vditor-icon-indent"></use></svg></button>
-			<button class="tex-btn" onclick={() => runEdit(openSearchPanel)} aria-label="Find and replace" title="Find and replace"><svg><use href="#vditor-icon-preview"></use></svg></button>
+			<button
+				class="tex-btn"
+				onclick={() => insertPlaceholder('\\href{url}{', 'text', '}')}
+				aria-label="Link"
+				title="Link"><svg><use href="#vditor-icon-link"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => void pickImage()}
+				aria-label="Insert image"
+				title="Insert image"><svg><use href="#vditor-icon-upload"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() =>
+					insertText(
+						'\\begin{table}[ht]\n\\centering\n\\begin{tabular}{ll}\nA & B \\\\\n\\hline\n1 & 2 \\\\\n\\end{tabular}\n\\caption{Caption}\n\\end{table}'
+					)}
+				aria-label="Table"
+				title="Table"><svg><use href="#vditor-icon-table"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertPlaceholder('\\cite{', 'key', '}')}
+				aria-label="Citation"
+				title="Citation"><svg><use href="#vditor-icon-link"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertPlaceholder('\\label{', 'label', '}')}
+				aria-label="Label"
+				title="Label"><svg><use href="#vditor-icon-check"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => insertPlaceholder('\\ref{', 'label', '}')}
+				aria-label="Reference"
+				title="Reference"><svg><use href="#vditor-icon-link"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={toggleComment}
+				aria-label="Comment or uncomment"
+				title="Comment or uncomment"><svg><use href="#vditor-icon-comment"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={formatLatex}
+				aria-label="Format document"
+				title="Format document"><svg><use href="#vditor-icon-indent"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				onclick={() => runEdit(openSearchPanel)}
+				aria-label="Find and replace"
+				title="Find and replace"><svg><use href="#vditor-icon-preview"></use></svg></button
+			>
 			<span class="tex-divider"></span>
-			<button class="tex-btn" disabled={!canUndo} onclick={() => runEdit(undo)} aria-label="Undo" title="Undo"><svg><use href="#vditor-icon-undo"></use></svg></button>
-			<button class="tex-btn" disabled={!canRedo} onclick={() => runEdit(redo)} aria-label="Redo" title="Redo"><svg><use href="#vditor-icon-redo"></use></svg></button>
+			<button
+				class="tex-btn"
+				disabled={!canUndo}
+				onclick={() => runEdit(undo)}
+				aria-label="Undo"
+				title="Undo"><svg><use href="#vditor-icon-undo"></use></svg></button
+			>
+			<button
+				class="tex-btn"
+				disabled={!canRedo}
+				onclick={() => runEdit(redo)}
+				aria-label="Redo"
+				title="Redo"><svg><use href="#vditor-icon-redo"></use></svg></button
+			>
 		</div>
 		{#if onCompile}
 			<div class="tex-compile">
@@ -363,8 +499,8 @@
 
 <style>
 	.tex-toolbar {
-		--toolbar-icon-color: #586069;
-		--toolbar-icon-hover-color: #4285f4;
+		--toolbar-icon-color: var(--text-secondary);
+		--toolbar-icon-hover-color: var(--accent-100);
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
@@ -382,8 +518,8 @@
 		scrollbar-width: none;
 	}
 	.tex-toolbar.dark {
-		--toolbar-icon-color: #b9b9b9;
-		--toolbar-icon-hover-color: #fff;
+		--toolbar-icon-color: var(--text-secondary);
+		--toolbar-icon-hover-color: var(--text-primary);
 	}
 	.tex-toolbar::-webkit-scrollbar {
 		display: none;

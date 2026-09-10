@@ -10,7 +10,12 @@ declare global {
 	}
 	namespace svelteHTML {
 		interface IntrinsicElements {
-			'math-field': any;
+			'math-field': {
+				value?: string;
+				placeholder?: string;
+				class?: string;
+				[key: string]: unknown;
+			};
 		}
 	}
 }

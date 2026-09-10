@@ -158,12 +158,23 @@ export type AppSnapshot = {
 	};
 	providerStatus: ProviderStatus;
 	indexState: IndexState;
+	storageIssues: StorageIssue[];
+};
+
+export type StorageIssue = {
+	code: string;
+	severity: string;
+	path?: string | null;
+	message: string;
+	recoverable: boolean;
 };
 
 export type SearchResult = {
 	note: NoteSummary;
 	score: number;
 	reason: string;
+	matchExcerpt?: string | null;
+	matchedSection?: string | null;
 };
 
 export type SearchResponse = {

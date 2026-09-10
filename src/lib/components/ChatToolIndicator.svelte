@@ -10,8 +10,13 @@
 		if (n.includes('search')) return 'search';
 		if (n.includes('read')) return 'read';
 		if (
-			n.includes('write') || n.includes('append') || n.includes('note') ||
-			n.includes('text') || n.includes('clear') || n.includes('replace') || n.includes('delete')
+			n.includes('write') ||
+			n.includes('append') ||
+			n.includes('note') ||
+			n.includes('text') ||
+			n.includes('clear') ||
+			n.includes('replace') ||
+			n.includes('delete')
 		)
 			return 'edit';
 		return 'tool';
@@ -30,11 +35,33 @@
 </script>
 
 <div class="chat-tool-indicator">
-	<button class="tool-header" onclick={() => expanded = !expanded}>
-		<svg class="dropdown-arrow" class:expanded width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+	<button class="tool-header" onclick={() => (expanded = !expanded)}>
+		<svg
+			class="dropdown-arrow"
+			class:expanded
+			width="12"
+			height="12"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+		>
 			<polyline points="9 18 15 12 9 6"></polyline>
 		</svg>
-		<svg class="tool-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+		<svg
+			class="tool-icon"
+			width="13"
+			height="13"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			aria-hidden="true"
+		>
 			{#if kind === 'web'}
 				<circle cx="12" cy="12" r="9"></circle>
 				<path d="M3 12h18"></path>
@@ -49,7 +76,8 @@
 				<path d="M12 20h9"></path>
 				<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>
 			{:else}
-				<path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 1 5.4-5.4l-2.6 2.6-2-2z"></path>
+				<path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 1 5.4-5.4l-2.6 2.6-2-2z"
+				></path>
 			{/if}
 		</svg>
 		<span class="tool-name" class:web={kind === 'web'}>{tool.name}</span>
@@ -72,7 +100,7 @@
 		margin-top: var(--space-1);
 		margin-bottom: var(--space-1);
 	}
-	
+
 	.tool-header {
 		display: flex;
 		align-items: center;
@@ -86,7 +114,9 @@
 		cursor: pointer;
 		text-align: left;
 		opacity: 0.8;
-		transition: opacity 0.2s, color 0.2s;
+		transition:
+			opacity 0.2s,
+			color 0.2s;
 	}
 
 	.tool-header:hover {

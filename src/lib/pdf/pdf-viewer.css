@@ -1,0 +1,324 @@
+.pdf-wrapper {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	background: var(--bg-body);
+	border-right: 1px solid var(--border-default);
+	position: relative;
+}
+
+.pdf-controls {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	padding: 0 var(--space-4);
+	height: 48px;
+	box-sizing: border-box;
+	background: var(--bg-panel);
+	border-bottom: 1px solid var(--border-default);
+	font-family: var(--font-mono);
+	font-size: 0.85rem;
+	z-index: 100;
+	/* A scrollable x-axis also computes the y-axis as auto, clipping the
+		   absolutely positioned dropdowns at the toolbar's 48px boundary. */
+	overflow: visible;
+	min-width: 0;
+}
+
+.pdf-controls button {
+	background: var(--bg-surface);
+	border: 1px solid var(--border-default);
+	color: var(--text-primary);
+	padding: 0 0.35rem;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	height: 28px;
+	min-width: 28px;
+	box-sizing: border-box;
+}
+
+/* Close button: neutral toolbar styling (not a red standout), turns red on hover. */
+.close-pdf-btn {
+	color: var(--text-secondary);
+}
+.close-pdf-btn:hover {
+	color: var(--danger);
+	border-color: var(--danger) !important;
+}
+
+.display-menu-container {
+	position: relative;
+}
+
+.display-btn {
+	padding: 0.35rem 0.5rem !important;
+}
+
+.dropdown {
+	position: absolute;
+	z-index: 200;
+	top: 100%;
+	left: 0;
+	margin-top: 0.5rem;
+	background: var(--bg-panel);
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-md);
+	box-shadow: 0 4px 12px var(--shadow-color);
+	padding: 0.5rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	min-width: 180px;
+}
+
+.menu-group {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.menu-group button {
+	justify-content: flex-start;
+	gap: 0.5rem;
+	border: none;
+	background: transparent;
+	padding: 0.35rem 0.5rem;
+	font-size: 0.85rem;
+}
+
+.menu-group button:hover {
+	background: var(--bg-hover);
+}
+
+.menu-group button.active {
+	background: var(--accent-100);
+	color: var(--text-inverse);
+}
+
+.menu-divider {
+	height: 1px;
+	background: var(--border-default);
+	margin: 0.25rem 0;
+}
+
+.attach-note-btn {
+	background: var(--accent-100) !important;
+	color: var(--text-inverse) !important;
+	border: none !important;
+	font-weight: 600;
+}
+
+.vertical-divider {
+	width: 1px;
+	height: 24px;
+	background: var(--border-default);
+	margin: 0 0.25rem;
+}
+
+.tools-group {
+	display: flex;
+	gap: 0.25rem;
+}
+
+.tools-group button.active {
+	background: var(--accent-100);
+	border-color: var(--accent-200);
+	color: var(--text-inverse);
+}
+
+.spacer {
+	flex: 1;
+}
+
+.page-nav-btn {
+	padding: 0 0.2rem !important;
+	min-width: 24px !important;
+}
+
+.page-nav-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.page-counter {
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
+.pdf-viewer-scroll-area {
+	flex: 1;
+	overflow: auto;
+	position: relative;
+	padding: 2rem;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+/* Layout Modes */
+.pdf-pages-container {
+	display: flex;
+	gap: 1rem;
+	margin: 0 auto;
+}
+
+/* Vertical */
+.pdf-pages-container.layout-vertical {
+	flex-direction: column;
+	align-items: center;
+}
+
+/* Horizontal */
+.pdf-pages-container.layout-horizontal {
+	flex-direction: row;
+	align-items: center;
+}
+
+/* Wrapped */
+.pdf-pages-container.layout-wrapped {
+	flex-direction: row;
+	flex-wrap: wrap;
+	justify-content: center;
+	max-width: 100%;
+}
+
+/* Single-page mode renders only the active page; the toolbar controls navigation. */
+.pdf-pages-container.layout-page {
+	flex-direction: column;
+	align-items: center;
+}
+
+/* Spreads */
+.pdf-pages-container.spread-even,
+.pdf-pages-container.spread-odd {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 1rem;
+	justify-content: center;
+}
+
+.pdf-pages-container.spread-odd > .pdf-page-container:first-child {
+	grid-column: 2; /* Forces the first page to be on the right side */
+}
+
+/* Fix for text layer making text visible on selection */
+.textLayer ::selection {
+	color: transparent !important;
+}
+.textLayer ::-moz-selection {
+	color: transparent !important;
+}
+
+.floating-toolbar {
+	position: absolute;
+	background: var(--bg-panel);
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-md);
+	box-shadow: 0 4px 12px var(--shadow-color);
+	z-index: 100;
+	padding: 0.25rem;
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+}
+
+.swatch-group {
+	display: flex;
+	gap: 0.25rem;
+	padding: 0 0.25rem;
+}
+.swatch-btn {
+	width: 24px;
+	height: 24px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: transparent;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	position: relative;
+	transition: transform 0.1s ease;
+}
+.swatch-btn:hover {
+	transform: scale(1.1);
+}
+.swatch-icon {
+	font-weight: 700;
+	font-family: serif;
+	font-size: 14px;
+	color: var(--text-primary);
+	line-height: 1;
+	border-bottom: 3px solid var(--swatch-border);
+	padding-bottom: 1px;
+}
+.divider {
+	width: 1px;
+	height: 20px;
+	background: var(--border-default);
+	margin: 0 0.25rem;
+}
+.action-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	background: transparent;
+	color: var(--text-secondary);
+	border: none;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	transition:
+		background 0.15s ease,
+		color 0.15s ease;
+}
+.action-btn:hover {
+	background: var(--bg-hover);
+	color: var(--text-primary);
+}
+
+/* More-tools dropdown */
+.more-menu-container {
+	position: relative;
+}
+
+.more-btn {
+	padding: 0.35rem 0.5rem !important;
+	color: var(--text-secondary);
+}
+
+.more-btn.has-active-tool {
+	color: var(--accent-100);
+	border-color: var(--accent-200) !important;
+}
+
+.more-dropdown {
+	right: 0;
+	left: auto;
+	min-width: 160px;
+}
+
+.attach-btn-inline {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	justify-content: flex-start !important;
+	background: color-mix(in srgb, var(--accent-100) 15%, transparent) !important;
+	color: var(--accent-100) !important;
+	border: 1px solid color-mix(in srgb, var(--accent-200) 40%, transparent) !important;
+	font-weight: 600;
+	width: 100%;
+	padding: 0.35rem 0.5rem;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	font-size: 0.85rem;
+}
+
+.attach-btn-inline:hover {
+	background: color-mix(in srgb, var(--accent-100) 25%, transparent) !important;
+}

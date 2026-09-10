@@ -1,0 +1,8 @@
+[package]
+name = "myelin-edit-core"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic note-edit logic shared between the Myelin app and the openharn-myelin sidecar so on-disk edits stay byte-identical."
+
+[dependencies]
+regex = "1"

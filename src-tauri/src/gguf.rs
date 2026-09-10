@@ -48,8 +48,17 @@ impl GgufInfo {
             None => return false,
         };
         const FAMILIES: &[&str] = &[
-            "mamba", "rwkv", "jamba", "granitehybrid", "falcon_h1", "falcon-h1",
-            "nemotron_h", "nemotronh", "bamba", "plamo2", "lfm2",
+            "mamba",
+            "rwkv",
+            "jamba",
+            "granitehybrid",
+            "falcon_h1",
+            "falcon-h1",
+            "nemotron_h",
+            "nemotronh",
+            "bamba",
+            "plamo2",
+            "lfm2",
         ];
         arch.contains("hybrid") || FAMILIES.iter().any(|f| arch.contains(f))
     }
@@ -69,7 +78,11 @@ impl GgufInfo {
             _ => self.embedding_length?,
         };
         // 2 (K and V) * layers * kv_dim * 2 bytes (f16)
-        Some(2u64.saturating_mul(n_layers).saturating_mul(kv_dim).saturating_mul(2))
+        Some(
+            2u64.saturating_mul(n_layers)
+                .saturating_mul(kv_dim)
+                .saturating_mul(2),
+        )
     }
 }
 
@@ -79,7 +92,10 @@ pub fn read_gguf_info(path: &Path) -> io::Result<GgufInfo> {
     let mut r = BufReader::new(File::open(path)?);
 
     if read_u32(&mut r)? != GGUF_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a GGUF file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a GGUF file",
+        ));
     }
     let _version = read_u32(&mut r)?;
     let _tensor_count = read_u64(&mut r)?;
@@ -216,7 +232,9 @@ mod tests {
     #[test]
     fn kv_none_for_recurrent_some_for_transformer() {
         // Hybrid/recurrent → no transformer KV (context sized by trained length).
-        assert!(info("granitehybrid", 40, 4, 64).kv_bytes_per_token().is_none());
+        assert!(info("granitehybrid", 40, 4, 64)
+            .kv_bytes_per_token()
+            .is_none());
         // Transformer → 2 (K+V) * layers * (kv_heads*head_dim) * 2 bytes (f16).
         assert_eq!(
             info("llama", 32, 8, 128).kv_bytes_per_token(),

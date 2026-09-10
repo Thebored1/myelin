@@ -3,8 +3,8 @@ name = "myelin"
 version = "0.2.0"
 description = "Cross-platform local-first AI notes"
 authors = ["Paper"]
-license = ""
-repository = ""
+license = "MIT"
+repository = "https://github.com/Thebored1/myelin"
 edition = "2021"
 rust-version = "1.77.2"
 # The crate ships an extra dev binary (tool_e2e), so `cargo run` / `tauri dev`
@@ -22,6 +22,7 @@ tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
 anyhow = "1.0"
+myelin-edit-core = { path = "edit-core" }
 arrow-array = "53.4"
 arrow-schema = "53.4"
 chrono = { version = "0.4", features = ["serde"] }
@@ -37,7 +38,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 sha2 = "0.10"
-tauri = { version = "2.11.2", features = ["tray-icon"] }
+tauri = { version = "2.11.2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 tauri-plugin-global-shortcut = "2"
@@ -46,9 +47,10 @@ uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2.5"
 rig-core = "0.38.2"
 schemars = { version = "1.2.1", features = ["derive"] }
+scraper = "0.24"
 tempfile = "3.27.0"
 tectonic = "0.16.9"
-tokio = { version = "1.52.3", features = ["sync", "rt"] }
+tokio = { version = "1.52.3", features = ["sync", "rt", "time"] }
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -11,11 +11,11 @@ is 3× faster than the app."
 On launch the app picks the best available binary for the machine, in this
 order, and **falls back automatically** if one fails to start:
 
-| OS | Preference order |
-|----|------------------|
+| OS                              | Preference order          |
+| ------------------------------- | ------------------------- |
 | Windows / Linux, NVIDIA present | `cuda` → `vulkan` → `cpu` |
-| Windows / Linux, no NVIDIA | `vulkan` → `cpu` |
-| macOS | `metal` → `cpu` |
+| Windows / Linux, no NVIDIA      | `vulkan` → `cpu`          |
+| macOS                           | `metal` → `cpu`           |
 
 NVIDIA is detected via `nvidia-smi`. Vulkan covers AMD/Intel/NVIDIA GPUs and
 degrades to CPU on its own, so it is the safe universal fallback. The active
@@ -141,6 +141,7 @@ per-OS:
   `.cargo/config.toml` forces a full rebuild, and a clean rebuild of host
   proc-macros with `crt-static` can fail to link; if that happens, build with an
   explicit `--target x86_64-pc-windows-msvc` so the flag stays off host units.
+
 - **macOS:** no extra setup; Metal is in the standard toolchain.
 
 ## Adaptive GPU offload
@@ -152,7 +153,7 @@ runs on a 512 MB iGPU and a 24 GB dGPU without manual tuning. The principle is
 
 How it works (`llama_server.rs`):
 
-- **Aim for 32k context on *all* systems — CPU included.** Adaptive offload is
+- **Aim for 32k context on _all_ systems — CPU included.** Adaptive offload is
   not GPU-only: with it on (default), the launcher targets a 32k window whether
   the model runs on a GPU or pure CPU. (Turn it off to set Context Size / GPU
   Layers manually — the advanced/manual path uses your values verbatim.)
@@ -186,7 +187,7 @@ verbatim.
 
 Settings → **Advanced AI Configuration → Adaptive GPU offload** (default **on**)
 sizes everything per machine + model so it uses the GPU for what it can without
-running out of VRAM — *consistent context, variable performance*:
+running out of VRAM — _consistent context, variable performance_:
 
 - **KV cache stays in system RAM** (`--no-kv-offload`), so context size doesn't
   compete for VRAM — a large context fits on any GPU, even a 512 MB iGPU.

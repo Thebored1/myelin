@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path src-tauri/edit-core/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path src-tauri/openharn-myelin/Cargo.toml -- --check
+      - run: cargo check --all-targets --manifest-path src-tauri/Cargo.toml
+      - run: cargo check --all-targets --manifest-path src-tauri/edit-core/Cargo.toml
+      - run: cargo check --all-targets --manifest-path src-tauri/openharn-myelin/Cargo.toml
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+      - run: cargo test --manifest-path src-tauri/edit-core/Cargo.toml --lib
+      - run: cargo test --manifest-path src-tauri/openharn-myelin/Cargo.toml --all-targets -- --skip live_lfm2_writes_note
+
+  live:
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, myelin-live]
+    timeout-minutes: 30
+    env:
+      MYELIN_LIVE_LLAMA_BIN: ${{ vars.MYELIN_LIVE_LLAMA_BIN }}
+      MYELIN_LIVE_LLAMA_SHA256: ${{ vars.MYELIN_LIVE_LLAMA_SHA256 }}
+      MYELIN_LIVE_MODEL: ${{ vars.MYELIN_LIVE_MODEL }}
+      MYELIN_LIVE_MODEL_SHA256: ${{ vars.MYELIN_LIVE_MODEL_SHA256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify pinned model
+        shell: bash
+        run: |
+          test -x "$MYELIN_LIVE_LLAMA_BIN"
+          test -n "$MYELIN_LIVE_LLAMA_SHA256"
+          test -f "$MYELIN_LIVE_MODEL"
+          test -n "$MYELIN_LIVE_MODEL_SHA256"
+          test "$(sha256sum "$MYELIN_LIVE_LLAMA_BIN" | awk '{print $1}')" = "$MYELIN_LIVE_LLAMA_SHA256"
+          test "$(sha256sum "$MYELIN_LIVE_MODEL" | awk '{print $1}')" = "$MYELIN_LIVE_MODEL_SHA256"
+      - name: Start pinned llama-server
+        shell: bash
+        run: |
+          "$MYELIN_LIVE_LLAMA_BIN" \
+            --host 127.0.0.1 --port 39300 \
+            --model "$MYELIN_LIVE_MODEL" \
+            --ctx-size 8192 --threads 8 --parallel 1 \
+            --chat-template-file src-tauri/templates/lfm2.jinja \
+            --jinja --reasoning off > "$RUNNER_TEMP/myelin-llama.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/myelin-llama.pid"
+          for attempt in {1..60}; do
+            curl --fail --silent http://127.0.0.1:39300/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/myelin-llama.log"
+          exit 1
+      - name: Build sidecar for live harness
+        run: cargo build --manifest-path src-tauri/openharn-myelin/Cargo.toml --bin openharn-myelin
+      - name: Run live sidecar tests
+        env:
+          LLAMA_URL: http://127.0.0.1:39300/v1
+        run: cargo test --manifest-path src-tauri/openharn-myelin/Cargo.toml --test live -- --nocapture
+      - name: Stop pinned llama-server
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/myelin-llama.pid"; then
+            llama_pid="$(cat "$RUNNER_TEMP/myelin-llama.pid")"
+            kill "$llama_pid" 2>/dev/null || true
+            wait "$llama_pid" 2>/dev/null || true
+          fi
+      - name: Upload llama-server log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: myelin-live-llama-log
+          path: ${{ runner.temp }}/myelin-llama.log
