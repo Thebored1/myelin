@@ -5,13 +5,10 @@ import type {
 	NoteDocument,
 	NoteSummary,
 	ProviderStatus,
-	SearchResponse,
-	StorageIssue
+	SearchResponse
 } from '$lib/types';
 import { createHomeLifecycle } from './lifecycle.svelte';
-import { createTaskController } from '$lib/tasks/controller.svelte';
-import type { TaskItem } from '$lib/tasks/types';
-import { readBrowserStorage } from './storage';
+import { createHomeDashboard } from './dashboard.svelte';
 import { createHomeCommands } from './commands';
 import { createHomeNavigation } from './navigation';
 import { createBoundController } from '$lib/controllerView';
@@ -60,107 +57,25 @@ export function createHomeController() {
 	let notebookDialog: HTMLDialogElement | undefined = $state();
 	let newNotebookName = $state('');
 
-	let dashTasks = $state<TaskItem[]>([]);
 	let expandedTaskId = $state<string | number | null>(null);
-	let currentWorkspaceForTasks = $state<string | null>(null);
-	let tasksLoadedWorkspace = $state<string | null>(null);
-	const taskController = createTaskController();
-	let pinnedNoteIds = $state<string[]>([]);
-	let showTimeline = $state(true);
-	let tasksCollapsed = $state(false);
-	let browserStorageIssues = $state<StorageIssue[]>([]);
-
-	function reportBrowserStorageIssue(issueOrKey: StorageIssue | string, error: unknown) {
-		const issue: StorageIssue =
-			typeof issueOrKey === 'string'
-				? {
-						code: 'browser-storage',
-						severity: 'warning',
-						path: issueOrKey,
-						message:
-							'A browser preference could not be saved; the rest of the library remains available.',
-						recoverable: true
-					}
-				: issueOrKey;
-		if (!browserStorageIssues.some((existing) => existing.path === issue.path)) {
-			browserStorageIssues = [...browserStorageIssues, issue];
-		}
-		console.warn(`Could not persist browser preference ${issue.path}`, error);
-	}
-
-	$effect(() => {
-		if (app?.workspacePath && app.workspacePath !== currentWorkspaceForTasks) {
-			currentWorkspaceForTasks = app.workspacePath;
-			browserStorageIssues = [];
-			tasksLoadedWorkspace = null;
+	const dashboard = createHomeDashboard({
+		get workspacePath() {
+			return app?.workspacePath ?? null;
+		},
+		onWorkspaceChange: () => {
 			activeTag = null;
 			selectedNote = null;
 			activeNotebook = null;
-			void taskController
-				.load(app.workspacePath)
-				.then((tasks) => {
-					if (currentWorkspaceForTasks === app?.workspacePath) {
-						dashTasks = tasks;
-						tasksLoadedWorkspace = app.workspacePath;
-					}
-				})
-				.catch((error) => {
-					message = String(error);
-					dashTasks = [];
-				});
-			const pinnedKey = `pinned_${app.workspacePath}`;
-			const storedPinned = readBrowserStorage(pinnedKey, reportBrowserStorageIssue);
-			if (storedPinned) {
-				try {
-					pinnedNoteIds = JSON.parse(storedPinned);
-				} catch {
-					pinnedNoteIds = [];
-				}
-			} else {
-				pinnedNoteIds = [];
-			}
-			const timelineKey = `timeline_${app.workspacePath}`;
-			const storedTimeline = readBrowserStorage(timelineKey, reportBrowserStorageIssue);
-			if (storedTimeline !== null) {
-				showTimeline = storedTimeline === 'true';
-			} else {
-				showTimeline = true;
-			}
-			tasksCollapsed =
-				readBrowserStorage(`taskscollapsed_${app.workspacePath}`, reportBrowserStorageIssue) ===
-				'true';
+		},
+		setMessage: (value) => {
+			message = value;
 		}
 	});
-
-	$effect(() => {
-		if (currentWorkspaceForTasks && tasksLoadedWorkspace === currentWorkspaceForTasks) {
-			taskController.scheduleSave(currentWorkspaceForTasks, dashTasks);
-			const writes = [
-				[`pinned_${currentWorkspaceForTasks}`, JSON.stringify(pinnedNoteIds)],
-				[`timeline_${currentWorkspaceForTasks}`, showTimeline.toString()],
-				[`taskscollapsed_${currentWorkspaceForTasks}`, tasksCollapsed.toString()]
-			] as const;
-			for (const [key, value] of writes) {
-				try {
-					localStorage.setItem(key, value);
-				} catch (error) {
-					reportBrowserStorageIssue(key, error);
-				}
-			}
-		}
-	});
-
-	let newTaskText = $state('');
-
 	let isClusterDialogOpen = $state(false);
 	let selectedCluster = $state<NoteSummary[]>([]);
 
 	function togglePin(id: string) {
-		if (pinnedNoteIds.includes(id)) {
-			pinnedNoteIds = pinnedNoteIds.filter((pid) => pid !== id);
-		} else {
-			pinnedNoteIds = [...pinnedNoteIds, id];
-		}
+		dashboard.togglePin(id);
 		activeMenuId = null;
 	}
 
@@ -170,23 +85,6 @@ export function createHomeController() {
 	}
 	function closeClusterDialog() {
 		isClusterDialogOpen = false;
-	}
-
-	function addTask() {
-		if (newTaskText.trim()) {
-			dashTasks = [...dashTasks, { id: Date.now(), text: newTaskText.trim(), done: false }];
-			newTaskText = '';
-		}
-	}
-	async function removeTask(id: string | number) {
-		const previous = dashTasks;
-		dashTasks = dashTasks.filter((t) => t.id !== id);
-		if (!currentWorkspaceForTasks) return;
-		const removed = await taskController.remove(currentWorkspaceForTasks, id);
-		if (!removed) {
-			dashTasks = previous;
-			dashTasks = await taskController.load(currentWorkspaceForTasks).catch(() => previous);
-		}
 	}
 
 	const visibleNotes = $derived.by(() => {
@@ -253,7 +151,7 @@ export function createHomeController() {
 			activeTypeFilter,
 			activeTag,
 			activeNotebook,
-			pinnedNoteIds,
+			dashboard.pinnedNoteIds,
 			attachedDocIds
 		)
 	);
@@ -268,9 +166,9 @@ export function createHomeController() {
 	// ── Tasks (right) — filter tabs ──
 	let activeTaskFilter = $state<'all' | 'active' | 'done'>('all');
 	const filteredTasks = $derived.by(() => {
-		if (activeTaskFilter === 'active') return dashTasks.filter((t) => !t.done);
-		if (activeTaskFilter === 'done') return dashTasks.filter((t) => t.done);
-		return dashTasks;
+		if (activeTaskFilter === 'active') return dashboard.dashTasks.filter((t) => !t.done);
+		if (activeTaskFilter === 'done') return dashboard.dashTasks.filter((t) => t.done);
+		return dashboard.dashTasks;
 	});
 
 	const tagCounts = $derived.by(() => countTags(app?.notes ?? []));
@@ -410,19 +308,19 @@ export function createHomeController() {
 			return deleteDialog;
 		},
 		get currentWorkspaceForTasks() {
-			return currentWorkspaceForTasks;
+			return dashboard.currentWorkspaceForTasks;
 		},
 		get dashTasks() {
-			return dashTasks;
+			return dashboard.dashTasks;
 		},
 		set dashTasks(value) {
-			dashTasks = value;
+			dashboard.dashTasks = value;
 		},
 		set tasksLoadedWorkspace(value: string | null) {
-			tasksLoadedWorkspace = value;
+			dashboard.tasksLoadedWorkspace = value;
 		},
 		refreshApp,
-		loadTasks: (workspace) => taskController.load(workspace),
+		loadTasks: (workspace) => dashboard.loadTasks(workspace),
 		upsertNoteIntoLibrary
 	});
 
@@ -464,16 +362,16 @@ export function createHomeController() {
 			message = value;
 		},
 		get currentWorkspaceForTasks() {
-			return currentWorkspaceForTasks;
+			return dashboard.currentWorkspaceForTasks;
 		},
 		get dashTasks() {
-			return dashTasks;
+			return dashboard.dashTasks;
 		},
 		set dashTasks(value) {
-			dashTasks = value;
+			dashboard.dashTasks = value;
 		},
 		reloadTasks: homeCommands.reloadTasks,
-		disposeTasks: () => taskController.dispose(),
+		disposeTasks: () => dashboard.disposeTasks(),
 		refreshApp
 	});
 
@@ -501,7 +399,7 @@ export function createHomeController() {
 			selectedNote = value;
 		},
 		set tasksCollapsed(value: boolean) {
-			tasksCollapsed = value;
+			dashboard.tasksCollapsed = value;
 		},
 		set activeMenuId(value: string | null) {
 			activeMenuId = value;
@@ -577,28 +475,28 @@ export function createHomeController() {
 				return newNotebookName;
 			})(),
 			dashTasks: (() => {
-				return dashTasks;
+				return dashboard.dashTasks;
 			})(),
 			expandedTaskId: (() => {
 				return expandedTaskId;
 			})(),
 			currentWorkspaceForTasks: (() => {
-				return currentWorkspaceForTasks;
+				return dashboard.currentWorkspaceForTasks;
 			})(),
 			pinnedNoteIds: (() => {
-				return pinnedNoteIds;
+				return dashboard.pinnedNoteIds;
 			})(),
 			showTimeline: (() => {
-				return showTimeline;
+				return dashboard.showTimeline;
 			})(),
 			tasksCollapsed: (() => {
-				return tasksCollapsed;
+				return dashboard.tasksCollapsed;
 			})(),
 			storageIssues: (() => {
-				return [...(app?.storageIssues ?? []), ...browserStorageIssues];
+				return [...(app?.storageIssues ?? []), ...dashboard.storageIssues];
 			})(),
 			newTaskText: (() => {
-				return newTaskText;
+				return dashboard.newTaskText;
 			})(),
 			isClusterDialogOpen: (() => {
 				return isClusterDialogOpen;
@@ -741,25 +639,25 @@ export function createHomeController() {
 				newNotebookName = value;
 			},
 			dashTasks: (value) => {
-				dashTasks = value;
+				dashboard.dashTasks = value;
 			},
 			expandedTaskId: (value) => {
 				expandedTaskId = value;
 			},
 			currentWorkspaceForTasks: (value) => {
-				currentWorkspaceForTasks = value;
+				dashboard.currentWorkspaceForTasks = value;
 			},
 			pinnedNoteIds: (value) => {
-				pinnedNoteIds = value;
+				dashboard.pinnedNoteIds = value;
 			},
 			showTimeline: (value) => {
-				showTimeline = value;
+				dashboard.showTimeline = value;
 			},
 			tasksCollapsed: (value) => {
-				tasksCollapsed = value;
+				dashboard.tasksCollapsed = value;
 			},
 			newTaskText: (value) => {
-				newTaskText = value;
+				dashboard.newTaskText = value;
 			},
 			isClusterDialogOpen: (value) => {
 				isClusterDialogOpen = value;
@@ -815,8 +713,8 @@ export function createHomeController() {
 			togglePin,
 			openCluster,
 			closeClusterDialog,
-			addTask,
-			removeTask,
+			addTask: dashboard.addTask,
+			removeTask: dashboard.removeTask,
 			openClustersDialog,
 			closeClustersList,
 			setTypeFilter,

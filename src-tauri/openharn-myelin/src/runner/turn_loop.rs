@@ -361,50 +361,7 @@ pub(crate) async fn run_loop(
             .await;
         emit_model_prompt(&tx, "AGENT request messages:", &body).await;
 
-        // POST to llama-server, retrying with backoff. The host app starts the
-        // server just before calling us, so the first attempt can land while it's
-        // still binding — give it a few chances before surfacing an error.
-        let resp = {
-            let mut attempt = 0u32;
-            const MAX_ATTEMPTS: u32 = 6;
-            let dispatched_at = Instant::now();
-            loop {
-                let mut rq = client.post(&url).json(&body);
-                if let Some(k) = &req.api_key {
-                    if !k.is_empty() {
-                        rq = rq.bearer_auth(k);
-                    }
-                }
-                match rq.send().await {
-                    Ok(r) => {
-                        let _ = tx
-                            .send(Out::Debug {
-                                kind: "response_headers".into(),
-                                message: format!(
-                                    "elapsed_ms={} status={}",
-                                    dispatched_at.elapsed().as_millis(),
-                                    r.status()
-                                ),
-                            })
-                            .await;
-                        break Some(r);
-                    }
-                    Err(e) => {
-                        attempt += 1;
-                        if attempt >= MAX_ATTEMPTS {
-                            let _ = tx
-                                .send(Out::Error(format!(
-                                    "request to llama-server failed after {attempt} attempts: {e}. \
-                                     Check the model server is running and reachable at {url}."
-                                )))
-                                .await;
-                            break None;
-                        }
-                        tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
-                    }
-                }
-            }
-        };
+        let resp = post_with_retry(&client, &url, req.api_key.as_deref(), &body, &tx, true).await;
         let Some(resp) = resp else { return };
 
         if !resp.status().is_success() {
@@ -563,41 +520,8 @@ pub(crate) async fn run_loop(
                 }
             }
             emit_model_prompt(&tx, "PROMPT-TOOLS fallback request messages:", &fb_body).await;
-            let fb_resp = {
-                let mut attempt = 0u32;
-                const MAX_ATTEMPTS: u32 = 6;
-                let dispatched_at = Instant::now();
-                loop {
-                    let mut rq = client.post(&url).json(&fb_body);
-                    if let Some(k) = &req.api_key {
-                        if !k.is_empty() {
-                            rq = rq.bearer_auth(k);
-                        }
-                    }
-                    match rq.send().await {
-                        Ok(r) => {
-                            let _ = tx
-                                .send(Out::Debug {
-                                    kind: "response_headers".into(),
-                                    message: format!(
-                                        "elapsed_ms={} status={}",
-                                        dispatched_at.elapsed().as_millis(),
-                                        r.status()
-                                    ),
-                                })
-                                .await;
-                            break Some(r);
-                        }
-                        Err(_e) => {
-                            attempt += 1;
-                            if attempt >= MAX_ATTEMPTS {
-                                break None;
-                            }
-                            tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
-                        }
-                    }
-                }
-            };
+            let fb_resp =
+                post_with_retry(&client, &url, req.api_key.as_deref(), &fb_body, &tx, false).await;
             if let Some(fb_resp) = fb_resp {
                 if fb_resp.status().is_success() {
                     let (fb_content, fb_calls, _) = match stream_upstream_with_timeout(
@@ -814,4 +738,61 @@ pub(crate) async fn run_loop(
             last_tool,
         })
         .await;
+}
+
+/// POST to llama-server, retrying with backoff. The host app starts the
+/// server just before calling us, so the first attempt can land while it's
+/// still binding — give it a few chances before surfacing an error. When
+/// `error_on_exhausted` is set, emitting the user-facing error here is the
+/// caller's whole failure path; otherwise the caller treats `None` as
+/// "fallback unavailable" and keeps its primary result.
+async fn post_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    body: &Value,
+    tx: &mpsc::Sender<Out>,
+    error_on_exhausted: bool,
+) -> Option<reqwest::Response> {
+    let mut attempt = 0u32;
+    const MAX_ATTEMPTS: u32 = 6;
+    let dispatched_at = Instant::now();
+    loop {
+        let mut rq = client.post(url).json(body);
+        if let Some(k) = api_key {
+            if !k.is_empty() {
+                rq = rq.bearer_auth(k);
+            }
+        }
+        match rq.send().await {
+            Ok(r) => {
+                let _ = tx
+                    .send(Out::Debug {
+                        kind: "response_headers".into(),
+                        message: format!(
+                            "elapsed_ms={} status={}",
+                            dispatched_at.elapsed().as_millis(),
+                            r.status()
+                        ),
+                    })
+                    .await;
+                return Some(r);
+            }
+            Err(e) => {
+                attempt += 1;
+                if attempt >= MAX_ATTEMPTS {
+                    if error_on_exhausted {
+                        let _ = tx
+                            .send(Out::Error(format!(
+                                "request to llama-server failed after {attempt} attempts: {e}. \
+                                 Check the model server is running and reachable at {url}."
+                            )))
+                            .await;
+                    }
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+    }
 }

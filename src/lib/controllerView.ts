@@ -19,6 +19,22 @@ export function createBoundController<State extends object, Actions extends obje
 				return true;
 			}
 			return Reflect.set(target, property, value, receiver);
+		},
+		has(target, property) {
+			if (property in target) return true;
+			return property in read();
+		},
+		ownKeys(target) {
+			return [...Reflect.ownKeys(target), ...Reflect.ownKeys(read())].filter(
+				(key, index, keys) => keys.indexOf(key) === index
+			);
+		},
+		getOwnPropertyDescriptor(target, property) {
+			if (property in target) return Reflect.getOwnPropertyDescriptor(target, property);
+			if (property in read()) {
+				return { configurable: true, enumerable: true, get: () => read()[property as keyof State] };
+			}
+			return undefined;
 		}
 	}) as State & Actions;
 }

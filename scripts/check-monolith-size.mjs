@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -28,25 +29,36 @@ const implementationRoots = [
 	'src/lib/settings'
 ];
 const excludedNames = new Set(['target', 'node_modules', '.svelte-kit', 'dist', 'build']);
+const normalLimit = 800;
 
-// These files have documented reasons to remain larger than the normal module
-// budget: compatibility facades preserve public bindings; the sidecar harness
-// keeps its parser/grammar/context-fit corpus together; the runner keeps one
-// ordered cancellation/tool-loop state machine; and the state modules each own
-// a cross-cutting transaction or cache invariant that would be obscured by a
-// purely mechanical split.
-const documentedLargeFiles = new Set([
-	'src/lib/home/controller.svelte.ts',
-	'src/lib/settings/controller.svelte.ts',
-	'src-tauri/openharn-myelin/src/harness.rs',
-	'src-tauri/openharn-myelin/src/runner.rs',
-	'src-tauri/openharn-myelin/src/runner/turn_loop.rs',
-	'src/lib/note-page/controller.svelte.ts',
-	'src-tauri/src/state/ai/section_cache.rs',
-	'src-tauri/src/state/documents/helpers.rs',
-	'src-tauri/src/state/retrieval.rs',
-	'src-tauri/src/state/settings.rs'
-]);
+// Baseline entries are a ratchet, not a permanent exemption: a file may never
+// exceed its recorded budget, the budget may never be raised, and entries must
+// be deleted once the file is back under the normal limit. See
+// scripts/size-baseline.json for the full contract.
+const baselinePath = 'scripts/size-baseline.json';
+const baseline = JSON.parse(readFileSync(join(root, baselinePath), 'utf8'));
+for (const key of Object.keys(baseline)) {
+	if (key.startsWith('$')) delete baseline[key];
+}
+
+// Compare against the committed baseline so raised budgets are rejected even
+// though the working-tree file matches them. Outside a git repo (or before the
+// first commit) this guard is skipped and the working-tree baseline stands.
+function committedBaseline() {
+	try {
+		const raw = execFileSync('git', ['show', `HEAD:${baselinePath}`], {
+			cwd: root,
+			encoding: 'utf8'
+		});
+		const parsed = JSON.parse(raw);
+		for (const key of Object.keys(parsed)) {
+			if (key.startsWith('$')) delete parsed[key];
+		}
+		return parsed;
+	} catch {
+		return null;
+	}
+}
 
 function lineCount(path) {
 	return readFileSync(path, 'utf8').split(/\r?\n/).length - 1;
@@ -74,11 +86,35 @@ for (const [file, limit] of facadeLimits) {
 for (const rootDir of implementationRoots) {
 	for (const path of walk(join(root, rootDir))) {
 		const file = relative(root, path).replaceAll('\\', '/');
-		if (documentedLargeFiles.has(file)) continue;
 		if (!/\.(rs|ts|svelte|svelte\.ts)$/.test(file)) continue;
 		if (/[/](tests?|fixtures|generated|assets)[/]/.test(file)) continue;
 		const actual = lineCount(path);
-		if (actual > 800) violations.push(`${file}: ${actual} lines (limit 800)`);
+		const budget = baseline[file];
+		if (budget !== undefined) {
+			if (actual > budget) {
+				violations.push(`${file}: ${actual} lines (ratchet budget ${budget})`);
+			} else if (actual <= normalLimit) {
+				violations.push(
+					`${file}: ${actual} lines is under the normal ${normalLimit}-line limit; ` +
+						'remove its stale size-baseline entry'
+				);
+			}
+			continue;
+		}
+		if (actual > normalLimit) violations.push(`${file}: ${actual} lines (limit ${normalLimit})`);
+	}
+}
+
+const committed = committedBaseline();
+if (committed) {
+	for (const [file, budget] of Object.entries(baseline)) {
+		const previous = committed[file];
+		if (previous !== undefined && budget > previous) {
+			violations.push(
+				`${baselinePath}: budget for ${file} was raised from ${previous} to ${budget}; ` +
+					'ratchet budgets may only shrink'
+			);
+		}
 	}
 }
 
@@ -88,4 +124,11 @@ if (violations.length) {
 	process.exit(1);
 }
 
+const ratcheted = Object.keys(baseline).length;
 console.log('Architecture size check passed.');
+if (ratcheted > 0) {
+	console.log(
+		`Size ratchet active: ${ratcheted} file(s) above the ${normalLimit}-line limit, ` +
+			'budgets may only shrink.'
+	);
+}

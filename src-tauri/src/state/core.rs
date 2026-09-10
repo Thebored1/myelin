@@ -2,6 +2,8 @@
 pub(super) mod context;
 #[path = "documents/helpers.rs"]
 pub(super) mod documents_helpers;
+#[path = "documents/index.rs"]
+pub(super) mod documents_index;
 #[path = "documents/persistence.rs"]
 pub(super) mod documents_persistence;
 #[path = "latex_support.rs"]
@@ -31,6 +33,7 @@ pub(crate) fn validate_note_storage_id(id: &str) -> anyhow::Result<()> {
 
 pub(crate) use context::*;
 pub(crate) use documents_helpers::*;
+pub(crate) use documents_index::*;
 pub(crate) use documents_persistence::*;
 pub(crate) use latex_support::*;
 pub(crate) use search::*;

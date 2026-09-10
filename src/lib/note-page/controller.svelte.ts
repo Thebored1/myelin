@@ -22,6 +22,7 @@ import { createNotePageUtilities } from './sessions/utilities.svelte';
 import { createNotePageDialogs } from './sessions/dialogs.svelte';
 import { createNotePageActions } from './sessions/actions.svelte';
 import type { SelectionHandle } from '$lib/controller-context';
+import { createBoundController } from '$lib/controllerView';
 export function createNotePageController() {
 	let requireToolApproval = $state(false);
 	let note = $state<NoteDocument | null>(null);
@@ -219,36 +220,25 @@ export function createNotePageController() {
 	let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
 	let isSidebarResizing = $state(false);
 	let selectionSession: SelectionHandle;
-	const editorInteraction = createEditorInteractionSession({
-		get vditorInstance() {
-			return vditorInstance;
+	const editorInteractionPort = createBoundController(
+		() => ({
+			vditorInstance,
+			vditorContainer,
+			workingDocType,
+			texEditorInstance,
+			ipynbEditorInstance,
+			shortcutEditorRange,
+			shouldRefocusEditor
+		}),
+		{
+			shortcutEditorRange: (value) => (shortcutEditorRange = value),
+			shouldRefocusEditor: (value) => (shouldRefocusEditor = value)
 		},
-		get vditorContainer() {
-			return vditorContainer;
-		},
-		get workingDocType() {
-			return workingDocType;
-		},
-		get texEditorInstance() {
-			return texEditorInstance;
-		},
-		get ipynbEditorInstance() {
-			return ipynbEditorInstance;
-		},
-		get shortcutEditorRange() {
-			return shortcutEditorRange;
-		},
-		set shortcutEditorRange(value) {
-			shortcutEditorRange = value;
-		},
-		get shouldRefocusEditor() {
-			return shouldRefocusEditor;
-		},
-		set shouldRefocusEditor(value) {
-			shouldRefocusEditor = value;
-		},
-		captureEditorSelection: () => selectionSession.captureEditorSelection()
-	});
+		{
+			captureEditorSelection: () => selectionSession.captureEditorSelection()
+		}
+	);
+	const editorInteraction = createEditorInteractionSession(editorInteractionPort);
 	const {
 		focusEditor,
 		refocusEditorSoon,
@@ -281,319 +271,145 @@ export function createNotePageController() {
 	let loadedRouteNoteId = $state('');
 	let saveNote: () => Promise<void> = async () => {};
 	let invalidateVditorInitialization = () => {};
-	const editorState = createEditorStateSession({
-		get showAttachedNote() {
-			return showAttachedNote;
+	const editorStatePort = createBoundController(
+		() => ({
+			showAttachedNote,
+			vditorInstance,
+			draftBody,
+			saveStatus,
+			saveTimer
+		}),
+		{
+			showAttachedNote: (value) => (showAttachedNote = value),
+			vditorInstance: (value) => (vditorInstance = value),
+			draftBody: (value) => (draftBody = value),
+			saveStatus: (value) => (saveStatus = value),
+			saveTimer: (value) => (saveTimer = value)
 		},
-		set showAttachedNote(value) {
-			showAttachedNote = value;
-		},
-		get vditorInstance() {
-			return vditorInstance;
-		},
-		set vditorInstance(value) {
-			vditorInstance = value;
-		},
-		get draftBody() {
-			return draftBody;
-		},
-		set draftBody(value) {
-			draftBody = value;
-		},
-		get saveStatus() {
-			return saveStatus;
-		},
-		set saveStatus(value) {
-			saveStatus = value;
-		},
-		get saveTimer() {
-			return saveTimer;
-		},
-		set saveTimer(value) {
-			saveTimer = value;
-		},
-		invalidateVditorInitialization: () => invalidateVditorInitialization(),
-		saveNote: () => saveNote()
-	});
-	const { appendToNoteBody, destroyEditorInstance, triggerAutoSave } = editorState;
-	const utilities = createNotePageUtilities({
-		get note() {
-			return note;
-		},
-		get isSourceMaterial() {
-			return isSourceMaterial;
-		},
-		get showAttachedNote() {
-			return showAttachedNote;
-		},
-		get scratchpadSavedId() {
-			return scratchpadSavedId;
-		},
-		get activeSourceId() {
-			return activeSourceId;
-		},
-		get sourceMaterialType() {
-			return sourceMaterialType;
-		},
-		get workingDocType() {
-			return workingDocType;
-		},
-		get PdfViewerComponent() {
-			return PdfViewerComponent;
-		},
-		set PdfViewerComponent(value) {
-			PdfViewerComponent = value;
-		},
-		get EpubViewerComponent() {
-			return EpubViewerComponent;
-		},
-		set EpubViewerComponent(value) {
-			EpubViewerComponent = value;
-		},
-		get HtmlViewerComponent() {
-			return HtmlViewerComponent;
-		},
-		set HtmlViewerComponent(value) {
-			HtmlViewerComponent = value;
-		},
-		get TexEditorComponent() {
-			return TexEditorComponent;
-		},
-		set TexEditorComponent(value) {
-			TexEditorComponent = value;
-		},
-		get IpynbEditorComponent() {
-			return IpynbEditorComponent;
-		},
-		set IpynbEditorComponent(value) {
-			IpynbEditorComponent = value;
-		},
-		get vditorContainer() {
-			return vditorContainer;
-		},
-		get toolbarExpanded() {
-			return toolbarExpanded;
-		},
-		set toolbarExpanded(value) {
-			toolbarExpanded = value;
-		},
-		get toolbarNeedsToggle() {
-			return toolbarNeedsToggle;
-		},
-		set toolbarNeedsToggle(value) {
-			toolbarNeedsToggle = value;
+		{
+			invalidateVditorInitialization: () => invalidateVditorInitialization(),
+			saveNote: () => saveNote()
 		}
-	});
+	);
+	const editorState = createEditorStateSession(editorStatePort);
+	const { appendToNoteBody, destroyEditorInstance, triggerAutoSave } = editorState;
+	const utilitiesPort = createBoundController(
+		() => ({
+			note,
+			isSourceMaterial,
+			showAttachedNote,
+			scratchpadSavedId,
+			activeSourceId,
+			sourceMaterialType,
+			workingDocType,
+			PdfViewerComponent,
+			EpubViewerComponent,
+			HtmlViewerComponent,
+			TexEditorComponent,
+			IpynbEditorComponent,
+			vditorContainer,
+			toolbarExpanded,
+			toolbarNeedsToggle
+		}),
+		{
+			PdfViewerComponent: (value) => (PdfViewerComponent = value),
+			EpubViewerComponent: (value) => (EpubViewerComponent = value),
+			HtmlViewerComponent: (value) => (HtmlViewerComponent = value),
+			TexEditorComponent: (value) => (TexEditorComponent = value),
+			IpynbEditorComponent: (value) => (IpynbEditorComponent = value),
+			toolbarExpanded: (value) => (toolbarExpanded = value),
+			toolbarNeedsToggle: (value) => (toolbarNeedsToggle = value)
+		},
+		{}
+	);
+	const utilities = createNotePageUtilities(utilitiesPort);
 	const { openNoteNotebook, localVditorCdn, activeAiNoteId, updateToolbarOverflow } = utilities;
 
-	const inputGraph = createNoteInputGraph({
-		get note() {
-			return note;
-		},
-		get texCompileError() {
-			return texCompileError;
-		},
-		set texCompileError(value) {
-			texCompileError = value;
-		},
-		get texPreviewStatus() {
-			return texPreviewStatus;
-		},
-		set texPreviewStatus(value) {
-			texPreviewStatus = value;
-		},
-		get texCacheWarmed() {
-			return texCacheWarmed;
-		},
-		set texCacheWarmed(value) {
-			texCacheWarmed = value;
-		},
-		get texCompiling() {
-			return texCompiling;
-		},
-		set texCompiling(value) {
-			texCompiling = value;
-		},
-		get texCompileQueued() {
-			return texCompileQueued;
-		},
-		set texCompileQueued(value) {
-			texCompileQueued = value;
-		},
-		get isBusy() {
-			return isBusy;
-		},
-		set isBusy(value) {
-			isBusy = value;
-		},
-		get texRevision() {
-			return texRevision;
-		},
-		set texRevision(value) {
-			texRevision = value;
-		},
-		get draftBody() {
-			return draftBody;
-		},
-		get activeSourceBytes() {
-			return activeSourceBytes;
-		},
-		set activeSourceBytes(value) {
-			activeSourceBytes = value;
-		},
-		get sourceMaterialType() {
-			return sourceMaterialType;
-		},
-		set sourceMaterialType(value) {
-			sourceMaterialType = value;
-		},
-		get showAttachedNote() {
-			return showAttachedNote;
-		},
-		set showAttachedNote(value) {
-			showAttachedNote = value;
-		},
-		get texDiagnostics() {
-			return texDiagnostics;
-		},
-		set texDiagnostics(value) {
-			texDiagnostics = value;
-		},
-		get latexDownloadMsg() {
-			return latexDownloadMsg;
-		},
-		set latexDownloadMsg(value) {
-			latexDownloadMsg = value;
-		},
-		get activeSection() {
-			return activeSection;
-		},
-		set activeSection(value) {
-			activeSection = value;
-		},
-		get sectionCache() {
-			return sectionCache;
-		},
-		set sectionCache(value) {
-			sectionCache = value;
-		},
-		get workingDocType() {
-			return workingDocType;
-		},
-		get lastTexBody() {
-			return lastTexBody;
-		},
-		set lastTexBody(value) {
-			lastTexBody = value;
-		},
-		get texAutoCompile() {
-			return texAutoCompile;
-		},
-		get texAutoTimer() {
-			return texAutoTimer;
-		},
-		set texAutoTimer(value) {
-			texAutoTimer = value;
-		},
-		saveNote: () => saveNote(),
-		get vditorInstance() {
-			return vditorInstance;
-		},
-		get vditorContainer() {
-			return vditorContainer;
-		},
-		get armedSelection() {
-			return armedSelection;
-		},
-		set armedSelection(value) {
-			armedSelection = value;
-		},
-		get writeTargetNotice() {
-			return writeTargetNotice;
-		},
-		set writeTargetNotice(value) {
-			writeTargetNotice = value;
-		},
-		get selDebounce() {
-			return selDebounce;
-		},
-		set selDebounce(value) {
-			selDebounce = value;
-		},
-		get savedEditorRange() {
-			return savedEditorRange;
-		},
-		set savedEditorRange(value) {
-			savedEditorRange = value;
-		},
-		get noteStreaming() {
-			return noteStreaming;
-		},
-		triggerAutoSave,
-		focusEditor,
-		setSelectionSession: (value: SelectionHandle) => {
-			selectionSession = value;
-		},
-		PANE_MIN_WIDTH,
-		SIDEBAR_MIN_WIDTH,
-		get splitRatio() {
-			return splitRatio;
-		},
-		set splitRatio(value) {
-			splitRatio = value;
-		},
-		get isResizing() {
-			return isResizing;
-		},
-		set isResizing(value) {
-			isResizing = value;
-		},
-		get mainLayoutEl() {
-			return mainLayoutEl;
-		},
-		get sidebarWidth() {
-			return sidebarWidth;
-		},
-		set sidebarWidth(value) {
-			sidebarWidth = value;
-		},
-		get isSidebarResizing() {
-			return isSidebarResizing;
-		},
-		set isSidebarResizing(value) {
-			isSidebarResizing = value;
-		},
-		get activeSidebarTab() {
-			return activeSidebarTab;
-		},
-		set activeSidebarTab(value) {
-			activeSidebarTab = value;
-		},
-		get chatTextareaEl() {
-			return chatTextareaEl;
-		},
-		get chatMessagesEl() {
-			return chatMessagesEl;
-		},
-		get chatMessages() {
-			return chatMessages;
-		},
-		get chatPersistenceError() {
-			return chatPersistenceError;
-		},
-		set chatPersistenceError(value) {
-			chatPersistenceError = value;
-		},
-		get userScrolledUp() {
-			return userScrolledUp;
-		},
-		set userScrolledUp(value) {
-			userScrolledUp = value;
-		},
-		captureShortcutEditorTarget,
-		restoreShortcutEditorFocus,
-		tick
-	});
+	const inputGraphPort = createBoundController(
+		() => ({
+			note,
+			texCompileError,
+			texPreviewStatus,
+			texCacheWarmed,
+			texCompiling,
+			texCompileQueued,
+			isBusy,
+			texRevision,
+			draftBody,
+			activeSourceBytes,
+			sourceMaterialType,
+			showAttachedNote,
+			texDiagnostics,
+			latexDownloadMsg,
+			activeSection,
+			sectionCache,
+			workingDocType,
+			lastTexBody,
+			texAutoCompile,
+			texAutoTimer,
+			vditorInstance,
+			vditorContainer,
+			armedSelection,
+			writeTargetNotice,
+			selDebounce,
+			savedEditorRange,
+			noteStreaming,
+			splitRatio,
+			isResizing,
+			mainLayoutEl,
+			sidebarWidth,
+			isSidebarResizing,
+			activeSidebarTab,
+			chatTextareaEl,
+			chatMessagesEl,
+			chatMessages,
+			chatPersistenceError,
+			userScrolledUp
+		}),
+		{
+			texCompileError: (value) => (texCompileError = value),
+			texPreviewStatus: (value) => (texPreviewStatus = value),
+			texCacheWarmed: (value) => (texCacheWarmed = value),
+			texCompiling: (value) => (texCompiling = value),
+			texCompileQueued: (value) => (texCompileQueued = value),
+			isBusy: (value) => (isBusy = value),
+			texRevision: (value) => (texRevision = value),
+			activeSourceBytes: (value) => (activeSourceBytes = value),
+			sourceMaterialType: (value) => (sourceMaterialType = value),
+			showAttachedNote: (value) => (showAttachedNote = value),
+			texDiagnostics: (value) => (texDiagnostics = value),
+			latexDownloadMsg: (value) => (latexDownloadMsg = value),
+			activeSection: (value) => (activeSection = value),
+			sectionCache: (value) => (sectionCache = value),
+			lastTexBody: (value) => (lastTexBody = value),
+			texAutoTimer: (value) => (texAutoTimer = value),
+			armedSelection: (value) => (armedSelection = value),
+			writeTargetNotice: (value) => (writeTargetNotice = value),
+			selDebounce: (value) => (selDebounce = value),
+			savedEditorRange: (value) => (savedEditorRange = value),
+			splitRatio: (value) => (splitRatio = value),
+			isResizing: (value) => (isResizing = value),
+			sidebarWidth: (value) => (sidebarWidth = value),
+			isSidebarResizing: (value) => (isSidebarResizing = value),
+			activeSidebarTab: (value) => (activeSidebarTab = value),
+			chatPersistenceError: (value) => (chatPersistenceError = value),
+			userScrolledUp: (value) => (userScrolledUp = value)
+		},
+		{
+			saveNote: () => saveNote(),
+			triggerAutoSave,
+			focusEditor,
+			setSelectionSession: (value: SelectionHandle) => {
+				selectionSession = value;
+			},
+			PANE_MIN_WIDTH,
+			SIDEBAR_MIN_WIDTH,
+			captureShortcutEditorTarget,
+			restoreShortcutEditorFocus,
+			tick
+		}
+	);
+	const inputGraph = createNoteInputGraph(inputGraphPort);
 	const {
 		getSelectionTextOffset,
 		textOffsetOf,
@@ -621,451 +437,189 @@ export function createNotePageController() {
 		handleChatScroll,
 		scrollChatToBottom
 	} = inputGraph;
-	const graph = createNotePageGraph({
-		createDocumentSession,
-		createStreamingSession,
-		createLinkingSession,
-		createEditorSession,
-		createNavigationSession,
-		createSourceSession,
-		createChatSession,
-		get isLoadingNote() {
-			return isLoadingNote;
-		},
-		set isLoadingNote(value) {
-			isLoadingNote = value;
-		},
-		get toolsReady() {
-			return toolsReady;
-		},
-		set toolsReady(value) {
-			toolsReady = value;
-		},
-		clearArmedSelection,
-		get writeTargetNotice() {
-			return writeTargetNotice;
-		},
-		set writeTargetNotice(value) {
-			writeTargetNotice = value;
-		},
-		get chatPersistTimer() {
-			return chatPersistTimer;
-		},
-		set chatPersistTimer(value) {
-			chatPersistTimer = value;
-		},
-		activeAiNoteId,
-		destroyEditorInstance,
-		get activeSourceBytes() {
-			return activeSourceBytes;
-		},
-		set activeSourceBytes(value) {
-			activeSourceBytes = value;
-		},
-		get activeSourceId() {
-			return activeSourceId;
-		},
-		set activeSourceId(value) {
-			activeSourceId = value;
-		},
-		get activeSection() {
-			return activeSection;
-		},
-		set activeSection(value) {
-			activeSection = value;
-		},
-		get sectionCache() {
-			return sectionCache;
-		},
-		set sectionCache(value) {
-			sectionCache = value;
-		},
-		get showAttachedNote() {
-			return showAttachedNote;
-		},
-		set showAttachedNote(value) {
-			showAttachedNote = value;
-		},
-		get note() {
-			return note;
-		},
-		set note(value) {
-			note = value;
-		},
-		get chatMessages() {
-			return chatMessages;
-		},
-		set chatMessages(value) {
-			chatMessages = value;
-		},
-		get chatPersistenceError() {
-			return chatPersistenceError;
-		},
-		set chatPersistenceError(value) {
-			chatPersistenceError = value;
-		},
-		get noteHistory() {
-			return noteHistory;
-		},
-		set noteHistory(value) {
-			noteHistory = value;
-		},
-		get versionPreviewContent() {
-			return versionPreviewContent;
-		},
-		set versionPreviewContent(value) {
-			versionPreviewContent = value;
-		},
-		get activeSidebarTab() {
-			return activeSidebarTab;
-		},
-		set activeSidebarTab(value) {
-			activeSidebarTab = value;
-		},
-		get isSourceMaterial() {
-			return isSourceMaterial;
-		},
-		set isSourceMaterial(value) {
-			isSourceMaterial = value;
-		},
-		get sourceMaterialType() {
-			return sourceMaterialType;
-		},
-		set sourceMaterialType(value) {
-			sourceMaterialType = value;
-		},
-		get workingDocType() {
-			return workingDocType;
-		},
-		set workingDocType(value) {
-			workingDocType = value;
-		},
-		get draftTitle() {
-			return draftTitle;
-		},
-		set draftTitle(value) {
-			draftTitle = value;
-		},
-		get draftBody() {
-			return draftBody;
-		},
-		set draftBody(value) {
-			draftBody = value;
-		},
-		get draftTags() {
-			return draftTags;
-		},
-		set draftTags(value) {
-			draftTags = value;
-		},
-		get scratchpadSavedId() {
-			return scratchpadSavedId;
-		},
-		set scratchpadSavedId(value) {
-			scratchpadSavedId = value;
-		},
-		get message() {
-			return message;
-		},
-		set message(value) {
-			message = value;
-		},
-		openNoteNotebook,
-		get saveStatus() {
-			return saveStatus;
-		},
-		set saveStatus(value) {
-			saveStatus = value;
-		},
-		get vditorInstance() {
-			return vditorInstance;
-		},
-		set vditorInstance(value) {
-			vditorInstance = value;
-		},
-		get isBusy() {
-			return isBusy;
-		},
-		set isBusy(value) {
-			isBusy = value;
-		},
-		goToHome: () => goto(resolve('/')),
-		get saveNote() {
-			return saveNote;
-		},
-		setSaveNote: (value: () => Promise<void>) => {
-			saveNote = value;
-		},
-		get noteStreamBackup() {
-			return noteStreamBackup;
-		},
-		set noteStreamBackup(value) {
-			noteStreamBackup = value;
-		},
-		get noteStreamBuf() {
-			return noteStreamBuf;
-		},
-		set noteStreamBuf(value) {
-			noteStreamBuf = value;
-		},
-		get noteStreaming() {
-			return noteStreaming;
-		},
-		set noteStreaming(value) {
-			noteStreaming = value;
-		},
-		get transclusionObserver() {
-			return transclusionObserver;
-		},
-		set transclusionObserver(value) {
-			transclusionObserver = value;
-		},
-		get activeAiEditTarget() {
-			return activeAiEditTarget;
-		},
-		set activeAiEditTarget(value) {
-			activeAiEditTarget = value;
-		},
-		get noteStreamSpan() {
-			return noteStreamSpan;
-		},
-		set noteStreamSpan(value) {
-			noteStreamSpan = value;
-		},
-		get noteStreamFlushPending() {
-			return noteStreamFlushPending;
-		},
-		set noteStreamFlushPending(value) {
-			noteStreamFlushPending = value;
-		},
-		getSelectionTextOffset,
-		restoreSelectionTextOffset,
-		get vditorContainer() {
-			return vditorContainer;
-		},
-		get VditorConstructor() {
-			return VditorConstructor;
-		},
-		set VditorConstructor(value) {
-			VditorConstructor = value;
-		},
-		localVditorCdn,
-		get shouldRefocusEditor() {
-			return shouldRefocusEditor;
-		},
-		set shouldRefocusEditor(value) {
-			shouldRefocusEditor = value;
-		},
-		insertAtSavedCursor,
-		refocusEditorSoon,
-		get vditorLoading() {
-			return vditorLoading;
-		},
-		set vditorLoading(value) {
-			vditorLoading = value;
-		},
-		get shouldInitEditor() {
-			return shouldInitEditor;
-		},
-		get toolbarResizeObserver() {
-			return toolbarResizeObserver;
-		},
-		set toolbarResizeObserver(value) {
-			toolbarResizeObserver = value;
-		},
-		get toolbarNeedsToggle() {
-			return toolbarNeedsToggle;
-		},
-		set toolbarNeedsToggle(value) {
-			toolbarNeedsToggle = value;
-		},
-		get toolbarExpanded() {
-			return toolbarExpanded;
-		},
-		set toolbarExpanded(value) {
-			toolbarExpanded = value;
-		},
-		get fullscreenShortcut() {
-			return fullscreenShortcut;
-		},
-		set fullscreenShortcut(value) {
-			fullscreenShortcut = value;
-		},
-		get blockCache() {
-			return blockCache;
-		},
-		get relatedNotes() {
-			return relatedNotes;
-		},
-		set relatedNotes(value) {
-			relatedNotes = value;
-		},
-		openMathDialog,
-		saveCursorPosition,
-		focusEditor,
-		updateToolbarOverflow,
-		triggerAutoSave,
-		get versionPreviewHash() {
-			return versionPreviewHash;
-		},
-		set versionPreviewHash(value) {
-			versionPreviewHash = value;
-		},
-		get versionPreviewDialog() {
-			return versionPreviewDialog;
-		},
-		get navigationWarningDialog() {
-			return navigationWarningDialog;
-		},
-		hasReturnTo: () => page.url.searchParams.has('returnTo'),
-		get backUrl() {
-			return backUrl;
-		},
-		get pendingDebugTrace() {
-			return pendingDebugTrace;
-		},
-		set pendingDebugTrace(value) {
-			pendingDebugTrace = value;
-		},
-		get debugInfo() {
-			return debugInfo;
-		},
-		set debugInfo(value) {
-			debugInfo = value;
-		},
-		get showDebugWindow() {
-			return showDebugWindow;
-		},
-		get pdfIngestionStatus() {
-			return pdfIngestionStatus;
-		},
-		set pdfIngestionStatus(value) {
-			pdfIngestionStatus = value;
-		},
-		get pdfIngestionError() {
-			return pdfIngestionError;
-		},
-		set pdfIngestionError(value) {
-			pdfIngestionError = value;
-		},
-		get pdfIngestionPromise() {
-			return pdfIngestionPromise;
-		},
-		set pdfIngestionPromise(value) {
-			pdfIngestionPromise = value;
-		},
-		get pdfSearchQuery() {
-			return pdfSearchQuery;
-		},
-		set pdfSearchQuery(value) {
-			pdfSearchQuery = value;
-		},
-		get pdfSelectedIndex() {
-			return pdfSelectedIndex;
-		},
-		set pdfSelectedIndex(value) {
-			pdfSelectedIndex = value;
-		},
-		get pdfNotesList() {
-			return pdfNotesList;
-		},
-		set pdfNotesList(value) {
-			pdfNotesList = value;
-		},
-		get filteredPdfs() {
-			return filteredPdfs;
-		},
-		get attachPdfDialog() {
-			return attachPdfDialog;
-		},
-		get detachPdfDialog() {
-			return detachPdfDialog;
-		},
-		tick,
-		appendToNoteBody,
-		get requireToolApproval() {
-			return requireToolApproval;
-		},
-		set requireToolApproval(value) {
-			requireToolApproval = value;
-		},
-		get isChatStreaming() {
-			return isChatStreaming;
-		},
-		get activeAiComposerMode() {
-			return activeAiComposerMode;
-		},
-		set activeAiComposerMode(value) {
-			activeAiComposerMode = value;
-		},
-		get activeChatNoteId() {
-			return activeChatNoteId;
-		},
-		set activeChatNoteId(value) {
-			activeChatNoteId = value;
-		},
-		get activeChatRequestId() {
-			return activeChatRequestId;
-		},
-		set activeChatRequestId(value) {
-			activeChatRequestId = value;
-		},
-		get chatInput() {
-			return chatInput;
-		},
-		set chatInput(value) {
-			chatInput = value;
-		},
-		get chatTextareaEl() {
-			return chatTextareaEl;
-		},
-		get chatMessagesEl() {
-			return chatMessagesEl;
-		},
-		// Keep the selected Chat/Write mode in the graph context. Without this
-		// bridge the chat session sent `undefined`, and the backend accepted it
-		// as legacy `auto` mode even while the Chat button looked active.
-		get aiInteractionMode() {
-			return aiInteractionMode;
-		},
-		set aiInteractionMode(value) {
-			aiInteractionMode = value;
-		},
-		get copiedIdx() {
-			return copiedIdx;
-		},
-		set copiedIdx(value) {
-			copiedIdx = value;
-		},
-		get chatChunkBuf() {
-			return chatChunkBuf;
-		},
-		set chatChunkBuf(value) {
-			chatChunkBuf = value;
-		},
-		get chatChunkFlushPending() {
-			return chatChunkFlushPending;
-		},
-		set chatChunkFlushPending(value) {
-			chatChunkFlushPending = value;
-		},
-		get MAX_DEBUG_MSG_CHARS() {
-			return MAX_DEBUG_MSG_CHARS;
-		},
-		get MAX_DEBUG_TRACE() {
-			return MAX_DEBUG_TRACE;
-		},
-		get approvalTimeouts() {
-			return approvalTimeouts;
-		},
-		get armedSelection() {
-			return armedSelection;
-		},
-		armedEditTarget,
-		reselectAfterEdit,
-		scrollChatToBottom,
-		APPROVAL_TIMEOUT_MS
-	});
+	const graphPort = createBoundController(
+		() => ({
+			aiInteractionMode,
+			isLoadingNote,
+			toolsReady,
+			writeTargetNotice,
+			chatPersistTimer,
+			activeSourceBytes,
+			activeSourceId,
+			activeSection,
+			sectionCache,
+			showAttachedNote,
+			note,
+			chatMessages,
+			chatPersistenceError,
+			noteHistory,
+			versionPreviewContent,
+			activeSidebarTab,
+			isSourceMaterial,
+			sourceMaterialType,
+			workingDocType,
+			draftTitle,
+			draftBody,
+			draftTags,
+			scratchpadSavedId,
+			message,
+			saveStatus,
+			vditorInstance,
+			isBusy,
+			saveNote,
+			noteStreamBackup,
+			noteStreamBuf,
+			noteStreaming,
+			transclusionObserver,
+			activeAiEditTarget,
+			noteStreamSpan,
+			noteStreamFlushPending,
+			vditorContainer,
+			VditorConstructor,
+			shouldRefocusEditor,
+			vditorLoading,
+			shouldInitEditor,
+			toolbarResizeObserver,
+			toolbarNeedsToggle,
+			toolbarExpanded,
+			fullscreenShortcut,
+			blockCache,
+			relatedNotes,
+			versionPreviewHash,
+			versionPreviewDialog,
+			navigationWarningDialog,
+			backUrl,
+			pendingDebugTrace,
+			debugInfo,
+			showDebugWindow,
+			pdfIngestionStatus,
+			pdfIngestionError,
+			pdfIngestionPromise,
+			pdfSearchQuery,
+			pdfSelectedIndex,
+			pdfNotesList,
+			filteredPdfs,
+			attachPdfDialog,
+			detachPdfDialog,
+			requireToolApproval,
+			isChatStreaming,
+			activeAiComposerMode,
+			activeChatNoteId,
+			activeChatRequestId,
+			chatInput,
+			chatTextareaEl,
+			chatMessagesEl,
+			copiedIdx,
+			chatChunkBuf,
+			chatChunkFlushPending,
+			MAX_DEBUG_MSG_CHARS,
+			MAX_DEBUG_TRACE,
+			approvalTimeouts,
+			armedSelection
+		}),
+		{
+			isLoadingNote: (value) => (isLoadingNote = value),
+			toolsReady: (value) => (toolsReady = value),
+			writeTargetNotice: (value) => (writeTargetNotice = value),
+			chatPersistTimer: (value) => (chatPersistTimer = value),
+			activeSourceBytes: (value) => (activeSourceBytes = value),
+			activeSourceId: (value) => (activeSourceId = value),
+			activeSection: (value) => (activeSection = value),
+			sectionCache: (value) => (sectionCache = value),
+			showAttachedNote: (value) => (showAttachedNote = value),
+			note: (value) => (note = value),
+			chatMessages: (value) => (chatMessages = value),
+			chatPersistenceError: (value) => (chatPersistenceError = value),
+			noteHistory: (value) => (noteHistory = value),
+			versionPreviewContent: (value) => (versionPreviewContent = value),
+			activeSidebarTab: (value) => (activeSidebarTab = value),
+			isSourceMaterial: (value) => (isSourceMaterial = value),
+			sourceMaterialType: (value) => (sourceMaterialType = value),
+			workingDocType: (value) => (workingDocType = value),
+			draftTitle: (value) => (draftTitle = value),
+			draftBody: (value) => (draftBody = value),
+			draftTags: (value) => (draftTags = value),
+			scratchpadSavedId: (value) => (scratchpadSavedId = value),
+			message: (value) => (message = value),
+			saveStatus: (value) => (saveStatus = value),
+			vditorInstance: (value) => (vditorInstance = value),
+			isBusy: (value) => (isBusy = value),
+			noteStreamBackup: (value) => (noteStreamBackup = value),
+			noteStreamBuf: (value) => (noteStreamBuf = value),
+			noteStreaming: (value) => (noteStreaming = value),
+			transclusionObserver: (value) => (transclusionObserver = value),
+			activeAiEditTarget: (value) => (activeAiEditTarget = value),
+			noteStreamSpan: (value) => (noteStreamSpan = value),
+			noteStreamFlushPending: (value) => (noteStreamFlushPending = value),
+			VditorConstructor: (value) => (VditorConstructor = value),
+			shouldRefocusEditor: (value) => (shouldRefocusEditor = value),
+			vditorLoading: (value) => (vditorLoading = value),
+			toolbarResizeObserver: (value) => (toolbarResizeObserver = value),
+			toolbarNeedsToggle: (value) => (toolbarNeedsToggle = value),
+			toolbarExpanded: (value) => (toolbarExpanded = value),
+			fullscreenShortcut: (value) => (fullscreenShortcut = value),
+			relatedNotes: (value) => (relatedNotes = value),
+			versionPreviewHash: (value) => (versionPreviewHash = value),
+			pendingDebugTrace: (value) => (pendingDebugTrace = value),
+			debugInfo: (value) => (debugInfo = value),
+			pdfIngestionStatus: (value) => (pdfIngestionStatus = value),
+			pdfIngestionError: (value) => (pdfIngestionError = value),
+			pdfIngestionPromise: (value) => (pdfIngestionPromise = value),
+			pdfSearchQuery: (value) => (pdfSearchQuery = value),
+			pdfSelectedIndex: (value) => (pdfSelectedIndex = value),
+			pdfNotesList: (value) => (pdfNotesList = value),
+			requireToolApproval: (value) => (requireToolApproval = value),
+			activeAiComposerMode: (value) => (activeAiComposerMode = value),
+			activeChatNoteId: (value) => (activeChatNoteId = value),
+			activeChatRequestId: (value) => (activeChatRequestId = value),
+			chatInput: (value) => (chatInput = value),
+			aiInteractionMode: (value) => (aiInteractionMode = value),
+			copiedIdx: (value) => (copiedIdx = value),
+			chatChunkBuf: (value) => (chatChunkBuf = value),
+			chatChunkFlushPending: (value) => (chatChunkFlushPending = value)
+		},
+		{
+			createDocumentSession,
+			createStreamingSession,
+			createLinkingSession,
+			createEditorSession,
+			createNavigationSession,
+			createSourceSession,
+			createChatSession,
+			clearArmedSelection,
+			activeAiNoteId,
+			destroyEditorInstance,
+			openNoteNotebook,
+			goToHome: () => goto(resolve('/')),
+			setSaveNote: (value: () => Promise<void>) => {
+				saveNote = value;
+			},
+			getSelectionTextOffset,
+			restoreSelectionTextOffset,
+			localVditorCdn,
+			insertAtSavedCursor,
+			refocusEditorSoon,
+			openMathDialog,
+			saveCursorPosition,
+			focusEditor,
+			updateToolbarOverflow,
+			triggerAutoSave,
+			hasReturnTo: () => page.url.searchParams.has('returnTo'),
+			tick,
+			appendToNoteBody,
+			// Keep the selected Chat/Write mode in the graph context. Without this
+			// bridge the chat session sent `undefined`, and the backend accepted it
+			// as legacy `auto` mode even while the Chat button looked active.
+			get aiInteractionMode() {
+				return aiInteractionMode;
+			},
+			armedEditTarget,
+			reselectAfterEdit,
+			scrollChatToBottom,
+			APPROVAL_TIMEOUT_MS
+		}
+	);
+	const graph = createNotePageGraph(graphPort);
 	const {
 		linkingSession,
 		editorSession,
@@ -1093,860 +647,271 @@ export function createNotePageController() {
 		aiEventContext
 	} = graph;
 	invalidateVditorInitialization = editorSession.invalidateInitialization;
-	const dialogs = createNotePageDialogs({
-		get deleteMainNoteDialog() {
-			return deleteMainNoteDialog;
+	const dialogsPort = createBoundController(
+		() => ({
+			deleteMainNoteDialog,
+			deleteAttachedNoteDialog,
+			isSourceMaterial,
+			scratchpadSavedId,
+			activeSourceId,
+			note,
+			isBusy,
+			saveTimer,
+			draftBody,
+			showAttachedNote,
+			saveStatus,
+			message
+		}),
+		{
+			isBusy: (value) => (isBusy = value),
+			saveTimer: (value) => (saveTimer = value),
+			draftBody: (value) => (draftBody = value),
+			showAttachedNote: (value) => (showAttachedNote = value),
+			saveStatus: (value) => (saveStatus = value),
+			message: (value) => (message = value)
 		},
-		get deleteAttachedNoteDialog() {
-			return deleteAttachedNoteDialog;
-		},
-		get isSourceMaterial() {
-			return isSourceMaterial;
-		},
-		get scratchpadSavedId() {
-			return scratchpadSavedId;
-		},
-		get activeSourceId() {
-			return activeSourceId;
-		},
-		get note() {
-			return note;
-		},
-		get isBusy() {
-			return isBusy;
-		},
-		set isBusy(value) {
-			isBusy = value;
-		},
-		get saveTimer() {
-			return saveTimer;
-		},
-		set saveTimer(value) {
-			saveTimer = value;
-		},
-		destroyEditorInstance,
-		get draftBody() {
-			return draftBody;
-		},
-		set draftBody(value) {
-			draftBody = value;
-		},
-		get showAttachedNote() {
-			return showAttachedNote;
-		},
-		set showAttachedNote(value) {
-			showAttachedNote = value;
-		},
-		get saveStatus() {
-			return saveStatus;
-		},
-		set saveStatus(value) {
-			saveStatus = value;
-		},
-		get message() {
-			return message;
-		},
-		set message(value) {
-			message = value;
-		},
-		deleteNote: (noteId: string) => invoke('delete_note', { noteId }),
-		navigationSession: graph.navigationSession,
-		linkingSession: graph.linkingSession,
-		goToNote: (noteId: string) => goto(resolve(`/notes/${encodeURIComponent(noteId)}`)),
-		goToHref: (href: string) => {
-			window.location.href = href;
+		{
+			destroyEditorInstance,
+			deleteNote: (noteId: string) => invoke('delete_note', { noteId }),
+			navigationSession: graph.navigationSession,
+			linkingSession: graph.linkingSession,
+			goToNote: (noteId: string) => goto(resolve(`/notes/${encodeURIComponent(noteId)}`)),
+			goToHref: (href: string) => {
+				window.location.href = href;
+			}
 		}
-	});
+	);
+	const dialogs = createNotePageDialogs(dialogsPort);
 	const { requestDeleteMainNote } = dialogs;
-	const lifecycle = createNotePageLifecycle({
-		get aiInteractionMode() {
-			return aiInteractionMode;
-		},
-		set aiInteractionMode(value) {
-			aiInteractionMode = value;
-		},
-		PANE_MIN_WIDTH,
-		SIDEBAR_MIN_WIDTH,
-		get sidebarWidth() {
-			return sidebarWidth;
-		},
-		set sidebarWidth(value) {
-			sidebarWidth = value;
-		},
-		handleGlobalSelectionChange,
-		onDocMouseDown,
-		handleChatSidebarShortcut,
-		aiEventContext,
-		handleGlobalMouseMove,
-		stopResizing,
-		handleBeforeUnload,
-		get chatPersistTimer() {
-			return chatPersistTimer;
-		},
-		get texAutoTimer() {
-			return texAutoTimer;
-		},
-		approvalTimeouts,
-		activeAiNoteId,
-		get chatMessages() {
-			return chatMessages;
-		},
-		persistChatHistory,
-		get toolbarResizeObserver() {
-			return toolbarResizeObserver;
-		},
-		editorSession,
-		sourceSession,
-		destroyEditorInstance,
-		get vditorInstance() {
-			return vditorInstance;
-		},
-		get loadedRouteNoteId() {
-			return loadedRouteNoteId;
-		},
-		set loadedRouteNoteId(value) {
-			loadedRouteNoteId = value;
-		},
-		loadCurrentNote,
-		get debugInfo() {
-			return debugInfo;
-		},
-		set debugInfo(value) {
-			debugInfo = value;
-		},
-		get showDebugWindow() {
-			return showDebugWindow;
-		},
-		get activeChatRequestId() {
-			return activeChatRequestId;
-		},
-		get debugTimer() {
-			return debugTimer;
-		},
-		set debugTimer(value) {
-			debugTimer = value;
-		}
-	});
-	return {
-		...lifecycle,
-		get requireToolApproval() {
-			return requireToolApproval;
-		},
-		set requireToolApproval(value: typeof requireToolApproval) {
-			requireToolApproval = value;
-		},
-		get note() {
-			return note;
-		},
-		set note(value: typeof note) {
-			note = value;
-		},
-		get isLoadingNote() {
-			return isLoadingNote;
-		},
-		set isLoadingNote(value: typeof isLoadingNote) {
-			isLoadingNote = value;
-		},
-		get draftBody() {
-			return draftBody;
-		},
-		set draftBody(value: typeof draftBody) {
-			draftBody = value;
-		},
-		get draftTitle() {
-			return draftTitle;
-		},
-		set draftTitle(value: typeof draftTitle) {
-			draftTitle = value;
-		},
-		get draftTags() {
-			return draftTags;
-		},
-		set draftTags(value: typeof draftTags) {
-			draftTags = value;
-		},
-		get isBusy() {
-			return isBusy;
-		},
-		set isBusy(value: typeof isBusy) {
-			isBusy = value;
-		},
-		get message() {
-			return message;
-		},
-		set message(value: typeof message) {
-			message = value;
-		},
-		get latexDownloadMsg() {
-			return latexDownloadMsg;
-		},
-		set latexDownloadMsg(value: typeof latexDownloadMsg) {
-			latexDownloadMsg = value;
-		},
-		get texAutoCompile() {
-			return texAutoCompile;
-		},
-		set texAutoCompile(value: typeof texAutoCompile) {
-			texAutoCompile = value;
-		},
-		get texCompiling() {
-			return texCompiling;
-		},
-		set texCompiling(value: typeof texCompiling) {
-			texCompiling = value;
-		},
-		get texCacheWarmed() {
-			return texCacheWarmed;
-		},
-		set texCacheWarmed(value: typeof texCacheWarmed) {
-			texCacheWarmed = value;
-		},
-		get texPreviewStatus() {
-			return texPreviewStatus;
-		},
-		set texPreviewStatus(value: typeof texPreviewStatus) {
-			texPreviewStatus = value;
-		},
-		get texCompileError() {
-			return texCompileError;
-		},
-		set texCompileError(value: typeof texCompileError) {
-			texCompileError = value;
-		},
-		get texRevision() {
-			return texRevision;
-		},
-		set texRevision(value: typeof texRevision) {
-			texRevision = value;
-		},
-		get texCompileQueued() {
-			return texCompileQueued;
-		},
-		set texCompileQueued(value: typeof texCompileQueued) {
-			texCompileQueued = value;
-		},
-		get lastTexBody() {
-			return lastTexBody;
-		},
-		set lastTexBody(value: typeof lastTexBody) {
-			lastTexBody = value;
-		},
-		get texDiagnostics() {
-			return texDiagnostics;
-		},
-		set texDiagnostics(value: typeof texDiagnostics) {
-			texDiagnostics = value;
-		},
-		get texAutoTimer() {
-			return texAutoTimer;
-		},
-		set texAutoTimer(value: typeof texAutoTimer) {
-			texAutoTimer = value;
-		},
-		get activeSidebarTab() {
-			return activeSidebarTab;
-		},
-		set activeSidebarTab(value: typeof activeSidebarTab) {
-			activeSidebarTab = value;
-		},
-		get noteHistory() {
-			return noteHistory;
-		},
-		set noteHistory(value: typeof noteHistory) {
-			noteHistory = value;
-		},
-		get versionPreviewContent() {
-			return versionPreviewContent;
-		},
-		set versionPreviewContent(value: typeof versionPreviewContent) {
-			versionPreviewContent = value;
-		},
-		get versionPreviewHash() {
-			return versionPreviewHash;
-		},
-		set versionPreviewHash(value: typeof versionPreviewHash) {
-			versionPreviewHash = value;
-		},
-		get versionPreviewDialog() {
-			return versionPreviewDialog;
-		},
-		set versionPreviewDialog(value: typeof versionPreviewDialog) {
-			versionPreviewDialog = value;
-		},
-		get chatMessages() {
-			return chatMessages;
-		},
-		set chatMessages(value: typeof chatMessages) {
-			chatMessages = value;
-		},
-		get chatPersistenceError() {
-			return chatPersistenceError;
-		},
-		set chatPersistenceError(value: typeof chatPersistenceError) {
-			chatPersistenceError = value;
-		},
-		get chatInput() {
-			return chatInput;
-		},
-		set chatInput(value: typeof chatInput) {
-			chatInput = value;
-		},
-		get copiedIdx() {
-			return copiedIdx;
-		},
-		set copiedIdx(value: typeof copiedIdx) {
-			copiedIdx = value;
-		},
-		get chatChunkBuf() {
-			return chatChunkBuf;
-		},
-		set chatChunkBuf(value: typeof chatChunkBuf) {
-			chatChunkBuf = value;
-		},
-		get chatChunkFlushPending() {
-			return chatChunkFlushPending;
-		},
-		set chatChunkFlushPending(value: typeof chatChunkFlushPending) {
-			chatChunkFlushPending = value;
-		},
-		get chatPersistTimer() {
-			return chatPersistTimer;
-		},
-		set chatPersistTimer(value: typeof chatPersistTimer) {
-			chatPersistTimer = value;
-		},
-		persistableChatHistory,
-		persistChatHistory,
-		checkpointChatHistory,
-		flushChatChunks,
-		get showDebugWindow() {
-			return showDebugWindow;
-		},
-		set showDebugWindow(value: typeof showDebugWindow) {
-			showDebugWindow = value;
-		},
-		get MAX_DEBUG_TRACE() {
-			return MAX_DEBUG_TRACE;
-		},
-		get MAX_DEBUG_MSG_CHARS() {
-			return MAX_DEBUG_MSG_CHARS;
-		},
-		makeDebugTraceEntry,
-		renderChatContent,
-		get pendingDebugTrace() {
-			return pendingDebugTrace;
-		},
-		set pendingDebugTrace(value: typeof pendingDebugTrace) {
-			pendingDebugTrace = value;
-		},
-		get activeAiComposerMode() {
-			return activeAiComposerMode;
-		},
-		set activeAiComposerMode(value: typeof activeAiComposerMode) {
-			activeAiComposerMode = value;
-		},
-		get activeChatNoteId() {
-			return activeChatNoteId;
-		},
-		set activeChatNoteId(value: typeof activeChatNoteId) {
-			activeChatNoteId = value;
-		},
-		get aiInteractionMode() {
-			return aiInteractionMode;
-		},
-		set aiInteractionMode(value: typeof aiInteractionMode) {
-			aiInteractionMode = value;
-		},
-		setAiInteractionMode,
-		handleActiveSectionChange,
-		setToolApproval,
-		setStreamingStatus,
-		visibleAiStatus,
-		get debugInfo() {
-			return debugInfo;
-		},
-		set debugInfo(value: typeof debugInfo) {
-			debugInfo = value;
-		},
-		copyMessage,
-		get armedSelection() {
-			return armedSelection;
-		},
-		set armedSelection(value: typeof armedSelection) {
-			armedSelection = value;
-		},
-		get selDebounce() {
-			return selDebounce;
-		},
-		set selDebounce(value: typeof selDebounce) {
-			selDebounce = value;
-		},
-		get activeAiEditTarget() {
-			return activeAiEditTarget;
-		},
-		set activeAiEditTarget(value: typeof activeAiEditTarget) {
-			activeAiEditTarget = value;
-		},
-		get writeTargetNotice() {
-			return writeTargetNotice;
-		},
-		set writeTargetNotice(value: typeof writeTargetNotice) {
-			writeTargetNotice = value;
-		},
-		get activeChatRequestId() {
-			return activeChatRequestId;
-		},
-		set activeChatRequestId(value: typeof activeChatRequestId) {
-			activeChatRequestId = value;
-		},
-		get isChatStreaming() {
-			return isChatStreaming;
-		},
-		set isChatStreaming(value: typeof isChatStreaming) {
-			isChatStreaming = value;
-		},
-		openNoteNotebook,
-		attachFile,
-		get chatTextareaEl() {
-			return chatTextareaEl;
-		},
-		set chatTextareaEl(value: typeof chatTextareaEl) {
-			chatTextareaEl = value;
-		},
-		get chatMessagesEl() {
-			return chatMessagesEl;
-		},
-		set chatMessagesEl(value: typeof chatMessagesEl) {
-			chatMessagesEl = value;
-		},
-		get currentTime() {
-			return currentTime;
-		},
-		set currentTime(value: typeof currentTime) {
-			currentTime = value;
-		},
-		get debugTimer() {
-			return debugTimer;
-		},
-		set debugTimer(value: typeof debugTimer) {
-			debugTimer = value;
-		},
-		get backUrl() {
-			return backUrl;
-		},
-		set backUrl(value: typeof backUrl) {
-			backUrl = value;
-		},
-		get relatedNotes() {
-			return relatedNotes;
-		},
-		set relatedNotes(value: typeof relatedNotes) {
-			relatedNotes = value;
-		},
-		get vditorContainer() {
-			return vditorContainer;
-		},
-		set vditorContainer(value: typeof vditorContainer) {
-			vditorContainer = value;
-		},
-		get vditorInstance() {
-			return vditorInstance;
-		},
-		set vditorInstance(value: typeof vditorInstance) {
-			vditorInstance = value;
-		},
-		get VditorConstructor() {
-			return VditorConstructor;
-		},
-		set VditorConstructor(value: typeof VditorConstructor) {
-			VditorConstructor = value;
-		},
-		get vditorLoading() {
-			return vditorLoading;
-		},
-		set vditorLoading(value: typeof vditorLoading) {
-			vditorLoading = value;
-		},
-		localVditorCdn,
-		get toolsReady() {
-			return toolsReady;
-		},
-		set toolsReady(value: typeof toolsReady) {
-			toolsReady = value;
-		},
-		get fullscreenShortcut() {
-			return fullscreenShortcut;
-		},
-		set fullscreenShortcut(value: typeof fullscreenShortcut) {
-			fullscreenShortcut = value;
-		},
-		get APPROVAL_TIMEOUT_MS() {
-			return APPROVAL_TIMEOUT_MS;
-		},
-		get approvalTimeouts() {
-			return approvalTimeouts;
-		},
-		get noteStreaming() {
-			return noteStreaming;
-		},
-		set noteStreaming(value: typeof noteStreaming) {
-			noteStreaming = value;
-		},
-		get noteStreamBuf() {
-			return noteStreamBuf;
-		},
-		set noteStreamBuf(value: typeof noteStreamBuf) {
-			noteStreamBuf = value;
-		},
-		get noteStreamBackup() {
-			return noteStreamBackup;
-		},
-		set noteStreamBackup(value: typeof noteStreamBackup) {
-			noteStreamBackup = value;
-		},
-		get noteStreamFlushPending() {
-			return noteStreamFlushPending;
-		},
-		set noteStreamFlushPending(value: typeof noteStreamFlushPending) {
-			noteStreamFlushPending = value;
-		},
-		get noteStreamSpan() {
-			return noteStreamSpan;
-		},
-		set noteStreamSpan(value: typeof noteStreamSpan) {
-			noteStreamSpan = value;
-		},
-		get savedEditorRange() {
-			return savedEditorRange;
-		},
-		set savedEditorRange(value: typeof savedEditorRange) {
-			savedEditorRange = value;
-		},
-		get shortcutEditorRange() {
-			return shortcutEditorRange;
-		},
-		set shortcutEditorRange(value: typeof shortcutEditorRange) {
-			shortcutEditorRange = value;
-		},
-		get shouldRefocusEditor() {
-			return shouldRefocusEditor;
-		},
-		set shouldRefocusEditor(value: typeof shouldRefocusEditor) {
-			shouldRefocusEditor = value;
-		},
-		get isSourceMaterial() {
-			return isSourceMaterial;
-		},
-		set isSourceMaterial(value: typeof isSourceMaterial) {
-			isSourceMaterial = value;
-		},
-		get sourceMaterialType() {
-			return sourceMaterialType;
-		},
-		set sourceMaterialType(value: typeof sourceMaterialType) {
-			sourceMaterialType = value;
-		},
-		get workingDocType() {
-			return workingDocType;
-		},
-		set workingDocType(value: typeof workingDocType) {
-			workingDocType = value;
-		},
-		get PdfViewerComponent() {
-			return PdfViewerComponent;
-		},
-		set PdfViewerComponent(value: typeof PdfViewerComponent) {
-			PdfViewerComponent = value;
-		},
-		get EpubViewerComponent() {
-			return EpubViewerComponent;
-		},
-		set EpubViewerComponent(value: typeof EpubViewerComponent) {
-			EpubViewerComponent = value;
-		},
-		get HtmlViewerComponent() {
-			return HtmlViewerComponent;
-		},
-		set HtmlViewerComponent(value: typeof HtmlViewerComponent) {
-			HtmlViewerComponent = value;
-		},
-		get TexEditorComponent() {
-			return TexEditorComponent;
-		},
-		set TexEditorComponent(value: typeof TexEditorComponent) {
-			TexEditorComponent = value;
-		},
-		get IpynbEditorComponent() {
-			return IpynbEditorComponent;
-		},
-		set IpynbEditorComponent(value: typeof IpynbEditorComponent) {
-			IpynbEditorComponent = value;
-		},
-		get texEditorInstance() {
-			return texEditorInstance;
-		},
-		set texEditorInstance(value: typeof texEditorInstance) {
-			texEditorInstance = value;
-		},
-		get ipynbEditorInstance() {
-			return ipynbEditorInstance;
-		},
-		set ipynbEditorInstance(value: typeof ipynbEditorInstance) {
-			ipynbEditorInstance = value;
-		},
-		get activeSourceId() {
-			return activeSourceId;
-		},
-		set activeSourceId(value: typeof activeSourceId) {
-			activeSourceId = value;
-		},
-		get activeSourceBytes() {
-			return activeSourceBytes;
-		},
-		set activeSourceBytes(value: typeof activeSourceBytes) {
-			activeSourceBytes = value;
-		},
-		get activeSection() {
-			return activeSection;
-		},
-		set activeSection(value: typeof activeSection) {
-			activeSection = value;
-		},
-		get sectionCache() {
-			return sectionCache;
-		},
-		set sectionCache(value: typeof sectionCache) {
-			sectionCache = value;
-		},
-		get scratchpadSavedId() {
-			return scratchpadSavedId;
-		},
-		set scratchpadSavedId(value: typeof scratchpadSavedId) {
-			scratchpadSavedId = value;
-		},
-		get showAttachedNote() {
-			return showAttachedNote;
-		},
-		set showAttachedNote(value: typeof showAttachedNote) {
-			showAttachedNote = value;
-		},
-		get pdfIngestionStatus() {
-			return pdfIngestionStatus;
-		},
-		set pdfIngestionStatus(value: typeof pdfIngestionStatus) {
-			pdfIngestionStatus = value;
-		},
-		get pdfIngestionError() {
-			return pdfIngestionError;
-		},
-		set pdfIngestionError(value: typeof pdfIngestionError) {
-			pdfIngestionError = value;
-		},
-		get pdfIngestionPromise() {
-			return pdfIngestionPromise;
-		},
-		set pdfIngestionPromise(value: typeof pdfIngestionPromise) {
-			pdfIngestionPromise = value;
-		},
-		get splitRatio() {
-			return splitRatio;
-		},
-		set splitRatio(value: typeof splitRatio) {
-			splitRatio = value;
-		},
-		get isResizing() {
-			return isResizing;
-		},
-		set isResizing(value: typeof isResizing) {
-			isResizing = value;
-		},
-		get mainLayoutEl() {
-			return mainLayoutEl;
-		},
-		set mainLayoutEl(value: typeof mainLayoutEl) {
-			mainLayoutEl = value;
-		},
-		activeAiNoteId,
-		handleSectionsReady,
-		formatSectionCacheDuration,
-		openAttachedNote,
-		get PANE_MIN_WIDTH() {
-			return PANE_MIN_WIDTH;
-		},
-		get SIDEBAR_MIN_WIDTH() {
-			return SIDEBAR_MIN_WIDTH;
-		},
-		get sidebarWidth() {
-			return sidebarWidth;
-		},
-		set sidebarWidth(value: typeof sidebarWidth) {
-			sidebarWidth = value;
-		},
-		get isSidebarResizing() {
-			return isSidebarResizing;
-		},
-		set isSidebarResizing(value: typeof isSidebarResizing) {
-			isSidebarResizing = value;
-		},
-		startSidebarResizing,
-		startResizing,
-		handleGlobalMouseMove,
-		stopResizing,
-		handlePdfQuote,
-		focusEditor,
-		refocusEditorSoon,
-		captureShortcutEditorTarget,
-		restoreShortcutEditorFocus,
-		handleChatSidebarShortcut,
-		get userScrolledUp() {
-			return userScrolledUp;
-		},
-		set userScrolledUp(value: typeof userScrolledUp) {
-			userScrolledUp = value;
-		},
-		handleChatScroll,
-		scrollChatToBottom,
-		getSelectionTextOffset,
-		textOffsetOf,
-		nearestIndexOf,
-		computeSourceSelection,
-		computeSourceCursor,
-		clearArmedSelection,
-		onDocMouseDown,
-		captureEditorSelection,
-		captureExternalTarget,
-		reselectAfterEdit,
-		armedEditTarget,
-		onSelectionChange,
-		restoreSelectionTextOffset,
-		saveCursorPosition,
-		insertAtSavedCursor,
-		...mathSession,
-		get blockCache() {
-			return blockCache;
-		},
-		set blockCache(value: typeof blockCache) {
-			blockCache = value;
-		},
-		get transclusionObserver() {
-			return transclusionObserver;
-		},
-		set transclusionObserver(value: typeof transclusionObserver) {
-			transclusionObserver = value;
-		},
-		get toolbarExpanded() {
-			return toolbarExpanded;
-		},
-		set toolbarExpanded(value: typeof toolbarExpanded) {
-			toolbarExpanded = value;
-		},
-		get toolbarNeedsToggle() {
-			return toolbarNeedsToggle;
-		},
-		set toolbarNeedsToggle(value: typeof toolbarNeedsToggle) {
-			toolbarNeedsToggle = value;
-		},
-		get toolbarResizeObserver() {
-			return toolbarResizeObserver;
-		},
-		set toolbarResizeObserver(value: typeof toolbarResizeObserver) {
-			toolbarResizeObserver = value;
-		},
-		get saveStatus() {
-			return saveStatus;
-		},
-		set saveStatus(value: typeof saveStatus) {
-			saveStatus = value;
-		},
-		get saveTimer() {
-			return saveTimer;
-		},
-		set saveTimer(value: typeof saveTimer) {
-			saveTimer = value;
-		},
-		get navigationWarningDialog() {
-			return navigationWarningDialog;
-		},
-		set navigationWarningDialog(value: typeof navigationWarningDialog) {
-			navigationWarningDialog = value;
-		},
-		get deleteAttachedNoteDialog() {
-			return deleteAttachedNoteDialog;
-		},
-		set deleteAttachedNoteDialog(value: typeof deleteAttachedNoteDialog) {
-			deleteAttachedNoteDialog = value;
-		},
-		get deleteMainNoteDialog() {
-			return deleteMainNoteDialog;
-		},
-		set deleteMainNoteDialog(value: typeof deleteMainNoteDialog) {
-			deleteMainNoteDialog = value;
-		},
-		get detachPdfDialog() {
-			return detachPdfDialog;
-		},
-		set detachPdfDialog(value: typeof detachPdfDialog) {
-			detachPdfDialog = value;
-		},
-		requestDeleteMainNote,
-		get attachPdfDialog() {
-			return attachPdfDialog;
-		},
-		set attachPdfDialog(value: typeof attachPdfDialog) {
-			attachPdfDialog = value;
-		},
-		get pdfSearchQuery() {
-			return pdfSearchQuery;
-		},
-		set pdfSearchQuery(value: typeof pdfSearchQuery) {
-			pdfSearchQuery = value;
-		},
-		get pdfNotesList() {
-			return pdfNotesList;
-		},
-		set pdfNotesList(value: typeof pdfNotesList) {
-			pdfNotesList = value;
-		},
-		get pdfSelectedIndex() {
-			return pdfSelectedIndex;
-		},
-		set pdfSelectedIndex(value: typeof pdfSelectedIndex) {
-			pdfSelectedIndex = value;
-		},
-		get filteredPdfs() {
-			return filteredPdfs;
-		},
-		set filteredPdfs(value: typeof filteredPdfs) {
-			filteredPdfs = value;
-		},
-		get shouldRenderEditor() {
-			return shouldRenderEditor;
-		},
-		set shouldRenderEditor(value: typeof shouldRenderEditor) {
-			shouldRenderEditor = value;
-		},
-		get shouldInitEditor() {
-			return shouldInitEditor;
-		},
-		set shouldInitEditor(value: typeof shouldInitEditor) {
-			shouldInitEditor = value;
-		},
-		get loadedRouteNoteId() {
-			return loadedRouteNoteId;
-		},
-		set loadedRouteNoteId(value: typeof loadedRouteNoteId) {
-			loadedRouteNoteId = value;
-		},
-		...createNotePageActions({
-			...inputGraph,
-			...graph,
-			...dialogs,
+	const lifecyclePort = createBoundController(
+		() => ({
+			aiInteractionMode,
+			sidebarWidth,
+			chatPersistTimer,
+			texAutoTimer,
+			chatMessages,
+			toolbarResizeObserver,
+			vditorInstance,
+			loadedRouteNoteId,
+			debugInfo,
+			showDebugWindow,
+			activeChatRequestId,
+			debugTimer
+		}),
+		{
+			aiInteractionMode: (value) => (aiInteractionMode = value),
+			sidebarWidth: (value) => (sidebarWidth = value),
+			loadedRouteNoteId: (value) => (loadedRouteNoteId = value),
+			debugInfo: (value) => (debugInfo = value),
+			debugTimer: (value) => (debugTimer = value)
+		},
+		{
+			PANE_MIN_WIDTH,
+			SIDEBAR_MIN_WIDTH,
+			handleGlobalSelectionChange,
+			onDocMouseDown,
+			handleChatSidebarShortcut,
+			aiEventContext,
+			handleGlobalMouseMove,
+			stopResizing,
+			handleBeforeUnload,
+			approvalTimeouts,
+			activeAiNoteId,
+			persistChatHistory,
 			editorSession,
-			navigationSession,
-			linkingSession,
-			saveNote,
-			updateToolbarOverflow
-		})
-	};
+			sourceSession,
+			destroyEditorInstance,
+			loadCurrentNote
+		}
+	);
+	const lifecycle = createNotePageLifecycle(lifecyclePort);
+	return createBoundController(
+		() => ({
+			PdfViewerComponent,
+			EpubViewerComponent,
+			HtmlViewerComponent,
+			TexEditorComponent,
+			IpynbEditorComponent,
+			shouldRenderEditor,
+			currentTime,
+			...editorInteractionPort,
+			...editorStatePort,
+			...inputGraphPort,
+			...graphPort,
+			...dialogsPort,
+			...lifecyclePort,
+			loadedRouteNoteId
+		}),
+		{
+			requireToolApproval: (value) => (requireToolApproval = value),
+			note: (value) => (note = value),
+			isLoadingNote: (value) => (isLoadingNote = value),
+			draftBody: (value) => (draftBody = value),
+			draftTitle: (value) => (draftTitle = value),
+			draftTags: (value) => (draftTags = value),
+			isBusy: (value) => (isBusy = value),
+			message: (value) => (message = value),
+			latexDownloadMsg: (value) => (latexDownloadMsg = value),
+			texAutoCompile: (value) => (texAutoCompile = value),
+			texCompiling: (value) => (texCompiling = value),
+			texCacheWarmed: (value) => (texCacheWarmed = value),
+			texPreviewStatus: (value) => (texPreviewStatus = value),
+			texCompileError: (value) => (texCompileError = value),
+			texRevision: (value) => (texRevision = value),
+			texCompileQueued: (value) => (texCompileQueued = value),
+			lastTexBody: (value) => (lastTexBody = value),
+			texDiagnostics: (value) => (texDiagnostics = value),
+			texAutoTimer: (value) => (texAutoTimer = value),
+			activeSidebarTab: (value) => (activeSidebarTab = value),
+			noteHistory: (value) => (noteHistory = value),
+			versionPreviewContent: (value) => (versionPreviewContent = value),
+			versionPreviewHash: (value) => (versionPreviewHash = value),
+			versionPreviewDialog: (value) => (versionPreviewDialog = value),
+			chatMessages: (value) => (chatMessages = value),
+			chatPersistenceError: (value) => (chatPersistenceError = value),
+			chatInput: (value) => (chatInput = value),
+			copiedIdx: (value) => (copiedIdx = value),
+			chatChunkBuf: (value) => (chatChunkBuf = value),
+			chatChunkFlushPending: (value) => (chatChunkFlushPending = value),
+			chatPersistTimer: (value) => (chatPersistTimer = value),
+			showDebugWindow: (value) => (showDebugWindow = value),
+			pendingDebugTrace: (value) => (pendingDebugTrace = value),
+			activeAiComposerMode: (value) => (activeAiComposerMode = value),
+			activeChatNoteId: (value) => (activeChatNoteId = value),
+			aiInteractionMode: (value) => (aiInteractionMode = value),
+			debugInfo: (value) => (debugInfo = value),
+			armedSelection: (value) => (armedSelection = value),
+			selDebounce: (value) => (selDebounce = value),
+			activeAiEditTarget: (value) => (activeAiEditTarget = value),
+			writeTargetNotice: (value) => (writeTargetNotice = value),
+			activeChatRequestId: (value) => (activeChatRequestId = value),
+			isChatStreaming: (value) => (isChatStreaming = value),
+			chatTextareaEl: (value) => (chatTextareaEl = value),
+			chatMessagesEl: (value) => (chatMessagesEl = value),
+			currentTime: (value) => (currentTime = value),
+			debugTimer: (value) => (debugTimer = value),
+			backUrl: (value) => (backUrl = value),
+			relatedNotes: (value) => (relatedNotes = value),
+			vditorContainer: (value) => (vditorContainer = value),
+			vditorInstance: (value) => (vditorInstance = value),
+			VditorConstructor: (value) => (VditorConstructor = value),
+			vditorLoading: (value) => (vditorLoading = value),
+			toolsReady: (value) => (toolsReady = value),
+			fullscreenShortcut: (value) => (fullscreenShortcut = value),
+			noteStreaming: (value) => (noteStreaming = value),
+			noteStreamBuf: (value) => (noteStreamBuf = value),
+			noteStreamBackup: (value) => (noteStreamBackup = value),
+			noteStreamFlushPending: (value) => (noteStreamFlushPending = value),
+			noteStreamSpan: (value) => (noteStreamSpan = value),
+			savedEditorRange: (value) => (savedEditorRange = value),
+			shortcutEditorRange: (value) => (shortcutEditorRange = value),
+			shouldRefocusEditor: (value) => (shouldRefocusEditor = value),
+			isSourceMaterial: (value) => (isSourceMaterial = value),
+			sourceMaterialType: (value) => (sourceMaterialType = value),
+			workingDocType: (value) => (workingDocType = value),
+			PdfViewerComponent: (value) => (PdfViewerComponent = value),
+			EpubViewerComponent: (value) => (EpubViewerComponent = value),
+			HtmlViewerComponent: (value) => (HtmlViewerComponent = value),
+			TexEditorComponent: (value) => (TexEditorComponent = value),
+			IpynbEditorComponent: (value) => (IpynbEditorComponent = value),
+			texEditorInstance: (value) => (texEditorInstance = value),
+			ipynbEditorInstance: (value) => (ipynbEditorInstance = value),
+			activeSourceId: (value) => (activeSourceId = value),
+			activeSourceBytes: (value) => (activeSourceBytes = value),
+			activeSection: (value) => (activeSection = value),
+			sectionCache: (value) => (sectionCache = value),
+			scratchpadSavedId: (value) => (scratchpadSavedId = value),
+			showAttachedNote: (value) => (showAttachedNote = value),
+			pdfIngestionStatus: (value) => (pdfIngestionStatus = value),
+			pdfIngestionError: (value) => (pdfIngestionError = value),
+			pdfIngestionPromise: (value) => (pdfIngestionPromise = value),
+			splitRatio: (value) => (splitRatio = value),
+			isResizing: (value) => (isResizing = value),
+			mainLayoutEl: (value) => (mainLayoutEl = value),
+			sidebarWidth: (value) => (sidebarWidth = value),
+			isSidebarResizing: (value) => (isSidebarResizing = value),
+			userScrolledUp: (value) => (userScrolledUp = value),
+			blockCache: (value) => (blockCache = value),
+			transclusionObserver: (value) => (transclusionObserver = value),
+			toolbarExpanded: (value) => (toolbarExpanded = value),
+			toolbarNeedsToggle: (value) => (toolbarNeedsToggle = value),
+			toolbarResizeObserver: (value) => (toolbarResizeObserver = value),
+			saveStatus: (value) => (saveStatus = value),
+			saveTimer: (value) => (saveTimer = value),
+			navigationWarningDialog: (value) => (navigationWarningDialog = value),
+			deleteAttachedNoteDialog: (value) => (deleteAttachedNoteDialog = value),
+			deleteMainNoteDialog: (value) => (deleteMainNoteDialog = value),
+			detachPdfDialog: (value) => (detachPdfDialog = value),
+			attachPdfDialog: (value) => (attachPdfDialog = value),
+			pdfSearchQuery: (value) => (pdfSearchQuery = value),
+			pdfNotesList: (value) => (pdfNotesList = value),
+			pdfSelectedIndex: (value) => (pdfSelectedIndex = value),
+			filteredPdfs: (value) => (filteredPdfs = value),
+			shouldRenderEditor: (value) => (shouldRenderEditor = value),
+			shouldInitEditor: (value) => (shouldInitEditor = value),
+			loadedRouteNoteId: (value) => (loadedRouteNoteId = value)
+		},
+		{
+			...lifecycle,
+			persistableChatHistory,
+			persistChatHistory,
+			checkpointChatHistory,
+			flushChatChunks,
+			makeDebugTraceEntry,
+			renderChatContent,
+			setAiInteractionMode,
+			handleActiveSectionChange,
+			setToolApproval,
+			setStreamingStatus,
+			visibleAiStatus,
+			copyMessage,
+			openNoteNotebook,
+			attachFile,
+			localVditorCdn,
+			activeAiNoteId,
+			handleSectionsReady,
+			formatSectionCacheDuration,
+			openAttachedNote,
+			startSidebarResizing,
+			startResizing,
+			handleGlobalMouseMove,
+			stopResizing,
+			handlePdfQuote,
+			focusEditor,
+			refocusEditorSoon,
+			captureShortcutEditorTarget,
+			restoreShortcutEditorFocus,
+			handleChatSidebarShortcut,
+			handleChatScroll,
+			scrollChatToBottom,
+			getSelectionTextOffset,
+			textOffsetOf,
+			nearestIndexOf,
+			computeSourceSelection,
+			computeSourceCursor,
+			clearArmedSelection,
+			onDocMouseDown,
+			captureEditorSelection,
+			captureExternalTarget,
+			reselectAfterEdit,
+			armedEditTarget,
+			onSelectionChange,
+			restoreSelectionTextOffset,
+			saveCursorPosition,
+			insertAtSavedCursor,
+			...mathSession,
+			requestDeleteMainNote,
+			...createNotePageActions({
+				...inputGraph,
+				...graph,
+				...dialogs,
+				editorSession,
+				navigationSession,
+				linkingSession,
+				saveNote,
+				updateToolbarOverflow
+			})
+		}
+	);
 }
 export type NotePageController = ReturnType<typeof createNotePageController>;
