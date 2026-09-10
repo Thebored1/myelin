@@ -257,8 +257,8 @@ export function deriveThemeTokens(
 		info: string;
 	}>
 ): ThemeTokens {
-	const page = normalizeHex(palette.page ?? (mode === 'dark' ? '#020202' : '#F4F2EF'));
-	const panel = normalizeHex(palette.panel ?? (mode === 'dark' ? '#1C1B1A' : '#FFFFFF'));
+	const page = normalizeHex(palette.page ?? (mode === 'dark' ? '#000000' : '#F4F2EF'));
+	const panel = normalizeHex(palette.panel ?? (mode === 'dark' ? '#0A0A0A' : '#FFFFFF'));
 	const text = normalizeHex(palette.text ?? (mode === 'dark' ? '#EEEEEE' : '#1F1D1C'));
 	const muted = normalizeHex(palette.mutedText ?? (mode === 'dark' ? '#A49D9A' : '#6E6A67'));
 	const accent = normalizeHex(palette.accent ?? '#EF6F2E');

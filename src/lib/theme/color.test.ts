@@ -131,7 +131,7 @@ describe('theme colors', () => {
 		expect(tokens['bg-page']).toMatch(/^#[0-9A-F]{6}$/);
 		expect(theme.palette?.accent).toBe('#EAB308');
 		const clone = cloneTheme(darkTheme);
-		expect(compileTheme(clone)['accent-100']).toBe('#EF6F2E');
+		expect(compileTheme(clone)['accent-100']).toBe('#000000');
 	});
 
 	it('keeps the new surface direction for clones and any applied accent', () => {

@@ -4,8 +4,23 @@ import type { ColorTheme } from './types';
 const now = '2026-01-01T00:00:00.000Z';
 
 const darkTokens = {
-	...deriveThemeTokens('dark', { accent: '#EF6F2E' }),
-	'accent-tint': '#EE60181F',
+	...deriveThemeTokens('dark', {
+		page: '#000000',
+		panel: '#0A0A0A',
+		text: '#EEEEEE',
+		mutedText: '#A49D9A',
+		accent: '#000000',
+		danger: '#E05555',
+		warning: '#E7885C',
+		success: '#4CAF50',
+		info: '#64B5F6'
+	}),
+	// A pure-black accent leaves a composited selection invisible on the
+	// black surfaces, so selection uses an explicit monochrome gray.
+	'bg-selection': '#333333',
+	'text-selection': '#FFFFFF',
+	'text-hero': '#FFFFFF',
+	'accent-tint': '#0000001F',
 	'danger-bg': '#EF44441F',
 	'danger-bg-strong': '#EF44442E',
 	'danger-border': '#EF444459',

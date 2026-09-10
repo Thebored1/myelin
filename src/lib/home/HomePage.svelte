@@ -29,6 +29,14 @@
 {/if}
 
 <div class="shell" class:rail-collapsed={!$sidebarOpen}>
+	{#if $sidebarOpen}
+		<button
+			class="rail-dismiss"
+			aria-label="Close sidebar"
+			tabindex="-1"
+			onclick={() => ($sidebarOpen = false)}
+		></button>
+	{/if}
 	<HomeRail {home} />
 	<HomeMain {home} />
 </div>
