@@ -1817,7 +1817,7 @@ button:disabled {
 }
 .interaction-mode button.active {
 	background: var(--accent-100);
-	color: var(--bg-base);
+	color: var(--on-accent);
 }
 
 /* Shared control baseline: same height, calm by default, theme-consistent. */
