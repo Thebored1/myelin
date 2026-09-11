@@ -493,7 +493,16 @@ button:disabled {
 /* Keep every editing tool reachable in narrow panes. The toolbar owns its
 	   height and wraps into additional rows instead of hiding tools behind a
 	   second overflow toggle. */
-.vditor-wrapper .vditor-toolbar {
+.vditor-wrapper:not(.toolbar-expanded) .vditor-toolbar {
+	max-height: 52px;
+	overflow: hidden !important;
+	white-space: nowrap;
+	flex-wrap: nowrap !important;
+	height: auto !important;
+	flex: 0 0 auto !important;
+}
+
+.vditor-wrapper.toolbar-expanded .vditor-toolbar {
 	max-height: none !important;
 	overflow: visible !important;
 	white-space: normal !important;

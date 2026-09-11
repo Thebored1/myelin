@@ -250,6 +250,7 @@
 							bind:this={notePage.vditorContainer}
 							class="vditor-wrapper"
 							class:tools-loading={!notePage.toolsReady || notePage.vditorLoading}
+							class:toolbar-expanded={notePage.toolbarExpanded}
 							class:has-pdf-note={!!notePage.activeSourceBytes ||
 								(!notePage.isSourceMaterial && !!notePage.note)}
 							onclickcapture={notePage.handleVditorClick}
@@ -308,7 +309,10 @@
 					{/if}
 
 					{#if notePage.isSourceMaterial && notePage.activeSourceBytes && notePage.showAttachedNote}
-						<div class="toolbar-close-note-container" style="right: 12px;">
+						<div
+							class="toolbar-close-note-container"
+							style={notePage.toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}
+						>
 							<button
 								class="toolbar-close-note-btn"
 								onclick={notePage.requestDeleteAttachedNote}
@@ -320,6 +324,27 @@
 						</div>
 					{/if}
 					<div class="toolbar-note-actions-container">
+						{#if notePage.toolbarNeedsToggle}
+							<button
+								class="toolbar-overlay-toggle"
+								class:expanded={notePage.toolbarExpanded}
+								onclick={() => (notePage.toolbarExpanded = !notePage.toolbarExpanded)}
+								aria-label="Toggle toolbar"
+							>
+								<svg
+									viewBox="0 0 24 24"
+									width="16"
+									height="16"
+									stroke="currentColor"
+									stroke-width="2"
+									fill="none"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<polyline points="6 9 12 15 18 9"></polyline>
+								</svg>
+							</button>
+						{/if}
 						{#if notePage.activeSourceBytes !== null && notePage.showAttachedNote}
 							<button
 								class="toolbar-overlay-toggle"
