@@ -231,3 +231,40 @@ describe('theme colors', () => {
 		).toThrow();
 	});
 });
+
+describe('accent contrast lift sweep', () => {
+	const accents = [
+		'#000000',
+		'#FFFFFF',
+		'#797979',
+		'#808080',
+		'#EAB308',
+		'#EF6F2E',
+		'#7F1D1D',
+		'#1E3A8A',
+		'#22C55E',
+		'#F4F2EF',
+		'#020617',
+		'#FECACA',
+		'#55AAFF'
+	];
+	for (const mode of ['dark', 'light'] as const) {
+		for (const accent of accents) {
+			it(`${mode} ${accent} stays readable against its panel`, () => {
+				const tokens = deriveThemeTokens(mode, { accent });
+				expect(
+					contrastRatio(tokens['accent-100'] ?? '#000000', tokens['bg-panel'] ?? '#000000')
+				).toBeGreaterThanOrEqual(4.5);
+				expect(
+					contrastRatio(tokens['on-accent'] ?? '#FFFFFF', tokens['accent-100'] ?? '#000000')
+				).toBeGreaterThanOrEqual(4.5);
+			});
+		}
+	}
+
+	it('leaves accents that already pass completely untouched', () => {
+		expect(deriveThemeTokens('dark', { accent: '#EAB308' })['accent-100']).toBe('#EAB308');
+		expect(deriveThemeTokens('dark', { accent: '#55AAFF' })['accent-100']).toBe('#55AAFF');
+		expect(deriveThemeTokens('light', { accent: '#7F1D1D' })['accent-100']).toBe('#7F1D1D');
+	});
+});

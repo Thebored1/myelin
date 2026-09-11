@@ -196,14 +196,24 @@ export function deriveAccentTokens(accent: string, mode: ThemeMode, panel: strin
 	// threshold are left untouched.
 	if (contrastRatio(base, panel) < 4.5) {
 		const { l, c, h } = toOklch(base);
+		// Contrast against a panel is monotonic in lightness: raising it helps
+		// on dark panels, lowering it helps on light panels. Pick the endpoint
+		// direction that can pass at all, then search for the smallest change.
+		const upPasses = contrastRatio(fromOklch(1, c, h), panel) >= 4.5;
+		const downPasses = contrastRatio(fromOklch(0, c, h), panel) >= 4.5;
+		// Invariant: lo fails, hi passes; converge and take the passing bound.
 		let lo = l;
-		let hi = 1;
+		let hi = upPasses ? 1 : 0;
+		if (downPasses && !upPasses) {
+			lo = 0;
+			hi = l;
+		}
 		for (let i = 0; i < 24; i++) {
 			const mid = (lo + hi) / 2;
 			if (contrastRatio(fromOklch(mid, c, h), panel) < 4.5) lo = mid;
 			else hi = mid;
 		}
-		base = fromOklch(hi, c, h);
+		base = fromOklch(contrastRatio(fromOklch(hi, c, h), panel) >= 4.5 ? hi : lo, c, h);
 	}
 	const delta = mode === 'dark' ? 0.1 : -0.1;
 	const selection = compositeOver(base, panel, 0.22);
