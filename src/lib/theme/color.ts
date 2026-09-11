@@ -187,7 +187,24 @@ export const washDerivedTokenIds = [
 
 /** Derive the whole app-wide accent family from one input color. */
 export function deriveAccentTokens(accent: string, mode: ThemeMode, panel: string): ThemeTokens {
-	const base = normalizeHex(accent);
+	let base = normalizeHex(accent);
+	// An accent that cannot separate from its own panel (a black accent on the
+	// near-black dark surfaces, for example) is unusable as text, underlines,
+	// or active fills. Binary-search the smallest OKLCH lightness that reads
+	// against the panel — stepping up from black is a no-op because the first
+	// sRGB steps round back to #000000. Chromatic accents already above the
+	// threshold are left untouched.
+	if (contrastRatio(base, panel) < 4.5) {
+		const { l, c, h } = toOklch(base);
+		let lo = l;
+		let hi = 1;
+		for (let i = 0; i < 24; i++) {
+			const mid = (lo + hi) / 2;
+			if (contrastRatio(fromOklch(mid, c, h), panel) < 4.5) lo = mid;
+			else hi = mid;
+		}
+		base = fromOklch(hi, c, h);
+	}
 	const delta = mode === 'dark' ? 0.1 : -0.1;
 	const selection = compositeOver(base, panel, 0.22);
 	return {
