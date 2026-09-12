@@ -224,6 +224,7 @@ pub fn run() {
             list_model_profiles,
             get_all_note_documents,
             read_pdf_binary,
+            save_source_annotations,
             ask_ai_stream,
             cancel_ai,
             save_chat_history,

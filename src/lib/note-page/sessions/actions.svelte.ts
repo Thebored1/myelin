@@ -28,6 +28,8 @@ export function createNotePageActions(rawContext: object) {
 		handleAnnotationsChange: ctx.handleAnnotationsChange,
 		handleImageExtract: ctx.handleImageExtract,
 		handlePdfTextExtracted: ctx.handlePdfTextExtracted,
+		saveSourceAnnotations: ctx.saveSourceAnnotations,
+		handleSourceTextExtracted: ctx.handleSourceTextExtracted,
 		saveNote: ctx.saveNote,
 		deleteNote: ctx.deleteNote,
 		duplicateNote: ctx.duplicateNote,

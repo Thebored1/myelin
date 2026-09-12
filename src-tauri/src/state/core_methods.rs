@@ -269,6 +269,34 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn save_source_annotations(
+        &self,
+        note_id: String,
+        annotations: Vec<crate::models::SourceAnnotation>,
+    ) -> Result<()> {
+        let workspace = self.require_workspace()?;
+        validate_note_storage_id(&note_id)?;
+        if self.note_by_id(&note_id).is_none() {
+            anyhow::bail!("note not found: {note_id}");
+        }
+        let _persistence_guard = self.inner.persistence_lock.lock();
+        let workspace_data_dir = self.workspace_data_dir(&workspace);
+        let annotations_dir = workspace_data_dir.join("annotations");
+        let annotations_path = annotations_dir.join(format!("{}.source.annotations.json", note_id));
+        if annotations.is_empty() {
+            crate::persistence::atomic_remove(&annotations_path)?;
+        } else {
+            crate::persistence::atomic_write_json(&annotations_path, &annotations)?;
+        }
+        {
+            let mut runtime = self.inner.runtime.write();
+            if let Some(note) = runtime.notes.get_mut(&note_id) {
+                note.document.source_annotations = annotations;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn import_pdf_file(
         &self,
         file_path: String,
@@ -313,8 +341,14 @@ impl AppState {
         let source = self
             .note_by_id(&note_id)
             .ok_or_else(|| anyhow!("PDF note not found: {note_id}"))?;
-        if !source.relative_path.to_ascii_lowercase().ends_with(".pdf") {
-            return Err(anyhow!("note is not a PDF: {note_id}"));
+        const SOURCE_EXTENSIONS: [&str; 8] =
+            ["pdf", "epub", "docx", "rtf", "txt", "md", "html", "htm"];
+        let lower = source.relative_path.to_ascii_lowercase();
+        if !SOURCE_EXTENSIONS
+            .iter()
+            .any(|extension| lower.ends_with(&format!(".{extension}")))
+        {
+            return Err(anyhow!("note is not an attachable source: {note_id}"));
         }
         let source_path = workspace.join(&source.relative_path);
         if !source_path.is_file() {

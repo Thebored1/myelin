@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
-import type { NoteDocument, PdfAnnotation } from '$lib/types';
+import { kindForPath } from '$lib/source-pane/renderers';
+import type { NoteDocument, PdfAnnotation, SourceAnnotation } from '$lib/types';
 import type { PdfSection } from '$lib/pdf/types';
 import { noteOpened } from '$lib/llamaWarm';
 import type { ControllerContext } from '$lib/controller-context';
@@ -11,7 +12,12 @@ export function createSourceSession(rawContext: object) {
 	async function attachFile() {
 		const picked = await openFileDialog({
 			multiple: false,
-			filters: [{ name: 'Documents', extensions: ['pdf', 'epub'] }]
+			filters: [
+				{
+					name: 'Documents',
+					extensions: ['pdf', 'epub', 'docx', 'rtf', 'txt', 'md', 'html', 'htm']
+				}
+			]
 		});
 		if (typeof picked !== 'string') return;
 		try {
@@ -189,13 +195,18 @@ export function createSourceSession(rawContext: object) {
 			const isCopyName = (d: NoteDocument) => {
 				const name = d.relativePath.split(/[\\/]/).pop()?.toLowerCase() ?? '';
 				return (
-					/ \d+\.(pdf|epub)$/.test(name) ||
-					/ [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|epub)$/.test(name)
+					/ \d+\.(pdf|epub|docx|rtf|txt|md|html|htm)$/.test(name) ||
+					/ [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|epub|docx|rtf|txt|md|html|htm)$/.test(
+						name
+					)
 				);
 			};
+			const isAttachable = (path: string) =>
+				['.pdf', '.epub', '.docx', '.rtf', '.txt', '.md', '.html', '.htm'].some((extension) =>
+					path.toLowerCase().endsWith(extension)
+				);
 			ctx.pdfNotesList = allDocs.filter(
-				(d) =>
-					d.relativePath.toLowerCase().endsWith('.pdf') && !(referenced.has(d.id) && isCopyName(d))
+				(d) => isAttachable(d.relativePath) && !(referenced.has(d.id) && isCopyName(d))
 			);
 		} catch (err) {
 			ctx.message = `Failed to load PDFs: ${err}`;
@@ -238,9 +249,12 @@ export function createSourceSession(rawContext: object) {
 			});
 			ctx.activeSourceId = attachmentPdf.id;
 			ctx.sectionCache = null;
+			const kind = kindForPath(attachmentPdf.relativePath);
 			const bytes = await invoke<ArrayBuffer>('read_pdf_binary', { noteId: attachmentPdf.id });
 			ctx.activeSourceBytes = new Uint8Array(bytes);
-			ctx.sourceMaterialType = 'pdf';
+			ctx.sourceMaterialType = kind ?? 'pdf';
+			// A source is active: pane and editor sit side by side.
+			ctx.isSourceMaterial = true;
 			ctx.showAttachedNote = true;
 			ctx.saveStatus = 'saved';
 			ctx.destroyEditorInstance();
@@ -298,7 +312,12 @@ export function createSourceSession(rawContext: object) {
 	async function browseAndAttachPdf() {
 		const selected = await openFileDialog({
 			multiple: false,
-			filters: [{ name: 'Documents', extensions: ['pdf', 'epub', 'tex', 'ipynb', 'md'] }]
+			filters: [
+				{
+					name: 'Documents',
+					extensions: ['pdf', 'epub', 'docx', 'rtf', 'txt', 'md', 'html', 'htm', 'tex', 'ipynb']
+				}
+			]
 		});
 		if (!selected) return;
 		ctx.attachPdfDialog?.close();
@@ -328,11 +347,42 @@ export function createSourceSession(rawContext: object) {
 		}
 	}
 
+	async function handleSourceTextExtracted(text: string) {
+		if (!ctx.activeSourceId || !ctx.note) return;
+		const sourceId = ctx.activeSourceId;
+		const sourceTitle = ctx.note.title;
+		const formatHint = ctx.sourceMaterialType === 'html' ? 'htmlText' : 'plainText';
+		ctx.pdfIngestionPromise = (async () => {
+			try {
+				await invoke('ensure_document_ingested', {
+					docId: sourceId,
+					source: sourceTitle,
+					text,
+					formatHint
+				});
+			} catch (error) {
+				console.debug('Source ingestion skipped:', error);
+			}
+		})();
+	}
+
+	function saveSourceAnnotations(annotations: SourceAnnotation[]) {
+		if (ctx.note) ctx.note.sourceAnnotations = annotations;
+		void invoke('save_source_annotations', {
+			noteId: ctx.activeSourceId,
+			annotations
+		}).catch((error) => {
+			ctx.message = `Failed to save annotations: ${error}`;
+		});
+	}
+
 	function dispose() {
 		ctx.pdfIngestionPromise = null;
 	}
 
 	return {
+		saveSourceAnnotations,
+		handleSourceTextExtracted,
 		attachFile,
 		handleSectionsReady,
 		formatSectionCacheDuration,

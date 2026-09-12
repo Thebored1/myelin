@@ -138,6 +138,30 @@ pub(crate) fn parse_pdf_file(
             None
         }
     };
+    let source_annotations = {
+        let source_annotations_path = sidecar_path(
+            workspace,
+            workspace_data_dir,
+            "annotations",
+            &format!("{}.source.annotations.json", id),
+        );
+        if source_annotations_path.exists() {
+            let raw = fs::read_to_string(&source_annotations_path).with_context(|| {
+                format!(
+                    "failed to read source annotations {}",
+                    source_annotations_path.display()
+                )
+            })?;
+            Some(serde_json::from_str(&raw).with_context(|| {
+                format!(
+                    "source annotations are invalid at {}",
+                    source_annotations_path.display()
+                )
+            })?)
+        } else {
+            None
+        }
+    };
     let document = NoteDocument {
         id: id.clone(),
         title,
@@ -148,6 +172,7 @@ pub(crate) fn parse_pdf_file(
         updated_at,
         source_pdf: stored_metadata.and_then(|metadata| metadata.source_pdf),
         annotations: annotations.unwrap_or_default(),
+        source_annotations: source_annotations.unwrap_or_default(),
         backlinks: Vec::new(),
         chat_history: {
             let chats_path = sidecar_path(
@@ -469,6 +494,7 @@ pub(crate) fn parse_note_file(
                 Vec::new()
             }
         },
+    source_annotations: Vec::new(),
     };
     if native {
         let app_sidecar = native_metadata_app_path(workspace, workspace_data_dir, path);

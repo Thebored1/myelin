@@ -1,46 +1,46 @@
 {
-  "chunks": [
-    {
-      "id": "paris-location",
-      "source": "Travel Notes",
-      "text": "The Eiffel Tower stands on the Champ de Mars in Paris, France.",
-      "page": 1,
-      "section": "Landmarks"
-    },
-    {
-      "id": "attention-mechanism",
-      "source": "Transformer Primer",
-      "text": "Transformers use self-attention to connect relevant tokens across a sequence.",
-      "page": 3,
-      "section": "Architecture"
-    },
-    {
-      "id": "api-identifiers",
-      "source": "Engineering Guide",
-      "text": "Call createIndex() after writing lexical_text; the request ID is req_42A.",
-      "page": 8,
-      "section": "Index API"
-    },
-    {
-      "id": "url-reference",
-      "source": "Engineering Guide",
-      "text": "Runtime documentation is available at https://example.test/v1/rerank?top_n=8.",
-      "page": 9,
-      "section": "References"
-    },
-    {
-      "id": "latex-symbols",
-      "source": "Math Notes",
-      "text": "Use \\section{Methods} before defining the loss L = \\sum_i x_i^2.",
-      "page": 2,
-      "section": "LaTeX"
-    },
-    {
-      "id": "cjk-note",
-      "source": "研究ノート",
-      "text": "検索品質を改善するには、ページ番号と見出しを保持する。",
-      "page": 4,
-      "section": "検索"
-    }
-  ]
+	"chunks": [
+		{
+			"id": "paris-location",
+			"source": "Travel Notes",
+			"text": "The Eiffel Tower stands on the Champ de Mars in Paris, France.",
+			"page": 1,
+			"section": "Landmarks"
+		},
+		{
+			"id": "attention-mechanism",
+			"source": "Transformer Primer",
+			"text": "Transformers use self-attention to connect relevant tokens across a sequence.",
+			"page": 3,
+			"section": "Architecture"
+		},
+		{
+			"id": "api-identifiers",
+			"source": "Engineering Guide",
+			"text": "Call createIndex() after writing lexical_text; the request ID is req_42A.",
+			"page": 8,
+			"section": "Index API"
+		},
+		{
+			"id": "url-reference",
+			"source": "Engineering Guide",
+			"text": "Runtime documentation is available at https://example.test/v1/rerank?top_n=8.",
+			"page": 9,
+			"section": "References"
+		},
+		{
+			"id": "latex-symbols",
+			"source": "Math Notes",
+			"text": "Use \\section{Methods} before defining the loss L = \\sum_i x_i^2.",
+			"page": 2,
+			"section": "LaTeX"
+		},
+		{
+			"id": "cjk-note",
+			"source": "研究ノート",
+			"text": "検索品質を改善するには、ページ番号と見出しを保持する。",
+			"page": 4,
+			"section": "検索"
+		}
+	]
 }

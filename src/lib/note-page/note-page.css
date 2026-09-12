@@ -502,6 +502,12 @@ button:disabled {
 	flex: 0 0 auto !important;
 }
 
+/* Keep the toolbar's clamped items clear of the Close Note / delete
+	   buttons that overlay the toolbar's right edge on attached sources. */
+.vditor-wrapper.toolbar-has-actions .vditor-toolbar {
+	padding-right: 256px !important;
+}
+
 .vditor-wrapper.toolbar-expanded .vditor-toolbar {
 	max-height: none !important;
 	overflow: visible !important;

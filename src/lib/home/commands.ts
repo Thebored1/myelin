@@ -58,7 +58,12 @@ export function createHomeCommands(port: HomeCommandPort) {
 		port.showAddMenu = false;
 		const picked = await open({
 			multiple: false,
-			filters: [{ name: 'Documents', extensions: ['pdf', 'epub'] }]
+			filters: [
+				{
+					name: 'Documents',
+					extensions: ['pdf', 'epub', 'docx', 'rtf', 'txt', 'md', 'html', 'htm']
+				}
+			]
 		});
 		if (typeof picked !== 'string') return;
 		port.isBusy = true;

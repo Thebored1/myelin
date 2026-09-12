@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { kindForPath } from '$lib/source-pane/renderers';
 import { tick } from 'svelte';
 import { noteOpened } from '$lib/llamaWarm';
 import type { NoteDocument } from '$lib/types';
@@ -39,15 +40,19 @@ export function createDocumentSession(rawContext: object) {
 			ctx.activeSidebarTab = 'info';
 
 			const relLower = loadedNote.relativePath.toLowerCase();
-			ctx.isSourceMaterial =
-				relLower.endsWith('.pdf') || relLower.endsWith('.epub') || relLower.endsWith('.html');
+			// Working document formats (md/txt) open in the editor; only rendered
+			// source formats open directly as source material. md/txt files can
+			// still be attached to a note as sources via the attach flow.
+			ctx.isSourceMaterial = ['.pdf', '.epub', '.html', '.htm', '.docx', '.rtf'].some((extension) =>
+				relLower.endsWith(extension)
+			);
 
 			if (ctx.isSourceMaterial) {
 				ctx.sourceMaterialType = relLower.endsWith('.pdf')
 					? 'pdf'
 					: relLower.endsWith('.epub')
 						? 'epub'
-						: 'html';
+						: (kindForPath(relLower) ?? 'html');
 				ctx.workingDocType = 'md';
 
 				const allNotes = await invoke<NoteDocument[]>('get_all_note_documents');
@@ -101,7 +106,7 @@ export function createDocumentSession(rawContext: object) {
 							? 'pdf'
 							: sRel.endsWith('.epub')
 								? 'epub'
-								: 'html';
+								: (kindForPath(sRel) ?? 'html');
 					} catch {
 						ctx.sourceMaterialType = 'pdf'; // fallback
 					}

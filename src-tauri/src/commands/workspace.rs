@@ -217,6 +217,18 @@ pub(crate) async fn get_all_note_documents(state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
+pub(crate) async fn save_source_annotations(
+    state: State<'_, AppState>,
+    note_id: String,
+    annotations: Vec<crate::models::SourceAnnotation>,
+) -> Result<(), String> {
+    state
+        .save_source_annotations(note_id, annotations)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub(crate) async fn read_pdf_binary(
     state: State<'_, AppState>,
     note_id: String,

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { NotePageController } from '$lib/note-page/controller.svelte';
 	import NoteSidebar from '$lib/note-page/components/NoteSidebar.svelte';
+	import SourcePane from '$lib/source-pane/SourcePane.svelte';
 
 	let { notePage }: { notePage: NotePageController } = $props();
 </script>
@@ -193,25 +194,17 @@
 					{/if}
 				{:else if notePage.sourceMaterialType === 'epub'}
 					<div class="viewer-loading">Loading EPUB viewer…</div>
-				{:else if notePage.sourceMaterialType === 'html' && notePage.HtmlViewerComponent}
-					{@const HtmlViewer = notePage.HtmlViewerComponent}
-					<HtmlViewer
-						htmlBytes={notePage.activeSourceBytes}
-						onActiveSection={notePage.handleActiveSectionChange}
-						onSectionsReady={notePage.handleSectionsReady}
+				{:else if (notePage.sourceMaterialType === 'html' || notePage.sourceMaterialType === 'txt' || notePage.sourceMaterialType === 'docx' || notePage.sourceMaterialType === 'rtf') && notePage.activeSourceBytes}
+					<SourcePane
+						kind={notePage.sourceMaterialType}
+						bytes={notePage.activeSourceBytes}
+						annotations={notePage.note?.sourceAnnotations ?? []}
+						onAnnotationsChange={notePage.saveSourceAnnotations}
+						onTextExtracted={notePage.handleSourceTextExtracted}
+						onAttachNote={() => void notePage.openAttachedNote()}
+						onClosePdf={notePage.requestDetachPdf}
+						showAttachButton={!notePage.showAttachedNote}
 					/>
-					{#if !notePage.showAttachedNote}
-						<button
-							style="position: absolute; top: 10px; right: 10px;"
-							class="primary"
-							onclick={() => {
-								notePage.showAttachedNote = true;
-								setTimeout(() => notePage.initVditor(), 100);
-							}}>Attach Note</button
-						>
-					{/if}
-				{:else if notePage.sourceMaterialType === 'html'}
-					<div class="viewer-loading">Loading document viewer…</div>
 				{/if}
 				{#if notePage.sourceMaterialType === 'pdf' && (notePage.pdfIngestionStatus === 'indexing' || notePage.pdfIngestionStatus === 'empty' || notePage.pdfIngestionStatus === 'failed')}
 					<div
@@ -251,6 +244,8 @@
 							class="vditor-wrapper"
 							class:tools-loading={!notePage.toolsReady || notePage.vditorLoading}
 							class:toolbar-expanded={notePage.toolbarExpanded}
+							class:toolbar-has-actions={notePage.showAttachedNote &&
+								notePage.activeSourceBytes !== null}
 							class:has-pdf-note={!!notePage.activeSourceBytes ||
 								(!notePage.isSourceMaterial && !!notePage.note)}
 							onclickcapture={notePage.handleVditorClick}
@@ -311,7 +306,7 @@
 					{#if notePage.isSourceMaterial && notePage.activeSourceBytes && notePage.showAttachedNote}
 						<div
 							class="toolbar-close-note-container"
-							style={notePage.toolbarNeedsToggle ? 'right: 50px;' : 'right: 12px;'}
+							style={notePage.toolbarNeedsToggle ? 'right: 104px;' : 'right: 12px;'}
 						>
 							<button
 								class="toolbar-close-note-btn"

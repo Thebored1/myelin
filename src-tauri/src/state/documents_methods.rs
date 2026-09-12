@@ -80,6 +80,7 @@ impl AppState {
             annotations: Vec::new(),
             backlinks: Vec::new(),
             chat_history: Vec::new(),
+        source_annotations: Vec::new(),
         };
 
         let vector = self
@@ -231,6 +232,7 @@ impl AppState {
             annotations: annotations.unwrap_or_default(),
             backlinks: existing.document.backlinks,
             chat_history: existing.document.chat_history,
+        source_annotations: Vec::new(),
         };
 
         if prompt_changed {
@@ -409,6 +411,7 @@ impl AppState {
             annotations: source.document.annotations.clone(),
             backlinks: source.document.backlinks,
             chat_history: source.document.chat_history.clone(),
+        source_annotations: Vec::new(),
         };
 
         {
@@ -503,6 +506,7 @@ impl AppState {
 
         let moved = NoteDocument {
             relative_path: relative_to_workspace(&workspace, &target_path),
+            source_annotations: Vec::new(),
             ..source.document.clone()
         };
         {

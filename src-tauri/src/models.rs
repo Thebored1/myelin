@@ -109,6 +109,27 @@ pub struct PdfAnnotation {
     pub stroke_width: f64,
 }
 
+/// An annotation on a text-bearing source document (html/txt/docx/rtf).
+/// Highlights anchor to character offsets in the rendered text; ink stores
+/// points normalized to the document's scroll size.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SourceAnnotation {
+    Highlight {
+        id: String,
+        color: String,
+        start: usize,
+        end: usize,
+        quote: String,
+    },
+    Ink {
+        id: String,
+        color: String,
+        stroke_width: f64,
+        points: Vec<(f64, f64)>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Backlink {
@@ -259,6 +280,8 @@ pub struct NoteDocument {
     pub backlinks: Vec<Backlink>,
     #[serde(default)]
     pub annotations: Vec<PdfAnnotation>,
+    #[serde(default)]
+    pub source_annotations: Vec<SourceAnnotation>,
     #[serde(default)]
     pub chat_history: Vec<ChatMessage>,
 }

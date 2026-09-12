@@ -6,7 +6,8 @@ import type {
 	GitCommit,
 	NoteDocument,
 	NoteSummary,
-	ProviderStatus
+	ProviderStatus,
+	SourceAnnotation
 } from '$lib/types';
 import type { OcrStatus } from '$lib/settings/types';
 import type { BlockItem } from '$lib/note-page/types';
@@ -146,7 +147,7 @@ export interface NotePageContext {
 	shortcutEditorRange: Range | null;
 	shouldRefocusEditor: boolean;
 	isSourceMaterial: boolean;
-	sourceMaterialType: 'pdf' | 'epub' | 'html' | null;
+	sourceMaterialType: 'pdf' | 'epub' | 'html' | 'txt' | 'docx' | 'rtf' | null;
 	workingDocType: 'md' | 'tex' | 'ipynb';
 	PdfViewerComponent: DynamicComponent | null;
 	EpubViewerComponent: DynamicComponent | null;
@@ -292,6 +293,8 @@ export interface NotePageContext {
 	handleImageExtract: AsyncAction;
 	handlePdfSearchKeydown: SyncAction;
 	handlePdfTextExtracted: AsyncAction;
+	saveSourceAnnotations: (annotations: SourceAnnotation[]) => void;
+	handleSourceTextExtracted: (text: string) => Promise<void>;
 	initVditor: AsyncAction;
 	isChatStreaming: boolean;
 	makeDebugTraceEntry: (kind: string, msg: string) => DebugTraceEntry;

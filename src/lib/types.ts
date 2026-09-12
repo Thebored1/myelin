@@ -64,8 +64,34 @@ export type NoteDocument = {
 	sourcePdf?: string | null;
 	backlinks: Backlink[];
 	annotations: PdfAnnotation[];
+	sourceAnnotations: SourceAnnotation[];
 	chatHistory: ChatMessage[];
 };
+
+/** File kinds the unified source pane can render with the shared toolset. */
+export type SourceKind = 'html' | 'txt' | 'docx' | 'rtf';
+
+/**
+ * Annotations on a text-bearing source document. Highlights anchor to
+ * character offsets in the rendered text (with the quoted text for sanity
+ * checks); ink stores points normalized to the document's scroll size.
+ */
+export type SourceAnnotation =
+	| {
+			id: string;
+			kind: 'highlight';
+			color: string;
+			start: number;
+			end: number;
+			quote: string;
+	  }
+	| {
+			id: string;
+			kind: 'ink';
+			color: string;
+			strokeWidth: number;
+			points: [number, number][];
+	  };
 
 export type PdfAnnotation = {
 	id: string;

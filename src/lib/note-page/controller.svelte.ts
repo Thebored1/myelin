@@ -176,7 +176,7 @@ export function createNotePageController() {
 	let shortcutEditorRange: Range | null = null;
 	let shouldRefocusEditor = false;
 	let isSourceMaterial = $state(false);
-	let sourceMaterialType = $state<'pdf' | 'epub' | 'html' | null>(null);
+	let sourceMaterialType = $state<'pdf' | 'epub' | 'html' | 'txt' | 'docx' | 'rtf' | null>(null);
 	let workingDocType = $state<'md' | 'tex' | 'ipynb'>('md');
 	// Optional document viewers/editors stay out of the Markdown cold path. They
 	// are loaded only when the current document actually needs them.

@@ -285,6 +285,9 @@ export function createNotePageGraph(rawContext: object) {
 		get isSourceMaterial() {
 			return ctx.isSourceMaterial;
 		},
+		set isSourceMaterial(value) {
+			ctx.isSourceMaterial = value;
+		},
 		activeAiNoteId: ctx.activeAiNoteId,
 		get activeSection() {
 			return ctx.activeSection;
