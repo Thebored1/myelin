@@ -54,10 +54,9 @@ export function createNotePageUtilities(rawContext: object) {
 		const toolbarStyle = getComputedStyle(toolbar);
 		const paddingLeft = parseFloat(toolbarStyle.paddingLeft) || 0;
 		const paddingRight = parseFloat(toolbarStyle.paddingRight) || 0;
-		// Reserve room for the Close Note / delete buttons that overlay the
-		// toolbar's right edge on attached sources, so clamped tools hide
-		// behind the overflow toggle instead of rendering underneath them.
-		const actionsReserve = ctx.vditorContainer?.classList.contains('toolbar-has-actions') ? 256 : 0;
+		// Reserve room for the overflow and delete buttons that overlay the
+		// toolbar's right edge on attached sources, so tools wrap before them.
+		const actionsReserve = ctx.vditorContainer?.classList.contains('toolbar-has-actions') ? 88 : 0;
 		const availableWidth =
 			toolbar.clientWidth - paddingLeft - Math.max(paddingRight, actionsReserve);
 		const itemElements = Array.from(items) as HTMLElement[];

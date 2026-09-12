@@ -491,21 +491,21 @@ button:disabled {
 }
 
 /* Keep every editing tool reachable in narrow panes. The toolbar owns its
-	   height and wraps into additional rows instead of hiding tools behind a
-	   second overflow toggle. */
+	   height and wraps overflow into additional rows; the overflow toggle
+	   reveals those rows without letting them run underneath the action buttons. */
 .vditor-wrapper:not(.toolbar-expanded) .vditor-toolbar {
 	max-height: 52px;
 	overflow: hidden !important;
-	white-space: nowrap;
-	flex-wrap: nowrap !important;
+	white-space: normal !important;
+	flex-wrap: wrap !important;
 	height: auto !important;
 	flex: 0 0 auto !important;
 }
 
-/* Keep the toolbar's clamped items clear of the Close Note / delete
-	   buttons that overlay the toolbar's right edge on attached sources. */
+/* Keep the toolbar's clamped items clear of the overflow / delete buttons
+	   that overlay the toolbar's right edge on attached sources. */
 .vditor-wrapper.toolbar-has-actions .vditor-toolbar {
-	padding-right: 256px !important;
+	padding-right: 88px !important;
 }
 
 .vditor-wrapper.toolbar-expanded .vditor-toolbar {
@@ -693,29 +693,6 @@ button:disabled {
 	display: flex;
 	align-items: center;
 	gap: var(--space-1);
-}
-
-.toolbar-close-note-container {
-	position: absolute;
-	top: 8px;
-	z-index: 45;
-}
-
-.toolbar-close-note-btn {
-	height: 28px;
-	padding: 0 var(--space-3);
-	border: 1px solid var(--border-subtle);
-	border-radius: var(--radius-sm);
-	background: var(--bg-surface);
-	color: var(--text-secondary);
-	font-family: var(--font-mono);
-	font-size: 0.75rem;
-	cursor: pointer;
-}
-
-.toolbar-close-note-btn:hover:not(:disabled) {
-	color: var(--text-primary);
-	background: var(--hover-overlay);
 }
 
 .vditor-wrapper.has-pdf-notePage.note .vditor-toolbar {

@@ -248,7 +248,7 @@ export function washSurfaces(
 ): WashSurfaces {
 	const accentOklch = toOklch(accent);
 	if (accentOklch.c < 0.01) return surfaces;
-	const baseChroma = mode === 'dark' ? 0.03 : 0.04;
+	const baseChroma = mode === 'dark' ? 0.03 : 0.01;
 	const tinted = (surface: string, chroma: number) =>
 		fromOklch(toOklch(surface).l, chroma, accentOklch.h);
 	const guarded = (surface: string, chroma: number): string => {
@@ -284,10 +284,10 @@ export function deriveThemeTokens(
 		info: string;
 	}>
 ): ThemeTokens {
-	const page = normalizeHex(palette.page ?? (mode === 'dark' ? '#000000' : '#F4F2EF'));
+	const page = normalizeHex(palette.page ?? (mode === 'dark' ? '#000000' : '#F1F1F1'));
 	const panel = normalizeHex(palette.panel ?? (mode === 'dark' ? '#0A0A0A' : '#FFFFFF'));
-	const text = normalizeHex(palette.text ?? (mode === 'dark' ? '#EEEEEE' : '#1F1D1C'));
-	const muted = normalizeHex(palette.mutedText ?? (mode === 'dark' ? '#A49D9A' : '#6E6A67'));
+	const text = normalizeHex(palette.text ?? (mode === 'dark' ? '#EEEEEE' : '#242424'));
+	const muted = normalizeHex(palette.mutedText ?? (mode === 'dark' ? '#A49D9A' : '#606060'));
 	const accent = normalizeHex(palette.accent ?? '#EF6F2E');
 	const danger = normalizeHex(palette.danger ?? '#E05555');
 	const warning = normalizeHex(palette.warning ?? '#E7B85C');
@@ -311,16 +311,16 @@ export function deriveThemeTokens(
 					'#1F1D1C'
 				]
 			: [
-					'#1F1D1C',
-					'#2E2C2B',
-					'#3D3A39',
-					'#4D4947',
-					'#5C5855',
-					'#8A8380',
-					'#A49D9A',
-					'#CCC9C7',
-					'#DDD9D5',
-					'#E8E4E0'
+					'#242424',
+					'#363636',
+					'#4A4A4A',
+					'#5E5E5E',
+					'#737373',
+					'#8A8A8A',
+					'#A1A1A1',
+					'#C6C6C6',
+					'#DDDDDD',
+					'#ECECEC'
 				];
 	const overlay = mode === 'dark' ? '#FFFFFF0A' : '#0000000A';
 	const strongOverlay = mode === 'dark' ? '#FFFFFF14' : '#00000012';
@@ -331,42 +331,42 @@ export function deriveThemeTokens(
 		'bg-elevated': mode === 'dark' ? '#262626' : light,
 		'bg-input': panel,
 		'bg-modal': mode === 'dark' ? '#151515' : light,
-		'border-default': mode === 'dark' ? '#3D3A39' : '#E2DED9',
-		'border-subtle': mode === 'dark' ? '#4D4947' : '#ECE9E5'
+		'border-default': mode === 'dark' ? '#3D3A39' : '#D9D9D9',
+		'border-subtle': mode === 'dark' ? '#4D4947' : '#E7E7E7'
 	});
 
 	return {
 		...deriveAccentTokens(accent, mode, panel),
 		'surface-dark-primary': mode === 'dark' ? page : light,
-		'surface-dark-secondary': mode === 'dark' ? panel : '#F4F2EF',
-		'surface-light-primary': mode === 'dark' ? '#EEEEEE' : '#1F1D1C',
-		'surface-light-secondary': mode === 'dark' ? '#FAFAFA' : '#2E2C2B',
+		'surface-dark-secondary': mode === 'dark' ? panel : '#F1F1F1',
+		'surface-light-primary': mode === 'dark' ? '#EEEEEE' : '#242424',
+		'surface-light-secondary': mode === 'dark' ? '#FAFAFA' : '#363636',
 		...Object.fromEntries(neutral.map((value, index) => [`neutral-${index + 1}00`, value])),
 		'text-primary': text,
 		'text-secondary': muted,
 		'text-inverse': textInverse,
-		'text-hero': mode === 'dark' ? '#F6F1E7' : '#1A1714',
+		'text-hero': mode === 'dark' ? '#F6F1E7' : '#1B1B1B',
 		'text-muted': muted,
 		'text-tertiary': muted,
 		'text-error': mode === 'dark' ? '#FECACA' : '#B42318',
 		'border-default': washed['border-default'],
 		'border-subtle': washed['border-subtle'],
-		'border-strong': mode === 'dark' ? '#5C5855' : '#C9C2BB',
+		'border-strong': mode === 'dark' ? '#5C5855' : '#BDBDBD',
 		'bg-page': washed['bg-page'],
 		'bg-panel': washed['bg-panel'],
-		'bg-code': mode === 'dark' ? '#1F1D1C' : '#F0EDE9',
+		'bg-code': mode === 'dark' ? '#1F1D1C' : '#EAEAEA',
 		'bg-elevated': washed['bg-elevated'],
-		'bg-elevated-hover': mode === 'dark' ? '#333333' : '#F8F6F3',
+		'bg-elevated-hover': mode === 'dark' ? '#333333' : '#F7F7F7',
 		'bg-input': washed['bg-input'],
 		'bg-modal': washed['bg-modal'],
 		'bg-panel-blur': panelBlur,
 		'hover-overlay': overlay,
 		'hover-overlay-strong': strongOverlay,
 		'overlay-faint': mode === 'dark' ? '#FFFFFF05' : '#00000006',
-		scrim: mode === 'dark' ? '#00000099' : '#281F183F',
-		'scrim-soft': mode === 'dark' ? '#00000080' : '#281F1833',
-		'shadow-color': mode === 'dark' ? '#00000066' : '#3C32201F',
-		'shadow-color-strong': mode === 'dark' ? '#000000CC' : '#3C322033',
+		scrim: mode === 'dark' ? '#00000099' : '#0000003F',
+		'scrim-soft': mode === 'dark' ? '#00000080' : '#00000033',
+		'shadow-color': mode === 'dark' ? '#00000066' : '#0000001F',
+		'shadow-color-strong': mode === 'dark' ? '#000000CC' : '#00000033',
 		danger: danger,
 		'danger-tint': `${danger.slice(0, 7)}1A`,
 		'danger-text': mode === 'dark' ? '#FECACA' : '#B42318',

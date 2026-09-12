@@ -160,7 +160,7 @@
 	);
 </script>
 
-<section class="settings-section theme-settings">
+<section id="settings-appearance" class="settings-section theme-settings">
 	<h2>Appearance</h2>
 	<p class="description">
 		Choose a built-in theme or create your own. Custom themes are saved for the whole application

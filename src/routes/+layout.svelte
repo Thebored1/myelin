@@ -423,7 +423,7 @@
 		-webkit-user-select: none;
 	}
 
-	/* Light: warm off-white with a faint diagonal hatch (matches the reference). */
+	/* Light: neutral grey surfaces with a faint diagonal hatch. */
 	:global(:root[data-theme='light'] body) {
 		background:
 			repeating-linear-gradient(

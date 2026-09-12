@@ -303,28 +303,20 @@
 						<div class="editor-loading">Loading notebook editor…</div>
 					{/if}
 
-					{#if notePage.isSourceMaterial && notePage.activeSourceBytes && notePage.showAttachedNote}
-						<div
-							class="toolbar-close-note-container"
-							style={notePage.toolbarNeedsToggle ? 'right: 104px;' : 'right: 12px;'}
-						>
-							<button
-								class="toolbar-close-note-btn"
-								onclick={notePage.requestDeleteAttachedNote}
-								disabled={notePage.isBusy}
-								title="Delete attached note and close pane"
-							>
-								Close Note
-							</button>
-						</div>
-					{/if}
 					<div class="toolbar-note-actions-container">
 						{#if notePage.toolbarNeedsToggle}
 							<button
+								type="button"
 								class="toolbar-overlay-toggle"
 								class:expanded={notePage.toolbarExpanded}
-								onclick={() => (notePage.toolbarExpanded = !notePage.toolbarExpanded)}
+								onclick={(event) => {
+									event.preventDefault();
+									event.stopPropagation();
+									notePage.toolbarExpanded = !notePage.toolbarExpanded;
+								}}
 								aria-label="Toggle toolbar"
+								aria-expanded={notePage.toolbarExpanded}
+								title={notePage.toolbarExpanded ? 'Hide editing tools' : 'Show editing tools'}
 							>
 								<svg
 									viewBox="0 0 24 24"
@@ -342,6 +334,7 @@
 						{/if}
 						{#if notePage.activeSourceBytes !== null && notePage.showAttachedNote}
 							<button
+								type="button"
 								class="toolbar-overlay-toggle"
 								onclick={notePage.requestDeleteMainNote}
 								aria-label="Delete Note"
