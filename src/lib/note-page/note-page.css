@@ -494,7 +494,10 @@ button:disabled {
 	   height and wraps overflow into additional rows; the overflow toggle
 	   reveals those rows without letting them run underneath the action buttons. */
 .vditor-wrapper:not(.toolbar-expanded) .vditor-toolbar {
-	max-height: 52px;
+	box-sizing: border-box !important;
+	height: 52px !important;
+	max-height: 52px !important;
+	min-height: 52px !important;
 	overflow: hidden !important;
 	white-space: normal !important;
 	flex-wrap: wrap !important;
@@ -676,7 +679,7 @@ button:disabled {
 
 .vditor-toolbar {
 	border-bottom: 1px solid var(--border-subtle) !important;
-	padding: var(--space-2) var(--space-4) !important;
+	padding: var(--space-2) var(--space-8) !important;
 	padding-right: 120px !important;
 	transition: none !important;
 	position: relative !important;
@@ -688,7 +691,7 @@ button:disabled {
 .toolbar-note-actions-container {
 	position: absolute;
 	top: 8px;
-	right: 12px;
+	right: var(--space-6);
 	z-index: 45;
 	display: flex;
 	align-items: center;

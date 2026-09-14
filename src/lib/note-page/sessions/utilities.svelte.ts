@@ -116,7 +116,10 @@ export function createNotePageUtilities(rawContext: object) {
 	});
 
 	$effect(() => {
-		void ctx.toolbarExpanded;
+		// The toggle owns the expanded/collapsed state. Measuring overflow should
+		// not run again just because the user clicked it, otherwise the resize
+		// pass can immediately overwrite the click before the collapsed row paints.
+		void ctx.vditorContainer;
 		updateToolbarOverflow();
 	});
 

@@ -4,6 +4,15 @@
 	import SourcePane from '$lib/source-pane/SourcePane.svelte';
 
 	let { notePage }: { notePage: NotePageController } = $props();
+	// Keep the disclosure state local to the toolbar control. The note controller
+	// is shared across several sessions, so using a local UI state prevents a
+	// resize measurement from replacing the user's click before the class update.
+	let toolbarExpanded = $state(false);
+
+	function toggleToolbar() {
+		toolbarExpanded = !toolbarExpanded;
+		notePage.toolbarExpanded = toolbarExpanded;
+	}
 </script>
 
 <div
@@ -243,7 +252,7 @@
 							bind:this={notePage.vditorContainer}
 							class="vditor-wrapper"
 							class:tools-loading={!notePage.toolsReady || notePage.vditorLoading}
-							class:toolbar-expanded={notePage.toolbarExpanded}
+							class:toolbar-expanded={toolbarExpanded}
 							class:toolbar-has-actions={notePage.showAttachedNote &&
 								notePage.activeSourceBytes !== null}
 							class:has-pdf-note={!!notePage.activeSourceBytes ||
@@ -308,15 +317,15 @@
 							<button
 								type="button"
 								class="toolbar-overlay-toggle"
-								class:expanded={notePage.toolbarExpanded}
+								class:expanded={toolbarExpanded}
 								onclick={(event) => {
 									event.preventDefault();
 									event.stopPropagation();
-									notePage.toolbarExpanded = !notePage.toolbarExpanded;
+									toggleToolbar();
 								}}
 								aria-label="Toggle toolbar"
-								aria-expanded={notePage.toolbarExpanded}
-								title={notePage.toolbarExpanded ? 'Hide editing tools' : 'Show editing tools'}
+								aria-expanded={toolbarExpanded}
+								title={toolbarExpanded ? 'Hide editing tools' : 'Show editing tools'}
 							>
 								<svg
 									viewBox="0 0 24 24"

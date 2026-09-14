@@ -80,6 +80,7 @@ export function createSettingsController() {
 			chatShortcutError
 		}),
 		{
+			quickShortcut: (value) => (quickShortcut = value),
 			quickRecording: (value) => (quickRecording = value),
 			quickShortcutError: (value) => (quickShortcutError = value),
 			chatShortcutRecording: (value) => (chatShortcutRecording = value),

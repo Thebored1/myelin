@@ -94,10 +94,12 @@ export function createEditorSession(rawContext: object) {
 					'|',
 					'fullscreen',
 					'edit-mode',
-					{
-						name: 'more',
-						toolbar: ['both', 'code-theme', 'content-theme', 'outline', 'devtools', 'info', 'help']
-					}
+					'code-theme',
+					'content-theme',
+					'outline',
+					'devtools',
+					'info',
+					'help'
 				],
 				after: () => {
 					if (!isCurrentInitialization()) return;
