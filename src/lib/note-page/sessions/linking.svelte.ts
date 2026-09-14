@@ -64,7 +64,7 @@ export function createLinkingSession(rawContext: object) {
 			}, 50);
 		} catch (err) {
 			console.error('Failed to load preview note', err);
-			alert('Could not load preview.');
+			ctx.message = 'Could not load preview.';
 		} finally {
 			ctx.isBusy = false;
 		}
@@ -106,12 +106,6 @@ export function createLinkingSession(rawContext: object) {
 	}
 
 	function handleVditorKeydownCapture(e: KeyboardEvent) {
-		// Prevent WYSIWYG mode shortcut (Cmd/Ctrl + Alt + 7)
-		if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey && e.code === 'Digit7') {
-			e.preventDefault();
-			e.stopPropagation();
-		}
-
 		// Prevent Ctrl+Arrow keys (Up/Down) from scrolling in the editor, but allow Shift for text selection
 		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
 			e.preventDefault();

@@ -21,6 +21,7 @@ import { createNotePageGraph } from './sessions/graph.svelte';
 import { createNotePageUtilities } from './sessions/utilities.svelte';
 import { createNotePageDialogs } from './sessions/dialogs.svelte';
 import { createNotePageActions } from './sessions/actions.svelte';
+import { createNotePageSessionBindings } from './session-bindings';
 import type { SelectionHandle } from '$lib/controller-context';
 import { createBoundController } from '$lib/controllerView';
 export function createNotePageController() {
@@ -158,7 +159,6 @@ export function createNotePageController() {
 	// Pending tool-approval prompts auto-reject after this long if the user
 	// never answers (mirrors the backend's TOOL_APPROVAL_TIMEOUT_SECS).
 	const APPROVAL_TIMEOUT_MS = 120_000;
-	// Timer bookkeeping is private controller state and is never rendered.
 	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	const approvalTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 	// Live note streaming (real token-by-token writes from the backend).
@@ -324,7 +324,6 @@ export function createNotePageController() {
 	);
 	const utilities = createNotePageUtilities(utilitiesPort);
 	const { openNoteNotebook, localVditorCdn, activeAiNoteId, updateToolbarOverflow } = utilities;
-
 	const inputGraphPort = createBoundController(
 		() => ({
 			note,
@@ -607,9 +606,7 @@ export function createNotePageController() {
 			hasReturnTo: () => page.url.searchParams.has('returnTo'),
 			tick,
 			appendToNoteBody,
-			// Keep the selected Chat/Write mode in the graph context. Without this
-			// bridge the chat session sent `undefined`, and the backend accepted it
-			// as legacy `auto` mode even while the Chat button looked active.
+			// Keep Chat/Write mode live so the backend does not fall back to legacy `auto` mode.
 			get aiInteractionMode() {
 				return aiInteractionMode;
 			},
@@ -646,6 +643,7 @@ export function createNotePageController() {
 		copyMessage,
 		aiEventContext
 	} = graph;
+	const sessionBindings = createNotePageSessionBindings(mathSession, linkingSession);
 	invalidateVditorInitialization = editorSession.invalidateInitialization;
 	const dialogsPort = createBoundController(
 		() => ({
@@ -734,6 +732,7 @@ export function createNotePageController() {
 			IpynbEditorComponent,
 			shouldRenderEditor,
 			currentTime,
+			...sessionBindings.read(),
 			...editorInteractionPort,
 			...editorStatePort,
 			...inputGraphPort,
@@ -836,6 +835,7 @@ export function createNotePageController() {
 			toolbarExpanded: (value) => (toolbarExpanded = value),
 			toolbarNeedsToggle: (value) => (toolbarNeedsToggle = value),
 			toolbarResizeObserver: (value) => (toolbarResizeObserver = value),
+			...sessionBindings.write,
 			saveStatus: (value) => (saveStatus = value),
 			saveTimer: (value) => (saveTimer = value),
 			navigationWarningDialog: (value) => (navigationWarningDialog = value),
@@ -899,7 +899,7 @@ export function createNotePageController() {
 			restoreSelectionTextOffset,
 			saveCursorPosition,
 			insertAtSavedCursor,
-			...mathSession,
+			...sessionBindings.mathActions,
 			requestDeleteMainNote,
 			...createNotePageActions({
 				...inputGraph,

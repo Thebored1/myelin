@@ -12,6 +12,7 @@
 	function toggleToolbar() {
 		toolbarExpanded = !toolbarExpanded;
 		notePage.toolbarExpanded = toolbarExpanded;
+		notePage.updateToolbarOverflow();
 	}
 </script>
 

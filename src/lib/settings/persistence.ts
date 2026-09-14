@@ -40,6 +40,7 @@ export type SettingsPersistencePort = {
 	set ohPromptTools(value: boolean);
 	set isSaving(value: boolean);
 	set saved(value: boolean);
+	set settingsError(value: string);
 	set ohSaving(value: boolean);
 	set enableJupyterExecution(value: boolean);
 	set extraArgs(value: string[]);
@@ -59,12 +60,13 @@ export function createSettingsPersistence(ctx: SettingsPersistencePort) {
 		if (!ctx.currentModelPath) return;
 		ctx.isSaving = true;
 		ctx.saved = false;
+		ctx.settingsError = '';
 		try {
 			await invoke('set_llama_model_path', { modelPath: ctx.currentModelPath });
 			markSaved();
 		} catch (error) {
 			console.error('Failed to save model path:', error);
-			alert('Failed to save model path: ' + error);
+			ctx.settingsError = 'Failed to save model path: ' + error;
 		} finally {
 			ctx.isSaving = false;
 		}
@@ -73,6 +75,7 @@ export function createSettingsPersistence(ctx: SettingsPersistencePort) {
 	async function saveAdvancedConfig() {
 		ctx.isSaving = true;
 		ctx.saved = false;
+		ctx.settingsError = '';
 		try {
 			await invoke(
 				'set_llama_advanced_config',
@@ -92,7 +95,7 @@ export function createSettingsPersistence(ctx: SettingsPersistencePort) {
 			markSaved();
 		} catch (error) {
 			console.error('Failed to save advanced config:', error);
-			alert('Failed to save advanced config: ' + error);
+			ctx.settingsError = 'Failed to save advanced config: ' + error;
 		} finally {
 			ctx.isSaving = false;
 		}
@@ -137,6 +140,7 @@ export function createSettingsPersistence(ctx: SettingsPersistencePort) {
 
 	async function saveOpenharn() {
 		ctx.ohSaving = true;
+		ctx.settingsError = '';
 		try {
 			const settings: OpenharnForm = {
 				port: ctx.ohPort,
@@ -161,7 +165,7 @@ export function createSettingsPersistence(ctx: SettingsPersistencePort) {
 			markSaved();
 		} catch (error) {
 			console.error('Failed to save agent settings:', error);
-			alert('Failed to save agent settings: ' + error);
+			ctx.settingsError = 'Failed to save agent settings: ' + error;
 		} finally {
 			ctx.ohSaving = false;
 		}

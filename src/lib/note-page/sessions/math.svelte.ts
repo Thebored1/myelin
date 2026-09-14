@@ -50,11 +50,6 @@ export function createMathSession(rawContext: object) {
 	function insertMath() {
 		if (ctx.vditorInstance && mathValue) {
 			const cleanMath = mathToKatex(mathValue);
-			if (
-				mathError &&
-				!confirm(`This formula may not render in your note:\n\n${mathError}\n\nInsert it anyway?`)
-			)
-				return;
 			ctx.vditorInstance.insertValue(`\n$$\n${cleanMath}\n$$\n`);
 		}
 		mathDialog?.close();

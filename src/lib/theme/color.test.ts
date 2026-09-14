@@ -45,6 +45,18 @@ describe('theme colors', () => {
 		}
 	});
 
+	it('keeps the built-in light theme aligned with the neutral light copy', () => {
+		const tokens = compileTheme(lightTheme);
+
+		expect(tokens['bg-page']).toBe('#FFFFFF');
+		expect(tokens['bg-panel']).toBe('#F6F5F4');
+		expect(tokens['bg-code']).toBe('#F0EDE9');
+		expect(tokens['text-primary']).toBe('#1F1D1C');
+		expect(tokens['text-secondary']).toBe('#6E6A67');
+		expect(tokens['accent-100']).toBe('#000000');
+		expect(tokens['accent-tint']).toBe('#0000001F');
+	});
+
 	it('round-trips colors through OKLCH without drifting', () => {
 		for (const color of ['#000000', '#FFFFFF', '#EF6F2E', '#55AAFF', '#EAB308', '#101010']) {
 			const { l, c, h } = toOklch(color);

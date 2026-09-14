@@ -366,7 +366,9 @@ button:disabled {
 .vditor-wrapper.tools-loading .vditor-toolbar {
 	opacity: 0.35;
 	filter: grayscale(1);
-	pointer-events: none;
+	/* The toolbar can already be rendered while the editor content is warming
+		up. Keep its buttons clickable instead of making visible controls inert. */
+	pointer-events: auto !important;
 }
 
 .vditor {
@@ -498,10 +500,9 @@ button:disabled {
 	height: 52px !important;
 	max-height: 52px !important;
 	min-height: 52px !important;
-	overflow: hidden !important;
+	overflow: visible !important;
 	white-space: normal !important;
 	flex-wrap: wrap !important;
-	height: auto !important;
 	flex: 0 0 auto !important;
 }
 
@@ -518,6 +519,60 @@ button:disabled {
 	flex-wrap: wrap !important;
 	height: auto !important;
 	flex: 0 0 auto !important;
+}
+
+/* Vditor places its menus inside the toolbar, but the editor surface normally
+	clips horizontal overflow. Once the toolbar is expanded, let the entire
+	menu chain paint outside its layout boxes so every dropdown stays usable. */
+.vditor-wrapper.toolbar-expanded,
+.vditor-wrapper.toolbar-expanded .vditor,
+.vditor-wrapper.toolbar-expanded .vditor-content {
+	overflow: visible !important;
+}
+
+.vditor-wrapper.toolbar-expanded .vditor-toolbar .vditor-hint {
+	z-index: 60 !important;
+}
+
+/* Make the first-level menu position deterministic after the toolbar wraps.
+	Nested Vditor menus retain their own left/right positioning rules. */
+.vditor-wrapper.toolbar-expanded .vditor-toolbar > .vditor-toolbar__item > .vditor-hint {
+	top: calc(100% - 1px) !important;
+	left: 0 !important;
+}
+
+.vditor-wrapper.toolbar-expanded
+	.vditor-toolbar
+	> .vditor-toolbar__item
+	> .vditor-hint.vditor-panel--left {
+	left: auto !important;
+	right: 0 !important;
+}
+
+/* A menu opened from the visible collapsed row also needs to escape the row's
+	clip window. The :has() condition is limited to panels Vditor has explicitly
+	opened, so the toolbar still starts collapsed and hides its wrapped tools. */
+.vditor-wrapper:not(.toolbar-expanded):has(.vditor-hint[style*='display: block']),
+.vditor-wrapper:not(.toolbar-expanded):has(.vditor-hint[style*='display: block']) .vditor-toolbar,
+.vditor-wrapper:not(.toolbar-expanded):has(.vditor-hint[style*='display: block']) .vditor-content {
+	overflow: visible !important;
+}
+
+.vditor-wrapper:not(.toolbar-expanded):has(.vditor-hint[style*='display: block'])
+	.vditor-toolbar
+	> .vditor-toolbar__item
+	> .vditor-hint {
+	top: calc(100% - 1px) !important;
+	left: 0 !important;
+	z-index: 60 !important;
+}
+
+.vditor-wrapper:not(.toolbar-expanded):has(.vditor-hint[style*='display: block'])
+	.vditor-toolbar
+	> .vditor-toolbar__item
+	> .vditor-hint.vditor-panel--left {
+	left: auto !important;
+	right: 0 !important;
 }
 
 /* Force all upward-facing tooltips (__n, __ne, __nw) to point downwards vertically */
@@ -560,7 +615,7 @@ button:disabled {
 	background: var(--bg-page) !important;
 	flex: 1 !important;
 	min-height: 0 !important;
-	overflow: hidden !important;
+	overflow: visible !important;
 }
 
 .vditor-ir,

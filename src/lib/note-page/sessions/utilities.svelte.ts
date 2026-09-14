@@ -49,8 +49,9 @@ export function createNotePageUtilities(rawContext: object) {
 		// Vditor lays toolbar items out with floats. Measuring offsetTop is
 		// unreliable here: wrapped items can still report the first row, and
 		// hiding them one-by-one changes the layout while it is being measured.
-		// Measure the complete unhidden row instead, then let CSS clip the
-		// overflow in collapsed mode and wrap it in expanded mode.
+		// Measure the complete unhidden row instead, then hide only wrapped
+		// buttons in collapsed mode. The toolbar itself must remain overflow-
+		// visible so Vditor's dropdowns can escape its one-row height.
 		const toolbarStyle = getComputedStyle(toolbar);
 		const paddingLeft = parseFloat(toolbarStyle.paddingLeft) || 0;
 		const paddingRight = parseFloat(toolbarStyle.paddingRight) || 0;
@@ -79,11 +80,17 @@ export function createNotePageUtilities(rawContext: object) {
 		ctx.toolbarNeedsToggle = needsToggle;
 		if (!needsToggle) ctx.toolbarExpanded = false;
 
-		// Clear styles left by older toolbar instances or a prior measurement.
+		const expanded = ctx.toolbarExpanded;
 		items.forEach((item: Element) => {
 			const element = item as HTMLElement;
-			element.style.removeProperty('visibility');
-			element.style.removeProperty('pointer-events');
+			const wrapped = element.getBoundingClientRect().top > firstRowTop + 2;
+			if (!expanded && wrapped) {
+				element.style.visibility = 'hidden';
+				element.style.pointerEvents = 'none';
+			} else {
+				element.style.removeProperty('visibility');
+				element.style.removeProperty('pointer-events');
+			}
 		});
 	}
 

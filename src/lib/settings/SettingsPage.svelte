@@ -78,6 +78,16 @@
 			<header class="settings-header">
 				<h1>Settings</h1>
 			</header>
+			{#if settings.settingsError}
+				<div class="settings-error" role="alert">
+					<span>{settings.settingsError}</span>
+					<button
+						type="button"
+						aria-label="Dismiss error"
+						onclick={() => (settings.settingsError = '')}>×</button
+					>
+				</div>
+			{/if}
 
 			<div class="settings-content" id="settings-content">
 				{#if activeSection === 'settings-workspace'}

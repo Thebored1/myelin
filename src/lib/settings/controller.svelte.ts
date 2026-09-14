@@ -62,6 +62,7 @@ export function createSettingsController() {
 	let latexDownloading = $state(false);
 	let latexDownloadBytes = $state(0);
 	let latexError = $state('');
+	let settingsError = $state('');
 	const formatMB = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 	// Quick-capture global shortcut.
 	let quickShortcut = $state('Ctrl+Space');
@@ -246,6 +247,7 @@ export function createSettingsController() {
 			enableJupyterExecution,
 			isSaving,
 			saved,
+			settingsError,
 			ohSaving
 		}),
 		{
@@ -256,6 +258,7 @@ export function createSettingsController() {
 			ohCallOnly: (value) => (ohCallOnly = value),
 			isSaving: (value) => (isSaving = value),
 			saved: (value) => (saved = value),
+			settingsError: (value) => (settingsError = value),
 			ohSaving: (value) => (ohSaving = value),
 			enableJupyterExecution: (value) => (enableJupyterExecution = value)
 		},
@@ -645,6 +648,7 @@ export function createSettingsController() {
 			activeProvider,
 			activeWorkspacePath,
 			backgroundError,
+			settingsError,
 			gpuAvailable,
 			gpus,
 			indexState,
@@ -699,6 +703,7 @@ export function createSettingsController() {
 			chatShortcutError: (value) => (chatShortcutError = value),
 			startWithSystem: (value) => (startWithSystem = value),
 			backgroundError: (value) => (backgroundError = value),
+			settingsError: (value) => (settingsError = value),
 			statusPoll: (value) => (statusPoll = value),
 			isSaving: (value) => (isSaving = value),
 			isRebuilding: (value) => (isRebuilding = value),

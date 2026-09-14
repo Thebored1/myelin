@@ -94,17 +94,62 @@ export function createEditorSession(rawContext: object) {
 					'|',
 					'fullscreen',
 					'edit-mode',
-					'code-theme',
-					'content-theme',
-					'outline',
-					'devtools',
-					'info',
-					'help'
+					{
+						name: 'more',
+						tipPosition: 'e',
+						toolbar: ['both', 'code-theme', 'content-theme', 'outline', 'devtools', 'info', 'help']
+					}
 				],
 				after: () => {
 					if (!isCurrentInitialization()) return;
 					const toolbar = ctx.vditorContainer?.querySelector('.vditor-toolbar');
 					if (toolbar) {
+						const customActions: Record<string, () => void> = {
+							mathlive: () => void ctx.openMathDialog(),
+							'link-note': () => ctx.openLinkDialog(),
+							'search-blocks': () => void ctx.linkingSession.openGlobalBlockSearch()
+						};
+						Object.entries(customActions).forEach(([type, action]) => {
+							const button = toolbar.querySelector(
+								`button[data-type="${type}"]`
+							) as HTMLButtonElement | null;
+							if (!button) return;
+							// Vditor's Custom adapter attaches a generic listener after
+							// creating the button. Capture the event here so the direct
+							// Myelin action is the only action that runs.
+							button.addEventListener(
+								'click',
+								(event) => {
+									event.preventDefault();
+									event.stopImmediatePropagation();
+									action();
+								},
+								{ capture: true }
+							);
+						});
+
+						const moreButton = toolbar.querySelector(
+							'button[data-type="more"]'
+						) as HTMLButtonElement | null;
+						const morePanel = moreButton?.parentElement?.querySelector(
+							':scope > .vditor-hint'
+						) as HTMLElement | null;
+						if (moreButton && morePanel) {
+							moreButton.addEventListener(
+								'click',
+								(event) => {
+									event.preventDefault();
+									event.stopImmediatePropagation();
+									const isOpen = morePanel.style.display === 'block';
+									toolbar.querySelectorAll<HTMLElement>('.vditor-hint').forEach((panel) => {
+										if (panel !== morePanel) panel.style.display = 'none';
+									});
+									morePanel.style.display = isOpen ? 'none' : 'block';
+								},
+								{ capture: true }
+							);
+						}
+
 						ctx.toolbarResizeObserver = new ResizeObserver(() => {
 							ctx.updateToolbarOverflow();
 						});

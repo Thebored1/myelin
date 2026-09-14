@@ -809,6 +809,30 @@ code {
 	gap: var(--space-2);
 }
 
+.settings-error {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-3);
+	margin: var(--space-4) var(--space-6) 0;
+	padding: var(--space-3) var(--space-4);
+	border: 1px solid var(--danger-border);
+	border-radius: var(--radius-sm);
+	background: var(--danger-bg);
+	color: var(--danger-text);
+	font-size: 0.8rem;
+}
+
+.settings-error button {
+	flex: 0 0 auto;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	font-size: 1.1rem;
+	line-height: 1;
+	cursor: pointer;
+}
+
 @media (max-width: 900px) {
 	.settings-container {
 		overflow-y: auto;

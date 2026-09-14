@@ -17,6 +17,7 @@
 	let busy = $state(false);
 	let message = $state('');
 	let importInput = $state<HTMLInputElement | null>(null);
+	let deleteThemeDialog = $state<HTMLDialogElement | undefined>();
 	let accentDraft = $state('#EF6F2E');
 
 	$effect(() => {
@@ -100,16 +101,18 @@
 		}
 	}
 
-	async function deleteTheme() {
-		if (
-			!$activeColorTheme ||
-			$activeColorTheme.readonly ||
-			!confirm(`Delete ${$activeColorTheme.name}?`)
-		)
-			return;
+	function requestDeleteTheme() {
+		if (!$activeColorTheme || $activeColorTheme.readonly || busy) return;
+		deleteThemeDialog?.showModal();
+	}
+
+	async function confirmDeleteTheme() {
+		const target = $activeColorTheme;
+		if (!target || target.readonly || busy) return;
+		deleteThemeDialog?.close();
 		busy = true;
 		try {
-			await themeController.delete($activeColorTheme.id);
+			await themeController.delete(target.id);
 			message = 'Theme deleted.';
 		} catch {
 			message = 'Theme could not be deleted.';
@@ -237,7 +240,7 @@
 			<button class="browse-btn" onclick={() => beginEdit($activeColorTheme)} disabled={busy}
 				>Edit colors</button
 			>
-			<button class="browse-btn danger-action" onclick={() => void deleteTheme()} disabled={busy}
+			<button class="browse-btn danger-action" onclick={requestDeleteTheme} disabled={busy}
 				>Delete</button
 			>
 		{/if}
@@ -294,6 +297,31 @@
 		</div>
 	{/if}
 </section>
+
+<dialog
+	bind:this={deleteThemeDialog}
+	class="theme-confirm-dialog"
+	aria-labelledby="delete-theme-title"
+	aria-describedby="delete-theme-description"
+>
+	<div class="theme-confirm-content">
+		<h3 id="delete-theme-title">Delete theme?</h3>
+		<p id="delete-theme-description">
+			<strong>{$activeColorTheme?.name}</strong> will be permanently deleted. This action cannot be undone.
+		</p>
+		<div class="theme-confirm-actions">
+			<button class="theme-confirm-cancel" type="button" onclick={() => deleteThemeDialog?.close()}
+				>Cancel</button
+			>
+			<button
+				class="theme-confirm-delete"
+				type="button"
+				onclick={() => void confirmDeleteTheme()}
+				disabled={busy}>Delete theme</button
+			>
+		</div>
+	</div>
+</dialog>
 
 <style>
 	.theme-gallery {
@@ -372,6 +400,71 @@
 	}
 	.danger-action {
 		color: var(--danger-text);
+	}
+	.theme-confirm-dialog {
+		width: min(26rem, calc(100vw - 2rem));
+		padding: 0;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-lg);
+		background: var(--bg-modal);
+		color: var(--text-primary);
+		box-shadow: 0 24px 80px var(--shadow-color-strong);
+	}
+	.theme-confirm-dialog::backdrop {
+		background: var(--scrim);
+		backdrop-filter: blur(var(--blur-sm));
+	}
+	.theme-confirm-content {
+		display: grid;
+		gap: var(--space-3);
+		padding: var(--space-6);
+	}
+	.theme-confirm-content h3,
+	.theme-confirm-content p {
+		margin: 0;
+	}
+	.theme-confirm-content h3 {
+		font-size: 1.1rem;
+		color: var(--text-hero);
+	}
+	.theme-confirm-content p {
+		color: var(--text-secondary);
+		line-height: 1.5;
+	}
+	.theme-confirm-content strong {
+		color: var(--text-primary);
+	}
+	.theme-confirm-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: var(--space-2);
+		margin-top: var(--space-3);
+	}
+	.theme-confirm-actions button {
+		padding: 0.55rem 0.9rem;
+		border: 1px solid var(--border-default);
+		border-radius: var(--radius-sm);
+		font-family: var(--font-mono);
+		cursor: pointer;
+	}
+	.theme-confirm-cancel {
+		background: var(--bg-panel);
+		color: var(--text-primary);
+	}
+	.theme-confirm-cancel:hover:not(:disabled) {
+		background: var(--hover-overlay);
+	}
+	.theme-confirm-delete {
+		background: var(--danger-bg);
+		border-color: var(--danger-border) !important;
+		color: var(--danger-text);
+	}
+	.theme-confirm-delete:hover:not(:disabled) {
+		background: var(--danger-bg-strong);
+	}
+	.theme-confirm-actions button:disabled {
+		cursor: wait;
+		opacity: 0.5;
 	}
 	.theme-message {
 		color: var(--text-secondary);

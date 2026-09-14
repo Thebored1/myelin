@@ -94,6 +94,7 @@
 
 	let pyodideInstance: PyodideAPI | null = null;
 	let pyodideLoading = $state(false);
+	let executionError = $state('');
 
 	// The core runtime is shipped with the app under static/pyodide. Resolve the
 	// relative asset directory at execution time so this works in both Vite dev
@@ -128,10 +129,11 @@
 
 		const canExecute = localStorage.getItem('myelin_jupyter_exec') === 'true';
 		if (!canExecute) {
-			alert('Jupyter code execution is disabled. Enable it in Settings to run code blocks.');
+			executionError = 'Jupyter execution is disabled. Enable it in Settings to run code blocks.';
 			return;
 		}
 
+		executionError = '';
 		const code = cell.source.join('');
 		try {
 			const pyodide = await getPyodide();
@@ -156,6 +158,7 @@
 			cell.execution_count = (cell.execution_count || 0) + 1;
 			onInput(JSON.stringify(notebook, null, 2));
 		} catch (e) {
+			executionError = `Execution failed: ${String(e)}`;
 			cell.outputs = [
 				{
 					output_type: 'stream',
@@ -181,6 +184,9 @@
 	{#if parseError}
 		<div class="error">{parseError}</div>
 	{:else}
+		{#if executionError}
+			<div class="error" role="status">{executionError}</div>
+		{/if}
 		<div class="cells">
 			{#if pyodideLoading}
 				<div class="pyodide-banner">
