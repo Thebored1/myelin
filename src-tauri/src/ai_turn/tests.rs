@@ -28,12 +28,9 @@ fn names(turn: &AiTurn) -> Vec<&str> {
 }
 
 #[test]
-fn direct_chat_offers_fixed_read_only_schema_and_keeps_real_title_metadata() {
+fn direct_chat_skips_tools_and_keeps_real_title_metadata() {
     let turn = build("chat", "What is this note about?");
-    // Chat always carries one fixed read-only schema set so the system/tool
-    // prefix is byte-identical across turns (KV reuse), regardless of the
-    // question. Intent is computed deterministically and stays direct here.
-    assert!(!turn.tools.is_empty());
+    assert!(turn.tools.is_empty());
     assert!(!turn.intent_is_tool);
     assert_eq!(turn.kind, TurnKind::DirectAnswer);
     assert_eq!(
@@ -89,10 +86,7 @@ fn section_context_is_shared_before_chat_or_write_profile_tail() {
 #[test]
 fn chat_rewrite_is_a_direct_draft_not_a_read_only_tool_call() {
     let turn = build("chat", "rewrite the INTRODUCTION in a couple of lines");
-    assert!(
-        !turn.tools.is_empty(),
-        "chat keeps its stable read-only schema prefix"
-    );
+    assert!(turn.tools.is_empty());
     assert!(!turn.intent_is_tool);
     assert_eq!(turn.kind, TurnKind::DirectAnswer);
     assert!(!names(&turn).contains(&"write_note"));
@@ -103,10 +97,7 @@ fn chat_rewrite_is_a_direct_draft_not_a_read_only_tool_call() {
 }
 
 #[test]
-fn chat_always_offers_the_fixed_read_only_tool_set() {
-    // Question-dependent tool gating would change the rendered prompt prefix
-    // between turns; chat instead offers one stable read-only set and relies
-    // on deterministic tool_intent for routing.
+fn tool_intent_chat_offers_the_fixed_read_only_tool_set() {
     let expected = [
         "fetch_web_page",
         "find_in_note",
@@ -115,10 +106,7 @@ fn chat_always_offers_the_fixed_read_only_tool_set() {
         "search_notes",
         "web_search",
     ];
-    assert_eq!(
-        names(&build("chat", "does this note contain aardvark?")),
-        expected
-    );
+    assert_eq!(names(&build("chat", "does this note contain aardvark?")), expected);
     assert_eq!(
         names(&build("chat", "summarize https://example.com")),
         expected
@@ -236,13 +224,12 @@ fn strong_profile_schemas_have_no_descriptions() {
 
 #[test]
 fn direct_chat_uses_small_preamble_only_when_tool_less() {
-    // Chat with tool support carries the read-only schema and the standard
-    // editing preamble (fixed prefix). The minimal DIRECT_CHAT_PREAMBLE is
-    // reserved for tool-less models so they never see a mutation manual.
+    // Direct Chat stays on the minimal preamble even when the model supports
+    // tools; tool-intent turns opt into the normal tool-aware preamble.
     let turn = build("chat", "hello");
     let system = turn.messages[0]["content"].as_str().unwrap();
-    assert!(system.starts_with(crate::agent::MYELIN_PREAMBLE));
-    assert!(!turn.tools.is_empty());
+    assert!(system.starts_with(crate::agent::DIRECT_CHAT_PREAMBLE));
+    assert!(turn.tools.is_empty());
 
     let tool_less = AiTurnBuilder::build(AiTurnInput {
         mode: "chat",

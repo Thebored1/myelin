@@ -354,8 +354,8 @@ pub fn select_tools(message: &str, has_open_note: bool, edit_thread: bool) -> Ve
     select_tools_cfg(message, has_open_note, edit_thread, true, true)
 }
 
-/// Chat always receives one fixed read-only schema. Question-dependent schemas
-/// change the rendered prompt prefix and defeat llama-server KV reuse.
+/// Tool-intent Chat receives the fixed read-only schema set. Direct Chat skips
+/// schemas entirely so simple answers do not pay the function-calling prefill.
 pub fn select_chat_tools(_message: &str, _has_open_note: bool) -> Vec<Value> {
     specs_for(&[
         "read_note",
@@ -374,9 +374,8 @@ pub fn select_chat_tools(_message: &str, _has_open_note: bool) -> Vec<Value> {
 /// mode toggle.
 pub fn interaction_mode_tools(mode: &str, oversized: bool) -> Vec<Value> {
     match mode {
-        // Chat always renders one fixed read-only set — even for oversized
-        // notes — so the synthetic warm-up prefix is byte-identical to the
-        // real chat turn and its persisted KV snapshot stays reusable.
+        // Chat's warm-up is selected by the caller; direct Chat uses no tools,
+        // while a tool-intent Chat request receives the fixed read-only set.
         "chat" => select_chat_tools("", true),
         "edit" => specs_for(&["write_note"]),
         _ if oversized => tool_specs()

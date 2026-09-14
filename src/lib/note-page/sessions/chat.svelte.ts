@@ -148,7 +148,8 @@ export function createChatSession(rawContext: object) {
 
 	function visibleAiStatus(kind: string, detail: string): string | undefined {
 		if (kind === 'model_prompt' || kind === 'request_serialized') return 'Reading the note…';
-		if (kind === 'response_headers' || kind === 'first_model_delta' || kind === 'gen')
+		if (kind === 'response_headers') return 'Preparing response…';
+		if (kind === 'first_model_delta' || kind === 'gen')
 			return ctx.activeAiComposerMode === 'editor' ? 'Writing replacement…' : 'Writing a response…';
 		if (kind === 'intent_prompt') return 'Understanding the request…';
 		if (kind === 'tool') {

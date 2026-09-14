@@ -191,9 +191,9 @@ impl AppState {
             config.supports_tools,
         )
         .await;
-        // Retrieval-backed chat uses the same tool-free profile as the direct
-        // document-answer route, so the warm-up can be reused by that request.
-        // Ordinary tool-capable chat retains its fixed read-only schema prefix.
+        // Ordinary Chat is tool-free by default, so warm the same short prefix
+        // used by direct answers. Tool-intent Chat adds schemas only when the
+        // request actually needs a read-only tool.
         let (system, tools) = warmup_prefix(
             &note.title,
             &excerpt,

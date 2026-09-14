@@ -50,7 +50,7 @@ fn slot_cache_budget_does_nothing_under_budget() {
 fn warmup_prefix_matches_real_chat_turn_prefix() {
     let title = "Parity note";
     let excerpt = "some note body text";
-    let (system, tools) = warmup_prefix(title, excerpt, None, "chat", "md", true, false, false);
+    let (system, tools) = warmup_prefix(title, excerpt, None, "chat", "md", false, false, false);
     let turn = crate::ai_turn::AiTurnBuilder::build(crate::ai_turn::AiTurnInput {
         mode: "chat",
         doc_type: "md",
@@ -63,7 +63,7 @@ fn warmup_prefix_matches_real_chat_turn_prefix() {
         has_open_note: true,
         edit_thread: false,
         oversized: false,
-        supports_tools: true,
+        supports_tools: false,
         verbose_tool_schemas: false,
         section_context: false,
     });

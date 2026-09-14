@@ -16,7 +16,13 @@ pub struct AiTurnBuilder;
 
 impl AiTurnBuilder {
     pub fn build(input: AiTurnInput<'_>) -> AiTurn {
-        let routed = if input.supports_tools {
+        // Direct Chat turns do not need a tool schema. Keeping the read-only
+        // tools off the wire for ordinary questions avoids making the model
+        // prefill a large function-calling prompt before it can answer.
+        // Tool-intent Chat turns still receive the read-only tool set.
+        let offer_tools = input.supports_tools
+            && (input.mode != "chat" || crate::agent::chat_tool_intent(input.question));
+        let routed = if offer_tools {
             route_tools(
                 input.mode,
                 input.doc_type,
@@ -30,10 +36,8 @@ impl AiTurnBuilder {
         };
         let tools =
             crate::agent::compact_tool_specs_for_profile(routed, input.verbose_tool_schemas);
-        // Deterministic TOOL/CHAT intent, decoupled from the offered schema list.
-        // Chat always carries one fixed read-only schema set (so the system/tool
-        // prefix is byte-identical every turn and llama-server can reuse the KV
-        // cache), so "tools present" can no longer mean "this is a tool turn".
+        // Deterministic TOOL/CHAT intent stays separate from the schema list so
+        // a direct Chat answer can be tool-free without changing its routing.
         let intent_is_tool = match input.mode {
             "operation" | "write" | "edit" => true,
             // A chat-only model cannot execute a tool. This also covers the
@@ -42,11 +46,8 @@ impl AiTurnBuilder {
             "chat" => input.supports_tools && crate::agent::chat_tool_intent(input.question),
             _ => !tools.is_empty(),
         };
-        // A fixed preamble per mode: chat always uses the editing preamble when
-        // it offers the read-only schema set, and the minimal chat preamble for
-        // tool-less models. The selection depends only on the stable mode+tool
-        // capability, never on the current question, so the system message does
-        // not flip between turns.
+        // Direct Chat uses the short preamble; tool-intent Chat uses the normal
+        // tool-aware preamble.
         let preamble = if input.mode == "write" {
             crate::agent::TARGETED_WRITE_PREAMBLE
         } else if input.mode == "chat" && tools.is_empty() {
@@ -54,8 +55,8 @@ impl AiTurnBuilder {
         } else {
             crate::agent::MYELIN_PREAMBLE
         };
-        // Chat always renders the minimal direct user content (raw question plus
-        // any turn-specific context) regardless of the read-only schemas offered.
+        // Chat renders the minimal direct user content; tool turns use the same
+        // direct wording while the tool schema is carried separately.
         let direct_chat = input.mode == "chat";
         let mut messages = if input.section_context {
             vec![
