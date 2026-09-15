@@ -112,7 +112,7 @@ export function createNotePageController() {
 		text: string;
 		before: string;
 		after: string;
-		cursor: boolean;
+		cursor: boolean; sourceOffset?: number;
 		cellIndex?: number;
 		chars: number;
 		words: number;
@@ -122,7 +122,7 @@ export function createNotePageController() {
 		text: string;
 		before: string;
 		after: string;
-		cursor: boolean;
+		cursor: boolean; sourceOffset?: number;
 		cellIndex?: number;
 	};
 	let activeAiEditTarget: AiEditTarget | null = null;
@@ -228,14 +228,14 @@ export function createNotePageController() {
 			texEditorInstance,
 			ipynbEditorInstance,
 			shortcutEditorRange,
-			shouldRefocusEditor
+			shouldRefocusEditor, savedEditorRange
 		}),
 		{
 			shortcutEditorRange: (value) => (shortcutEditorRange = value),
 			shouldRefocusEditor: (value) => (shouldRefocusEditor = value)
 		},
 		{
-			captureEditorSelection: () => selectionSession.captureEditorSelection()
+			captureEditorSelection: (range?: Range) => selectionSession.captureEditorSelection(range), saveCursorPosition: (range?: Range) => selectionSession.saveCursorPosition(range), clearSavedCaretProxy: () => selectionSession.clearSavedCaretProxy()
 		}
 	);
 	const editorInteraction = createEditorInteractionSession(editorInteractionPort);
@@ -514,7 +514,7 @@ export function createNotePageController() {
 			MAX_DEBUG_MSG_CHARS,
 			MAX_DEBUG_TRACE,
 			approvalTimeouts,
-			armedSelection
+			armedSelection,
 		}),
 		{
 			isLoadingNote: (value) => (isLoadingNote = value),

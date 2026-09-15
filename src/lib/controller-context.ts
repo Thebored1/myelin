@@ -19,7 +19,11 @@ export type RequiredStringAction = (...args: unknown[]) => string;
 export type NumberAction = (...args: unknown[]) => number | null;
 export type BooleanAction = (...args: unknown[]) => boolean;
 export type SessionHandle = Record<string, (...args: unknown[]) => unknown>;
-export type SelectionHandle = { captureEditorSelection: () => void };
+export type SelectionHandle = {
+	captureEditorSelection: (range?: Range) => void;
+	saveCursorPosition: (range?: Range) => void;
+	clearSavedCaretProxy: () => void;
+};
 export type DynamicComponent = Component<never>;
 
 type ActiveSection = { key: string; label?: string; content: string };
@@ -41,6 +45,8 @@ type SelectionTarget = {
 	before: string;
 	after: string;
 	cursor: boolean;
+	/** UTF-16 source offset captured from Vditor's Markdown serializer. */
+	sourceOffset?: number;
 	cellIndex?: number;
 };
 export interface LinkingSessionPort {
@@ -220,10 +226,11 @@ export interface NotePageContext {
 	refocusEditorSoon: SyncAction;
 	captureShortcutEditorTarget: SyncAction;
 	restoreShortcutEditorFocus: SyncAction;
-	captureEditorSelection: SyncAction;
+	captureEditorSelection: (range?: Range) => void;
 	reselectAfterEdit: SyncAction;
 	restoreSelectionTextOffset: SyncAction;
-	saveCursorPosition: SyncAction;
+	saveCursorPosition: (range?: Range) => void;
+	clearSavedCaretProxy: SyncAction;
 	insertAtSavedCursor: SyncAction;
 	onDocMouseDown: SyncAction;
 	handleGlobalSelectionChange: SyncAction;

@@ -126,6 +126,9 @@ export function createNoteInputGraph(rawContext: object) {
 		get vditorContainer() {
 			return ctx.vditorContainer;
 		},
+		get chatTextareaEl() {
+			return ctx.chatTextareaEl;
+		},
 		get armedSelection() {
 			return ctx.armedSelection;
 		},

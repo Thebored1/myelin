@@ -349,6 +349,21 @@ button:disabled {
 	min-height: 0;
 }
 
+/* The real contenteditable caret is hidden when the AI prompt/sidebar has
+   keyboard focus. Keep a non-interactive visual anchor at the saved editor
+   position so the user can still see where a write will land. */
+.myelin-editor-caret-proxy {
+	position: fixed;
+	display: block;
+	width: 2px;
+	min-height: 18px;
+	background: var(--accent-100);
+	border-radius: 1px;
+	pointer-events: none;
+	z-index: 1000;
+	opacity: 1;
+}
+
 .tools-loading-overlay {
 	position: absolute;
 	inset: 0;

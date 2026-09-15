@@ -61,7 +61,7 @@ export function createLayoutSession(rawContext: object) {
 			return;
 		event.preventDefault();
 		event.stopPropagation();
-		if (get(noteSidebarOpen) && document.activeElement === ctx.chatTextareaEl) {
+		if (get(noteSidebarOpen)) {
 			noteSidebarOpen.set(false);
 			await ctx.tick();
 			ctx.restoreShortcutEditorFocus();
@@ -71,7 +71,12 @@ export function createLayoutSession(rawContext: object) {
 		ctx.activeSidebarTab = 'chat';
 		noteSidebarOpen.set(true);
 		await ctx.tick();
-		ctx.chatTextareaEl?.focus();
+		const focusChatInput = () => ctx.chatTextareaEl?.focus();
+		focusChatInput();
+		// The textarea is created by the newly-rendered chat tab. Retry on the
+		// next task so the WebView cannot leave the editor caret active during
+		// the sidebar transition.
+		setTimeout(focusChatInput, 0);
 	}
 
 	function handleChatScroll(e: Event) {

@@ -9,10 +9,16 @@
 </script>
 
 <!-- Right Sidebar -->
-{#if $noteSidebarOpen}
+{#if $noteSidebarOpen && !(notePage.writeTargetNotice && notePage.aiInteractionMode === 'write')}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="sidebar-backdrop" onclick={() => ($noteSidebarOpen = false)}></div>
+	<div
+		class="sidebar-backdrop"
+		onclick={() => {
+			$noteSidebarOpen = false;
+			notePage.restoreShortcutEditorFocus();
+		}}
+	></div>
 {/if}
 <aside
 	class="sidebar"
