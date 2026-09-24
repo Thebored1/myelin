@@ -8,6 +8,8 @@ export type AiEditTarget = {
 	after: string;
 	start?: number;
 	end?: number;
+	sourceOffset?: number;
+	lineBreaks?: number;
 	cursor?: boolean;
 };
 

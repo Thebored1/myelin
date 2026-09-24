@@ -297,7 +297,10 @@ export function createChatSession(rawContext: object) {
 		ctx.chatInput = '';
 		if (ctx.chatTextareaEl) ctx.chatTextareaEl.style.height = 'auto';
 		try {
-			if ((ctx.isSourceMaterial && ctx.showAttachedNote) || ctx.saveStatus !== 'saved')
+			// Targeted writes are located against the note body stored by the
+			// backend. Save the current editor body first so the remembered target
+			// and the body used for lookup are always from the same revision.
+			if (composerMode === 'editor' || (ctx.isSourceMaterial && ctx.showAttachedNote) || ctx.saveStatus !== 'saved')
 				await ctx.saveNote();
 			if (ctx.pdfIngestionPromise) await ctx.pdfIngestionPromise;
 		} catch (error) {
@@ -409,31 +412,41 @@ export function createChatSession(rawContext: object) {
 		return merged;
 	}
 
-	async function reconcileRequestNote(expectedNoteId: string) {
+	async function reconcileRequestNote(expectedNoteId: string, baselineBody?: string) {
 		if (!canApplyReconciledNote(expectedNoteId, ctx.activeAiNoteId())) return;
 		const refreshed = await invoke<NoteDocument>('load_note', { noteId: expectedNoteId });
 		if (!canApplyReconciledNote(expectedNoteId, ctx.activeAiNoteId())) return;
+		const currentBody = ctx.vditorInstance ? ctx.vditorInstance.getValue() : ctx.draftBody;
+		// A native write emits its authoritative body before the chat turn ends.
+		// If the follow-up load briefly returns the pre-write snapshot, keep the
+		// body already applied in the editor instead of reloading the old note and
+		// autosaving it over the completed mutation.
+		const keepLocalMutation =
+			baselineBody !== undefined &&
+			currentBody !== baselineBody &&
+			refreshed.body === baselineBody;
+		const reconciledBody = keepLocalMutation ? currentBody : refreshed.body;
 		if (!ctx.isSourceMaterial) {
-			ctx.note = { ...refreshed, chatHistory: ctx.chatMessages };
+			ctx.note = { ...refreshed, body: reconciledBody, chatHistory: ctx.chatMessages };
 			ctx.draftTitle = refreshed.title;
-			ctx.draftBody = refreshed.body;
+			ctx.draftBody = reconciledBody;
 			ctx.draftTags = refreshed.tags.join(', ');
 			if (
 				ctx.workingDocType === 'md' &&
 				ctx.vditorInstance &&
-				editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), refreshed.body)
+				editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), reconciledBody)
 			) {
-				ctx.vditorInstance.setValue(refreshed.body);
+				ctx.vditorInstance.setValue(reconciledBody);
 			}
 		} else {
 			ctx.draftTitle = refreshed.title;
-			ctx.draftBody = refreshed.body;
+			ctx.draftBody = reconciledBody;
 			ctx.draftTags = refreshed.tags.join(', ');
 			if (
 				ctx.vditorInstance &&
-				editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), refreshed.body)
+				editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), reconciledBody)
 			) {
-				ctx.vditorInstance.setValue(refreshed.body);
+				ctx.vditorInstance.setValue(reconciledBody);
 			}
 		}
 		void ctx.fetchRelatedNotes();
@@ -443,6 +456,13 @@ export function createChatSession(rawContext: object) {
 		if (ctx.activeChatRequestId !== requestId) return;
 		ctx.flushChatChunks();
 		const requestNoteId = ctx.activeChatNoteId;
+		const requestBaseline = [...ctx.chatMessages]
+			.reverse()
+			.find((message: ChatMessage) => message.snapshotId === requestId)?.snapshot?.noteBody;
+		const finishedAt = Date.now();
+		const activeStartTime = [...ctx.chatMessages]
+			.reverse()
+			.find((message: ChatMessage) => message.isStreaming && message.startTime)?.startTime;
 		ctx.cancelNoteStream();
 		ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) =>
 			m.isStreaming
@@ -450,10 +470,12 @@ export function createChatSession(rawContext: object) {
 						...m,
 						isStreaming: false,
 						statusText: undefined,
-						endTime: Date.now(),
+						endTime: finishedAt,
 						debugTrace: ctx.pendingDebugTrace
 					}
-				: m
+				: m.tools?.length && m.startTime === activeStartTime && !m.endTime
+					? { ...m, endTime: finishedAt }
+					: m
 		);
 		if (ctx.chatPersistTimer) {
 			clearTimeout(ctx.chatPersistTimer);
@@ -462,7 +484,7 @@ export function createChatSession(rawContext: object) {
 		if (requestNoteId) await ctx.persistChatHistory(requestNoteId, ctx.chatMessages);
 		if (requestNoteId && hasNoteMutation(tools)) {
 			try {
-				await reconcileRequestNote(requestNoteId);
+				await reconcileRequestNote(requestNoteId, requestBaseline);
 			} catch (error) {
 				console.error('Failed to reconcile completed note mutation:', error);
 			}
@@ -488,11 +510,15 @@ export function createChatSession(rawContext: object) {
 
 	function failStreamingChatMessage(requestId: string, errorMsg: string, tools: ChatTool[] = []) {
 		if (ctx.activeChatRequestId !== requestId) return;
+		const failedTargetedWrite = ctx.activeAiComposerMode === 'editor';
+		const finishedAt = Date.now();
+		const activeStartTime = [...ctx.chatMessages]
+			.reverse()
+			.find((message: ChatMessage) => message.isStreaming && message.startTime)?.startTime;
 		const previewWasReverted = ctx.noteStreaming;
 		if (previewWasReverted && !errorMsg.includes('Live preview reverted; no changes were saved.'))
 			errorMsg += ' Live preview reverted; no changes were saved.';
 		if (ctx.showDebugWindow && ctx.debugInfo) {
-			const finishedAt = Date.now();
 			ctx.debugInfo = {
 				...ctx.debugInfo,
 				done: finishedAt,
@@ -508,6 +534,7 @@ export function createChatSession(rawContext: object) {
 		ctx.activeAiComposerMode = null;
 		ctx.cancelNoteStream();
 		ctx.activeAiEditTarget = null;
+		if (failedTargetedWrite) ctx.clearArmedSelection();
 		ctx.chatMessages = ctx.chatMessages.map((m: ChatMessage) =>
 			m.isStreaming
 				? {
@@ -517,9 +544,11 @@ export function createChatSession(rawContext: object) {
 						error: true,
 						content: m.content + '\n\n' + errorMsg,
 						tools,
-						endTime: Date.now()
+						endTime: finishedAt
 					}
-				: m
+				: m.tools?.length && m.startTime === activeStartTime && !m.endTime
+					? { ...m, endTime: finishedAt }
+					: m
 		);
 		if (ctx.chatPersistTimer) {
 			clearTimeout(ctx.chatPersistTimer);

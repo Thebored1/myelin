@@ -120,7 +120,6 @@ export function createEditorInteractionSession(rawContext: object) {
 		}
 		ctx.shortcutEditorRange = null;
 		shortcutEditorTextOffset = null;
-		ctx.clearSavedCaretProxy();
 	}
 
 	return {

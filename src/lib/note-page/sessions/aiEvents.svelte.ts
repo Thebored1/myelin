@@ -117,7 +117,8 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 				role: 'assistant',
 				content: '',
 				tools: [{ name: event.payload.tool, details: event.payload.details }],
-				isStreaming: false
+				isStreaming: false,
+				startTime: lastStartTime
 			},
 			{
 				role: 'assistant',

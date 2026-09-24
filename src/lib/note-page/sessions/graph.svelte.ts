@@ -1,5 +1,6 @@
 import { createDocumentSession } from './graph/document';
 import { createLinkingSession } from './graph/linking';
+import { editorNeedsAuthoritativeBody } from '$lib/noteMutation';
 import type { ControllerContext } from '$lib/controller-context';
 import type { createChatSession } from './chat.svelte';
 import type { createEditorSession } from './editor.svelte';
@@ -8,7 +9,6 @@ import type { createSourceSession } from './source.svelte';
 import type { createStreamingSession } from './streaming.svelte';
 import type { createLinkingSession as createLinkingSessionType } from './graph/linking';
 import type { createDocumentSession as createDocumentSessionType } from './graph/document';
-
 type NotePageGraphContext = ControllerContext;
 type EditorSession = ReturnType<typeof createEditorSession>;
 type NavigationSession = ReturnType<typeof createNavigationSession>;
@@ -103,6 +103,7 @@ export function createNotePageGraph(rawContext: object) {
 		},
 		getSelectionTextOffset: ctx.getSelectionTextOffset,
 		restoreSelectionTextOffset: ctx.restoreSelectionTextOffset,
+		editorNeedsAuthoritativeBody,
 		setupTransclusionObserver: () => editorSession.setupTransclusionObserver()
 	}) as StreamingSession;
 
@@ -213,7 +214,8 @@ export function createNotePageGraph(rawContext: object) {
 		},
 		linkingSession,
 		updateToolbarOverflow: ctx.updateToolbarOverflow,
-		triggerAutoSave: ctx.triggerAutoSave
+		triggerAutoSave: ctx.triggerAutoSave,
+		armedEditTarget: ctx.armedEditTarget
 	}) as EditorSession;
 
 	navigationSession = (ctx.createNavigationSession as (context: object) => unknown)({

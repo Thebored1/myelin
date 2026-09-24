@@ -22,7 +22,6 @@ export type SessionHandle = Record<string, (...args: unknown[]) => unknown>;
 export type SelectionHandle = {
 	captureEditorSelection: (range?: Range) => void;
 	saveCursorPosition: (range?: Range) => void;
-	clearSavedCaretProxy: () => void;
 };
 export type DynamicComponent = Component<never>;
 
@@ -47,6 +46,8 @@ type SelectionTarget = {
 	cursor: boolean;
 	/** UTF-16 source offset captured from Vditor's Markdown serializer. */
 	sourceOffset?: number;
+	/** Extra visual line breaks requested when the caret is below the last block. */
+	lineBreaks?: number;
 	cellIndex?: number;
 };
 export interface LinkingSessionPort {
@@ -230,7 +231,6 @@ export interface NotePageContext {
 	reselectAfterEdit: SyncAction;
 	restoreSelectionTextOffset: SyncAction;
 	saveCursorPosition: (range?: Range) => void;
-	clearSavedCaretProxy: SyncAction;
 	insertAtSavedCursor: SyncAction;
 	onDocMouseDown: SyncAction;
 	handleGlobalSelectionChange: SyncAction;

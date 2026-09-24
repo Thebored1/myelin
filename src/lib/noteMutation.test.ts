@@ -8,6 +8,7 @@ import {
 describe('note mutation completion reconciliation', () => {
 	it.each([
 		'Write Note',
+		'Insert at Cursor',
 		'Replace Text',
 		'Append Note',
 		'Prepend Note',

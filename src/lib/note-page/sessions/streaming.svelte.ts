@@ -4,7 +4,21 @@ import type { ControllerContext } from '$lib/controller-context';
 /** Buffered AI note-write preview and authoritative reconciliation session. */
 export function createStreamingSession(rawContext: object) {
 	const ctx = rawContext as ControllerContext;
+	let authoritativeBody: string | null = null;
+
+	// Vditor's input hook is also used for normal user edits. Preview rollback
+	// must not look like a user edit, or its stale backup can autosave over a
+	// write that the native tool has already committed.
+	function setEditorValueSilently(value: string, clearStack = false) {
+		if (!ctx.vditorInstance) return;
+		const wasStreaming = ctx.noteStreaming;
+		ctx.noteStreaming = true;
+		ctx.vditorInstance.setValue(value, clearStack);
+		ctx.noteStreaming = wasStreaming;
+	}
+
 	function beginNoteStream() {
+		authoritativeBody = null;
 		ctx.noteStreamBackup = ctx.vditorInstance ? ctx.vditorInstance.getValue() : ctx.draftBody;
 		ctx.noteStreamBuf = '';
 		ctx.noteStreaming = true;
@@ -80,8 +94,18 @@ export function createStreamingSession(rawContext: object) {
 	// the live preview; the authoritative note_written will apply the real change.
 	function cancelNoteStream() {
 		if (!ctx.noteStreaming) return;
+		if (authoritativeBody !== null) {
+			ctx.noteStreaming = false;
+			ctx.noteStreamBuf = '';
+			ctx.noteStreamSpan = null;
+			return;
+		}
+		const backup = ctx.noteStreamBackup;
 		ctx.noteStreaming = false;
-		if (ctx.vditorInstance) ctx.vditorInstance.setValue(ctx.noteStreamBackup);
+		ctx.noteStreamBuf = '';
+		ctx.noteStreamSpan = null;
+		ctx.draftBody = backup;
+		setEditorValueSilently(backup);
 		ctx.setupTransclusionObserver();
 	}
 
@@ -104,6 +128,7 @@ export function createStreamingSession(rawContext: object) {
 			: currentTrimmed
 				? `${currentTrimmed}\n\n${newContent}`
 				: newContent;
+		authoritativeBody = finalContent;
 		if (ctx.note) ctx.note = { ...ctx.note, body: finalContent };
 		ctx.draftBody = finalContent;
 		// Avoid a second visible reset only when the editor itself already contains
@@ -114,7 +139,7 @@ export function createStreamingSession(rawContext: object) {
 			ctx.vditorInstance &&
 			ctx.editorNeedsAuthoritativeBody(ctx.vditorInstance.getValue(), finalContent)
 		) {
-			ctx.vditorInstance.setValue(finalContent, true);
+			setEditorValueSilently(finalContent, true);
 		}
 		// Re-arm the transclusion observer disconnected during streaming and scan
 		// once so the settled content picks up any new links.

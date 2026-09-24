@@ -364,6 +364,8 @@ fn locate_selection_disambiguates_repeats_via_context() {
         before: "loyal.\n\n".into(),
         after: "".into(),
         cursor: false,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     let (s, e) = locate_selection(body, &sel).unwrap();
@@ -381,6 +383,8 @@ fn locate_selection_tolerates_markers_and_trailing_whitespace() {
         before: "Intro\n\n**".into(),
         after: "**\n\n## More".into(),
         cursor: false,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     let (s, e) = locate_selection(body, &sel).unwrap();
@@ -402,6 +406,8 @@ fn selection_scoped_plan_replaces_only_the_selected_span() {
         before: "Intro line.\n\n".into(),
         after: "\n\nClosing line.".into(),
         cursor: false,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     let plan = selection_scoped_plan(body, "New paragraph.", &sel).unwrap();
@@ -420,6 +426,8 @@ fn selection_scoped_plan_can_delete_only_the_selected_span() {
         before: "Keep this.\n\n".into(),
         after: "\n\nKeep that.".into(),
         cursor: false,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     let plan = selection_scoped_plan(body, "", &sel).unwrap();
@@ -434,10 +442,140 @@ fn cursor_scoped_plan_inserts_at_the_unique_anchor() {
         before: "Alpha ".into(),
         after: "beta.".into(),
         cursor: true,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     let plan = selection_scoped_plan(body, "bright", &sel).unwrap();
     assert_eq!(plan.new_body, "Alpha bright beta.");
+}
+
+#[test]
+fn cursor_scoped_plan_prefers_the_serialized_source_offset() {
+    let body = "Upper paragraph.\n\nLower paragraph.";
+    let position = body.find("Lower").unwrap();
+    let sel = SelectionArg {
+        text: String::new(),
+        before: body[..position].into(),
+        after: "Lower paragraph.".into(),
+        cursor: true,
+        source_offset: Some(position),
+        line_breaks: 0,
+        cell_index: None,
+    };
+    let plan = selection_scoped_plan(body, "An essay.", &sel).unwrap();
+    assert_eq!(
+        plan.new_body,
+        "Upper paragraph.\n\nAn essay.Lower paragraph."
+    );
+}
+
+#[test]
+fn cursor_scoped_plan_preserves_visual_lines_below_last_block() {
+    let body = "A poem ends here.";
+    let sel = SelectionArg {
+        text: String::new(),
+        before: body.into(),
+        after: String::new(),
+        cursor: true,
+        source_offset: Some(body.len()),
+        line_breaks: 3,
+        cell_index: None,
+    };
+    let plan = selection_scoped_plan(body, "An essay begins.", &sel).unwrap();
+    assert_eq!(plan.new_body, "A poem ends here.\n\n\nAn essay begins.");
+}
+
+#[test]
+fn cursor_source_offset_converts_utf16_after_an_emoji() {
+    let body = "😀 first\nsecond";
+    let position = body.find("second").unwrap();
+    let utf16_position = body[..position].encode_utf16().count();
+    let sel = SelectionArg {
+        text: String::new(),
+        before: "first\n".into(),
+        after: "second".into(),
+        cursor: true,
+        source_offset: Some(utf16_position),
+        line_breaks: 0,
+        cell_index: None,
+    };
+    let plan = selection_scoped_plan(body, "inserted ", &sel).unwrap();
+    assert_eq!(plan.new_body, "😀 first\ninserted second");
+}
+
+#[test]
+fn cursor_scoped_plan_tolerates_rendered_markdown_whitespace() {
+    let body = "First line  \nSecond line  \nThird line.";
+    let sel = SelectionArg {
+        text: String::new(),
+        // Rendered Markdown drops the two hard-break spaces before each newline.
+        before: "First line\nSecond line".into(),
+        after: "Third line.".into(),
+        cursor: true,
+        source_offset: None,
+        line_breaks: 0,
+        cell_index: None,
+    };
+    let plan = selection_scoped_plan(body, "Inserted", &sel).unwrap();
+    assert_eq!(
+        plan.new_body,
+        "First line  \nSecond line  \nInserted Third line."
+    );
+}
+
+#[test]
+fn cursor_scoped_plan_tolerates_rendered_markdown_markers() {
+    let body = "Before **bold** after.";
+    let sel = SelectionArg {
+        text: String::new(),
+        // IR exposes the rendered words but omits the bold markers.
+        before: "Before bold".into(),
+        after: "after.".into(),
+        cursor: true,
+        source_offset: None,
+        line_breaks: 0,
+        cell_index: None,
+    };
+    let plan = selection_scoped_plan(body, "inserted", &sel).unwrap();
+    assert_eq!(plan.new_body, "Before **bold** inserted after.");
+}
+
+#[test]
+fn cursor_scoped_plan_strips_echoed_note_before_inserting() {
+    let body = "A poem born in silence.\nEach word a pulse, a spark.";
+    let sel = SelectionArg {
+        text: String::new(),
+        before: body[body.len() - 20..].into(),
+        after: String::new(),
+        cursor: true,
+        source_offset: None,
+        line_breaks: 0,
+        cell_index: None,
+    };
+    let generated = format!("{body}\n\nA new essay begins here.");
+    let plan = selection_scoped_plan(body, &generated, &sel).unwrap();
+    assert_eq!(plan.new_body, generated);
+}
+
+#[test]
+fn cursor_scoped_plan_strips_whitespace_normalized_echoed_note() {
+    let body = "First line.\nSecond line.";
+    let sel = SelectionArg {
+        text: String::new(),
+        before: body.into(),
+        after: String::new(),
+        cursor: true,
+        source_offset: None,
+        line_breaks: 0,
+        cell_index: None,
+    };
+    let generated = format!("{}\n\nA new paragraph.", body.replace('\n', "  "));
+    let plan = selection_scoped_plan(body, &generated, &sel).unwrap();
+    assert_eq!(
+        plan.new_body,
+        "First line.\nSecond line.\n\nA new paragraph."
+    );
 }
 
 #[test]
@@ -447,6 +585,8 @@ fn cursor_scoped_plan_rejects_ambiguous_anchor() {
         before: String::new(),
         after: String::new(),
         cursor: true,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     assert!(selection_scoped_plan("abc", "x", &sel).is_none());
@@ -459,6 +599,8 @@ fn cursor_scoped_plan_inserts_into_newline_normalized_empty_note() {
         before: "\n".to_string(),
         after: String::new(),
         cursor: true,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     let plan = selection_scoped_plan("\n", "A useful essay.", &sel).unwrap();
@@ -473,6 +615,8 @@ fn selection_scoped_plan_defers_when_model_regenerated_whole_note() {
         before: "Intro line.\n\n".into(),
         after: "\n\nClosing line.".into(),
         cursor: false,
+        source_offset: None,
+        line_breaks: 0,
         cell_index: None,
     };
     // Model returned the WHOLE note (contains the after-anchor text) → fall

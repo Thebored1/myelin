@@ -3,72 +3,8 @@ import type { ControllerContext } from '$lib/controller-context';
 /** Editor selection and cursor mapping session. */
 export function createSelectionSession(rawContext: object) {
 	const ctx = rawContext as ControllerContext;
-	let savedCaretProxy: HTMLSpanElement | null = null;
-	let savedCaretUpdate: (() => void) | null = null;
-	let savedCaretResizeObserver: ResizeObserver | null = null;
-	let lastSavedCaretRect: { left: number; top: number; height: number } | null = null;
-	let cursorCaptureVersion = 0;
 	let pendingEditorClick: { x: number; y: number } | null = null;
-
-	function clearSavedCaretProxy() {
-		if (savedCaretUpdate) {
-			window.removeEventListener('resize', savedCaretUpdate);
-			ctx.vditorContainer?.removeEventListener('scroll', savedCaretUpdate, true);
-			savedCaretUpdate = null;
-		}
-		savedCaretResizeObserver?.disconnect();
-		savedCaretResizeObserver = null;
-		savedCaretProxy?.remove();
-		savedCaretProxy = null;
-		lastSavedCaretRect = null;
-	}
-
-	function updateSavedCaretProxy() {
-		if (!savedCaretProxy || !ctx.savedEditorRange || !ctx.vditorContainer) return;
-		const editorEl = ctx.vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
-		// Vditor can rebuild its contenteditable while focus is in the prompt.
-		// Keep the last known marker position during that brief transition rather
-		// than deleting the only visible indication of the write target.
-		if (!editorEl || !editorEl.contains(ctx.savedEditorRange.startContainer)) return;
-		const rangeRect =
-			ctx.savedEditorRange.getClientRects()[0] ?? ctx.savedEditorRange.getBoundingClientRect();
-		if (!rangeRect.height && !rangeRect.width) return;
-		lastSavedCaretRect = {
-			left: rangeRect.left,
-			top: rangeRect.top,
-			height: Math.max(rangeRect.height, 18)
-		};
-		savedCaretProxy.style.left = `${lastSavedCaretRect.left}px`;
-		savedCaretProxy.style.top = `${lastSavedCaretRect.top}px`;
-		savedCaretProxy.style.height = `${lastSavedCaretRect.height}px`;
-	}
-
-	function showSavedCaretProxy() {
-		if (!ctx.savedEditorRange?.collapsed || !ctx.vditorContainer) {
-			clearSavedCaretProxy();
-			return;
-		}
-		if (!savedCaretProxy) {
-			savedCaretProxy = document.createElement('span');
-			savedCaretProxy.className = 'myelin-editor-caret-proxy';
-			savedCaretProxy.setAttribute('aria-hidden', 'true');
-			// Keep the marker outside Vditor's mount tree. Vditor is allowed to
-			// replace that tree when the note/sidebar state updates, which used to
-			// make the caret disappear as soon as the Cursor pill rendered.
-			document.body.appendChild(savedCaretProxy);
-			savedCaretUpdate = updateSavedCaretProxy;
-			window.addEventListener('resize', savedCaretUpdate);
-			ctx.vditorContainer.addEventListener('scroll', savedCaretUpdate, true);
-			if (typeof ResizeObserver !== 'undefined') {
-				savedCaretResizeObserver = new ResizeObserver(savedCaretUpdate);
-				savedCaretResizeObserver.observe(ctx.vditorContainer);
-			}
-		}
-		updateSavedCaretProxy();
-		requestAnimationFrame(() => {
-			if (ctx.savedEditorRange?.collapsed) updateSavedCaretProxy();
-		});
-	}
+	let armedTargetBody: string | null = null;
 
 	type SelectionTarget = {
 		text: string;
@@ -76,6 +12,7 @@ export function createSelectionSession(rawContext: object) {
 		after: string;
 		cursor: boolean;
 		sourceOffset?: number;
+		lineBreaks?: number;
 		cellIndex?: number;
 	};
 	function getSelectionTextOffset(editorEl: HTMLElement): number | null {
@@ -167,6 +104,23 @@ export function createSelectionSession(rawContext: object) {
 		return range;
 	}
 
+	// A contenteditable has no DOM caret for the empty area below its final
+	// block. Browsers therefore report the end of the last paragraph even when
+	// the user deliberately clicks several lines lower. Preserve that intent as
+	// an insertion-break count; the source offset remains the end of the note.
+	function lineBreaksForClick(editorEl: HTMLElement, click: { x: number; y: number } | null): number {
+		if (!click) return 0;
+		const renderedText = editorEl.textContent ?? '';
+		if (!renderedText.trim()) return 0;
+		const endRange = rangeAtRenderedOffset(editorEl, renderedText.length);
+		const endRect = endRange?.getBoundingClientRect();
+		if (!endRect || !endRect.height) return 0;
+		const lineHeight = Math.max(endRect.height, 16);
+		const distanceBelow = click.y - endRect.bottom;
+		if (distanceBelow <= lineHeight * 0.75) return 0;
+		return Math.min(12, Math.max(1, Math.round(distanceBelow / lineHeight)));
+	}
+
 	// Occurrence of `needle` in `hay` whose start is closest to `hint` (disambiguates repeats).
 	function nearestIndexOf(hay: string, needle: string, hint: number): number {
 		let best = -1;
@@ -224,7 +178,10 @@ export function createSelectionSession(rawContext: object) {
 		};
 	}
 
-	function computeSourceCursor(rangeOverride?: Range): SelectionTarget | null {
+	function computeSourceCursor(
+		rangeOverride?: Range,
+		clickPosition: { x: number; y: number } | null = null
+	): SelectionTarget | null {
 		if (!ctx.vditorInstance || !ctx.vditorContainer) return null;
 		const editorEl = ctx.vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		const sel = window.getSelection();
@@ -248,20 +205,18 @@ export function createSelectionSession(rawContext: object) {
 			const markerOffset = sourceWithMarker.indexOf(marker);
 			if (markerOffset >= 0) {
 				const N = 80;
+				const lineBreaks = lineBreaksForClick(editorEl, clickPosition);
 				return {
 					text: '',
 					before: sourceWithMarker.slice(Math.max(0, markerOffset - N), markerOffset),
 					after: sourceWithMarker.slice(markerOffset + marker.length, markerOffset + marker.length + N),
 					cursor: true,
-					sourceOffset: markerOffset
+					sourceOffset: markerOffset,
+					...(lineBreaks > 0 ? { lineBreaks } : {})
 				};
 			}
 		} finally {
 			markerNode.remove();
-			if (sel) {
-				sel.removeAllRanges();
-				sel.addRange(range);
-			}
 		}
 		// Do not use a rendered character offset as a source offset. Vditor IR
 		// omits Markdown newlines/markers from its DOM, so that offset drifts as
@@ -274,21 +229,14 @@ export function createSelectionSession(rawContext: object) {
 		const N = 80;
 		const beforeContext = renderedText.slice(Math.max(0, renderedOffset - N), renderedOffset);
 		const afterContext = renderedText.slice(renderedOffset, renderedOffset + N);
+		const lineBreaks = lineBreaksForClick(editorEl, clickPosition);
 		return {
 			text: '',
 			before: beforeContext,
 			after: afterContext,
-			cursor: true
+			cursor: true,
+			...(lineBreaks > 0 ? { lineBreaks } : {})
 		};
-	}
-
-	function sameCollapsedRange(left: Range | null, right: Range | null): boolean {
-		return Boolean(
-			left?.collapsed &&
-			right?.collapsed &&
-			left.startContainer === right.startContainer &&
-			left.startOffset === right.startOffset
-		);
 	}
 
 	function rangeAtPoint(editorEl: HTMLElement, x: number, y: number): Range | null {
@@ -331,12 +279,13 @@ export function createSelectionSession(rawContext: object) {
 
 	function clearArmedSelection() {
 		ctx.armedSelection = null;
+		ctx.savedEditorRange = null;
+		armedTargetBody = null;
 	}
 
-	// Keep the captured selection only while the user moves into the prompt.
-	// Sidebar controls are an intentional exception: clicking them should not
-	// destroy the editor's caret/selection target. The DOM focus moves to the
-	// control so it remains usable, while the Range is saved for later inserts.
+	// The armed target is the one source of truth for AI writes. Clicking the
+	// editor replaces it; other UI interaction leaves it alone until the user
+	// explicitly closes the Cursor/selection pill.
 	function onDocMouseDown(e: MouseEvent) {
 		const target = e.target as HTMLElement | null;
 		if (target?.closest('.prompt-box, .sidebar, .sidebar-backdrop')) {
@@ -345,7 +294,6 @@ export function createSelectionSession(rawContext: object) {
 		}
 		if (target?.closest('.vditor-ir')) {
 			if (ctx.armedSelection) clearArmedSelection();
-			clearSavedCaretProxy();
 			pendingEditorClick = { x: e.clientX, y: e.clientY };
 			const captureAfterClick = () => {
 				const click = pendingEditorClick;
@@ -354,8 +302,21 @@ export function createSelectionSession(rawContext: object) {
 					const selection = window.getSelection();
 					if (!selection || selection.isCollapsed) {
 						const editorEl = ctx.vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-						const pointRange = click && editorEl ? rangeAtPoint(editorEl, click.x, click.y) : null;
-						captureEditorSelection(pointRange ?? undefined);
+						const liveRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
+						const liveEditorRange =
+							liveRange && editorEl?.contains(liveRange.commonAncestorContainer) ? liveRange : null;
+						const clickBelowContent = Boolean(click && editorEl && lineBreaksForClick(editorEl, click) > 0);
+						// The browser's committed range is authoritative. Point-based
+						// lookup is used for blank space below the final block, where the
+						// browser otherwise reports the previous paragraph's end.
+						const pointRange =
+							(clickBelowContent || !liveEditorRange) && click && editorEl
+								? rangeAtPoint(editorEl, click.x, click.y)
+								: null;
+					const clickRange = clickBelowContent
+						? pointRange ?? liveEditorRange
+						: liveEditorRange ?? pointRange;
+					captureEditorSelection(clickRange ?? undefined, click);
 					}
 				}
 			};
@@ -367,10 +328,12 @@ export function createSelectionSession(rawContext: object) {
 			window.addEventListener('mouseup', captureAfterClick, { once: true });
 			return;
 		}
-		if (ctx.armedSelection) clearArmedSelection();
 	}
 
-	function captureEditorSelection(rangeOverride?: Range) {
+	function captureEditorSelection(
+		rangeOverride?: Range,
+		clickPosition: { x: number; y: number } | null = null
+	) {
 		if (!ctx.vditorContainer) return;
 		const editorEl = ctx.vditorContainer.querySelector('.vditor-ir') as HTMLElement | null;
 		if (!editorEl) return;
@@ -381,23 +344,36 @@ export function createSelectionSession(rawContext: object) {
 		if (range.collapsed) {
 			const renderedOffset = renderedTextOffsetAt(editorEl, range.startContainer, range.startOffset);
 			const savedRange = (renderedOffset === null ? range : rangeAtRenderedOffset(editorEl, renderedOffset) ?? range).cloneRange();
-			if (sameCollapsedRange(ctx.savedEditorRange, savedRange) && ctx.armedSelection?.cursor) return;
 			ctx.savedEditorRange = savedRange;
-			const captureVersion = ++cursorCaptureVersion;
-			requestAnimationFrame(() => {
-				if (captureVersion !== cursorCaptureVersion || ctx.savedEditorRange !== savedRange) return;
-				const currentEditor = ctx.vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
-				if (!currentEditor?.contains(savedRange.startContainer)) return;
-				const computed = computeSourceCursor(savedRange);
-				if (computed) {
-					ctx.armedSelection = { ...computed, chars: 0, words: 0 };
-					ctx.writeTargetNotice = false;
-				}
-			});
+			// Capture the serializable source anchor immediately. The DOM Range is
+			// only for restoring editor focus; the model receives this one target.
+			const computed = computeSourceCursor(savedRange, clickPosition);
+			if (computed) {
+				const sourceBody = ctx.vditorInstance?.getValue() ?? null;
+				const sameTargetBody = armedTargetBody === sourceBody;
+				const rememberedBreaks =
+					!clickPosition &&
+					ctx.armedSelection?.cursor &&
+					ctx.armedSelection.sourceOffset === computed.sourceOffset &&
+					sameTargetBody
+						? ctx.armedSelection.lineBreaks
+						: undefined;
+				armedTargetBody = sourceBody;
+				ctx.armedSelection = {
+					...computed,
+					...(computed.lineBreaks === undefined && rememberedBreaks !== undefined
+						? { lineBreaks: rememberedBreaks }
+						: {}),
+					chars: 0,
+					words: 0
+				};
+				ctx.writeTargetNotice = false;
+			}
 			return;
 		}
 		const computed = computeSourceSelection();
 		if (computed) {
+			armedTargetBody = ctx.vditorInstance?.getValue() ?? null;
 			const words = computed.text.trim().split(/\s+/).filter(Boolean).length;
 			ctx.armedSelection = {
 				...computed,
@@ -415,6 +391,7 @@ export function createSelectionSession(rawContext: object) {
 			return;
 		}
 		const words = target.text.trim().split(/\s+/).filter(Boolean).length;
+		armedTargetBody = ctx.vditorInstance?.getValue() ?? null;
 		ctx.armedSelection = {
 			...target,
 			chars: target.text.length,
@@ -452,10 +429,16 @@ export function createSelectionSession(rawContext: object) {
 			chars: newText.length,
 			words
 		};
+		armedTargetBody = source;
 	}
 
 	function armedEditTarget(): SelectionTarget | null {
 		if (!ctx.armedSelection) return null;
+		const currentBody = ctx.vditorInstance?.getValue();
+		if (armedTargetBody !== null && currentBody !== undefined && currentBody !== armedTargetBody) {
+			clearArmedSelection();
+			return null;
+		}
 		const { chars, words, ...target } = ctx.armedSelection;
 		void chars;
 		void words;
@@ -463,12 +446,23 @@ export function createSelectionSession(rawContext: object) {
 	}
 
 	function onSelectionChange() {
+		const editorEl = ctx.vditorContainer?.querySelector('.vditor-ir') as HTMLElement | null;
+		const selection = window.getSelection();
+		const activeElement = document.activeElement;
+		if (
+			!editorEl ||
+			!selection ||
+			selection.rangeCount === 0 ||
+			!(editorEl === activeElement || editorEl.contains(activeElement)) ||
+			!editorEl.contains(selection.getRangeAt(0).commonAncestorContainer)
+		) {
+			return;
+		}
 		clearTimeout(ctx.selDebounce);
 		ctx.selDebounce = setTimeout(captureEditorSelection, 120);
 	}
 
 	function restoreSelectionTextOffset(editorEl: HTMLElement, targetOffset: number) {
-		clearSavedCaretProxy();
 		const selection = window.getSelection();
 		if (!selection) return;
 
@@ -485,7 +479,6 @@ export function createSelectionSession(rawContext: object) {
 				selection.removeAllRanges();
 				selection.addRange(range);
 				ctx.savedEditorRange = range.cloneRange();
-				showSavedCaretProxy();
 				return;
 			}
 			offset = nextOffset;
@@ -509,7 +502,6 @@ export function createSelectionSession(rawContext: object) {
 		if (!editorEl.contains(range.commonAncestorContainer)) return;
 
 		ctx.savedEditorRange = range.cloneRange();
-		showSavedCaretProxy();
 	}
 
 	function insertAtSavedCursor(linkText: string) {
@@ -531,7 +523,6 @@ export function createSelectionSession(rawContext: object) {
 		}
 
 		ctx.savedEditorRange = null;
-		clearSavedCaretProxy();
 		ctx.focusEditor();
 		ctx.draftBody = ctx.vditorInstance.getValue();
 		ctx.triggerAutoSave();
@@ -546,9 +537,8 @@ export function createSelectionSession(rawContext: object) {
 			element.classList.remove('force-expand');
 		});
 		if (!selection || selection.rangeCount === 0) return;
-		// Do not clear the proxy here. A selectionchange can be emitted while the
-		// prompt takes focus, even though the saved editor target is still valid.
-		// Actual editor clicks and completed insertions clear it explicitly.
+		// A selectionchange can be emitted while the prompt takes focus. Keep the
+		// armed target until the user replaces it or closes its pill.
 		onSelectionChange();
 		if (selection.isCollapsed) return;
 		ctx.vditorContainer.querySelectorAll('[data-type="a"]').forEach((link: Element) => {
@@ -571,7 +561,6 @@ export function createSelectionSession(rawContext: object) {
 		onSelectionChange,
 		restoreSelectionTextOffset,
 		saveCursorPosition,
-		clearSavedCaretProxy,
 		insertAtSavedCursor,
 		handleGlobalSelectionChange
 	};

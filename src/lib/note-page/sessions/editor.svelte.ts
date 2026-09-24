@@ -185,7 +185,16 @@ export function createEditorSession(rawContext: object) {
 				},
 				input: (value: string) => {
 					ctx.draftBody = value;
-					ctx.triggerAutoSave();
+					// Streaming previews call setValue() once per animation frame. Do
+					// not persist those speculative bodies: the targeted tool still
+					// needs to validate against the original note and selection.
+					if (!ctx.noteStreaming) {
+						// A remembered target belongs to the exact body from which it
+						// was captured. User edits invalidate it until a new caret or
+						// selection is explicitly armed.
+						ctx.armedEditTarget();
+						ctx.triggerAutoSave();
+					}
 				}
 			});
 			if (!isCurrentInitialization()) {

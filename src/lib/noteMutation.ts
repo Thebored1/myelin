@@ -1,5 +1,6 @@
 const NOTE_MUTATION_TOOLS = new Set([
 	'Write Note',
+	'Insert at Cursor',
 	'Replace Text',
 	'Append Note',
 	'Prepend Note',

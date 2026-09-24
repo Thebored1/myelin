@@ -38,6 +38,60 @@ describe('note stream previews', () => {
 		expect(composeNoteStreamPreview(source, 'new\n', target)).toBe('before\nnew\nafter');
 	});
 
+	it('uses the serialized source offset when anchors are repeated', () => {
+		const source = 'Upper paragraph.\n\nRepeated line.\n\nRepeated line.';
+		const sourceOffset = source.lastIndexOf('Repeated line.');
+		const target = {
+			text: '',
+			before: source.slice(0, sourceOffset),
+			after: source.slice(sourceOffset + 'Repeated line.'.length),
+			cursor: true,
+			sourceOffset
+		};
+		expect(composeNoteStreamPreview(source, 'Inserted', target)).toBe(
+			'Upper paragraph.\n\nRepeated line.\n\nInsertedRepeated line.'
+		);
+	});
+
+	it('keeps a click below the final block on separate visual lines', () => {
+		const target = {
+			text: '',
+			before: 'A poem ends here.',
+			after: '',
+			cursor: true,
+			lineBreaks: 3
+		};
+		expect(composeNoteStreamPreview('A poem ends here.', 'An essay begins.', target)).toBe(
+			'A poem ends here.\n\n\nAn essay begins.'
+		);
+	});
+
+	it('tolerates rendered Markdown dropping hard-break spaces around a cursor', () => {
+		const source = 'First line  \nSecond line  \nThird line.';
+		const target = {
+			text: '',
+			before: 'First line\nSecond line',
+			after: 'Third line.',
+			cursor: true
+		};
+		expect(composeNoteStreamPreview(source, 'Inserted', target)).toBe(
+			'First line  \nSecond line  \nInsertedThird line.'
+		);
+	});
+
+	it('maps a cursor across Markdown markers that are absent from rendered IR', () => {
+		const source = 'Before **bold** after.';
+		const target = {
+			text: '',
+			before: 'Before bold',
+			after: 'after.',
+			cursor: true
+		};
+		expect(composeNoteStreamPreview(source, ' inserted ', target)).toBe(
+			'Before **bold** inserted  after.'
+		);
+	});
+
 	it.each(['\n', '   ', '\t', '\n\n\t  '])(
 		'streams an unanchored cursor write over a visually empty note (%j)',
 		(source) => {
@@ -84,5 +138,17 @@ describe('note stream previews', () => {
 	it('uses generated content as the whole-note preview without an editor target', () => {
 		expect(composeNoteStreamPreview('old', 'new', null)).toBe('new');
 		expect(composeNoteStreamPreviewWithStatus('old', 'new', null).applied).toBe(true);
+	});
+
+	it('does not show a streamed text wrapper or template tail', () => {
+		const generated = '{text: A poem.\n{text: ignored\n' + String.fromCharCode(96, 96, 96);
+		expect(
+			composeNoteStreamPreview('before\nafter', generated, {
+				text: '',
+				before: 'before\n',
+				after: 'after',
+				cursor: true
+			})
+		).toBe('before\nA poem.after');
 	});
 });

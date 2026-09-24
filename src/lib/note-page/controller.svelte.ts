@@ -112,7 +112,7 @@ export function createNotePageController() {
 		text: string;
 		before: string;
 		after: string;
-		cursor: boolean; sourceOffset?: number;
+		cursor: boolean; sourceOffset?: number; lineBreaks?: number;
 		cellIndex?: number;
 		chars: number;
 		words: number;
@@ -122,7 +122,7 @@ export function createNotePageController() {
 		text: string;
 		before: string;
 		after: string;
-		cursor: boolean; sourceOffset?: number;
+		cursor: boolean; sourceOffset?: number; lineBreaks?: number;
 		cellIndex?: number;
 	};
 	let activeAiEditTarget: AiEditTarget | null = null;
@@ -235,7 +235,7 @@ export function createNotePageController() {
 			shouldRefocusEditor: (value) => (shouldRefocusEditor = value)
 		},
 		{
-			captureEditorSelection: (range?: Range) => selectionSession.captureEditorSelection(range), saveCursorPosition: (range?: Range) => selectionSession.saveCursorPosition(range), clearSavedCaretProxy: () => selectionSession.clearSavedCaretProxy()
+			captureEditorSelection: (range?: Range) => selectionSession.captureEditorSelection(range), saveCursorPosition: (range?: Range) => selectionSession.saveCursorPosition(range)
 		}
 	);
 	const editorInteraction = createEditorInteractionSession(editorInteractionPort);
