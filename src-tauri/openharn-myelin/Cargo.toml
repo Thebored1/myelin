@@ -27,10 +27,10 @@ tokio-stream = "0.1"
 # residue check), so on-disk edits stay byte-identical to Myelin's.
 myelin-edit-core = { path = "../edit-core" }
 
-[profile.release]
-opt-level = "z"
-lto = true
-strip = true
+# Cargo honours [profile.*] only in the workspace-root manifest, so the
+# sidecar's size-first release settings now live in ../Cargo.toml as the
+# `sidecar` profile (inherits release, then prefers size over speed).
+# install.sh builds with `--profile sidecar`.
 
 # Integration tests spawn the built sidecar binary and a mock llama-server, then
 # drive a faithful (Myelin-mirroring) tool executor against a real .md file.

@@ -14,6 +14,20 @@ same value so the native and frontend sides never disagree:
 - `src-tauri/Cargo.lock` — the `name = "myelin"` package entry's `version`
 - `src-tauri/tauri.conf.json` — `version`
 
+## Rust workspace
+
+`src-tauri/Cargo.toml` is a Cargo **workspace root** covering all three crates: the app
+(`myelin`), `edit-core`, and `openharn-myelin`. There is one `Cargo.lock` and one
+`target/` at `src-tauri/`.
+
+Consequences to remember:
+
+- Run cargo from the workspace root, or pass `--manifest-path src-tauri/Cargo.toml -p <crate>`.
+- `[profile.*]` is only honoured in the root manifest. The sidecar's size-first release
+  settings live there as `[profile.sidecar]`; `src-tauri/openharn-myelin/install.sh`
+  builds with `--profile sidecar` and copies from `src-tauri/target/sidecar/`.
+- `cargo fmt --all` / `cargo check --workspace` cover every crate.
+
 ## License / repository metadata
 
 The MIT SPDX identifier and the repository URL are mirrored in `package.json` and

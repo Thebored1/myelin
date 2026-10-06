@@ -30,15 +30,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: cargo fmt --manifest-path src-tauri/edit-core/Cargo.toml -- --check
-      - run: cargo fmt --manifest-path src-tauri/openharn-myelin/Cargo.toml -- --check
-      - run: cargo check --all-targets --manifest-path src-tauri/Cargo.toml
-      - run: cargo check --all-targets --manifest-path src-tauri/edit-core/Cargo.toml
-      - run: cargo check --all-targets --manifest-path src-tauri/openharn-myelin/Cargo.toml
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
-      - run: cargo test --manifest-path src-tauri/edit-core/Cargo.toml --lib
-      - run: cargo test --manifest-path src-tauri/openharn-myelin/Cargo.toml --all-targets -- --skip live_lfm2_writes_note
+      # src-tauri is a single Cargo workspace (app + edit-core + openharn-myelin),
+      # so formatting, checking, and testing run once against the workspace root.
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --workspace --all-targets
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -p myelin --lib
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -p myelin-edit-core --lib
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -p openharn-myelin --all-targets -- --skip live_lfm2_writes_note
 
   live:
     if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
@@ -78,11 +76,11 @@ jobs:
           cat "$RUNNER_TEMP/myelin-llama.log"
           exit 1
       - name: Build sidecar for live harness
-        run: cargo build --manifest-path src-tauri/openharn-myelin/Cargo.toml --bin openharn-myelin
+        run: cargo build --manifest-path src-tauri/Cargo.toml -p openharn-myelin --bin openharn-myelin
       - name: Run live sidecar tests
         env:
           LLAMA_URL: http://127.0.0.1:39300/v1
-        run: cargo test --manifest-path src-tauri/openharn-myelin/Cargo.toml --test live -- --nocapture
+        run: cargo test --manifest-path src-tauri/Cargo.toml -p openharn-myelin --test live -- --nocapture
       - name: Stop pinned llama-server
         if: ${{ always() }}
         shell: bash

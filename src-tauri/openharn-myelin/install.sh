@@ -7,11 +7,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PROFILE="${1:-debug}"   # pass "release" for a release build
+# This crate is a workspace member, so cargo resolves the profile from the
+# workspace root manifest (src-tauri/Cargo.toml). The size-first release
+# settings are the `sidecar` profile defined there.
+PROFILE="${1:-debug}"   # pass "release" for a size-optimized build
 case "$PROFILE" in
   release)
-    CARGO_PROFILE=release
-    TARGET_DIR=release
+    CARGO_PROFILE=sidecar
+    TARGET_DIR=sidecar
     ;;
   debug|dev)
     CARGO_PROFILE=dev
@@ -24,9 +27,10 @@ case "$PROFILE" in
 esac
 
 echo "[install] building openharn-myelin ($CARGO_PROFILE)"
-cargo build ${CARGO_PROFILE:+--profile "$CARGO_PROFILE"}
+cargo build --manifest-path ../Cargo.toml -p openharn-myelin --profile "$CARGO_PROFILE"
 
-SRC="target/$TARGET_DIR/openharn-myelin"
+# The workspace shares one target directory at the workspace root.
+SRC="../target/$TARGET_DIR/openharn-myelin"
 if [ ! -f "$SRC" ]; then
   echo "[install] expected binary at $SRC not found" >&2
   exit 1

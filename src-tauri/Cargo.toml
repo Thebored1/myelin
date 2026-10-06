@@ -1,3 +1,10 @@
+# One workspace for all three crates (app, edit-core, sidecar) so dependency
+# versions resolve together and a single Cargo.lock covers the whole tree.
+# Previously each crate carried its own lockfile, which let the app and the
+# sidecar drift onto different versions of shared dependencies.
+[workspace]
+members = ["edit-core", "openharn-myelin"]
+
 [package]
 name = "myelin"
 version = "0.2.0"
@@ -82,3 +89,12 @@ icu = ""
 libpng = ""
 zlib = ""
 openssl = ""
+
+# Profiles must live in the workspace root. The sidecar is a tiny long-lived
+# helper binary that ships alongside the app, so it trades speed for size; the
+# Tauri app keeps the default release profile.
+[profile.sidecar]
+inherits = "release"
+opt-level = "z"
+lto = true
+strip = true
