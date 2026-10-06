@@ -18,6 +18,7 @@ const facadeLimits = new Map([
 // These are the extracted implementation roots. Build output and generated
 // files are intentionally outside this guard.
 const implementationRoots = [
+	'src-tauri/src',
 	'src-tauri/src/state',
 	'src-tauri/src/agent',
 	'src-tauri/src/llama_server',

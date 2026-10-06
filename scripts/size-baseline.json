@@ -1,4 +1,7 @@
 {
 	"$comment": "Line-count ratchet for files still above the 800-line module budget. Each entry records the largest size the file is currently allowed to have. Entries may only shrink: the check fails if a file exceeds its recorded budget, if a recorded budget is raised relative to git HEAD, or if an entry remains after its file drops under the normal 800-line limit. Delete an entry (and commit the smaller budget) as each file is decomposed.",
-	"src/lib/note-page/controller.svelte.ts": 917
+	"src-tauri/src/ai_config.rs": 812,
+	"src-tauri/src/bin/tool_e2e.rs": 1190,
+	"src-tauri/src/embeddings.rs": 844,
+	"src/lib/note-page/controller.svelte.ts": 913
 }
