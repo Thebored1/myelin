@@ -17,7 +17,10 @@ pub(crate) async fn create_note(
 }
 
 #[tauri::command]
-pub(crate) async fn create_notebook(state: State<'_, AppState>, name: String) -> Result<Vec<String>, String> {
+pub(crate) async fn create_notebook(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Vec<String>, String> {
     state
         .create_notebook(name)
         .map_err(|error| error.to_string())
@@ -29,7 +32,10 @@ pub(crate) async fn list_notebooks(state: State<'_, AppState>) -> Result<Vec<Str
 }
 
 #[tauri::command]
-pub(crate) async fn load_note(state: State<'_, AppState>, note_id: String) -> Result<NoteDocument, String> {
+pub(crate) async fn load_note(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> Result<NoteDocument, String> {
     state
         .load_note(note_id)
         .await
@@ -53,7 +59,10 @@ pub(crate) async fn save_note(
 }
 
 #[tauri::command]
-pub(crate) async fn delete_note(state: State<'_, AppState>, note_id: String) -> Result<AppSnapshot, String> {
+pub(crate) async fn delete_note(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> Result<AppSnapshot, String> {
     state
         .delete_note(note_id)
         .await
@@ -96,7 +105,10 @@ pub(crate) async fn reorder_note(
 }
 
 #[tauri::command]
-pub(crate) async fn search_notes(state: State<'_, AppState>, query: String) -> Result<SearchResponse, String> {
+pub(crate) async fn search_notes(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<SearchResponse, String> {
     state
         .search_notes(query)
         .await

@@ -223,7 +223,10 @@ pub fn parse_text_tool_calls(content: &str, schemas: &Value) -> Option<Vec<Value
             a.iter().any(|t| t["function"]["name"].as_str() == Some(n))
         })
     };
-    let pattern = regex::Regex::new(r"(?m)(?:^|\s)`?(\w+)\((\{.*?\}|[^)]*)\)`?").ok()?;
+    // Require the closing `)` before treating a Pythonic-looking fragment as
+    // an executable call. Without this, a model response that ends halfway
+    // through `write_note({...` can be saved as if it were complete content.
+    let pattern = regex::Regex::new(r"(?m)(?:^|\s)`?(\w+)\((\{.*?\}|[^)]*)`?\)").ok()?;
     for cap in pattern.captures_iter(s) {
         let name = cap.get(1).map(|m| m.as_str())?;
         if !known(name) {
@@ -339,7 +342,7 @@ fn tool_prompt(schemas: &Value) -> String {
     let mut s = String::from(
         "You do NOT have a tool API. To call a tool, reply with ONLY this line and nothing else:\n\
          <tool_call>[{\"name\": \"<tool>\", \"arguments\": { ... }}]\n\
-         Follow that JSON format exactly. Do not switch to native `tool_name(arg=...)` syntax. A generated note belongs only inside the JSON `content` string; never place tool names, call wrappers, or closing protocol markers inside `content`.\n\
+         Follow that JSON format exactly. Do not switch to native `tool_name(arg=...)` syntax. A generated note belongs only inside the JSON `content` string; never place tool names, call wrappers, closing protocol markers, or a second `text`/`content` JSON object inside `content`.\n\
          Call a tool whenever the user wants to change, create, add to, or remove content from the note — never put that content in a plain-text reply. Reply in plain text ONLY for genuine conversation (greetings, questions, clarifications, refusals); never for note content. Available tools:\n",
     );
 
@@ -617,7 +620,8 @@ pub fn partial_field(raw: &str, key: &str) -> Option<String> {
 }
 
 /// Decode the `content` string value and report whether its closing quote has
-/// arrived. This preserves Markdown escapes such as `\\n` as real newlines.
+/// arrived. This preserves Markdown escapes such as `\\n` as real newlines and
+/// withholds invalid escapes instead of leaking their payload into the preview.
 fn decode_partial_quoted(body: &str, quote: char) -> (String, bool, usize) {
     let mut out = String::new();
     let mut chars = body.char_indices();
@@ -652,7 +656,12 @@ fn decode_partial_quoted(body: &str, quote: char) -> (String, bool, usize) {
                             }
                         }
                     }
-                    other => out.push(other),
+                    // A malformed model escape is not valid JSON. Do not silently
+                    // drop the backslash and turn `\\zA` into visible `zA` text.
+                    other => {
+                        let _ = other;
+                        return (out, false, body.len());
+                    }
                 },
             },
             _ => out.push(c),
@@ -703,7 +712,42 @@ fn extract_lfm_content_value(raw: &str) -> Option<(String, bool)> {
 pub fn extract_partial_content(raw: &str) -> Option<String> {
     extract_json_content_value(raw)
         .or_else(|| extract_lfm_content_value(raw))
-        .map(|(content, _)| content)
+        .map(|(content, _)| myelin_edit_core::clean_note_content(&content))
+}
+
+/// Recover a complete replace-style `write_note` call as soon as its content
+/// string is closed. Some local models emit the body and then spend several
+/// seconds producing redundant wrapper punctuation; for preview-enabled
+/// replace requests the body is the only required argument, so waiting for
+/// that punctuation only keeps the UI's writing timer alive.
+pub fn complete_write_note_from_content(raw: &str, schemas: &Value) -> Option<Vec<Value>> {
+    let write_note = schemas.as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|tool| tool["function"]["name"].as_str() == Some("write_note"))
+    });
+    let properties =
+        write_note.and_then(|tool| tool["function"]["parameters"]["properties"].as_object());
+    let only_content = properties.is_some_and(|props| props.keys().all(|key| key == "content"));
+    if !only_content || !raw.contains("write_note") {
+        return None;
+    }
+
+    let (content, closed) =
+        extract_json_content_value(raw).or_else(|| extract_lfm_content_value(raw))?;
+    let content = myelin_edit_core::clean_note_content(&content);
+    if !closed || note_content_has_protocol_residue(&content) {
+        return None;
+    }
+
+    Some(vec![json!({
+        "id": "call_write_note_preview",
+        "type": "function",
+        "function": {
+            "name": "write_note",
+            "arguments": json!({ "content": content }).to_string()
+        }
+    })])
 }
 
 /// Protocol/template residue is never valid generated note content. Reject the

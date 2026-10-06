@@ -70,7 +70,8 @@ impl Tool for ReplaceInNoteTool {
                     serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
                 );
 
-                self.turn.state
+                self.turn
+                    .state
                     .save_note(
                         existing.id.clone(),
                         existing.title,
@@ -154,7 +155,8 @@ impl Tool for InsertAfterLineTool {
             }
             self.turn.record_tool(display_name, existing.title.clone());
             let _ = self.turn.state.handle.emit("ai://chat_tool", serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }));
-            self.turn.state
+            self.turn
+                .state
                 .save_note(
                     existing.id.clone(),
                     existing.title,
@@ -200,7 +202,8 @@ impl Tool for InsertAfterLineTool {
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
         );
 
-        self.turn.state
+        self.turn
+            .state
             .save_note(
                 existing.id.clone(),
                 existing.title,
@@ -287,7 +290,8 @@ impl Tool for DeleteInNoteTool {
                     serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{preview}", existing.title), "mutatesNote": true }),
                 );
 
-                self.turn.state
+                self.turn
+                    .state
                     .save_note(
                         existing.id.clone(),
                         existing.title,
@@ -384,7 +388,8 @@ impl Tool for FormatNoteTool {
             "ai://chat_tool",
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, pretty), "mutatesNote": true }),
         );
-        self.turn.state
+        self.turn
+            .state
             .save_note(
                 existing.id.clone(),
                 existing.title,

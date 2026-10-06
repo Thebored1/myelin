@@ -15,7 +15,6 @@ pub(crate) use std::fs;
 pub(crate) use std::path::Path;
 pub(crate) use std::sync::Arc;
 
-
 pub(crate) async fn rebuild_lancedb(
     index_dir: &Path,
     chunks: &[WorkspaceNoteChunk],

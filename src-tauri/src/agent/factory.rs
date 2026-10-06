@@ -24,45 +24,19 @@ pub fn build_myelin_agent(
         // rambling or asking the same clarifying question repeatedly.
         .temperature(temperature)
         .default_max_turns(max_turns)
-        .tool(ReadNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(WriteNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(AppendNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(PrependNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(ReplaceInNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(InsertAfterLineTool {
-            turn: turn.clone(),
-        })
-        .tool(DeleteInNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(FormatNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(FetchWebPageTool {
-            turn: turn.clone(),
-        })
-        .tool(WebSearchTool {
-            turn: turn.clone(),
-        })
-        .tool(SearchDocumentsTool {
-            turn: turn.clone(),
-        })
-        .tool(FindInNoteTool {
-            turn: turn.clone(),
-        })
-        .tool(SearchNotesTool {
-            turn: turn.clone(),
-        })
+        .tool(ReadNoteTool { turn: turn.clone() })
+        .tool(WriteNoteTool { turn: turn.clone() })
+        .tool(AppendNoteTool { turn: turn.clone() })
+        .tool(PrependNoteTool { turn: turn.clone() })
+        .tool(ReplaceInNoteTool { turn: turn.clone() })
+        .tool(InsertAfterLineTool { turn: turn.clone() })
+        .tool(DeleteInNoteTool { turn: turn.clone() })
+        .tool(FormatNoteTool { turn: turn.clone() })
+        .tool(FetchWebPageTool { turn: turn.clone() })
+        .tool(WebSearchTool { turn: turn.clone() })
+        .tool(SearchDocumentsTool { turn: turn.clone() })
+        .tool(FindInNoteTool { turn: turn.clone() })
+        .tool(SearchNotesTool { turn: turn.clone() })
         .tool(EditNotebookTool { turn })
         .build()
 }

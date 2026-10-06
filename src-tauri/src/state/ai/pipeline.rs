@@ -91,7 +91,8 @@ impl AppState {
         match result {
             Ok(config) => {
                 let announce_ready = !self.ai_pipeline_ready();
-                self.inner.ai
+                self.inner
+                    .ai
                     .pipeline_ready
                     .store(true, std::sync::atomic::Ordering::Release);
                 if announce_ready {
@@ -115,7 +116,8 @@ impl AppState {
 
     pub(crate) async fn cancel_prompt_warmup(&self) {
         let handle = self
-            .inner.ai
+            .inner
+            .ai
             .prompt_warmup
             .lock()
             .take()
@@ -134,7 +136,8 @@ impl AppState {
     /// finished warm-up useful without adding a long cold-start delay.
     pub(crate) async fn finish_prompt_warmup(&self) {
         let handle = self
-            .inner.ai
+            .inner
+            .ai
             .prompt_warmup
             .lock()
             .take()

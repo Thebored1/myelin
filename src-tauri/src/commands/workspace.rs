@@ -3,23 +3,41 @@ use crate::state::AppState;
 use tauri::State;
 
 #[tauri::command]
-pub(crate) fn get_ocr_status(state: State<'_, AppState>) -> crate::ocr::OcrStatus { state.ocr_status() }
-
-#[tauri::command]
-pub(crate) fn set_ocr_settings(state: State<'_, AppState>, settings: crate::ocr::OcrSettings) -> Result<crate::ocr::OcrStatus, String> {
-    state.set_ocr_settings(settings).map_err(|error| error.to_string())
+pub(crate) fn get_ocr_status(state: State<'_, AppState>) -> crate::ocr::OcrStatus {
+    state.ocr_status()
 }
 
 #[tauri::command]
-pub(crate) fn ocr_pdf_page(state: State<'_, AppState>, png: Vec<u8>, page_number: u32, language: Option<String>) -> Result<crate::ocr::OcrPageResult, String> {
+pub(crate) fn set_ocr_settings(
+    state: State<'_, AppState>,
+    settings: crate::ocr::OcrSettings,
+) -> Result<crate::ocr::OcrStatus, String> {
+    state
+        .set_ocr_settings(settings)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn ocr_pdf_page(
+    state: State<'_, AppState>,
+    png: Vec<u8>,
+    page_number: u32,
+    language: Option<String>,
+) -> Result<crate::ocr::OcrPageResult, String> {
     let mut settings = state.ocr_settings();
-    if !settings.auto_low_text_pages { return Err("Automatic OCR is disabled in settings.".into()); }
-    if let Some(language) = language { settings.language = language; }
+    if !settings.auto_low_text_pages {
+        return Err("Automatic OCR is disabled in settings.".into());
+    }
+    if let Some(language) = language {
+        settings.language = language;
+    }
     crate::ocr::recognize_png(&png, page_number, &settings)
 }
 
 #[tauri::command]
-pub(crate) async fn get_provider_status(state: State<'_, AppState>) -> Result<ProviderStatus, String> {
+pub(crate) async fn get_provider_status(
+    state: State<'_, AppState>,
+) -> Result<ProviderStatus, String> {
     state
         .provider_status()
         .await
@@ -121,7 +139,10 @@ pub(crate) async fn get_searxng_url(state: State<'_, AppState>) -> Result<Option
 
 /// Set (or clear) the SearXNG base URL for web search.
 #[tauri::command]
-pub(crate) async fn set_searxng_url(state: State<'_, AppState>, url: Option<String>) -> Result<(), String> {
+pub(crate) async fn set_searxng_url(
+    state: State<'_, AppState>,
+    url: Option<String>,
+) -> Result<(), String> {
     state
         .set_searxng_url(url)
         .map_err(|error| error.to_string())
@@ -129,7 +150,9 @@ pub(crate) async fn set_searxng_url(state: State<'_, AppState>, url: Option<Stri
 
 /// Current embedding model GGUF path (empty = embeddings/RAG disabled).
 #[tauri::command]
-pub(crate) async fn get_embed_model_path(state: State<'_, AppState>) -> Result<Option<String>, String> {
+pub(crate) async fn get_embed_model_path(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
     Ok(state.embed_model_path())
 }
 
@@ -146,20 +169,40 @@ pub(crate) async fn set_embed_model_path(
 }
 
 #[tauri::command]
-pub(crate) async fn get_reranker_model_status(state: State<'_, AppState>) -> Result<crate::state::RerankerModelStatus, String> {
+pub(crate) async fn get_reranker_model_status(
+    state: State<'_, AppState>,
+) -> Result<crate::state::RerankerModelStatus, String> {
     Ok(state.get_reranker_model_status().await)
 }
 
 #[tauri::command]
-pub(crate) async fn set_reranker_model_path(state: State<'_, AppState>, path: Option<String>) -> Result<crate::state::RerankerModelStatus, String> {
-    state.set_reranker_model_path(path).await.map_err(|error| error.to_string())
+pub(crate) async fn set_reranker_model_path(
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<crate::state::RerankerModelStatus, String> {
+    state
+        .set_reranker_model_path(path)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub(crate) fn list_built_in_models(state: State<'_, AppState>) -> Vec<crate::state::BuiltInModelInfo> { state.built_in_models() }
+pub(crate) fn list_built_in_models(
+    state: State<'_, AppState>,
+) -> Vec<crate::state::BuiltInModelInfo> {
+    state.built_in_models()
+}
 
 #[tauri::command]
-pub(crate) async fn download_built_in_model(state: State<'_, AppState>, id: String) -> Result<String, String> { state.download_built_in_model(&id).await.map_err(|error| error.to_string()) }
+pub(crate) async fn download_built_in_model(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<String, String> {
+    state
+        .download_built_in_model(&id)
+        .await
+        .map_err(|error| error.to_string())
+}
 
 /// Ingest a document into the RAG store (chunk → embed → store). `contextual`
 /// for the working doc / deep index; plain for bulk sources. Returns chunk count.
@@ -173,7 +216,13 @@ pub(crate) async fn ingest_document(
     format_hint: Option<crate::embeddings::DocumentFormat>,
 ) -> Result<usize, String> {
     state
-        .ingest_document(&doc_id, &source, &text, contextual.unwrap_or(false), format_hint)
+        .ingest_document(
+            &doc_id,
+            &source,
+            &text,
+            contextual.unwrap_or(false),
+            format_hint,
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -196,7 +245,10 @@ pub(crate) async fn ensure_document_ingested(
 
 /// Remove a document's chunks from the RAG store.
 #[tauri::command]
-pub(crate) async fn delete_document(state: State<'_, AppState>, doc_id: String) -> Result<(), String> {
+pub(crate) async fn delete_document(
+    state: State<'_, AppState>,
+    doc_id: String,
+) -> Result<(), String> {
     state
         .delete_document(&doc_id)
         .await
@@ -212,7 +264,9 @@ pub(crate) async fn list_model_profiles(
 }
 
 #[tauri::command]
-pub(crate) async fn get_all_note_documents(state: State<'_, AppState>) -> Result<Vec<NoteDocument>, String> {
+pub(crate) async fn get_all_note_documents(
+    state: State<'_, AppState>,
+) -> Result<Vec<NoteDocument>, String> {
     Ok(state.get_all_note_documents())
 }
 

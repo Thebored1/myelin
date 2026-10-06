@@ -277,6 +277,25 @@
 				</div>
 			{/if}
 			<div class="prompt-toolbar">
+				<button
+					type="button"
+					class="prompt-icon-btn"
+					onclick={notePage.attachFile}
+					title="Attach a file"
+					aria-label="Attach a file"
+				>
+					<svg
+						width="16"
+						height="16"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
+					>
+				</button>
 				<div class="interaction-mode" role="group" aria-label="AI interaction mode">
 					<button
 						type="button"
@@ -303,25 +322,6 @@
 						{notePage.requireToolApproval ? 'Ask' : 'Allow'}
 					</button>
 				</div>
-				<button
-					type="button"
-					class="prompt-icon-btn"
-					onclick={notePage.attachFile}
-					title="Attach a file"
-					aria-label="Attach a file"
-				>
-					<svg
-						width="16"
-						height="16"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg
-					>
-				</button>
 				{#if notePage.armedSelection}
 					<button
 						type="button"

@@ -3,7 +3,26 @@ use rig_core::completion::ToolDefinition;
 use rig_core::tool::Tool;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
 use tauri::Emitter;
+
+/// Some local models wrap the generated note in a second JSON object even
+/// though `content` is already the tool's string field. Remove only the
+/// unambiguous single-string wrappers; ordinary JSON note content is preserved.
+fn unwrap_text_wrapper(content: &str) -> String {
+    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(content.trim()) else {
+        return content.to_string();
+    };
+    if object.len() != 1 {
+        return content.to_string();
+    }
+    for key in ["text", "content", "body"] {
+        if let Some(Value::String(value)) = object.get(key) {
+            return value.clone();
+        }
+    }
+    content.to_string()
+}
 #[derive(Deserialize, JsonSchema)]
 pub struct WriteNoteArgs {
     /// The full new note body. Empty string clears the note.
@@ -32,13 +51,21 @@ impl Tool for WriteNoteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if note_content_has_protocol_residue(&args.content) {
+        // Unwrap before newline normalization: a valid JSON wrapper contains
+        // escaped `\\n` sequences that must remain valid JSON until parsed.
+        let framed = strip_prompt_markers(&args.content);
+        let unwrapped = if self.turn.policy.targeted_write {
+            unwrap_text_wrapper(&framed)
+        } else {
+            framed
+        };
+        let content = clean_note_content(&unwrapped);
+        if note_content_has_protocol_residue(&content) {
             return Err(ToolError {
                 message: "Generation mixed tool protocol text into the note. Live preview reverted; no changes were saved."
                     .to_string(),
             });
         }
-        let content = clean_note_content(&strip_prompt_markers(&args.content));
 
         if self.turn.policy.targeted_write
             && content.trim().is_empty()
@@ -111,7 +138,14 @@ impl Tool for WriteNoteTool {
         }
 
         let display_name = if scoped.is_some() {
-            "Replace Text"
+            if armed_selection
+                .as_ref()
+                .is_some_and(|selection| selection.cursor)
+            {
+                "Insert at Cursor"
+            } else {
+                "Replace Text"
+            }
         } else if new_body.trim().is_empty() {
             "Clear Note"
         } else {
@@ -128,7 +162,8 @@ impl Tool for WriteNoteTool {
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, content), "mutatesNote": true }),
         );
 
-        self.turn.state
+        self.turn
+            .state
             .save_note(
                 existing.id.clone(),
                 existing.title,
@@ -217,7 +252,8 @@ impl Tool for AppendNoteTool {
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, content), "mutatesNote": true }),
         );
 
-        self.turn.state
+        self.turn
+            .state
             .save_note(
                 existing.id.clone(),
                 existing.title,
@@ -300,7 +336,8 @@ impl Tool for PrependNoteTool {
             serde_json::json!({ "tool": display_name, "details": format!("Title: {}\n\n{}", existing.title, content), "mutatesNote": true }),
         );
 
-        self.turn.state
+        self.turn
+            .state
             .save_note(
                 existing.id.clone(),
                 existing.title,
@@ -321,5 +358,24 @@ impl Tool for PrependNoteTool {
             "Note successfully updated with ID: {}",
             existing.id
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unwrap_text_wrapper;
+
+    #[test]
+    fn unwraps_a_single_text_wrapper_from_targeted_model_output() {
+        assert_eq!(
+            unwrap_text_wrapper(r#"{"text":"A line.\nAnother line."}"#),
+            "A line.\nAnother line."
+        );
+    }
+
+    #[test]
+    fn preserves_ordinary_json_note_content() {
+        let json_note = r#"{"text":"A line.","kind":"note"}"#;
+        assert_eq!(unwrap_text_wrapper(json_note), json_note);
     }
 }

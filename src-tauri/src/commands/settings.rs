@@ -120,7 +120,10 @@ pub(crate) fn save_ai_config(state: State<'_, AppState>, contents: String) -> Re
 }
 
 #[tauri::command]
-pub(crate) async fn install_ai_runtime(state: State<'_, AppState>, runtime_id: String) -> Result<(), String> {
+pub(crate) async fn install_ai_runtime(
+    state: State<'_, AppState>,
+    runtime_id: String,
+) -> Result<(), String> {
     state
         .install_ai_runtime(&runtime_id)
         .await
@@ -133,7 +136,10 @@ pub(crate) fn set_require_tool_approval(state: State<'_, AppState>, require: boo
 }
 
 #[tauri::command]
-pub(crate) async fn set_deterministic_tools(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+pub(crate) async fn set_deterministic_tools(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
     state
         .set_deterministic_tools(enabled)
         .await
@@ -141,7 +147,10 @@ pub(crate) async fn set_deterministic_tools(state: State<'_, AppState>, enabled:
 }
 
 #[tauri::command]
-pub(crate) async fn set_tool_gating(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+pub(crate) async fn set_tool_gating(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
     state
         .set_tool_gating(enabled)
         .await
@@ -149,7 +158,10 @@ pub(crate) async fn set_tool_gating(state: State<'_, AppState>, enabled: bool) -
 }
 
 #[tauri::command]
-pub(crate) async fn set_prompt_cache(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+pub(crate) async fn set_prompt_cache(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
     state
         .set_prompt_cache(enabled)
         .await
@@ -263,17 +275,24 @@ pub(crate) async fn set_openharn_settings(
 }
 
 #[tauri::command]
-pub(crate) async fn downloadable_backends(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+pub(crate) async fn downloadable_backends(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
     Ok(state.downloadable_backends())
 }
 
 #[tauri::command]
-pub(crate) async fn downloadable_bee_backends(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+pub(crate) async fn downloadable_bee_backends(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
     Ok(state.downloadable_bee_backends())
 }
 
 #[tauri::command]
-pub(crate) async fn download_llama_backend(state: State<'_, AppState>, backend: String) -> Result<(), String> {
+pub(crate) async fn download_llama_backend(
+    state: State<'_, AppState>,
+    backend: String,
+) -> Result<(), String> {
     state
         .download_llama_backend(backend)
         .await
@@ -281,7 +300,10 @@ pub(crate) async fn download_llama_backend(state: State<'_, AppState>, backend: 
 }
 
 #[tauri::command]
-pub(crate) async fn download_bee_backend(state: State<'_, AppState>, backend: String) -> Result<(), String> {
+pub(crate) async fn download_bee_backend(
+    state: State<'_, AppState>,
+    backend: String,
+) -> Result<(), String> {
     state
         .download_bee_backend(backend)
         .await
@@ -289,7 +311,10 @@ pub(crate) async fn download_bee_backend(state: State<'_, AppState>, backend: St
 }
 
 #[tauri::command]
-pub(crate) async fn set_inference_engine(state: State<'_, AppState>, engine: String) -> Result<(), String> {
+pub(crate) async fn set_inference_engine(
+    state: State<'_, AppState>,
+    engine: String,
+) -> Result<(), String> {
     state
         .set_inference_engine(engine)
         .await

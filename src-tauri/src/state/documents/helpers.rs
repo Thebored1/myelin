@@ -494,7 +494,7 @@ pub(crate) fn parse_note_file(
                 Vec::new()
             }
         },
-    source_annotations: Vec::new(),
+        source_annotations: Vec::new(),
     };
     if native {
         let app_sidecar = native_metadata_app_path(workspace, workspace_data_dir, path);

@@ -147,15 +147,16 @@ impl AppState {
         crate::ai_config::status(&self.inner.app_data_dir)
     }
 
-
     pub fn set_deterministic_tools_runtime(&self, enabled: bool) {
-        self.inner.ai
+        self.inner
+            .ai
             .deterministic_tools
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn set_tool_gating_runtime(&self, enabled: bool) {
-        self.inner.ai
+        self.inner
+            .ai
             .tool_gating
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }

@@ -7,9 +7,7 @@ use serde_json::{json, Value};
 
 mod context;
 mod types;
-pub use context::{
-    ChatTurnContext, ToolTurnContext, TurnCancellation, TurnMode, TurnPolicy,
-};
+pub use context::{ChatTurnContext, ToolTurnContext, TurnCancellation, TurnMode, TurnPolicy};
 pub use types::{AiTurn, AiTurnInput, TurnKind};
 
 pub struct AiTurnBuilder;

@@ -16,7 +16,7 @@ pub(crate) fn max_tokens(
     if chat_mode && intent_is_tool == Some(false) {
         requested.min(768)
     } else {
-        requested.min(if targeted_write { 1024 } else { 4096 })
+        requested.min(if targeted_write { 2048 } else { 4096 })
     }
 }
 
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn token_caps_are_mode_specific() {
         assert_eq!(max_tokens(4096, true, Some(false), false), 768);
-        assert_eq!(max_tokens(4096, false, Some(true), true), 1024);
+        assert_eq!(max_tokens(4096, false, Some(true), true), 2048);
         assert_eq!(max_tokens(9000, false, None, false), 4096);
     }
 }

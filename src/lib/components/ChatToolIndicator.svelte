@@ -15,6 +15,7 @@
 			n.includes('note') ||
 			n.includes('text') ||
 			n.includes('clear') ||
+			n.includes('insert') ||
 			n.includes('replace') ||
 			n.includes('delete')
 		)

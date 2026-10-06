@@ -56,7 +56,8 @@ impl AppState {
 
     /// Context window (tokens) the running llama-server launched with, if any.
     pub(crate) async fn running_ctx_size(&self) -> Option<u32> {
-        self.inner.ai
+        self.inner
+            .ai
             .llama_server
             .lock()
             .await

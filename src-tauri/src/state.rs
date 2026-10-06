@@ -1,8 +1,8 @@
 mod ai;
+mod ai_runtime;
 mod appearance;
 pub(super) mod core;
 mod core_methods;
-mod ai_runtime;
 #[path = "state/documents_methods.rs"]
 mod documents;
 mod indexing;

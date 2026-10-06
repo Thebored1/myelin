@@ -164,14 +164,16 @@ impl Tool for SearchDocumentsTool {
             }
             None => scope,
         };
-        self.turn.record_tool("Search Documents", args.query.clone());
+        self.turn
+            .record_tool("Search Documents", args.query.clone());
         let _ = self.turn.state.handle.emit(
             "ai://chat_tool",
             serde_json::json!({ "tool": "Search Documents", "details": args.query.clone() }),
         );
-        let primary_future = self
-            .turn.state
-            .retrieve_chunks_scoped(&args.query, k, Some(&scoped_ids));
+        let primary_future =
+            self.turn
+                .state
+                .retrieve_chunks_scoped(&args.query, k, Some(&scoped_ids));
         let planner_future = self.turn.state.plan_complex_retrieval(&args.query);
         let (mut primary, alternates) = tokio::join!(primary_future, planner_future);
         if let Ok(chunks) = &mut primary {

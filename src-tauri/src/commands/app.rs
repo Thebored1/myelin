@@ -77,7 +77,10 @@ pub(crate) fn list_tasks(state: State<'_, AppState>) -> Result<Vec<models::Task>
 }
 
 #[tauri::command]
-pub(crate) fn save_task(state: State<'_, AppState>, task: models::Task) -> Result<models::Task, String> {
+pub(crate) fn save_task(
+    state: State<'_, AppState>,
+    task: models::Task,
+) -> Result<models::Task, String> {
     state.save_task(task).map_err(|e| e.to_string())
 }
 

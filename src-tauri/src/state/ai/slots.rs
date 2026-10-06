@@ -305,7 +305,8 @@ impl AppState {
         );
         let filename = Self::section_slot_filename(note_id, section, &clean_identity);
         if self
-            .inner.ai
+            .inner
+            .ai
             .active_slot_cache
             .lock()
             .as_ref()

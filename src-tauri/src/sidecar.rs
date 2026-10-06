@@ -13,8 +13,8 @@
 //! naming: `openharn-myelin-<target-triple>`). An explicit `OPENHARN_MYELIN_BIN`
 //! env var overrides resolution (handy for local dev / testing).
 
-use crate::llama_server::ResolvedLlamaConfig;
 use crate::ai_turn::ToolTurnContext;
+use crate::llama_server::ResolvedLlamaConfig;
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -58,7 +58,8 @@ pub async fn run_chat(
     let state = &turn.state;
     let base = ensure_sidecar(state).await?;
     let token = state
-        .inner.ai
+        .inner
+        .ai
         .sidecar
         .lock()
         .await
@@ -300,8 +301,7 @@ pub async fn run_chat(
                             emit_debug("tool", &format!("executing {name}(…{args_preview}…)"));
                             // Run the REAL Myelin tool (emits ai://chat_tool and,
                             // for write_note, ai://note_written on its own).
-                            let result =
-                                crate::stream_chat::execute_tool(turn, &name, &args).await;
+                            let result = crate::stream_chat::execute_tool(turn, &name, &args).await;
                             if turn.cancellation.is_cancelled() {
                                 // The turn was cancelled while the tool ran (e.g.
                                 // awaiting approval). Do not unblock the harness —

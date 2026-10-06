@@ -120,8 +120,9 @@ impl AppState {
                 payload.join("llama-server")
             };
             let payload_root = fs::canonicalize(&payload)?;
-            let executable_root = fs::canonicalize(&executable)
-                .with_context(|| format!("runtime binary path is invalid: {}", executable.display()))?;
+            let executable_root = fs::canonicalize(&executable).with_context(|| {
+                format!("runtime binary path is invalid: {}", executable.display())
+            })?;
             if !executable_root.starts_with(&payload_root) {
                 anyhow::bail!("runtime binary path escapes the extracted payload")
             }
@@ -170,7 +171,8 @@ impl AppState {
 
     pub async fn validate_ai_config(&self) -> anyhow::Result<crate::ai_config::AiConfigStatus> {
         let _chat_guard = self
-            .inner.ai
+            .inner
+            .ai
             .chat_lock
             .try_lock()
             .map_err(|_| anyhow::anyhow!("cannot validate while a model turn is active"))?;

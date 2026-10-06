@@ -106,7 +106,10 @@ fn tool_intent_chat_offers_the_fixed_read_only_tool_set() {
         "search_notes",
         "web_search",
     ];
-    assert_eq!(names(&build("chat", "does this note contain aardvark?")), expected);
+    assert_eq!(
+        names(&build("chat", "does this note contain aardvark?")),
+        expected
+    );
     assert_eq!(
         names(&build("chat", "summarize https://example.com")),
         expected

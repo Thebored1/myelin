@@ -3,23 +3,22 @@ use ::anyhow::Result;
 
 impl AppState {
     pub(crate) fn pause_section_cache_for_turn(&self) {
-        self.inner.ai
+        self.inner
+            .ai
             .section_cache_preempt
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.inner.ai.section_cache_resume.notify_waiters();
     }
 
     pub(crate) fn resume_section_cache_after_turn(&self) {
-        self.inner.ai
+        self.inner
+            .ai
             .section_cache_preempt
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.inner.ai.section_cache_resume.notify_waiters();
     }
 
-    pub(crate) fn install_turn_cancellation(
-        &self,
-        cancellation: crate::ai_turn::TurnCancellation,
-    ) {
+    pub(crate) fn install_turn_cancellation(&self, cancellation: crate::ai_turn::TurnCancellation) {
         *self.inner.ai.active_turn_cancel.lock() = Some(cancellation);
     }
 
@@ -34,7 +33,8 @@ impl AppState {
     }
 
     pub fn ai_cancel_requested(&self) -> bool {
-        self.inner.ai
+        self.inner
+            .ai
             .active_turn_cancel
             .lock()
             .as_ref()
@@ -110,7 +110,8 @@ impl AppState {
             }]);
             error
         })?;
-        self.inner.ai
+        self.inner
+            .ai
             .conversations
             .lock()
             .insert(note_id.to_string(), messages);
@@ -153,25 +154,29 @@ impl AppState {
     }
 
     pub fn is_tool_approval_required(&self) -> bool {
-        self.inner.ai
+        self.inner
+            .ai
             .require_tool_approval
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_require_tool_approval(&self, require: bool) {
-        self.inner.ai
+        self.inner
+            .ai
             .require_tool_approval
             .store(require, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn deterministic_tools_enabled(&self) -> bool {
-        self.inner.ai
+        self.inner
+            .ai
             .deterministic_tools
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn tool_gating_enabled(&self) -> bool {
-        self.inner.ai
+        self.inner
+            .ai
             .tool_gating
             .load(std::sync::atomic::Ordering::SeqCst)
     }

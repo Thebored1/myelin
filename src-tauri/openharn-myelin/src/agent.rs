@@ -462,6 +462,18 @@ pub(crate) async fn stream_upstream(
                                 .to_string(),
                         );
                     }
+
+                    // A replace preview is complete as soon as the required
+                    // write_note content string closes. Do not make the user
+                    // wait for wrapper punctuation that the model may emit
+                    // slowly or never terminate with [DONE].
+                    if stream_note_preview && suppress_text_call && !note_cancelled {
+                        if let Some(parsed) =
+                            harness::complete_write_note_from_content(&content, schemas)
+                        {
+                            return finish(content, parsed, no_think, note_streaming);
+                        }
+                    }
                 }
             }
 
@@ -549,8 +561,33 @@ pub(crate) async fn stream_upstream(
                                 note_emitted = c;
                             }
                         }
+
+                        // Native tool arguments are assembled independently of
+                        // the assistant text stream. Once the required content
+                        // JSON is valid, execute it without waiting for later
+                        // empty argument deltas or the finish sentinel.
+                        if suppress_text_call
+                            && serde_json::from_str::<Value>(&slot_args)
+                                .ok()
+                                .map(|args| args.get("content").and_then(Value::as_str).is_some())
+                                .unwrap_or(false)
+                        {
+                            return finish(content, tool_calls, no_think, note_streaming);
+                        }
                     }
                 }
+            }
+
+            // llama.cpp can report the terminal reason on the final SSE choice
+            // before sending [DONE]. This must be checked for ordinary content
+            // chunks too: prompt-tool responses often have no native
+            // `delta.tool_calls`, so checking only inside that branch leaves the
+            // frontend timer running until the request timeout.
+            if choice["finish_reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+            {
+                return finish(content, tool_calls, no_think, note_streaming);
             }
         }
     }

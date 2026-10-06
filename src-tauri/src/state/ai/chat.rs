@@ -1,5 +1,5 @@
 use super::super::core::*;
-use crate::ai_turn::{ToolTurnContext, TurnMode, TurnPolicy, TurnCancellation};
+use crate::ai_turn::{ToolTurnContext, TurnCancellation, TurnMode, TurnPolicy};
 use ::anyhow::{anyhow, Result};
 impl AppState {
     pub async fn ask_ai_stream(
@@ -406,7 +406,7 @@ impl AppState {
                     ));
                 } else if sel.cursor {
                     turn_instructions.push_str(
-                        "\n\nThe editor supplied an exact CURSOR target. Generate only the new text to insert there and call write_note with that text as content. Never reproduce existing note text.",
+                        "\n\nThe editor supplied an exact CURSOR target. Generate only the new text to insert there and call write_note with that raw text as content. Never reproduce existing note text, wrap the text in {\"text\": ...}, or use a Markdown code fence.",
                     );
                 } else {
                     turn_instructions.push_str(&format!(

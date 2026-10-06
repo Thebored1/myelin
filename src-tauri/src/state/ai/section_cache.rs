@@ -123,7 +123,8 @@ impl AppState {
             let filename = Self::section_slot_filename(&note_id, section, &identity);
             let valid = Self::slot_file_is_valid(&config, &filename, &identity)
                 || self
-                    .inner.ai
+                    .inner
+                    .ai
                     .active_slot_cache
                     .lock()
                     .as_ref()
@@ -211,7 +212,8 @@ impl AppState {
             );
             for profile in &scheduled {
                 while state
-                    .inner.ai
+                    .inner
+                    .ai
                     .section_cache_preempt
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
@@ -221,7 +223,8 @@ impl AppState {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 if state
-                    .inner.ai
+                    .inner
+                    .ai
                     .section_cache_preempt
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
@@ -229,7 +232,8 @@ impl AppState {
                 }
                 let _slot_guard = state.inner.ai.llama_slot_lock.lock().await;
                 if state
-                    .inner.ai
+                    .inner
+                    .ai
                     .section_cache_preempt
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {

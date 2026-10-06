@@ -820,7 +820,7 @@ button:disabled {
 
 /* Desktop workspaces dock the sidebar beside the editor. Narrow windows keep
 	   the overlay treatment so the editor retains a usable writing width. */
-@media (min-width: 1200px) {
+@media (min-width: 1400px) {
 	.main-layout .sidebar {
 		position: relative !important;
 		inset: auto !important;

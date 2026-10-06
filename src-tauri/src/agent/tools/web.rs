@@ -76,7 +76,8 @@ impl Tool for SearchNotesTool {
             serde_json::json!({ "tool": "Search Notes", "details": args.query }),
         );
         let results = self
-            .turn.state
+            .turn
+            .state
             .search_notes(args.query)
             .await
             .map_err(|e| ToolError {

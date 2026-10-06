@@ -110,6 +110,11 @@ pub fn note_content_has_protocol_residue(content: &str) -> bool {
         "<|tool_call_end|>",
         "<tool_call",
         "</tool_call",
+        "</text>",
+        ">>/text>",
+        ">/text>",
+        "{text:",
+        "myelin, focused editor>>",
         "/content>}",
         "</content>",
         "> write_note(content=",
@@ -136,6 +141,72 @@ pub fn clean_note_content(content: &str) -> String {
     }
     // Some small models use an em-space as a visual line separator.
     s = s.replace(' ', "\n");
+
+    // A prompt-tools response can start streaming the inner text wrapper
+    // itself ({text: or {"text":"}) before the actual note body. The
+    // wrapper is not note content, so remove its opening marker early enough
+    // for the live preview to remain clean as well as the final save.
+    let mut had_leading_text_wrapper = false;
+    if let Ok(wrapper) = Regex::new(r#"^\s*\{\s*["']?text["']?\s*:\s*["']?"#) {
+        had_leading_text_wrapper = wrapper.is_match(&s);
+        if had_leading_text_wrapper {
+            s = wrapper.replace(&s, "").into_owned();
+        }
+    }
+    if had_leading_text_wrapper {
+        if let Some(stripped) = s.trim_end().strip_suffix("\"}") {
+            s = stripped.to_string();
+        } else if let Some(stripped) = s.trim_end().strip_suffix("'}") {
+            s = stripped.to_string();
+        }
+    }
+
+    // Local models sometimes append the template's closing text marker and
+    // begin another JSON/text wrapper after the generated note. Everything
+    // after these markers is protocol, not note content. Truncate before it
+    // so both the live preview and the authoritative save agree.
+    let protocol_tail_markers = [
+        "\n{text:",
+        "\n{text: ",
+        "\n```",
+        "</text>",
+        ">>/text>",
+        ">/text>",
+        "</content>",
+        "<|tool_call_end|>",
+        "<|end_of_text|>",
+        "</tool_call>",
+    ];
+    if let Some(cut) = protocol_tail_markers
+        .iter()
+        .filter_map(|marker| s.find(marker))
+        .min()
+    {
+        s.truncate(cut);
+    }
+
+    // A malformed prompt-template boundary can occur in the middle of the
+    // generated text when the model echoes the focused-editor signature before
+    // continuing. Turn that boundary into a line break instead of preserving
+    // the protocol marker or joining the two prose sections together.
+    if let Ok(signature) = Regex::new(r"(?i)\s*[—-]?\s*myelin,\s*focused editor\s*>{1,}") {
+        s = signature.replace_all(&s, "\n").into_owned();
+    }
+
+    // The focused-write prompt is occasionally echoed as a signature at the
+    // end of the model's text. Remove it only when it is a terminal suffix,
+    // leaving ordinary prose containing the phrase untouched.
+    if let Some(signature) = s.rfind("Myelin, focused editor") {
+        let tail = &s[signature + "Myelin, focused editor".len()..];
+        if tail.chars().all(|ch| ch.is_whitespace() || ch == '>') {
+            let mut without_signature = s[..signature].trim_end().to_string();
+            without_signature = without_signature
+                .trim_end_matches(['—', '-'])
+                .trim_end()
+                .to_string();
+            s = without_signature;
+        }
+    }
     // Strip trailing <<, <>, >, < markers that some models use as stanza
     // connectors — they appear at line-ends or between phrases.
     if let Ok(re) = Regex::new(r"<{1,2}\s*>*\s*|\s*<{1,2}\s*") {
@@ -175,6 +246,32 @@ pub fn clean_note_content(content: &str) -> String {
                 s = lines.join("\n");
             }
         }
+
+        // LFM2's native tool format sometimes emits Markdown line breaks as
+        // spaced slashes (`line one / line two`). Convert only repeated slash
+        // separators whose next segment starts like a new line; leave paths,
+        // URLs, fractions, and ordinary prose slashes untouched.
+        if let Ok(separator) = Regex::new(r"\s+/\s+([A-Z0-9#>*-])") {
+            let total = s.matches(" / ").count();
+            let line_like = separator.find_iter(&s).count();
+            if total >= 2 && line_like == total && !s.contains("://") {
+                s = separator.replace_all(&s, "\n$1").into_owned();
+            }
+        }
+    }
+
+    // A malformed native tool argument can leave a wrapper's final `}` after
+    // otherwise complete prose. Remove only the sentence-ending, unmatched
+    // case so JSON examples and legitimate brace-heavy Markdown remain intact.
+    if s.ends_with('}') && !s.contains('{') {
+        let without_brace = s[..s.len() - 1].trim_end();
+        if without_brace
+            .chars()
+            .last()
+            .is_some_and(|ch| matches!(ch, '.' | '!' | '?'))
+        {
+            s = without_brace.to_string();
+        }
     }
 
     // Collapse multiple consecutive blank lines into one.
@@ -182,6 +279,50 @@ pub fn clean_note_content(content: &str) -> String {
         s = blank.replace_all(&s, "\n\n").into_owned();
     }
     s.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_note_content;
+
+    #[test]
+    fn repairs_spaced_slash_line_breaks_and_stray_wrapper_brace() {
+        let raw = "First line. / Second line. / Third line.}";
+        assert_eq!(
+            clean_note_content(raw),
+            "First line.\nSecond line.\nThird line."
+        );
+    }
+
+    #[test]
+    fn preserves_normal_slashes_and_braces() {
+        assert_eq!(
+            clean_note_content("https://example.com/a / b"),
+            "https://example.com/a / b"
+        );
+        assert_eq!(
+            clean_note_content("JSON: {\"ok\": true}"),
+            "JSON: {\"ok\": true}"
+        );
+    }
+
+    #[test]
+    fn removes_model_template_tail_and_focused_editor_signature() {
+        let raw = "A finished poem. — Myelin, focused editor>></text>\n```\n{text: \"";
+        assert_eq!(clean_note_content(raw), "A finished poem.");
+    }
+
+    #[test]
+    fn removes_an_internal_focused_editor_boundary() {
+        let raw = "Old text. — Myelin, focused editor>>New text.\n— Myelin, focused editor>>/text>";
+        assert_eq!(clean_note_content(raw), "Old text.\nNew text.");
+    }
+
+    #[test]
+    fn removes_a_leading_text_wrapper_from_streamed_content() {
+        assert_eq!(clean_note_content("{text: A poem"), "A poem");
+        assert_eq!(clean_note_content(r#"{"text":"A poem"}"#), "A poem");
+    }
 }
 
 /// `mode` is passed raw ("" when unspecified) so an explicit "replace" can be

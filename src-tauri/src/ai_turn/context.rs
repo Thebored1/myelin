@@ -212,9 +212,7 @@ impl ToolTurnContext {
         if let Some(source_id) = note.source_pdf {
             return vec![note.id, source_id];
         }
-        if note.relative_path.to_ascii_lowercase().ends_with(".pdf")
-            || self.policy.oversized_doc
-        {
+        if note.relative_path.to_ascii_lowercase().ends_with(".pdf") || self.policy.oversized_doc {
             return vec![note.id];
         }
         Vec::new()

@@ -101,7 +101,9 @@ pub(crate) fn import_latex_asset(
 }
 
 #[tauri::command]
-pub(crate) fn tectonic_cache_status(state: State<'_, AppState>) -> crate::state::TectonicCacheStatus {
+pub(crate) fn tectonic_cache_status(
+    state: State<'_, AppState>,
+) -> crate::state::TectonicCacheStatus {
     state.tectonic_cache_status()
 }
 

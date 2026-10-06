@@ -11,9 +11,6 @@ export function createNotePageLifecycle(rawContext: object) {
 	let debugTraceEl = $state<HTMLDivElement | undefined>();
 
 	onMount(() => {
-		// Do not reopen the note sidebar just because an earlier session left it
-		// open. The header toggle remains the explicit way to show it.
-		noteSidebarOpen.set(false);
 		let savedInteractionMode: string | null = null;
 		let savedSidebarWidth: string | null = null;
 		try {
@@ -34,8 +31,17 @@ export function createNotePageLifecycle(rawContext: object) {
 			}
 		}
 		showSidebarToggle.set(true);
-		const mql = window.matchMedia('(max-width: 1200px)');
-		const handleMediaChange = () => {};
+		// The CSS docks the sidebar beside the editor at this breakpoint. Keep the
+		// UI state in sync so wide windows use the available space automatically,
+		// while narrower windows keep the full toolbar width and start collapsed.
+		const mql = window.matchMedia('(min-width: 1400px)');
+		const syncSidebarToViewport = (matches = mql.matches) => {
+			noteSidebarOpen.set(matches);
+		};
+		syncSidebarToViewport();
+		const handleMediaChange = (event: MediaQueryListEvent) => {
+			syncSidebarToViewport(event.matches);
+		};
 		mql.addEventListener('change', handleMediaChange);
 		document.addEventListener('selectionchange', ctx.handleGlobalSelectionChange);
 		document.addEventListener('mousedown', ctx.onDocMouseDown, true);

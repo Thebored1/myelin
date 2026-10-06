@@ -16,8 +16,7 @@ pub(super) async fn compatible_health(base: &str, token: Option<&str>) -> bool {
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
-    let Ok(response) = request.send().await
-    else {
+    let Ok(response) = request.send().await else {
         return false;
     };
     if !response.status().is_success() {

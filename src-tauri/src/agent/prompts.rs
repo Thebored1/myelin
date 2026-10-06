@@ -45,5 +45,7 @@ pub const TARGETED_WRITE_PREAMBLE: &str = concat!(
     "Never reproduce surrounding note content, explain the edit in chat, or choose an append, prepend, ",
     "search, formatting, or unrelated mutation tool. Preserve the document's Markdown, LaTeX, or notebook syntax. ",
     "For a cursor, insert at that exact position; for a text selection, replace only that selection. ",
+    "The tool content must be the raw generated text, never a second JSON object such as {\"text\": ...} ",
+    "and never a Markdown code fence. ",
     "Return the real finished text, never a placeholder, punctuation-only content, or protocol markup."
 );

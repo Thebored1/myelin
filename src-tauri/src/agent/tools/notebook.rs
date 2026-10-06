@@ -117,7 +117,8 @@ impl Tool for EditNotebookTool {
             "ai://chat_tool",
             serde_json::json!({ "tool": display_name, "details": format!("Cell {} · {}", args.index, existing.title), "mutatesNote": true }),
         );
-        self.turn.state
+        self.turn
+            .state
             .save_note(
                 existing.id.clone(),
                 existing.title,

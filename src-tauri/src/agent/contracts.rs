@@ -109,7 +109,7 @@ fn write_note_params() -> Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "content": { "type": "string", "description": "The full new note body. Empty string clears the note. Never a placeholder — write the real content." }
+            "content": { "type": "string", "description": "The full new note body. Empty string clears the note. Never a placeholder — write the real content. Put raw Markdown directly in this string; never wrap it in a JSON object such as {\"text\": ...} or in a code fence." }
         },
         "required": ["content"]
     })

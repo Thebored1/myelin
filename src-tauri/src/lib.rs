@@ -1,5 +1,6 @@
 pub mod ai_config;
 pub mod ai_turn;
+mod commands;
 mod embeddings;
 mod gguf;
 pub mod git_history;
@@ -20,10 +21,9 @@ mod stream_chat;
 mod tool_capability;
 mod wayland_shortcut;
 mod web_search;
-mod commands;
 
-use state::AppState;
 use commands::*;
+use state::AppState;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};

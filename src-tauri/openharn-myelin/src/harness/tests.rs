@@ -127,6 +127,11 @@ fn parses_lfm_pythonic_named_arguments() {
 }
 
 #[test]
+fn rejects_unclosed_pythonic_tool_call() {
+    assert!(parse_text_tool_calls(r#"write_note({"content":"unfinished"}"#, &schemas()).is_none());
+}
+
+#[test]
 fn parses_framed_lfm_content_with_markdown_parentheses() {
     let calls = parse_text_tool_calls(
             r##"<|tool_call_start|>[write_note(content="# Links\nUse [Rust](https://rust-lang.org).")]<|tool_call_end|>"##,
@@ -193,6 +198,47 @@ fn extract_partial_content_mid_string() {
         Some("hi")
     );
     assert_eq!(extract_partial_content(r#"{"mode":"replace""#), None);
+}
+
+#[test]
+fn live_preview_removes_template_tail_from_partial_content() {
+    let raw = r#"{"content":"A poem. — Myelin, focused editor>></text>\n```\n{text: "#;
+    assert_eq!(extract_partial_content(raw).as_deref(), Some("A poem."));
+}
+
+#[test]
+fn does_not_leak_invalid_escape_payload_into_note_preview() {
+    assert_eq!(
+        extract_partial_content(r#"{"content":"\zA poem"#).as_deref(),
+        Some("")
+    );
+}
+
+#[test]
+fn completes_write_preview_when_content_quote_closes() {
+    let write_only = json!([
+        {"type":"function","function":{"name":"write_note","parameters":{"type":"object","properties":{"content":{"type":"string"}},"required":["content"]}}}
+    ]);
+    let calls = complete_write_note_from_content(
+        r#"<tool_call>[{"name":"write_note","arguments":{"content":"A complete body""#,
+        &write_only,
+    )
+    .expect("closed content should be executable");
+    assert_eq!(calls[0]["function"]["name"], "write_note");
+    assert_eq!(
+        serde_json::from_str::<Value>(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap()
+            ["content"],
+        "A complete body"
+    );
+}
+
+#[test]
+fn does_not_complete_write_preview_before_content_quote_closes() {
+    assert!(complete_write_note_from_content(
+        r#"<tool_call>[{"name":"write_note","arguments":{"content":"still writing"#,
+        &schemas()
+    )
+    .is_none());
 }
 
 #[test]
