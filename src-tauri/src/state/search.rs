@@ -254,8 +254,8 @@ pub(crate) fn extract_links(body: &str) -> Vec<ParsedLink> {
     // Parse [[Wikilinks]]
     if let Ok(re) = regex::Regex::new(r"\[\[([^\]]+)\]\]") {
         for cap in re.captures_iter(body) {
-            if let Some(m) = cap.get(0) {
-                let inner = cap.get(1).unwrap().as_str().to_string();
+            if let (Some(m), Some(inner)) = (cap.get(0), cap.get(1)) {
+                let inner = inner.as_str().to_string();
                 let (target, block) = if let Some(idx) = inner.find('#') {
                     (
                         inner[..idx].trim().to_string(),
@@ -278,8 +278,8 @@ pub(crate) fn extract_links(body: &str) -> Vec<ParsedLink> {
     // Vditor might rewrite `/notes/id` to `http://localhost:1420/notes/id`
     if let Ok(re) = regex::Regex::new(r"\[.*?\]\(([^)]+)\)") {
         for cap in re.captures_iter(body) {
-            if let Some(m) = cap.get(0) {
-                let inner = cap.get(1).unwrap().as_str().to_string();
+            if let (Some(m), Some(inner)) = (cap.get(0), cap.get(1)) {
+                let inner = inner.as_str().to_string();
 
                 let (url_part, block) = if let Some(idx) = inner.find('#') {
                     (&inner[..idx], Some(inner[idx + 1..].trim().to_string()))

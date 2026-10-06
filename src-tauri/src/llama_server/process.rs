@@ -279,7 +279,7 @@ async fn try_start_candidate(
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                let mut guard = captured.lock().unwrap();
+                let mut guard = captured.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.len() < STDERR_CAPTURE_LINES {
                     guard.push(line);
                 }
@@ -291,7 +291,7 @@ async fn try_start_candidate(
     let startup_started = std::time::Instant::now();
     loop {
         if health_check(client, config).await {
-            let log_lines = captured.lock().unwrap().clone();
+            let log_lines = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
             // Trust the launch: a GPU candidate that came up healthy with ngl>0
             // IS offloading — llama.cpp aborts rather than silently running GPU
             // layers on the CPU, so a "CPU" verdict from the (build-dependent)
@@ -328,7 +328,7 @@ async fn try_start_candidate(
             break;
         }
 
-        if has_fatal_startup_error(&captured.lock().unwrap()) {
+        if has_fatal_startup_error(&captured.lock().unwrap_or_else(|e| e.into_inner())) {
             break;
         }
 
@@ -343,7 +343,7 @@ async fn try_start_candidate(
     let _ = child.wait();
     let tail = captured
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .iter()
         .rev()
         .take(5)

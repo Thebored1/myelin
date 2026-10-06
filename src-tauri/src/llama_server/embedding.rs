@@ -76,7 +76,7 @@ pub async fn start_embed_server(
         let captured = Arc::clone(&captured);
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let mut guard = captured.lock().unwrap();
+                let mut guard = captured.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.len() == STDERR_CAPTURE_LINES {
                     guard.remove(0);
                 }
@@ -109,7 +109,10 @@ pub async fn start_embed_server(
             });
         }
         if let Ok(Some(status)) = child.try_wait() {
-            let detail = captured.lock().unwrap().join(" | ");
+            let detail = captured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .join(" | ");
             bail!(
                 "embedding server {} exited early ({status}) while loading {}{}",
                 executable.display(),
@@ -122,7 +125,10 @@ pub async fn start_embed_server(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let _ = child.kill();
-    let detail = captured.lock().unwrap().join(" | ");
+    let detail = captured
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .join(" | ");
     bail!(
         "embedding server {} did not become healthy while loading {}{}",
         executable.display(),

@@ -692,6 +692,13 @@ impl AppState {
         fs::read(path).map_err(|e| anyhow!("failed to read PDF: {}", e))
     }
 
+    /// Non-UTF-8 workspace paths cannot be represented in git, so surface a
+    /// typed error instead of panicking inside a command handler.
+    fn note_path_str(path: &std::path::Path) -> Result<&str> {
+        path.to_str()
+            .ok_or_else(|| anyhow!("note path is not valid UTF-8: {}", path.display()))
+    }
+
     pub async fn get_note_history(
         &self,
         note_id: String,
@@ -705,7 +712,7 @@ impl AppState {
                 .ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
-        let path_str = path.to_str().unwrap();
+        let path_str = Self::note_path_str(&path)?;
         let history = crate::git_history::get_file_history(&workspace, path_str)?;
 
         let mut filtered = Vec::new();
@@ -738,7 +745,11 @@ impl AppState {
                 .ok_or_else(|| anyhow!("note not found"))?;
             workspace.join(&note.document.relative_path)
         };
-        crate::git_history::get_file_at_commit(&workspace, &commit_hash, path.to_str().unwrap())
+        crate::git_history::get_file_at_commit(
+            &workspace,
+            &commit_hash,
+            Self::note_path_str(&path)?,
+        )
     }
     pub fn get_all_note_documents(&self) -> Vec<NoteDocument> {
         let runtime = self.inner.runtime.read();

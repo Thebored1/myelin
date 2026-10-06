@@ -208,9 +208,11 @@ impl RetrievalQuery {
         static CACHE: OnceLock<Mutex<VecDeque<(String, RetrievalQuery)>>> = OnceLock::new();
         let cache = CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
         let key = input.trim().to_string();
-        let mut cache = cache.lock().expect("retrieval query cache poisoned");
+        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(position) = cache.iter().position(|(existing, _)| existing == &key) {
-            let entry = cache.remove(position).expect("retrieval query cache entry");
+            let entry = cache
+                .remove(position)
+                .expect("position came from this same deque");
             let value = entry.1.clone();
             cache.push_back(entry);
             return value;
