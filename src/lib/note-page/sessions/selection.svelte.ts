@@ -52,7 +52,11 @@ export function createSelectionSession(rawContext: object) {
 	// inconsistent in Vditor IR when the point is inside the last block, so walk
 	// the text nodes instead of asking the browser to serialize a cross-block
 	// range.
-	function renderedTextOffsetAt(editorEl: HTMLElement, container: Node, offset: number): number | null {
+	function renderedTextOffsetAt(
+		editorEl: HTMLElement,
+		container: Node,
+		offset: number
+	): number | null {
 		if (!editorEl.contains(container)) return null;
 
 		function measure(node: Node): { found: boolean; length: number } {
@@ -66,7 +70,8 @@ export function createSelectionSession(rawContext: object) {
 				}
 				return { found: true, length };
 			}
-			if (node.nodeType === Node.TEXT_NODE) return { found: false, length: node.textContent?.length ?? 0 };
+			if (node.nodeType === Node.TEXT_NODE)
+				return { found: false, length: node.textContent?.length ?? 0 };
 
 			let length = 0;
 			for (const child of Array.from(node.childNodes)) {
@@ -108,7 +113,10 @@ export function createSelectionSession(rawContext: object) {
 	// block. Browsers therefore report the end of the last paragraph even when
 	// the user deliberately clicks several lines lower. Preserve that intent as
 	// an insertion-break count; the source offset remains the end of the note.
-	function lineBreaksForClick(editorEl: HTMLElement, click: { x: number; y: number } | null): number {
+	function lineBreaksForClick(
+		editorEl: HTMLElement,
+		click: { x: number; y: number } | null
+	): number {
 		if (!click) return 0;
 		const renderedText = editorEl.textContent ?? '';
 		if (!renderedText.trim()) return 0;
@@ -209,7 +217,10 @@ export function createSelectionSession(rawContext: object) {
 				return {
 					text: '',
 					before: sourceWithMarker.slice(Math.max(0, markerOffset - N), markerOffset),
-					after: sourceWithMarker.slice(markerOffset + marker.length, markerOffset + marker.length + N),
+					after: sourceWithMarker.slice(
+						markerOffset + marker.length,
+						markerOffset + marker.length + N
+					),
 					cursor: true,
 					sourceOffset: markerOffset,
 					...(lineBreaks > 0 ? { lineBreaks } : {})
@@ -241,13 +252,20 @@ export function createSelectionSession(rawContext: object) {
 
 	function rangeAtPoint(editorEl: HTMLElement, x: number, y: number): Range | null {
 		const pointDocument = document as Document & {
-			caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+			caretPositionFromPoint?: (
+				x: number,
+				y: number
+			) => { offsetNode: Node; offset: number } | null;
 			caretRangeFromPoint?: (x: number, y: number) => Range | null;
 		};
 		const range = pointDocument.caretRangeFromPoint?.(x, y) ?? null;
 		if (range && editorEl.contains(range.startContainer)) return range;
 		const position = pointDocument.caretPositionFromPoint?.(x, y);
-		if (position && position.offsetNode.nodeType === Node.TEXT_NODE && editorEl.contains(position.offsetNode)) {
+		if (
+			position &&
+			position.offsetNode.nodeType === Node.TEXT_NODE &&
+			editorEl.contains(position.offsetNode)
+		) {
 			const fallbackRange = document.createRange();
 			fallbackRange.setStart(position.offsetNode, position.offset);
 			fallbackRange.collapse(true);
@@ -269,7 +287,8 @@ export function createSelectionSession(rawContext: object) {
 				candidate.collapse(true);
 				const rect = candidate.getBoundingClientRect();
 				if (!rect.height) continue;
-				const verticalDistance = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+				const verticalDistance =
+					y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
 				const score = verticalDistance * 20 + Math.abs(rect.left - x);
 				if (!best || score < best.score) best = { range: candidate.cloneRange(), score };
 			}
@@ -305,7 +324,9 @@ export function createSelectionSession(rawContext: object) {
 						const liveRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
 						const liveEditorRange =
 							liveRange && editorEl?.contains(liveRange.commonAncestorContainer) ? liveRange : null;
-						const clickBelowContent = Boolean(click && editorEl && lineBreaksForClick(editorEl, click) > 0);
+						const clickBelowContent = Boolean(
+							click && editorEl && lineBreaksForClick(editorEl, click) > 0
+						);
 						// The browser's committed range is authoritative. Point-based
 						// lookup is used for blank space below the final block, where the
 						// browser otherwise reports the previous paragraph's end.
@@ -313,10 +334,10 @@ export function createSelectionSession(rawContext: object) {
 							(clickBelowContent || !liveEditorRange) && click && editorEl
 								? rangeAtPoint(editorEl, click.x, click.y)
 								: null;
-					const clickRange = clickBelowContent
-						? pointRange ?? liveEditorRange
-						: liveEditorRange ?? pointRange;
-					captureEditorSelection(clickRange ?? undefined, click);
+						const clickRange = clickBelowContent
+							? (pointRange ?? liveEditorRange)
+							: (liveEditorRange ?? pointRange);
+						captureEditorSelection(clickRange ?? undefined, click);
 					}
 				}
 			};
@@ -342,8 +363,14 @@ export function createSelectionSession(rawContext: object) {
 		if (!range) return;
 		if (!editorEl.contains(range.commonAncestorContainer)) return;
 		if (range.collapsed) {
-			const renderedOffset = renderedTextOffsetAt(editorEl, range.startContainer, range.startOffset);
-			const savedRange = (renderedOffset === null ? range : rangeAtRenderedOffset(editorEl, renderedOffset) ?? range).cloneRange();
+			const renderedOffset = renderedTextOffsetAt(
+				editorEl,
+				range.startContainer,
+				range.startOffset
+			);
+			const savedRange = (
+				renderedOffset === null ? range : (rangeAtRenderedOffset(editorEl, renderedOffset) ?? range)
+			).cloneRange();
 			ctx.savedEditorRange = savedRange;
 			// Capture the serializable source anchor immediately. The DOM Range is
 			// only for restoring editor focus; the model receives this one target.

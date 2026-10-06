@@ -26,14 +26,22 @@ pub fn harness_decompose(request: &str, tools: &Value) -> Vec<(String, String)> 
     let mut tool_kw: Vec<(String, Vec<String>)> = Vec::new();
     if let Some(arr) = tools.as_array() {
         for t in arr {
-            let f = if t["function"].is_object() { &t["function"] } else { t };
+            let f = if t["function"].is_object() {
+                &t["function"]
+            } else {
+                t
+            };
             let name = f["name"].as_str().unwrap_or("").to_string();
             if name.is_empty() {
                 continue;
             }
             let mut kw = Vec::new();
             let description = f["description"].as_str().unwrap_or("").to_lowercase();
-            kw.extend(word_re.find_iter(&description).map(|m| m.as_str().to_string()));
+            kw.extend(
+                word_re
+                    .find_iter(&description)
+                    .map(|m| m.as_str().to_string()),
+            );
             kw.extend(name.split(['.', '_']).map(str::to_string));
             if let Some(props) = f["parameters"]["properties"].as_object() {
                 for (property, spec) in props {

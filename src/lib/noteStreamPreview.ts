@@ -85,7 +85,7 @@ function cursorAnchorMatches(
 }
 
 function isCursorSeparator(value: string): boolean {
-	return !value || /^[\s*_`#>~\[\]{}():;,!?"'\-—–/.]+$/u.test(value);
+	return !value || /^[\s*_`#>~[\]{}():;,!?"'\-—–/.]+$/u.test(value);
 }
 
 function uniqueCursorGap(source: string, before: string, after: string): number | null {
@@ -109,9 +109,14 @@ function uniqueCursorGap(source: string, before: string, after: string): number 
 	return unique.length === 1 && unique[0][0] <= 256 ? unique[0][1] : null;
 }
 
-function addCursorLineBreaks(source: string, position: number, generated: string, lineBreaks = 0): string {
+function addCursorLineBreaks(
+	source: string,
+	position: number,
+	generated: string,
+	lineBreaks = 0
+): string {
 	if (lineBreaks <= 0) return generated;
-	const existingBreaks = (source.slice(0, position).match(/\n+$/)?.[0].length ?? 0);
+	const existingBreaks = source.slice(0, position).match(/\n+$/)?.[0].length ?? 0;
 	const generatedBreaks = generated.match(/^\n*/)?.[0].length ?? 0;
 	const neededBreaks = Math.max(0, lineBreaks - existingBreaks - generatedBreaks);
 	return '\n'.repeat(neededBreaks) + generated;
@@ -127,10 +132,8 @@ export function locateNoteStreamTarget(
 		// the safe fallback if the note was edited while the request was pending.
 		if (target.sourceOffset !== undefined && source.trim()) {
 			const position = target.sourceOffset;
-			const beforeMatches =
-				!target.before || source.slice(0, position).endsWith(target.before);
-			const afterMatches =
-				!target.after || source.slice(position).startsWith(target.after);
+			const beforeMatches = !target.before || source.slice(0, position).endsWith(target.before);
+			const afterMatches = !target.after || source.slice(position).startsWith(target.after);
 			if (position >= 0 && position <= source.length && beforeMatches && afterMatches)
 				return [position, position];
 		}
@@ -238,7 +241,9 @@ export function composeNoteStreamPreviewWithStatus(
 	if (!span) return { preview: source, applied: false };
 	return {
 		preview:
-			source.slice(0, span[0]) + addCursorLineBreaks(source, span[0], cleanGenerated, target.lineBreaks) + source.slice(span[1]),
+			source.slice(0, span[0]) +
+			addCursorLineBreaks(source, span[0], cleanGenerated, target.lineBreaks) +
+			source.slice(span[1]),
 		applied: true
 	};
 }

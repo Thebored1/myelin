@@ -7,12 +7,12 @@ node_modules
 .wrangler
 /.svelte-kit
 /build
+# One Cargo workspace rooted at src-tauri: a single target/ and Cargo.lock.
 /src-tauri/target
-/src-tauri/openharn-myelin/target
-/src-tauri/edit-core/target
 **/target/
 /src-tauri/resources/bin/openharn-myelin
 /src-tauri/target/release/bundle
+/src-tauri/target/sidecar/bundle
 *.db
 *.tmp
 
@@ -39,6 +39,9 @@ design-token.html
 scratch/
 src-tauri/test_rig.rs
 test_git.rs
+
+# IDE (JetBrains)
+/.idea/
 
 # Stray root clutter — not part of the app
 /Selections.pdf

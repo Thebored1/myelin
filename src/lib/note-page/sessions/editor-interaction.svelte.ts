@@ -76,7 +76,9 @@ export function createEditorInteractionSession(rawContext: object) {
 			editorEl.contains(liveRange.commonAncestorContainer)
 		) {
 			ctx.shortcutEditorRange = liveRange.cloneRange();
-			shortcutEditorTextOffset = liveRange.collapsed ? renderedTextOffset(editorEl, liveRange) : null;
+			shortcutEditorTextOffset = liveRange.collapsed
+				? renderedTextOffset(editorEl, liveRange)
+				: null;
 			ctx.saveCursorPosition(liveRange);
 			ctx.captureEditorSelection(liveRange);
 			return;

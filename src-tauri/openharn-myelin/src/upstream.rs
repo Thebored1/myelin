@@ -26,9 +26,7 @@ pub(super) async fn emit_prompt(tx: &mpsc::Sender<Out>, stage: &str, body: &Valu
     let _ = tx
         .send(Out::Debug {
             kind: "model_prompt".into(),
-            message: format!(
-                "{stage}\nprompt_chars={chars} approx_tokens={approx_tokens}"
-            ),
+            message: format!("{stage}\nprompt_chars={chars} approx_tokens={approx_tokens}"),
         })
         .await;
 }

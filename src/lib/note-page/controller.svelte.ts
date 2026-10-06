@@ -108,23 +108,17 @@ export function createNotePageController() {
 	// (cleared only by the ✕ pill or by deselecting inside the editor). Captured in
 	// source-markdown coordinates with surrounding context so the backend can pin
 	// the exact span even as the note drifts.
-	let armedSelection = $state<{
-		text: string;
-		before: string;
-		after: string;
-		cursor: boolean; sourceOffset?: number; lineBreaks?: number;
-		cellIndex?: number;
-		chars: number;
-		words: number;
-	} | null>(null);
-	let selDebounce: ReturnType<typeof setTimeout> | undefined;
 	type AiEditTarget = {
 		text: string;
 		before: string;
 		after: string;
-		cursor: boolean; sourceOffset?: number; lineBreaks?: number;
+		cursor: boolean;
+		sourceOffset?: number;
+		lineBreaks?: number;
 		cellIndex?: number;
 	};
+	let armedSelection = $state<(AiEditTarget & { chars: number; words: number }) | null>(null);
+	let selDebounce: ReturnType<typeof setTimeout> | undefined;
 	let activeAiEditTarget: AiEditTarget | null = null;
 	let writeTargetNotice = $state(false);
 	// A chat turn is in flight while the last assistant bubble is still streaming.
@@ -228,14 +222,16 @@ export function createNotePageController() {
 			texEditorInstance,
 			ipynbEditorInstance,
 			shortcutEditorRange,
-			shouldRefocusEditor, savedEditorRange
+			shouldRefocusEditor,
+			savedEditorRange
 		}),
 		{
 			shortcutEditorRange: (value) => (shortcutEditorRange = value),
 			shouldRefocusEditor: (value) => (shouldRefocusEditor = value)
 		},
 		{
-			captureEditorSelection: (range?: Range) => selectionSession.captureEditorSelection(range), saveCursorPosition: (range?: Range) => selectionSession.saveCursorPosition(range)
+			captureEditorSelection: (range?: Range) => selectionSession.captureEditorSelection(range),
+			saveCursorPosition: (range?: Range) => selectionSession.saveCursorPosition(range)
 		}
 	);
 	const editorInteraction = createEditorInteractionSession(editorInteractionPort);
@@ -514,7 +510,7 @@ export function createNotePageController() {
 			MAX_DEBUG_MSG_CHARS,
 			MAX_DEBUG_TRACE,
 			approvalTimeouts,
-			armedSelection,
+			armedSelection
 		}),
 		{
 			isLoadingNote: (value) => (isLoadingNote = value),

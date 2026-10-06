@@ -408,9 +408,7 @@ pub(crate) async fn run_loop(
         // Prompt-tools and some native LFM templates carry the note body as
         // ordinary content. Treat targeted writes as tool protocol in both
         // forms so parsing can stop at the closed call and preview can stream.
-        let suppress_text_call = friendly
-            && intent_is_tool
-            && (prompt_tools || targeted_native);
+        let suppress_text_call = friendly && intent_is_tool && (prompt_tools || targeted_native);
         let (mut content, mut tool_calls, streamed_incomplete_candidate) =
             match stream_upstream_with_timeout(
                 resp,

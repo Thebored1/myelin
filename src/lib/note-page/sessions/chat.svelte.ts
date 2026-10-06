@@ -300,7 +300,11 @@ export function createChatSession(rawContext: object) {
 			// Targeted writes are located against the note body stored by the
 			// backend. Save the current editor body first so the remembered target
 			// and the body used for lookup are always from the same revision.
-			if (composerMode === 'editor' || (ctx.isSourceMaterial && ctx.showAttachedNote) || ctx.saveStatus !== 'saved')
+			if (
+				composerMode === 'editor' ||
+				(ctx.isSourceMaterial && ctx.showAttachedNote) ||
+				ctx.saveStatus !== 'saved'
+			)
 				await ctx.saveNote();
 			if (ctx.pdfIngestionPromise) await ctx.pdfIngestionPromise;
 		} catch (error) {
@@ -422,9 +426,7 @@ export function createChatSession(rawContext: object) {
 		// body already applied in the editor instead of reloading the old note and
 		// autosaving it over the completed mutation.
 		const keepLocalMutation =
-			baselineBody !== undefined &&
-			currentBody !== baselineBody &&
-			refreshed.body === baselineBody;
+			baselineBody !== undefined && currentBody !== baselineBody && refreshed.body === baselineBody;
 		const reconciledBody = keepLocalMutation ? currentBody : refreshed.body;
 		if (!ctx.isSourceMaterial) {
 			ctx.note = { ...refreshed, body: reconciledBody, chatHistory: ctx.chatMessages };
