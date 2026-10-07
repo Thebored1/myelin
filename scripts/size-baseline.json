@@ -3,5 +3,5 @@
 	"src-tauri/src/ai_config.rs": 812,
 	"src-tauri/src/bin/tool_e2e.rs": 1190,
 	"src-tauri/src/embeddings.rs": 844,
-	"src/lib/note-page/controller.svelte.ts": 913
+	"src/lib/note-page/controller.svelte.ts": 892
 }

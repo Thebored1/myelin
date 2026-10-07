@@ -18,6 +18,26 @@ type StreamingSession = ReturnType<typeof createStreamingSession>;
 type LinkingSession = ReturnType<typeof createLinkingSessionType>;
 type DocumentSession = ReturnType<typeof createDocumentSessionType>;
 
+/**
+ * Build a view of `ctx` exposing only `keys`, each as a live getter/setter
+ * pair. Sessions use this instead of a wall of hand-written accessors; the
+ * indirection matters because a session's view must stay in sync with parent
+ * `$state`, which is reassigned on every write.
+ */
+function liveProps<T extends object>(ctx: T, keys: readonly (keyof T & string)[]) {
+	const view: Record<string, unknown> = {};
+	for (const key of keys) {
+		Object.defineProperty(view, key, {
+			enumerable: true,
+			get: () => ctx[key],
+			set: (value: unknown) => {
+				ctx[key] = value as T[keyof T & string];
+			}
+		});
+	}
+	return view;
+}
+
 /** Creates the cross-session graph for the note page. */
 export function createNotePageGraph(rawContext: object) {
 	const ctx = rawContext as NotePageGraphContext;
@@ -109,114 +129,75 @@ export function createNotePageGraph(rawContext: object) {
 
 	const linkingSession = createLinkingSession(ctx) as LinkingSession;
 
-	editorSession = (ctx.createEditorSession as (context: object) => unknown)({
-		get VditorConstructor() {
-			return ctx.VditorConstructor;
+	// The editor session reads and writes parent state through a restricted
+	// view of it. `liveProps` installs those accessors in bulk: each key reads
+	// and writes `ctx[key]` at access time, so the session always observes the
+	// current value rather than a copy taken when the graph was built.
+	//
+	// Built by mutation, never by object spread: the two lazily-resolved
+	// properties added below point at sessions constructed *after* this one, and
+	// spreading would read their getters immediately, throwing on the
+	// not-yet-assigned session and breaking the whole note page.
+	const editorSessionContext = liveProps<ControllerContext>(ctx, [
+		'VditorConstructor',
+		'vditorContainer',
+		'vditorInstance',
+		'vditorLoading',
+		'toolsReady',
+		'shouldInitEditor',
+		'draftBody',
+		'isSourceMaterial',
+		'message',
+		'toolbarResizeObserver',
+		'toolbarNeedsToggle',
+		'toolbarExpanded',
+		'fullscreenShortcut',
+		'blockCache',
+		'transclusionObserver',
+		'draftTags',
+		'relatedNotes',
+		'note',
+		// The oversized gate reads the live context size, so this has to be
+		// forwarded or every note is sized against the 32k default.
+		'provider'
+	]) as Record<string, unknown>;
+	// Resolved lazily: these sessions are constructed after the editor's.
+	Object.defineProperties(editorSessionContext, {
+		handleSectionsReady: {
+			enumerable: true,
+			get: () => sourceSession.handleSectionsReady
 		},
-		set VditorConstructor(value) {
-			ctx.VditorConstructor = value;
-		},
-		get vditorContainer() {
-			return ctx.vditorContainer;
-		},
-		get vditorInstance() {
-			return ctx.vditorInstance;
-		},
-		set vditorInstance(value) {
-			ctx.vditorInstance = value;
-		},
-		get vditorLoading() {
-			return ctx.vditorLoading;
-		},
-		set vditorLoading(value) {
-			ctx.vditorLoading = value;
-		},
-		get toolsReady() {
-			return ctx.toolsReady;
-		},
-		get shouldInitEditor() {
-			return ctx.shouldInitEditor;
-		},
-		get draftBody() {
-			return ctx.draftBody;
-		},
-		set draftBody(value) {
-			ctx.draftBody = value;
-		},
-		get isSourceMaterial() {
-			return ctx.isSourceMaterial;
-		},
-		get message() {
-			return ctx.message;
-		},
-		set message(value) {
-			ctx.message = value;
-		},
-		get toolbarResizeObserver() {
-			return ctx.toolbarResizeObserver;
-		},
-		set toolbarResizeObserver(value) {
-			ctx.toolbarResizeObserver = value;
-		},
-		get toolbarNeedsToggle() {
-			return ctx.toolbarNeedsToggle;
-		},
-		set toolbarNeedsToggle(value) {
-			ctx.toolbarNeedsToggle = value;
-		},
-		get toolbarExpanded() {
-			return ctx.toolbarExpanded;
-		},
-		set toolbarExpanded(value) {
-			ctx.toolbarExpanded = value;
-		},
-		get fullscreenShortcut() {
-			return ctx.fullscreenShortcut;
-		},
-		set fullscreenShortcut(value) {
-			ctx.fullscreenShortcut = value;
-		},
-		get blockCache() {
-			return ctx.blockCache;
-		},
-		get transclusionObserver() {
-			return ctx.transclusionObserver;
-		},
-		set transclusionObserver(value) {
-			ctx.transclusionObserver = value;
-		},
-		get draftTags() {
-			return ctx.draftTags;
-		},
-		get relatedNotes() {
-			return ctx.relatedNotes;
-		},
-		set relatedNotes(value) {
-			ctx.relatedNotes = value;
-		},
-		get note() {
-			return ctx.note;
-		},
-		localVditorCdn: ctx.localVditorCdn,
-		openAttachPdfDialog: () => sourceSession.openAttachPdfDialog(),
-		openMathDialog: ctx.openMathDialog,
-		openLinkDialog: () => {
-			ctx.saveCursorPosition();
-			linkingSession.linkSearchQuery = '';
-			linkingSession.linkSearchResults = [];
-			linkingSession.linkNoteDialog?.showModal();
-			setTimeout(() => {
-				const input = linkingSession.linkNoteDialog?.querySelector(
-					'.link-search-input'
-				) as HTMLInputElement;
-				input?.focus();
-			}, 50);
-		},
-		linkingSession,
-		updateToolbarOverflow: ctx.updateToolbarOverflow,
-		triggerAutoSave: ctx.triggerAutoSave,
-		armedEditTarget: ctx.armedEditTarget
-	}) as EditorSession;
+		handleActiveSectionChange: {
+			enumerable: true,
+			get: () => chatSession.handleActiveSectionChange
+		}
+	});
+	// Assign the rest by mutation. A spread here would read every accessor on
+	// `editorSessionContext` — including the deferred ones above — at
+	// construction time, which throws because those sessions do not exist yet.
+	const editorView = editorSessionContext as Record<string, unknown>;
+	editorView.localVditorCdn = ctx.localVditorCdn;
+	editorView.openAttachPdfDialog = () => sourceSession.openAttachPdfDialog();
+	editorView.openMathDialog = ctx.openMathDialog;
+	editorView.openLinkDialog = () => {
+		ctx.saveCursorPosition();
+		linkingSession.linkSearchQuery = '';
+		linkingSession.linkSearchResults = [];
+		linkingSession.linkNoteDialog?.showModal();
+		setTimeout(() => {
+			const input = linkingSession.linkNoteDialog?.querySelector(
+				'.link-search-input'
+			) as HTMLInputElement;
+			input?.focus();
+		}, 50);
+	};
+	editorView.linkingSession = linkingSession;
+	editorView.updateToolbarOverflow = ctx.updateToolbarOverflow;
+	editorView.triggerAutoSave = ctx.triggerAutoSave;
+	editorView.armedEditTarget = ctx.armedEditTarget;
+	editorSession = (ctx.createEditorSession as (context: object) => unknown)(
+		editorView
+	) as EditorSession;
 
 	navigationSession = (ctx.createNavigationSession as (context: object) => unknown)({
 		get note() {

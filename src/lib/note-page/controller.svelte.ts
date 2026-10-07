@@ -18,11 +18,12 @@ import { createChatSession } from './sessions/chat.svelte';
 import { createNavigationSession } from './sessions/navigation.svelte';
 import { createSourceSession } from './sessions/source.svelte';
 import { createNotePageGraph } from './sessions/graph.svelte';
+import { SIDEBAR_MIN_WIDTH as SIDEBAR_MIN_WIDTH_PX } from './model/sidebarLayout';
 import { createNotePageUtilities } from './sessions/utilities.svelte';
 import { createNotePageDialogs } from './sessions/dialogs.svelte';
 import { createNotePageActions } from './sessions/actions.svelte';
 import { createNotePageSessionBindings } from './session-bindings';
-import type { SelectionHandle } from '$lib/controller-context';
+import type { AiEditTarget, DebugInfo, SelectionHandle } from '$lib/controller-context';
 import { createBoundController } from '$lib/controllerView';
 export function createNotePageController() {
 	let requireToolApproval = $state(false);
@@ -81,7 +82,7 @@ export function createNotePageController() {
 			console.warn('Could not save debug-window preference', error);
 		}
 	});
-	type DebugTraceEntry = { time: number; msg: string; kind: string };
+	type DebugTraceEntry = DebugInfo['trace'][number];
 	// Keep the trace bounded: full model prompts are multi-KB and would otherwise
 	// bloat every persisted chat message and the live debug window.
 	const MAX_DEBUG_TRACE = 200;
@@ -91,32 +92,9 @@ export function createNotePageController() {
 	let activeChatNoteId: string | null = null;
 	type AiInteractionMode = 'chat' | 'write';
 	let aiInteractionMode = $state<AiInteractionMode>('chat');
-	let debugInfo = $state<{
-		requestStart: number | null;
-		firstChunk: number | null;
-		generationStart: number | null;
-		generationEnd: number | null;
-		done: number | null;
-		promptTokens: number;
-		completionTokens: number;
-		totalTokens: number;
-		turnCount: number;
-		replyChars: number;
-		trace: DebugTraceEntry[];
-	} | null>(null);
+	let debugInfo = $state<DebugInfo | null>(null);
 	// The editor selection the user has "armed" for the AI. Persists across sends
-	// (cleared only by the ✕ pill or by deselecting inside the editor). Captured in
-	// source-markdown coordinates with surrounding context so the backend can pin
-	// the exact span even as the note drifts.
-	type AiEditTarget = {
-		text: string;
-		before: string;
-		after: string;
-		cursor: boolean;
-		sourceOffset?: number;
-		lineBreaks?: number;
-		cellIndex?: number;
-	};
+	// (cleared only by the ✕ pill or by deselecting inside the editor).
 	let armedSelection = $state<(AiEditTarget & { chars: number; words: number }) | null>(null);
 	let selDebounce: ReturnType<typeof setTimeout> | undefined;
 	let activeAiEditTarget: AiEditTarget | null = null;
@@ -210,7 +188,8 @@ export function createNotePageController() {
 	let isResizing = $state(false);
 	let mainLayoutEl: HTMLElement | undefined = $state();
 	const PANE_MIN_WIDTH = 26 * 16;
-	const SIDEBAR_MIN_WIDTH = 320;
+	// Sized from the composer row's geometry; see model/sidebarLayout.ts.
+	const SIDEBAR_MIN_WIDTH = SIDEBAR_MIN_WIDTH_PX;
 	let sidebarWidth = $state(SIDEBAR_MIN_WIDTH);
 	let isSidebarResizing = $state(false);
 	let selectionSession: SelectionHandle;
