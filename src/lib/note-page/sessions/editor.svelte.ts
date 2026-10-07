@@ -4,12 +4,126 @@ import { theme } from '$lib/theme';
 import type { NoteDocument, SearchResponse } from '$lib/types';
 import { vditorI18n } from '$lib/vditorI18n';
 import { parseBlocks } from '../model/links';
+import {
+	activeSectionFor,
+	canMapSections,
+	headingOffsets,
+	markdownSections,
+	parseMarkdownBlocks,
+	shouldSectionNote,
+	toBackendSection
+} from '../model/markdownSections';
 import type { ControllerContext } from '$lib/controller-context';
+
+/**
+ * How long the reader must be idle before the *whole* document's sections are
+ * filled in.
+ *
+ * Priming a KV slot costs a real forward pass (~95 tok/s on CPU). It is not an
+ * embedding that can be computed once and shared across queries — it is
+ * llama.cpp's attention state for one exact prompt prefix. So opening a note
+ * primes only the section in view; the rest are primed in the background once
+ * the reader stops moving.
+ */
+const IDLE_FILL_MS = 4_000;
+/** Re-section after edits settle; streaming writes fire input every frame. */
+const RESECTION_IDLE_MS = 700;
+/** Scroll/caret events are coalesced to at most one active-section report. */
+const ACTIVE_SECTION_THROTTLE_MS = 250;
 
 /** Owns the lazy Vditor lifecycle and the DOM-only transclusion decoration. */
 export function createEditorSession(rawContext: object) {
 	const ctx = rawContext as ControllerContext;
 	let initGeneration = 0;
+	let idleTimer: ReturnType<typeof setTimeout> | undefined;
+	let resectionTimer: ReturnType<typeof setTimeout> | undefined;
+	let activeThrottle = 0;
+	let teardown: (() => void) | null = null;
+
+	/**
+	 * A note only earns sectioning when it is too large to send whole. Below
+	 * that the whole body fits in context, so priming slots would be pure cost.
+	 * The threshold mirrors `NotePromptShape::build` in the backend.
+	 */
+	function sectioningApplies(): boolean {
+		const tokens = ctx.provider?.resolved?.contextSize ?? 32_768;
+		return shouldSectionNote(ctx.draftBody.length, tokens);
+	}
+
+	/**
+	 * Sections are only usable when the editor's rendered headings agree with
+	 * the parsed blocks. The active-section lookup is index-based, so acting on a
+	 * shifted mapping would send one section's text under another section's
+	 * cache key — a wrong-context bug that would be invisible in the output.
+	 */
+	function mappedSections() {
+		if (!sectioningApplies()) return null;
+		const blocks = parseMarkdownBlocks(ctx.draftBody);
+		const tops = headingOffsets(ctx.vditorContainer);
+		if (!canMapSections(blocks.length, tops.length)) return null;
+		const sections = markdownSections(ctx.draftBody);
+		return sections.length > 0 ? { sections, tops } : null;
+	}
+
+	function scrollMetrics() {
+		const scroller = ctx.vditorContainer?.querySelector<HTMLElement>('.vditor-ir');
+		return {
+			scrollTop: scroller?.scrollTop ?? ctx.vditorContainer?.scrollTop ?? 0,
+			documentHeight: scroller?.scrollHeight ?? ctx.vditorContainer?.scrollHeight ?? 0
+		};
+	}
+
+	function reportActiveSection() {
+		const mapped = mappedSections();
+		if (!mapped) return;
+		const { scrollTop, documentHeight } = scrollMetrics();
+		const section = activeSectionFor(mapped.sections, mapped.tops, scrollTop, documentHeight);
+		// Prime only the section in view; warming the rest is the idle fill's job.
+		if (section) ctx.handleActiveSectionChange(toBackendSection(section));
+	}
+
+	function scheduleActiveSection() {
+		const now = Date.now();
+		if (now - activeThrottle < ACTIVE_SECTION_THROTTLE_MS) return;
+		activeThrottle = now;
+		reportActiveSection();
+	}
+
+	/** Background fill: prime every section, but only once the reader settles. */
+	function scheduleIdleFill() {
+		if (idleTimer) clearTimeout(idleTimer);
+		idleTimer = setTimeout(() => {
+			idleTimer = undefined;
+			const mapped = mappedSections();
+			if (!mapped) return;
+			void ctx.handleSectionsReady(mapped.sections.map(toBackendSection));
+		}, IDLE_FILL_MS);
+	}
+
+	function scheduleResection() {
+		if (resectionTimer) clearTimeout(resectionTimer);
+		resectionTimer = setTimeout(() => {
+			resectionTimer = undefined;
+			// The body changed, so both the active section and the background
+			// fill have to be recomputed against the new text.
+			reportActiveSection();
+			scheduleIdleFill();
+		}, RESECTION_IDLE_MS);
+	}
+
+	function attachSectionTracking(root: HTMLElement) {
+		const scroller = root.querySelector<HTMLElement>('.vditor-ir') ?? root;
+		scroller.addEventListener('scroll', scheduleActiveSection, { passive: true });
+		// A caret move inside the editor is as much a "user is here" signal as a
+		// scroll, and it is what a reader does when they jump to a heading.
+		root.addEventListener('keyup', scheduleActiveSection, { passive: true });
+		root.addEventListener('mouseup', scheduleActiveSection, { passive: true });
+		return () => {
+			scroller.removeEventListener('scroll', scheduleActiveSection);
+			root.removeEventListener('keyup', scheduleActiveSection);
+			root.removeEventListener('mouseup', scheduleActiveSection);
+		};
+	}
 
 	function initVditor() {
 		if (!ctx.VditorConstructor || !ctx.vditorContainer || ctx.vditorInstance) return;
@@ -189,6 +303,7 @@ export function createEditorSession(rawContext: object) {
 					// not persist those speculative bodies: the targeted tool still
 					// needs to validate against the original note and selection.
 					if (!ctx.noteStreaming) {
+						scheduleResection();
 						// A remembered target belongs to the exact body from which it
 						// was captured. User edits invalidate it until a new caret or
 						// selection is explicitly armed.
@@ -205,7 +320,15 @@ export function createEditorSession(rawContext: object) {
 				}
 				return;
 			}
+			// A superseded instance never gets `teardown` assigned, but a
+			// re-init must not leave the previous generation's listeners behind.
 			ctx.vditorInstance = instance;
+			teardown?.();
+			teardown = attachSectionTracking(container);
+			// Prime the section in view straight away so the first ask is
+			// fast, then fill the rest once the reader goes idle.
+			reportActiveSection();
+			scheduleIdleFill();
 		} catch (e: unknown) {
 			if (!isCurrentInitialization()) return;
 			ctx.message = 'Vditor Error: ' + (e instanceof Error ? e.message : String(e));
@@ -244,6 +367,19 @@ export function createEditorSession(rawContext: object) {
 	$effect(() => {
 		const skin = get(theme) === 'light' ? 'classic' : 'dark';
 		if (ctx.vditorInstance) ctx.vditorInstance.setTheme(skin);
+	});
+
+	// Release section listeners when the editor container goes away, so a note
+	// switch cannot leave a stale generation reporting active sections.
+	$effect(() => {
+		const container = ctx.vditorContainer;
+		if (container) return;
+		if (resectionTimer) clearTimeout(resectionTimer);
+		resectionTimer = undefined;
+		if (idleTimer) clearTimeout(idleTimer);
+		idleTimer = undefined;
+		teardown?.();
+		teardown = null;
 	});
 
 	function scanForTransclusions() {
@@ -323,6 +459,12 @@ export function createEditorSession(rawContext: object) {
 		invalidateInitialization();
 		ctx.toolbarResizeObserver?.disconnect();
 		ctx.transclusionObserver?.disconnect();
+		if (resectionTimer) clearTimeout(resectionTimer);
+		resectionTimer = undefined;
+		if (idleTimer) clearTimeout(idleTimer);
+		idleTimer = undefined;
+		teardown?.();
+		teardown = null;
 	}
 
 	function invalidateInitialization() {

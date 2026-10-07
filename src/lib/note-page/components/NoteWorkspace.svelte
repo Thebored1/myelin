@@ -275,6 +275,40 @@
 								Loading editing tools…
 							</div>
 						{/if}
+						<!-- Section priming also runs for notes with no source pane, and
+						     partial failures have to stay visible: the source-pane overlay
+						     is not rendered here, so a compact editor status reports it. -->
+						{#if notePage.sectionCache && !notePage.activeSourceBytes}
+							<div
+								class="editor-section-cache"
+								class:section-cache-complete={notePage.sectionCache.finished &&
+									notePage.sectionCache.failed === 0}
+								class:section-cache-failed={notePage.sectionCache.finished &&
+									notePage.sectionCache.failed > 0}
+								role="status"
+								aria-live="polite"
+							>
+								{#if notePage.sectionCache.finished}
+									{#if notePage.sectionCache.failed > 0}
+										Prepared {notePage.sectionCache.sectionDone}/{notePage.sectionCache
+											.sectionTotal} sections;
+										{notePage.sectionCache.failed} failed{notePage.sectionCache.failedDetails
+											.length > 0
+											? ` (${notePage.sectionCache.failedDetails.join(', ')})`
+											: ''}
+									{:else}
+										Prepared {notePage.sectionCache.sectionDone}/{notePage.sectionCache
+											.sectionTotal} sections
+									{/if}
+									in {notePage.formatSectionCacheDuration(notePage.sectionCache.elapsedMs ?? 0)}
+								{:else}
+									Preparing section {Math.min(
+										notePage.sectionCache.sectionDone + 1,
+										notePage.sectionCache.sectionTotal
+									)} of {notePage.sectionCache.sectionTotal}…
+								{/if}
+							</div>
+						{/if}
 						<div class="fullscreen-indicator">
 							Press <span>{notePage.fullscreenShortcut}</span> to toggle
 						</div>

@@ -11,6 +11,7 @@ import type {
 } from '$lib/types';
 import type { OcrStatus } from '$lib/settings/types';
 import type { BlockItem } from '$lib/note-page/types';
+import type { PdfSection } from '$lib/pdf/types';
 
 export type AsyncAction = (...args: unknown[]) => Promise<void>;
 export type SyncAction = (...args: unknown[]) => void;
@@ -19,6 +20,21 @@ export type RequiredStringAction = (...args: unknown[]) => string;
 export type NumberAction = (...args: unknown[]) => number | null;
 export type BooleanAction = (...args: unknown[]) => boolean;
 export type SessionHandle = Record<string, (...args: unknown[]) => unknown>;
+
+/**
+ * A span of note text pinned for the AI, captured in source-markdown
+ * coordinates with surrounding context so the backend can locate the exact
+ * span even as the note drifts.
+ */
+export type AiEditTarget = {
+	text: string;
+	before: string;
+	after: string;
+	cursor: boolean;
+	sourceOffset?: number;
+	lineBreaks?: number;
+	cellIndex?: number;
+};
 export type SelectionHandle = {
 	captureEditorSelection: (range?: Range) => void;
 	saveCursorPosition: (range?: Range) => void;
@@ -89,7 +105,7 @@ export interface EditorSessionPort {
 	dispose: SyncAction;
 }
 type DebugTraceEntry = { time: number; msg: string; kind: string };
-type DebugInfo = {
+export type DebugInfo = {
 	requestStart: number | null;
 	firstChunk: number | null;
 	generationStart: number | null;
@@ -98,6 +114,16 @@ type DebugInfo = {
 	promptTokens: number;
 	completionTokens: number;
 	totalTokens: number;
+	/** Prompt tokens served from the KV cache. */
+	cachedTokens: number;
+	/**
+	 * Prompt tokens that actually had to be evaluated this turn. For a
+	 * prepared section this should be only the question tail, so a large value
+	 * here means the section prefix was NOT reused.
+	 */
+	evaluatedTokens: number;
+	/** cachedTokens / promptTokens, 0..1. */
+	cacheReuseRatio: number;
 	turnCount: number;
 	replyChars: number;
 	trace: DebugTraceEntry[];
@@ -181,6 +207,10 @@ export interface NotePageContext {
 	isSidebarResizing: boolean;
 	vditorContainer: HTMLElement | undefined;
 	vditorInstance: Vditor | null;
+	/** Full section list for the visible document, for eager slot priming. */
+	handleSectionsReady: (sections: PdfSection[]) => Promise<void> | void;
+	/** The section currently in view, for active-section slot priming. */
+	handleActiveSectionChange: (section: PdfSection) => void;
 	VditorConstructor: typeof Vditor | null;
 	vditorLoading: boolean;
 	toolsReady: boolean;

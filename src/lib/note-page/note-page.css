@@ -216,6 +216,31 @@ button:disabled {
 	background: var(--danger);
 }
 
+/* Editor-pane variant: notes with no source pane still prime sections, and a
+   partial failure has to stay visible without the source-pane overlay. */
+.editor-section-cache {
+	position: absolute;
+	top: 0.6rem;
+	right: 1rem;
+	z-index: 9;
+	max-width: min(24rem, calc(100% - 2rem));
+	padding: 0.35rem 0.6rem;
+	border: 1px solid var(--border-default);
+	border-radius: var(--radius-sm);
+	background: var(--bg-panel);
+	box-shadow: var(--shadow-md);
+	color: var(--text-secondary);
+	font-size: 0.7rem;
+	pointer-events: none;
+}
+.editor-section-cache.section-cache-complete {
+	border-color: color-mix(in srgb, var(--success) 45%, var(--border-default));
+}
+.editor-section-cache.section-cache-failed {
+	border-color: color-mix(in srgb, var(--danger) 55%, var(--border-default));
+	color: var(--danger);
+}
+
 .section-cache-label {
 	flex: 1;
 	color: var(--text-secondary);
@@ -1898,6 +1923,16 @@ button:disabled {
 	font-weight: 600;
 	color: var(--accent-100);
 	background: color-mix(in srgb, var(--accent-100) 9%, transparent);
+	/* The composer row never wraps, so the pill is the one flexible child.
+	   Without this, a long notebook target ("Cell 12 · 480 sel") pushes the send
+	   button out of the clipped panel instead of ellipsizing. */
+	min-width: 0;
+	overflow: hidden;
+}
+.selection-pill > span:first-of-type {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .selection-pill:hover {
 	background: color-mix(in srgb, var(--accent-100) 15%, transparent);
