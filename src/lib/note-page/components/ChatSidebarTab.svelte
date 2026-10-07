@@ -196,6 +196,26 @@
 						<span class="debug-value">{notePage.debugInfo.promptTokens || '—'}</span>
 					</div>
 					<div class="debug-row">
+						<span class="debug-label">KV cache reused:</span>
+						<span class="debug-value"
+							>{notePage.debugInfo.promptTokens
+								? `${notePage.debugInfo.cachedTokens || 0} (${(
+										notePage.debugInfo.cacheReuseRatio * 100
+									)
+										.toFixed(1)
+										.toString()}%)`
+								: '—'}</span
+						>
+					</div>
+					<div class="debug-row">
+						<span class="debug-label">Evaluated this turn:</span>
+						<span class="debug-value"
+							>{notePage.debugInfo.promptTokens
+								? notePage.debugInfo.evaluatedTokens || '—'
+								: '—'}</span
+						>
+					</div>
+					<div class="debug-row">
 						<span class="debug-label">Completion tokens:</span>
 						<span class="debug-value">{notePage.debugInfo.completionTokens || '—'}</span>
 					</div>

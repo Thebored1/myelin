@@ -221,14 +221,23 @@ export function installAiEventBridge(ctx: AiEventContext): () => void {
 		promptTokens: number;
 		completionTokens: number;
 		totalTokens: number;
+		cachedTokens?: number;
+		evaluatedTokens?: number;
+		cacheReuseRatio?: number;
 	}>('ai://chat_usage', (event) => {
 		if (ctx.activeChatRequestId !== event.payload.requestId) return;
 		if (ctx.showDebugWindow && ctx.debugInfo) {
+			// Cache counters are the evidence that a prepared section was reused
+			// rather than re-evaluated; dropping them here made the section
+			// KV-cache behaviour unobservable from the UI.
 			ctx.debugInfo = {
 				...ctx.debugInfo,
 				promptTokens: event.payload.promptTokens,
 				completionTokens: event.payload.completionTokens,
-				totalTokens: event.payload.totalTokens
+				totalTokens: event.payload.totalTokens,
+				cachedTokens: event.payload.cachedTokens ?? 0,
+				evaluatedTokens: event.payload.evaluatedTokens ?? event.payload.promptTokens,
+				cacheReuseRatio: event.payload.cacheReuseRatio ?? 0
 			};
 			ctx.debugInfo.generationEnd = Date.now();
 		}

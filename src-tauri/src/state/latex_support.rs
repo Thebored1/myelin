@@ -24,6 +24,9 @@ pub(crate) const INDEX_DIR_NAME: &str = "index";
 pub(crate) const MAX_CHAT_HISTORY_MESSAGES_IN_PROMPT: usize = 2;
 pub(crate) const MAX_LIVE_CONVERSATION_CHARS: usize = 8_000;
 pub(crate) const SETTINGS_FILE_NAME: &str = "settings.json";
+/// Rotating log file under the app log directory. Written in every build, not
+/// just debug, so a packaged install stays diagnosable.
+pub(crate) const LOG_FILE_NAME: &str = "myelin.log";
 pub(crate) const TABLE_NAME: &str = "note_chunks";
 pub(crate) const NOTE_INGEST_MANIFEST: &str = "note-ingestion.json";
 pub(crate) const QUERY_EMBEDDING_CACHE: &str = "query-embeddings.json";

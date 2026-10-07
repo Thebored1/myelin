@@ -169,6 +169,9 @@ export function createSourceSession(rawContext: object) {
 							promptTokens: 0,
 							completionTokens: 0,
 							totalTokens: 0,
+							cachedTokens: 0,
+							evaluatedTokens: 0,
+							cacheReuseRatio: 0,
 							turnCount: 0,
 							replyChars: 0,
 							trace: [startEntry, entry]

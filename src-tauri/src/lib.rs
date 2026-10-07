@@ -24,6 +24,7 @@ mod web_search;
 
 use commands::*;
 use state::AppState;
+use state::LOG_FILE_NAME;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
@@ -110,22 +111,32 @@ pub fn run() {
                 }).build(app)?;
             if background_launch { if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); } }
 
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        // Silence noisy dependency spans (e.g. lancedb's "load"
-                        // tracing spans) while keeping our own INFO logs.
-                        .level_for("tracing::span", log::LevelFilter::Warn)
-                        .level_for("lance", log::LevelFilter::Warn)
-                        .level_for("lance_table", log::LevelFilter::Warn)
-                        .level_for("lance_core", log::LevelFilter::Warn)
-                        .level_for("lance_io", log::LevelFilter::Warn)
-                        // zbus logs every D-Bus frame at INFO and floods the log.
-                        .level_for("zbus", log::LevelFilter::Warn)
-                        .build(),
-                )?;
-            }
+            // Logging is NOT limited to debug builds. A packaged app needs a
+            // record of prompt-slot cache decisions, section priming, and llama
+            // launches — those lines are the only way to diagnose "the AI ignored
+            // the page I was reading". Writes go to a rotating file under the app
+            // log directory so a release build stays diagnosable; stdout is kept
+            // for `tauri dev`.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    // Silence noisy dependency spans (e.g. lancedb's "load"
+                    // tracing spans) while keeping our own INFO logs.
+                    .level_for("tracing::span", log::LevelFilter::Warn)
+                    .level_for("lance", log::LevelFilter::Warn)
+                    .level_for("lance_table", log::LevelFilter::Warn)
+                    .level_for("lance_core", log::LevelFilter::Warn)
+                    .level_for("lance_io", log::LevelFilter::Warn)
+                    // zbus logs every D-Bus frame at INFO and floods the log.
+                    .level_for("zbus", log::LevelFilter::Warn)
+                    .targets([
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                            file_name: Some(LOG_FILE_NAME.to_string()),
+                        }),
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    ])
+                    .build(),
+            )?;
 
             // Quick-capture global shortcut: register the plugin with a handler that
             // toggles the capture window, then register the user's configured combo.
