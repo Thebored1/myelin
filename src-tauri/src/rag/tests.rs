@@ -1,4 +1,4 @@
-use super::ingest::{contains_document, upsert_document};
+use super::ingest::{contains_document, stored_chunks, upsert_document};
 use super::packing::pack_passages;
 use super::packing::pack_passages_limited;
 use super::schema::{prepare_schema, SchemaMarker, RAG_SCHEMA_MARKER, RAG_SCHEMA_VERSION};
@@ -15,6 +15,139 @@ fn chunk(id: &str, idx: i32, v: f32) -> DocChunk {
         vector: vec![v; DIM as usize],
         ..Default::default()
     }
+}
+
+/// A chunk whose stored text differs from `chunk`, so tests can model a
+/// document whose content actually changed at one position.
+fn chunk_with_text(id: &str, idx: i32, text: &str, v: f32) -> DocChunk {
+    DocChunk {
+        doc_id: id.into(),
+        source: "test".into(),
+        chunk_index: idx,
+        text: text.into(),
+        lexical_text: format!("test {text}"),
+        vector: vec![v; DIM as usize],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn stored_chunks_returns_vectors_keyed_by_text() {
+    let dir = tempfile::tempdir().unwrap();
+    upsert_document(
+        dir.path(),
+        "d1",
+        vec![
+            chunk_with_text("d1", 0, "alpha", 0.1),
+            chunk_with_text("d1", 1, "beta", 0.9),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let stored = stored_chunks(dir.path(), "d1").await.unwrap();
+    assert_eq!(stored.count, 2);
+    assert_eq!(stored.vectors.len(), 2);
+    // The stored vector must be the one written, addressed by its text.
+    let beta = stored.vectors.get("beta").expect("beta chunk stored");
+    assert_eq!(beta.len(), DIM as usize);
+    assert!(beta.iter().all(|v| (*v - 0.9).abs() < f32::EPSILON));
+    assert!(
+        !stored.vectors.contains_key("gamma"),
+        "unrelated text absent"
+    );
+}
+
+#[tokio::test]
+async fn stored_chunks_is_empty_for_unknown_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let stored = stored_chunks(dir.path(), "never-ingested").await.unwrap();
+    assert_eq!(stored.count, 0);
+    assert!(stored.vectors.is_empty());
+}
+
+#[tokio::test]
+async fn stored_chunks_is_empty_when_the_table_does_not_exist() {
+    // A fresh directory has no table at all: this must degrade to "nothing
+    // stored" rather than an error, so a first ingest always embeds fully.
+    let dir = tempfile::tempdir().unwrap();
+    let stored = stored_chunks(dir.path(), "d1").await.unwrap();
+    assert_eq!(stored.count, 0);
+}
+
+/// The contract that makes an incremental re-embed sound: a chunk is reusable
+/// exactly when its embed input is already present in the store, so editing one
+/// chunk leaves the others addressable by the same text.
+#[tokio::test]
+async fn editing_one_chunk_leaves_the_others_addressable() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = vec![
+        chunk_with_text("d1", 0, "alpha", 0.1),
+        chunk_with_text("d1", 1, "beta", 0.2),
+        chunk_with_text("d1", 2, "gamma", 0.3),
+    ];
+    upsert_document(dir.path(), "d1", before).await.unwrap();
+    let stored = stored_chunks(dir.path(), "d1").await.unwrap();
+    assert!(stored.vectors.contains_key("alpha"));
+    assert!(stored.vectors.contains_key("gamma"));
+
+    // Re-ingest with only the middle chunk edited.
+    let after = vec![
+        chunk_with_text("d1", 0, "alpha", 0.1),
+        chunk_with_text("d1", 1, "beta EDITED", 0.2),
+        chunk_with_text("d1", 2, "gamma", 0.3),
+    ];
+    upsert_document(dir.path(), "d1", after).await.unwrap();
+    let stored = stored_chunks(dir.path(), "d1").await.unwrap();
+
+    assert!(
+        stored.vectors.contains_key("alpha"),
+        "untouched chunk reusable"
+    );
+    assert!(
+        stored.vectors.contains_key("gamma"),
+        "untouched chunk reusable"
+    );
+    assert!(
+        !stored.vectors.contains_key("beta"),
+        "the edited chunk's old text is gone"
+    );
+    assert!(
+        stored.vectors.contains_key("beta EDITED"),
+        "new text present"
+    );
+}
+
+#[tokio::test]
+async fn stored_chunks_returns_every_row_of_a_large_document() {
+    // A real note chunks into tens to hundreds of rows. If the scan behind
+    // `stored_chunks` is implicitly limited, reuse silently caps out near that
+    // limit and most of a document is needlessly re-embedded every edit.
+    let dir = tempfile::tempdir().unwrap();
+    let chunks: Vec<DocChunk> = (0..250)
+        .map(|index| {
+            chunk_with_text(
+                "d1",
+                index,
+                &format!("unique chunk text number {index}"),
+                index as f32 / 250.0,
+            )
+        })
+        .collect();
+    upsert_document(dir.path(), "d1", chunks).await.unwrap();
+
+    let stored = stored_chunks(dir.path(), "d1").await.unwrap();
+    assert_eq!(stored.count, 250, "row count");
+    assert_eq!(
+        stored.vectors.len(),
+        250,
+        "every distinct text must be addressable, not just the first page of rows"
+    );
+    let last = stored
+        .vectors
+        .get("unique chunk text number 249")
+        .expect("the final row must be readable");
+    assert_eq!(last.len(), DIM as usize);
 }
 
 #[tokio::test]

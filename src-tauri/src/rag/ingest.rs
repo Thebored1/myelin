@@ -3,8 +3,8 @@
 use anyhow::{Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{
-    ArrayRef, FixedSizeListArray, Int32Array, Int64Array, RecordBatch, RecordBatchIterator,
-    StringArray,
+    Array, ArrayRef, FixedSizeListArray, Float32Array, Int32Array, Int64Array, RecordBatch,
+    RecordBatchIterator, StringArray,
 };
 use lancedb::connect;
 use std::path::Path;
@@ -12,6 +12,11 @@ use std::sync::Arc;
 
 use super::schema::{open, open_or_create, schema};
 use super::types::{DocChunk, DIM, RAG_TABLE};
+
+/// Upper bound on rows read back when diffing a freshly chunked document
+/// against what is already stored. Generous enough that no real document hits
+/// it; it exists only because the query builder requires an explicit limit.
+const STORED_CHUNK_SCAN_LIMIT: usize = 1_000_000;
 
 pub async fn contains_document(index_dir: &Path, doc_id: &str) -> Result<bool> {
     use futures_util::TryStreamExt;
@@ -41,6 +46,87 @@ pub async fn contains_document(index_dir: &Path, doc_id: &str) -> Result<bool> {
         .await
         .context("failed to read document chunk check")?
         .is_some_and(|batch| batch.num_rows() > 0))
+}
+
+/// Chunks already stored for a document, keyed by their embed input.
+///
+/// Re-ingesting a document used to delete every row and re-embed every chunk,
+/// so a one-character edit cost a full re-embed of the whole note. Callers diff
+/// the freshly chunked text against this map and only embed what actually
+/// changed. Keyed by *embed input* rather than stored text, because contextual
+/// ingestion prepends a document summary that is not stored on the row — the
+/// vector must not be reused if that prefix moved.
+#[derive(Default)]
+pub struct StoredChunks {
+    /// embed input -> stored vector
+    pub vectors: std::collections::HashMap<String, Vec<f32>>,
+    /// How many chunks the document currently has in the store.
+    pub count: usize,
+}
+
+pub async fn stored_chunks(index_dir: &Path, doc_id: &str) -> Result<StoredChunks> {
+    use futures_util::TryStreamExt;
+    use lancedb::query::{ExecutableQuery, QueryBase};
+
+    let conn = match connect(index_dir.to_string_lossy().as_ref())
+        .execute()
+        .await
+    {
+        Ok(conn) => conn,
+        Err(_) => return Ok(StoredChunks::default()),
+    };
+    let table = match conn.open_table(RAG_TABLE).execute().await {
+        Ok(table) => table,
+        Err(_) => return Ok(StoredChunks::default()),
+    };
+    let Some(filter) = super::search::doc_filter(Some(&[doc_id.to_string()])) else {
+        return Ok(StoredChunks::default());
+    };
+    let mut stream = table
+        .query()
+        .only_if(filter)
+        // `query()` defaults to ten rows. Without an explicit limit this read
+        // silently returned only the first ten chunks, so reuse capped out
+        // there and a note of any real length re-embedded almost everything on
+        // every edit.
+        .limit(STORED_CHUNK_SCAN_LIMIT)
+        .execute()
+        .await
+        .context("failed to read stored chunks")?;
+
+    let mut vectors = std::collections::HashMap::new();
+    let mut count = 0usize;
+    while let Some(batch) = stream
+        .try_next()
+        .await
+        .context("failed to read stored chunks")?
+    {
+        let texts = batch
+            .column_by_name("text")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>().cloned());
+        let list = batch
+            .column_by_name("vector")
+            .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>().cloned());
+        let (Some(texts), Some(list)) = (texts, list) else {
+            continue;
+        };
+        for row in 0..batch.num_rows() {
+            if list.is_null(row) {
+                continue;
+            }
+            // `value` yields an Arc<dyn Array> for this arrow-rs version, so a
+            // null row is filtered above rather than unwrapped here.
+            let values = list.value(row);
+            let vectored: Vec<f32> = values
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .map(|array| array.values().to_vec())
+                .unwrap_or_default();
+            vectors.insert(texts.value(row).to_string(), vectored);
+            count += 1;
+        }
+    }
+    Ok(StoredChunks { vectors, count })
 }
 
 /// Replace all chunks for a document (re-ingest = replace), then append the new

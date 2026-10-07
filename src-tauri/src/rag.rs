@@ -17,7 +17,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use ingest::{contains_document, upsert_document};
+pub use ingest::{contains_document, stored_chunks, upsert_document};
 pub use packing::{pack_passages_focused, pack_passages_limited};
 pub use search::{search_fts_only, search_hybrid};
 pub use types::{DocChunk, RetrievedChunk};

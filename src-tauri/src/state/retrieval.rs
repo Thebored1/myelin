@@ -557,21 +557,66 @@ impl AppState {
             .iter()
             .map(|c| format!("{prefix}{}", c.text))
             .collect();
-        let vectors = if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some() {
-            self.embed_texts(
-                &embed_input,
-                crate::embeddings::EmbeddingInputKind::Document,
-            )
-            .await?
-        } else {
-            embed_input
+
+        // Re-embed only what changed. A one-character edit previously
+        // re-embedded the entire note; now unchanged chunks reuse their stored
+        // vectors and only the edited neighbourhood is sent to the embedder.
+        //
+        // Reuse is keyed on the exact embed input and only trusted when the
+        // stored text is itself that input — a contextual prefix is not stored
+        // on the row, so a vector whose text matches while the prefix moved
+        // would be stale. Falling back to a full embed is always correct.
+        let stored = crate::rag::stored_chunks(&self.rag_dir(), doc_id).await?;
+        let reusable = prefix.is_empty() || stored.count == 0;
+        let mut vectors: Vec<Option<Vec<f32>>> = embed_input
+            .iter()
+            .map(|input| {
+                reusable
+                    .then(|| stored.vectors.get(input).cloned())
+                    .flatten()
+            })
+            .collect();
+        let pending: Vec<usize> = vectors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, vector)| vector.is_none().then_some(index))
+            .collect();
+        let reused = vectors.iter().filter(|vector| vector.is_some()).count();
+        if reused > 0 || !pending.is_empty() {
+            log::info!(
+                "[rag] {doc_id}: reusing {reused}/{} stored vectors, embedding {}",
+                vectors.len(),
+                pending.len()
+            );
+        }
+
+        if !pending.is_empty() {
+            let inputs: Vec<String> = pending
                 .iter()
-                .map(|text| hashed_embedding(text))
-                .collect()
-        };
+                .map(|index| embed_input[*index].clone())
+                .collect();
+            let fresh = if crate::llama_server::embed_model_path(&self.inner.app_data_dir).is_some()
+            {
+                self.embed_texts(&inputs, crate::embeddings::EmbeddingInputKind::Document)
+                    .await?
+            } else {
+                inputs.iter().map(|text| hashed_embedding(text)).collect()
+            };
+            if fresh.len() != pending.len() {
+                anyhow::bail!(
+                    "embedder returned {} vectors for {} chunks",
+                    fresh.len(),
+                    pending.len()
+                );
+            }
+            for (slot, vector) in pending.iter().zip(fresh) {
+                vectors[*slot] = Some(vector);
+            }
+        }
+
         let docs: Vec<crate::rag::DocChunk> = chunks
             .iter()
-            .zip(vectors)
+            .zip(vectors.into_iter().flatten())
             .map(|(c, v)| crate::rag::DocChunk {
                 doc_id: doc_id.to_string(),
                 source: source.to_string(),

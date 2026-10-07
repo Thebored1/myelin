@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Instant;
 
-pub const CHUNKER_VERSION: &str = "tokens-256-overlap-40-max-384-structural-v3";
+pub const CHUNKER_VERSION: &str = "tokens-256-overlap-40-max-384-block-anchored-v4";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkerConfig {
@@ -23,6 +23,12 @@ pub const RAG_CHUNKER: ChunkerConfig = ChunkerConfig {
     overlap_tokens: 40,
     hard_max_tokens: 384,
     min_tail_tokens: 64,
+};
+
+mod boundaries;
+
+use boundaries::{
+    block_boundaries, count_chars, next_span, overlap_start, preferred_boundaries, scan_locations,
 };
 
 pub const EMBEDDING_CONTRACT_VERSION: u32 = 1;
@@ -410,55 +416,46 @@ async fn chunk_with_counter<C: TokenCounter>(
     }
     let locations = scan_locations(text, format, chars.len());
     let preferred = preferred_boundaries(&chars);
+    let boundaries = block_boundaries(text, format, chars.len());
     let mut requests = 0usize;
     let mut spans: Vec<(usize, usize, usize)> = Vec::new();
     let mut start = 0usize;
     while start < chars.len() {
-        let (target_end, target_count) =
-            largest_end(&chars, start, config.target_tokens, counter, &mut requests).await?;
-        let (max_end, _) = largest_end(
+        let (end, count) = next_span(
             &chars,
             start,
-            config.hard_max_tokens,
+            &config,
             counter,
+            &preferred,
+            &boundaries,
             &mut requests,
         )
         .await?;
-        let mut end = target_end.max((start + 1).min(chars.len()));
-        if let Some(boundary) = preferred
-            .iter()
-            .copied()
-            .filter(|point| *point > start && *point <= target_end)
-            .last()
-        {
-            let candidate_count =
-                count_chars(&chars, start, boundary, counter, &mut requests).await?;
-            if candidate_count >= config.target_tokens / 2 {
-                end = boundary;
-            }
-        }
-        if end > max_end {
-            end = max_end.max((start + 1).min(chars.len()));
-        }
-        let count = if end == target_end {
-            target_count
-        } else {
-            count_chars(&chars, start, end, counter, &mut requests).await?
-        };
         spans.push((start, end, count));
         if end == chars.len() {
             break;
         }
-        let overlap_start = overlap_start(
-            &chars,
-            start,
-            end,
-            config.overlap_tokens,
-            counter,
-            &mut requests,
-        )
-        .await?;
-        start = overlap_start.max(start + 1).min(end);
+        // Overlap the next chunk with the tail of this one, but only when this
+        // chunk is actually longer than the overlap budget. Restarting inside a
+        // chunk shorter than the budget would advance the start by a single
+        // character and re-emit nearly the same text dozens of times.
+        start = if count_chars(&chars, start, end, counter, &mut requests).await?
+            <= config.overlap_tokens
+        {
+            end
+        } else {
+            overlap_start(
+                &chars,
+                start,
+                end,
+                config.overlap_tokens,
+                counter,
+                &mut requests,
+            )
+            .await?
+            .max(start + 1)
+        }
+        .min(end);
     }
     if spans.len() >= 2 {
         let last = spans.len() - 1;
@@ -496,135 +493,6 @@ async fn chunk_with_counter<C: TokenCounter>(
         })
         .collect();
     Ok((chunks, requests))
-}
-
-async fn largest_end<C: TokenCounter>(
-    chars: &[char],
-    start: usize,
-    limit: usize,
-    counter: &C,
-    requests: &mut usize,
-) -> Result<(usize, usize), String> {
-    let mut low = start;
-    let mut high = chars.len();
-    let mut best = start;
-    let mut best_count = 0usize;
-    while low < high {
-        let mid = (low + high + 1) / 2;
-        let count = count_chars(chars, start, mid, counter, requests).await?;
-        if count <= limit {
-            best = mid;
-            best_count = count;
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
-    }
-    Ok((best, best_count))
-}
-
-async fn count_chars<C: TokenCounter>(
-    chars: &[char],
-    start: usize,
-    end: usize,
-    counter: &C,
-    requests: &mut usize,
-) -> Result<usize, String> {
-    *requests += 1;
-    counter
-        .count(&chars[start..end].iter().collect::<String>())
-        .await
-}
-
-async fn overlap_start<C: TokenCounter>(
-    chars: &[char],
-    start: usize,
-    end: usize,
-    overlap: usize,
-    counter: &C,
-    requests: &mut usize,
-) -> Result<usize, String> {
-    let mut low = start;
-    let mut high = end;
-    let mut best = end;
-    while low < high {
-        let mid = (low + high) / 2;
-        let count = count_chars(chars, mid, end, counter, requests).await?;
-        if count <= overlap {
-            best = mid;
-            high = mid;
-        } else {
-            low = mid + 1;
-        }
-    }
-    Ok(best)
-}
-
-fn preferred_boundaries(chars: &[char]) -> Vec<usize> {
-    let mut points = vec![0];
-    for (index, character) in chars.iter().enumerate() {
-        let next = chars.get(index + 1).copied();
-        if character.is_whitespace()
-            || matches!(character, '.' | '!' | '?' | '。' | '！' | '？')
-                && next.is_none_or(char::is_whitespace)
-        {
-            points.push(index + 1);
-        }
-    }
-    points
-}
-
-fn scan_locations(text: &str, format: DocumentFormat, chars_len: usize) -> Vec<Location> {
-    let mut locations = vec![Location::default(); chars_len];
-    let mut char_offset = 0usize;
-    let mut page = None;
-    let mut section = None;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if let Some(value) = trimmed
-            .strip_prefix("[Page ")
-            .and_then(|rest| rest.strip_suffix(']'))
-            .and_then(|v| v.parse::<i32>().ok())
-        {
-            page = Some(value);
-        }
-        let detected =
-            match format {
-                DocumentFormat::Latex => ["section", "subsection", "subsubsection"]
-                    .iter()
-                    .find_map(|command| {
-                        trimmed
-                            .strip_prefix(&format!("\\{command}{{"))
-                            .and_then(|rest| {
-                                rest.find('}')
-                                    .map(|end| format!("{command}: {}", &rest[..end]))
-                            })
-                    }),
-                DocumentFormat::Markdown
-                | DocumentFormat::PdfText
-                | DocumentFormat::PlainText
-                | DocumentFormat::HtmlText
-                | DocumentFormat::EpubText => {
-                    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-                    ((1..=6).contains(&hashes))
-                        .then(|| trimmed[hashes..].trim().to_string())
-                        .filter(|label| !label.is_empty())
-                }
-                DocumentFormat::Notebook => None,
-            };
-        if detected.is_some() {
-            section = detected;
-        }
-        let end = (char_offset + line.chars().count()).min(chars_len);
-        for location in &mut locations[char_offset..end] {
-            *location = Location {
-                page,
-                section: section.clone(),
-            };
-        }
-        char_offset = end;
-    }
-    locations
 }
 
 /// Embed texts through llama-server's OpenAI-compatible endpoint. Every
@@ -776,18 +644,23 @@ pub fn normalize_vector(vector: &mut [f32]) -> Option<()> {
     Some(())
 }
 
+/// Charges one token per character. Lets the chunker's geometry be tested
+/// deterministically without a running tokenizer server.
+#[cfg(test)]
+pub(super) struct CharCounter;
+#[cfg(test)]
+impl TokenCounter for CharCounter {
+    fn count<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<usize, String>> + Send + 'a>> {
+        Box::pin(async move { Ok(text.chars().count()) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct CharCounter;
-    impl TokenCounter for CharCounter {
-        fn count<'a>(
-            &'a self,
-            text: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<usize, String>> + Send + 'a>> {
-            Box::pin(async move { Ok(text.chars().count()) })
-        }
-    }
     #[tokio::test]
     async fn preserves_whitespace_and_bounds_chunks() {
         let text = format!(
