@@ -35,6 +35,16 @@ describe('markdown sectioning', () => {
 			expect(shouldSectionNote(65_536, 32768)).toBe(false);
 			expect(shouldSectionNote(65_537, 32768)).toBe(true);
 		});
+
+		// The gate takes the *running* context size. When that value never reaches
+		// the note page, it silently falls back to 32k and a larger configured
+		// window changes nothing — every note over 65k chars is sectioned anyway.
+		it('tracks a raised context window instead of assuming the 32k default', () => {
+			expect(shouldSectionNote(65_537, 32768)).toBe(true);
+			expect(shouldSectionNote(65_537, 65536)).toBe(false);
+			expect(shouldSectionNote(131_072, 65536)).toBe(false);
+			expect(shouldSectionNote(131_073, 65536)).toBe(true);
+		});
 	});
 
 	describe('block parsing', () => {

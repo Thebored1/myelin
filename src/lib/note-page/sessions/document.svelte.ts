@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { kindForPath } from '$lib/source-pane/renderers';
 import { tick } from 'svelte';
 import { noteOpened } from '$lib/llamaWarm';
-import type { NoteDocument } from '$lib/types';
+import type { NoteDocument, ProviderStatus } from '$lib/types';
 import type { ControllerContext } from '$lib/controller-context';
 
 /** Note loading and backend reconciliation lifecycle. */
@@ -32,6 +32,16 @@ export function createDocumentSession(rawContext: object) {
 		try {
 			ctx.note = await invoke<NoteDocument>('load_note', { noteId });
 			const loadedNote = ctx.note;
+			// The oversized gate sizes notes against the running context window, and
+			// this page never otherwise learns it: only the home controller fetches
+			// provider status. Without this the gate silently falls back to 32k, so a
+			// configured larger context has no effect and every note over 65k chars
+			// gets sectioned regardless of what the model can actually hold.
+			try {
+				ctx.provider = await invoke<ProviderStatus>('get_provider_status');
+			} catch (statusError) {
+				console.warn('Could not read provider status; sizing notes against defaults', statusError);
+			}
 			// Keep the persisted transcript untouched; reasoning is removed only from
 			// the assistant's presentation below.
 			ctx.chatMessages = loadedNote.chatHistory || [];
