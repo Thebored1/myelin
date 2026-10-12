@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>MyelinWeb — Harness quality, not scale, dominates tool-call accuracy</title>
+<style>
+:root{
+  --paper:#fbfaf7; --sheet:#fff; --ink:#1a1815; --ink-2:#4d473f; --ink-3:#8b8478;
+  --rule:#e6e1d7; --rule-2:#d3ccbe;
+  --live:#2f6f4e; --live-bg:#e9f3ed; --warn:#9c3b28; --warn-bg:#f9ece8;
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --paper:#141311;--sheet:#1b1917;--ink:#ece7dd;--ink-2:#b2ab9f;--ink-3:#7c7568;
+    --rule:#292622;--rule-2:#39352e;--live:#71bb96;--live-bg:#182620;--warn:#db8c76;--warn-bg:#2a1a14; }
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--paper);color:var(--ink)}
+body{font-family:var(--sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased;overflow:hidden}
+button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
+
+.shell{height:100vh;display:flex;flex-direction:column}
+
+/* ---- the only permanent chrome: a title, like a document ---- */
+.titlebar{flex:none;height:40px;display:flex;align-items:center;gap:12px;padding:0 18px;
+  border-bottom:1px solid var(--rule)}
+.titlebar .t{font-size:12.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.titlebar .t b{font-weight:500;color:var(--ink)}
+.titlebar .sub{font-size:11px;color:var(--ink-3);white-space:nowrap}
+.sp{flex:1}
+
+/* ---- the split, as shipped: sources left, document right ---- */
+.split{flex:1;display:flex;min-height:0}
+#paneL{flex:none;width:41%;background:var(--sheet);border-right:1px solid var(--rule);
+  display:flex;min-width:0}
+#paneR{flex:1;overflow:auto;min-width:0;scroll-behavior:smooth}
+.grip{flex:none;width:9px;cursor:col-resize;position:relative}
+.grip::after{content:"";position:absolute;inset:0 4px;transition:.15s}
+.grip:hover::after{background:var(--rule-2)}
+
+/* ---- left pane = attachments. a manifest beside the material, not tabs ---- */
+.manifest{flex:none;width:266px;border-right:1px solid var(--rule);overflow:auto;
+  padding:10px 0 50px;position:relative}
+.mf-head{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  padding:0 14px 10px;display:flex;justify-content:space-between;align-items:baseline}
+.mf-head em{font-style:normal;letter-spacing:0;text-transform:none;font-size:11px}
+.mf-live{font-size:10px;letter-spacing:.03em;text-transform:none;color:var(--ink-3);
+  padding:0 14px 12px;display:flex;align-items:center;gap:6px}
+.mf-live b{font-weight:500;color:var(--live)}
+.mf-live .dot{width:5px;height:5px;border-radius:50%;background:var(--live);flex:none;
+  transition:opacity .2s}
+.mf-live.idle{opacity:.45}
+.mf-live.idle b{color:var(--ink-3)}
+.mgroup{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+  padding:15px 14px 6px;border-top:1px solid var(--rule);margin-top:8px}
+.mgroup span{color:var(--rule-2)}
+
+/* one flat list, in the order the article reaches them.
+   three-level state:
+   cited  — cited somewhere in the article (a quiet dot)
+   inview — cited in the current viewport (bright dot, ink text)
+   on     — currently materialised in the pane (rule + fill)          */
+.att{display:grid;width:100%;text-align:left;padding:7px 14px 7px 12px;
+  grid-template-columns:7px 27px 1fr;column-gap:6px;align-items:baseline;
+  border-left:2px solid transparent;transition:.14s;position:relative}
+.att .g{font-size:8.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);
+  line-height:1.7}
+.att .n{font-size:12.5px;color:var(--ink-3);line-height:1.35}
+.att .d{grid-column:3;font-size:11px;color:var(--ink-3);line-height:1.4;margin-top:2px;
+  display:none}
+.att .dot{width:5px;height:5px;border-radius:50%;background:var(--rule-2);opacity:0;
+  transition:.16s;align-self:center}
+.att.cited .dot{opacity:1}
+.att.inview{border-left-color:color-mix(in srgb,var(--live) 34%,transparent)}
+.att.inview .dot{background:var(--live);opacity:1}
+.att.inview .n{color:var(--ink-2)}
+.att.on{border-left-color:var(--live);background:var(--paper)}
+.att.on .n{color:var(--ink)}
+.att.key .n{color:var(--ink-2)}
+.att.key .d{display:block}
+.att.chall .n{color:var(--warn)}
+.att:hover{background:var(--paper)}
+.att.pinned{background:var(--paper)}
+.att.pinned::after{content:"held";position:absolute;right:12px;top:9px;font-size:8.5px;
+  letter-spacing:.07em;text-transform:uppercase;color:var(--live)}
+
+/* ---- the material, at its own fidelity ---- */
+.material{flex:1;overflow:auto;min-width:0;position:relative}
+.mbar{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:9px;padding:8px 15px;
+  border-bottom:1px solid var(--rule);background:color-mix(in srgb,var(--sheet) 93%,transparent);
+  backdrop-filter:blur(6px)}
+.mbar .loc{font-size:11.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mbar .loc b{font-weight:500;color:var(--ink)}
+.mbar .aim{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);flex:none}
+@keyframes tick{from{opacity:.25}to{opacity:1}}
+.mbar .loc.tick{animation:tick .4s ease-out}
+
+.page{padding:26px 30px 70px;max-width:57ch}
+.page-no{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);
+  padding-bottom:9px;border-bottom:1px solid var(--rule);margin-bottom:16px}
+.page h3{font-family:var(--serif);font-size:18px;font-weight:400;line-height:1.32;margin:0 0 13px}
+.page h4{font-family:var(--sans);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-3);margin:20px 0 8px}
+.page p{font-family:var(--serif);font-size:15px;line-height:1.7;margin:0 0 14px;color:var(--ink-2)}
+.page p.dim{color:var(--ink-3)}
+.hit{background:var(--live-bg);color:var(--ink);border-radius:2px;box-shadow:0 0 0 3px var(--live-bg)}
+.hit-w{background:var(--warn-bg);color:var(--ink);border-radius:2px;box-shadow:0 0 0 3px var(--warn-bg)}
+.cap{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);margin:16px 0 5px}
+.tbl{border-top:1px solid var(--rule-2);border-bottom:1px solid var(--rule)}
+.tbl .r{display:grid;grid-template-columns:1.35fr 1fr 1fr;border-bottom:1px solid var(--rule);align-items:center}
+.tbl .r:last-child{border-bottom:0}
+.tbl .h{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);padding:7px 6px}
+.tbl .c{padding:9px 6px;display:flex;align-items:center;gap:7px}
+.tbl .c i{font-style:normal;font-size:11px;color:var(--ink-3)}
+.bi,.bn,.bw{height:12px;border-radius:2px;flex:none}
+.bi{background:var(--live)} .bn{background:var(--ink-3)} .bw{background:var(--warn)}
+.tbl .win{background:var(--live-bg)}
+.tbl .loss{background:var(--warn-bg)}
+.datav{font-family:var(--mono);font-size:12px;color:var(--ink-2)}
+.tnote{margin-top:9px;font-size:11.5px;color:var(--live)}
+.tnote.w{color:var(--warn)}
+
+.webbar{padding:7px 15px;background:var(--paper);border-bottom:1px solid var(--rule);
+  font-size:11px;color:var(--ink-3);font-family:var(--mono)}
+.webin{padding:24px 30px 70px;max-width:54ch}
+.webin .src{font-size:10.5px;color:var(--ink-3);letter-spacing:.04em;margin-bottom:11px}
+.webin h3{font-family:var(--serif);font-size:21px;font-weight:400;line-height:1.28;margin:0 0 12px}
+.webin p{font-size:14px;line-height:1.66;margin:0 0 13px;color:var(--ink-2)}
+.notice{margin-top:14px;padding:12px 14px;background:var(--paper);border-left:2px solid var(--rule-2);
+  font-size:12.5px;color:var(--ink-3);border-radius:0 4px 4px 0}
+
+.logwrap{margin:18px 22px;border:1px solid var(--rule);border-radius:5px;overflow:hidden;background:var(--paper)}
+.logh{padding:8px 13px;border-bottom:1px solid var(--rule);font-size:10.5px;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--ink-3);font-family:var(--mono)}
+.logb{padding:12px 14px;font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--ink-2);
+  white-space:pre-wrap}
+.logb .g{color:var(--warn)} .logb .s{color:var(--live)} .logb .c{color:var(--ink-3)}
+.logv{padding:11px 14px;border-top:1px solid var(--rule);font-size:12px;background:var(--warn-bg)}
+.logv.ok{background:var(--live-bg)}
+
+.run{margin:18px 22px;border:1px solid var(--rule);border-radius:5px;overflow:hidden;background:var(--paper)}
+.runh{padding:8px 13px;border-bottom:1px solid var(--rule);font-size:10.5px;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--ink-3);font-family:var(--mono)}
+.runb{padding:12px 14px;font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--ink-2);
+  white-space:pre-wrap}
+.runb .k{color:#6b4fa8} .runb .s{color:var(--live)} .runb .g{color:var(--warn)} .runb .c{color:var(--ink-3)}
+
+.ds{margin:18px 22px;border:1px solid var(--rule);border-radius:5px;overflow:hidden;background:var(--paper)}
+.dsr{display:grid;grid-template-columns:1.5fr .5fr .5fr 1fr 1fr;border-bottom:1px solid var(--rule);
+  font-family:var(--mono);font-size:11px;padding:7px 12px;gap:10px;align-items:center}
+.dsr:last-child{border-bottom:0}
+.dsr.hd{font-family:var(--sans);font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--ink-3);background:var(--paper);font-weight:500}
+.dsr .cellv{display:flex;align-items:center;gap:6px}
+.dsbar{height:8px;border-radius:2px;background:var(--live);display:inline-block;flex:none}
+
+.fig{margin:18px 22px;border:1px solid var(--rule);border-radius:5px;background:var(--paper);
+  padding:15px 17px 11px}
+.fig .ft{font-size:12px;color:var(--ink-2);margin:0 0 12px;font-family:var(--sans)}
+.fig svg{display:block;width:100%;height:auto}
+.fig .fl{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);
+  margin-top:9px;line-height:1.5;font-family:var(--sans)}
+.fig .cap-t{font-size:11.5px;color:var(--ink-3);margin:13px 0 0;line-height:1.6}
+
+.spec{margin:18px 22px;border:1px solid var(--rule);border-radius:5px;background:var(--paper);
+  padding:13px 15px;font-family:var(--mono);font-size:11.5px;line-height:1.7;color:var(--ink-2);
+  overflow:auto}
+.spec .k{color:#6b4fa8} .spec .s{color:var(--live)} .spec .c{color:var(--ink-3)} .spec .g{color:var(--warn)}
+
+.diffwrap{margin:18px 22px;border:1px solid var(--rule);border-radius:5px;background:var(--paper)}
+.diff{padding:11px 14px;font-family:var(--mono);font-size:11.5px;line-height:1.7;white-space:pre-wrap}
+.diff .del{color:var(--warn);background:var(--warn-bg);display:block}
+.diff .add{color:var(--live);background:var(--live-bg);display:block}
+.diff .c{color:var(--ink-3)}
+.diffh{padding:8px 13px;border-bottom:1px solid var(--rule);font-size:10.5px;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--ink-3)}
+
+.thr{margin:18px 22px;display:flex;flex-direction:column}
+.post{padding:13px 15px;border:1px solid var(--rule);border-bottom:0;background:var(--paper)}
+.post:first-child{border-radius:5px 5px 0 0}
+.post:last-child{border-bottom:1px solid var(--rule);border-radius:0 0 5px 5px}
+.post .who{font-size:11px;color:var(--ink-3);margin-bottom:5px;display:flex;gap:8px}
+.post .who b{color:var(--ink-2);font-weight:500}
+.post p{font-size:13.5px;line-height:1.6;color:var(--ink-2);margin:0}
+.post .op{font-size:10.5px;color:var(--ink-3);margin-top:7px;display:flex;gap:6px;align-items:center}
+.post .vote{font-family:var(--mono);color:var(--live)}
+
+.slides{margin:18px 22px;border:1px solid var(--rule);border-radius:5px;background:var(--paper);overflow:hidden}
+.sl{padding:15px 17px;border-bottom:1px solid var(--rule)}
+.sl:last-child{border-bottom:0}
+.sl .n{font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+.sl h5{font-family:var(--serif);font-size:16px;font-weight:400;margin:5px 0 0}
+
+/* ---- RIGHT: an ordinary long article. nothing added to the prose. ---- */
+.doc{max-width:64ch;margin:0 auto;padding:52px 44px 160px}
+.doc h1{font-family:var(--serif);font-size:32px;font-weight:400;line-height:1.2;letter-spacing:-.013em;
+  margin:0 0 14px;max-width:22em}
+.byline{font-size:12.5px;color:var(--ink-3);margin:0 0 30px;padding-bottom:22px;
+  border-bottom:1px solid var(--rule)}
+.byline b{color:var(--ink-2);font-weight:500}
+
+.doc h2{font-family:var(--serif);font-size:21px;font-weight:400;margin:46px 0 13px;
+  letter-spacing:-.006em;scroll-margin-top:24px}
+.doc h3{font-family:var(--sans);font-size:12px;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--ink-2);margin:28px 0 9px;font-weight:600;scroll-margin-top:24px}
+.doc p{font-family:var(--serif);font-size:17px;line-height:1.68;margin:0 0 18px;color:var(--ink-2)}
+.doc p strong{color:var(--ink);font-weight:600}
+.doc p em{font-style:italic}
+.doc p.abstract{font-family:var(--serif);font-size:16px;color:var(--ink-3);line-height:1.66;
+  border-left:2px solid var(--rule-2);padding-left:18px;margin-bottom:26px}
+.doc ul{margin:0 0 18px;padding-left:20px;font-family:var(--serif);font-size:17px;line-height:1.62;
+  color:var(--ink-2)}
+.doc li{margin-bottom:7px}
+
+.toc{border:1px solid var(--rule);border-radius:5px;padding:16px 20px;margin:0 0 34px;background:var(--sheet)}
+.toc h4{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);margin:0 0 10px;
+  font-weight:500}
+.toc ol{margin:0;padding-left:18px;columns:2;column-gap:34px;font-size:13.5px;line-height:1.75}
+.toc a{color:var(--ink-2);text-decoration:none;border-bottom:1px solid transparent}
+.toc a:hover{color:var(--ink);border-bottom-color:var(--rule-2)}
+.toc li{margin:0}
+
+.refs{list-style:none;padding:0;margin:0}
+.refs li{font-size:14px;line-height:1.6;color:var(--ink-2);margin-bottom:13px;padding-left:26px;
+  position:relative;font-family:var(--sans)}
+.refs li b{color:var(--ink-3);font-weight:400;font-family:var(--mono);font-size:12px;position:absolute;
+  left:0}
+
+/* the one thing Myelin adds, and it is invisible until you touch it */
+.cite{border-bottom:1px solid color-mix(in srgb,var(--live) 42%,transparent);
+  text-decoration:none;color:inherit;cursor:pointer;padding-bottom:1px;transition:.13s}
+.cite:hover{background:var(--live-bg);border-bottom-color:var(--live)}
+.cite.on{background:var(--live-bg);border-bottom-color:var(--live)}
+@keyframes flash{0%{background:var(--live-bg)}100%{background:transparent}}
+.cite.found{animation:flash 1.8s ease-out;border-radius:2px}
+
+/* ---- the plain-markdown proof ---- */
+.raw{padding:52px 44px 140px;max-width:72ch;margin:0 auto;display:none}
+.raw.on{display:block}.doc.off{display:none}
+.raw h1{font-family:var(--serif);font-size:23px;font-weight:400;margin:0 0 8px;letter-spacing:-.01em}
+.raw .note{font-size:13px;color:var(--ink-3);margin:0 0 22px;max-width:54ch}
+.raw pre{font-family:var(--mono);font-size:12px;line-height:1.8;color:var(--ink-2);white-space:pre-wrap;
+  margin:0;max-height:70vh;overflow:auto}
+.raw pre .c{color:var(--ink-3)}
+.raw pre .l{color:var(--live);text-decoration:underline;text-underline-offset:3px}
+.raw .after{margin-top:24px;padding-top:18px;border-top:1px solid var(--rule);font-size:13px;
+  color:var(--ink-3);max-width:56ch}
+.raw .after b{color:var(--ink-2);font-weight:500}
+
+.demo{position:fixed;right:14px;bottom:14px;z-index:50;display:flex;gap:6px;align-items:center;
+  background:color-mix(in srgb,var(--paper) 92%,transparent);backdrop-filter:blur(8px);
+  border:1px solid var(--rule);border-radius:999px;padding:5px 7px}
+.demo .lab{font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);padding-left:6px}
+.demo button{font-size:11px;color:var(--ink-3);border:1px solid var(--rule-2);border-radius:999px;
+  padding:3px 10px;transition:.13s}
+.demo button:hover{color:var(--ink);border-color:var(--ink-3)}
+.demo button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+
+@media(max-width:980px){
+  .split{flex-direction:column}
+  #paneL{width:100%!important;height:44%;border-right:0;border-bottom:1px solid var(--rule)}
+  .grip{display:none} .manifest{display:none}
+  .doc{padding:32px 20px 90px} .doc h1{font-size:25px} .doc p{font-size:16px}
+  .toc ol{columns:1}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="titlebar">
+    <span class="t"><b>Harness quality, not scale, dominates tool-call accuracy</b></span>
+    <span class="sub">draft v3 · 18 attachments</span>
+    <span class="sp"></span>
+  </div>
+
+  <div class="split" id="split">
+    <section id="paneL">
+      <nav class="manifest">
+        <div class="mf-head"><span>attachments · in order read</span><em>18</em></div>
+        <div class="mf-live idle" id="mflive"><span class="dot"></span><span>scrolling — none in view</span></div>
+
+        <button class="att key" data-a="data-tasksuite">
+          <span class="dot"></span><span class="g">dat</span><span class="n">tasksuite-v4 · 240 tasks</span>
+          <span class="d">the thing being measured</span></button>
+        <button class="att key" data-a="spec">
+          <span class="dot"></span><span class="g">spc</span><span class="n">JSON Schema for tool calls</span>
+          <span class="d">draft-2026-09 — the typing under test</span></button>
+        <button class="att key" data-a="paper-mine">
+          <span class="dot"></span><span class="g">pap</span><span class="n">Harness overhead in tool calling</span>
+          <span class="d">§4.2 — the load-bearing numbers</span></button>
+        <button class="att key" data-a="erratum">
+          <span class="dot"></span><span class="g">err</span><span class="n">Table 4.2 quantisation</span>
+          <span class="d">open — the likely cause of reka's result</span></button>
+        <button class="att cited" data-a="talk-cdnw">
+          <span class="dot"></span><span class="g">web</span><span class="n">CDNW 2026 · slides</span></button>
+        <button class="att cited" data-a="art-3">
+          <span class="dot"></span><span class="g">web</span><span class="n">Why agents fail at tool use</span></button>
+        <button class="att key chall" data-a="repro-reka">
+          <span class="dot"></span><span class="g">rep</span><span class="n">reka · AMD 7900X3D</span>
+          <span class="d">does not reproduce — 20B leads by 3.6</span></button>
+        <button class="att key" data-a="paper-tanaka">
+          <span class="dot"></span><span class="g">pap</span><span class="n">Scaffolding ablation, 4 families</span>
+          <span class="d">Table 3 — same crossover, other rig</span></button>
+        <button class="att key" data-a="paper-svensson">
+          <span class="dot"></span><span class="g">pap</span><span class="n">On the limits of harness effects</span>
+          <span class="d">§4 — argues the effect is task-specific</span></button>
+        <button class="att" data-a="fig-crossover">
+          <span class="dot"></span><span class="g">fig</span><span class="n">Crossover curves, full grid</span></button>
+        <button class="att key" data-a="run-exp-d">
+          <span class="dot"></span><span class="g">run</span><span class="n">exp-d · enum vs string</span>
+          <span class="d">the mechanism, isolated</span></button>
+        <button class="att key" data-a="run-exp-e">
+          <span class="dot"></span><span class="g">run</span><span class="n">exp-e · cost and latency</span>
+          <span class="d">a stronger harness is not free</span></button>
+        <button class="att key" data-a="draft-v1">
+          <span class="dot"></span><span class="g">drf</span><span class="n">this paper, v1</span>
+          <span class="d">the claim before the chain benchmark</span></button>
+        <button class="att key" data-a="repro-nakamura">
+          <span class="dot"></span><span class="g">rep</span><span class="n">nakamura · RTX 4090</span>
+          <span class="d">reproduces closely</span></button>
+        <button class="att key" data-a="thread-hn">
+          <span class="dot"></span><span class="g">thr</span><span class="n">discussion on the erratum</span>
+          <span class="d">where the quantisation bug surfaced</span></button>
+
+        <div class="mgroup">attached, never cited <span>3</span></div>
+        <button class="att" data-a="art-1"><span class="g"></span><span class="n" style="grid-column:2/4">"Small models are catching up"</span></button>
+        <button class="att" data-a="art-2"><span class="g"></span><span class="n" style="grid-column:2/4">"The new scaffolding wars"</span></button>
+        <button class="att" data-a="art-4"><span class="g"></span><span class="n" style="grid-column:2/4">vendor benchmark post</span></button>
+      </nav>
+
+      <div class="material" id="material">
+        <div class="mbar"><span class="aim">source</span><span class="loc" id="mloc"></span></div>
+
+        <!-- ===== paper:mine ===== -->
+        <div class="mt" data-m="paper-mine">
+          <div class="page">
+            <div class="page-no">paper:mine · p. 11</div>
+            <h3>§4.2 Variance decomposition across the harness grid</h3>
+            <p class="dim">2 model sizes × 2 harness conditions, 3 seeds, 240 tasks each.</p>
+            <p>Holding the model fixed, the harness term dominates. In the naive condition the failure
+              mode is uniformly <span class="hit">schema adherence under multi-step chains</span> — the
+              model selects the correct tool and emits an ill-typed argument.</p>
+            <p>This is not a reasoning failure and does not scale with parameters: the 20B naive condition
+              trails the 8B instrumented condition by 14 points.</p>
+            <div class="cap">Table 4.2 — tool-call exact match</div>
+            <div class="tbl">
+              <div class="r"><span class="h"></span><span class="h">8B</span><span class="h">20B</span></div>
+              <div class="r"><span class="c"><i>naive</i></span>
+                <span class="c"><span class="bn" style="width:41px"></span><span class="datav">41.2%</span></span>
+                <span class="c"><span class="bn" style="width:74px"></span><span class="datav">74.3%</span></span></div>
+              <div class="r win"><span class="c"><i>instrumented</i></span>
+                <span class="c"><span class="bi" style="width:88px"></span><span class="datav">88.1%</span></span>
+                <span class="c"><span class="bi" style="width:91px"></span><span class="datav">90.8%</span></span></div>
+            </div>
+            <div class="tnote">the crossover this article reports</div>
+          </div>
+        </div>
+
+        <!-- ===== paper:tanaka ===== -->
+        <div class="mt" data-m="paper-tanaka" hidden>
+          <div class="page">
+            <div class="page-no">paper:tanaka-2025 · Table 3</div>
+            <h3>§5 Scaffolding ablation across four model families</h3>
+            <p class="dim">Peer reviewed. Independent harness, task set, and evaluation stack.</p>
+            <p>We observe a <span class="hit">crossover below 10B parameters</span>: scaffolding quality
+              predicts task completion better than parameter count. Above 14B the two explanations are
+              statistically indistinguishable in our setup.</p>
+            <p>We do not claim scaffolding quality is universally dominant. Our evaluation excludes
+              long-horizon tool chains, and we do not vary the typing of the tool schema.</p>
+            <div class="cap">Table 3 — task completion, weakest vs. best scaffolding</div>
+            <div class="tbl">
+              <div class="r"><span class="h"></span><span class="h">7B</span><span class="h">13B</span></div>
+              <div class="r"><span class="c"><i>weakest</i></span>
+                <span class="c"><span class="bn" style="width:46px"></span><span class="datav">46%</span></span>
+                <span class="c"><span class="bn" style="width:38px"></span><span class="datav">38%</span></span></div>
+              <div class="r win"><span class="c"><i>best</i></span>
+                <span class="c"><span class="bi" style="width:84px"></span><span class="datav">84%</span></span>
+                <span class="c"><span class="bi" style="width:79px"></span><span class="datav">79%</span></span></div>
+            </div>
+            <div class="tnote">the same crossover, on a rig the author had no hand in</div>
+          </div>
+        </div>
+
+        <!-- ===== paper:svensson ===== -->
+        <div class="mt" data-m="paper-svensson" hidden>
+          <div class="page">
+            <div class="page-no">paper:svensson-2026 · preprint, not peer reviewed</div>
+            <h3>§4 On the limits of harness effects in tool-use evaluation</h3>
+            <p class="dim">We read the harness-quality claim closely and think it overreaches.</p>
+            <p>Scaffolding interventions and task difficulty are <span class="hit">not independent</span> in
+              most published harnesses. A stronger scaffold typically lowers the measured difficulty of the
+              same task, so an apparent harness effect can be an artifact of the task suite rather than a
+              property of the model.</p>
+            <p>Further, "harness" is not a single variable. Tool-schema typing, retry policy, context
+              window management, and error-message verbosity are bundled together in most comparisons, and
+              we have no way to separate them from published results alone.</p>
+            <p>We do not dispute the crossovers. We dispute the attribution.</p>
+            <div class="cap">Table 2 — variance explained, four suites</div>
+            <div class="tbl">
+              <div class="r"><span class="h"></span><span class="h">our suite</span><span class="h">published</span></div>
+              <div class="r"><span class="c"><i>scaffold bundle</i></span>
+                <span class="c"><span class="bn" style="width:31px"></span><span class="datav">31%</span></span>
+                <span class="c"><span class="bw" style="width:82px"></span><span class="datav">82%</span></span></div>
+              <div class="r"><span class="c"><i>task suite</i></span>
+                <span class="c"><span class="bw" style="width:61px"></span><span class="datav">61%</span></span>
+                <span class="c"><span class="bn" style="width:24px"></span><span class="datav">24%</span></span></div>
+            </div>
+            <div class="tnote w">our suite is confounded; theirs may not be</div>
+          </div>
+        </div>
+
+        <!-- ===== spec ===== -->
+        <div class="mt" data-m="spec" hidden>
+          <div class="page">
+            <div class="page-no">draft-2026-09 · json-schema/tool-call</div>
+            <h3>The typing under test</h3>
+            <p class="dim">The instrumented harness returns a constrained schema. The naive harness
+              returns a free string. Nothing else about the tools differs.</p>
+          </div>
+          <div class="spec"><span class="c">// instrumented — constrained</span>
+{
+  <span class="k">"name"</span>: <span class="s">"get_weather"</span>,
+  <span class="k">"arguments"</span>: {
+    <span class="k">"type"</span>: <span class="s">"object"</span>,
+    <span class="k">"properties"</span>: {
+      <span class="k">"city"</span>: {
+        <span class="k">"type"</span>: <span class="s">"string"</span>,
+        <span class="k">"enum"</span>: [<span class="s">"Lisbon"</span>,<span class="s">"Porto"</span>,<span class="s">"Faro"</span>]
+      },
+      <span class="k">"units"</span>: { <span class="k">"type"</span>: <span class="s">"string"</span>,
+                   <span class="k">"enum"</span>: [<span class="s">"c"</span>,<span class="s">"f"</span>] }
+    },
+    <span class="k">"required"</span>: [<span class="s">"city"</span>,<span class="s">"units"</span>],
+    <span class="k">"additionalProperties"</span>: <span class="g">false</span>
+  }
+}
+
+<span class="c">// naive — untyped, the failure mode we are measuring</span>
+{
+  <span class="k">"description"</span>: <span class="s">"get the weather somewhere"</span>
+}
+<span class="c">// model returns: get_weather(city='Lisbon')</span>
+<span class="c">// third turn: argument drift, no recoverable state</span></div>
+        </div>
+
+        <!-- ===== figure ===== -->
+        <div class="mt" data-m="fig-crossover" hidden>
+          <div class="fig">
+            <p class="ft">Crossover curves, five model sizes, three seeds</p>
+            <svg viewBox="0 0 460 260" role="img" aria-label="tool-call accuracy against parameter count, two harness conditions">
+              <line x1="50" y1="206" x2="436" y2="206" stroke="currentColor" stroke-opacity=".2"/>
+              <line x1="50" y1="24" x2="50" y2="206" stroke="currentColor" stroke-opacity=".2"/>
+              <text x="44" y="210" text-anchor="end" font-size="9" fill="currentColor" fill-opacity=".45">0%</text>
+              <text x="44" y="118" text-anchor="end" font-size="9" fill="currentColor" fill-opacity=".45">50%</text>
+              <text x="44" y="28" text-anchor="end" font-size="9" fill="currentColor" fill-opacity=".45">100%</text>
+              <text x="243" y="236" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity=".45">parameters (B)</text>
+              <polyline points="86,143 188,95 290,66 392,56 430,54" fill="none" stroke="var(--ink-3)"
+                        stroke-width="1.8" stroke-dasharray="4 4"/>
+              <polyline points="86,187 188,54 290,41 392,37 430,35" fill="none" stroke="var(--live)" stroke-width="2.1"/>
+              <circle cx="86" cy="143" r="2.6" fill="var(--ink-3)"/><circle cx="188" cy="95" r="2.6" fill="var(--ink-3)"/>
+              <circle cx="290" cy="66" r="2.6" fill="var(--ink-3)"/><circle cx="392" cy="56" r="2.6" fill="var(--ink-3)"/>
+              <circle cx="430" cy="54" r="2.6" fill="var(--ink-3)"/>
+              <circle cx="86" cy="187" r="2.6" fill="var(--live)"/><circle cx="188" cy="54" r="2.6" fill="var(--live)"/>
+              <circle cx="290" cy="41" r="2.6" fill="var(--live)"/><circle cx="392" cy="37" r="2.6" fill="var(--live)"/>
+              <circle cx="430" cy="35" r="2.6" fill="var(--live)"/>
+              <line x1="188" y1="54" x2="188" y2="143" stroke="var(--warn)" stroke-width="1" stroke-dasharray="2 2"/>
+              <text x="194" y="102" font-size="9.5" fill="var(--warn)">+46.9</text>
+              <text x="392" y="26" font-size="9.5" fill="var(--live)">instrumented</text>
+              <text x="392" y="44" font-size="9.5" fill="var(--ink-3)">naive</text>
+              <text x="86" y="252" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity=".45">8</text>
+              <text x="188" y="252" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity=".45">14</text>
+              <text x="290" y="252" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity=".45">20</text>
+              <text x="392" y="252" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity=".45">32</text>
+            </svg>
+            <div class="fl">Figure 2 — the gap closes by 14B and is gone by 32B</div>
+            <p class="cap-t">The naive curve flattens above 14B because the remaining failures are no
+              longer format failures. The instrumented curve flattens for the same reason. The two cross
+              at 14B; beyond it the gap is under three points. At 32B and 70B this paper is telling you
+              nothing you could not get by buying a bigger model.</p>
+          </div>
+        </div>
+
+        <!-- ===== dataset ===== -->
+        <div class="mt" data-m="data-tasksuite" hidden>
+          <div class="ds">
+            <div class="dsr hd"><div>task_id</div><div>turns</div><div>tools</div><div>naive</div><div>instrumented</div></div>
+            <div class="dsr"><div>weather-014</div><div>3</div><div>1</div><div class="cellv"><span class="dsbar" style="width:31px"></span>31%</div><div class="cellv"><span class="dsbar" style="width:88px"></span>88%</div></div>
+            <div class="dsr"><div>weather-071</div><div>3</div><div>1</div><div class="cellv"><span class="dsbar" style="width:22px"></span>22%</div><div class="cellv"><span class="dsbar" style="width:81px"></span>81%</div></div>
+            <div class="dsr"><div>booking-208</div><div>4</div><div>3</div><div class="cellv"><span class="dsbar" style="width:9px"></span>9%</div><div class="cellv"><span class="dsbar" style="width:64px"></span>64%</div></div>
+            <div class="dsr"><div>booking-233</div><div>4</div><div>3</div><div class="cellv"><span class="dsbar" style="width:4px"></span>4%</div><div class="cellv"><span class="dsbar" style="width:58px"></span>58%</div></div>
+            <div class="dsr"><div>sql-091</div><div>2</div><div>1</div><div class="cellv"><span class="dsbar" style="width:67px"></span>67%</div><div class="cellv"><span class="dsbar" style="width:91px"></span>91%</div></div>
+            <div class="dsr"><div>sql-140</div><div>2</div><div>1</div><div class="cellv"><span class="dsbar" style="width:71px"></span>71%</div><div class="cellv"><span class="dsbar" style="width:94px"></span>94%</div></div>
+            <div class="dsr"><div>mail-042</div><div>5</div><div>2</div><div class="cellv"><span class="dsbar" style="width:2px"></span>2%</div><div class="cellv"><span class="dsbar" style="width:47px"></span>47%</div></div>
+            <div class="dsr"><div>mail-077</div><div>5</div><div>2</div><div class="cellv"><span class="dsbar" style="width:1px"></span>1%</div><div class="cellv"><span class="dsbar" style="width:41px"></span>41%</div></div>
+          </div>
+          <div class="page" style="padding-top:6px">
+            <div class="cap">tasksuite-v4 · 240 rows, 8 categories</div>
+            <p class="dim">The naive column collapses hardest exactly where turn count rises — which is why
+              the chain result in exp-d is not a rounding artifact. The two-turn SQL tasks show a modest
+              gap; the five-turn mail tasks show almost none.</p>
+          </div>
+        </div>
+
+        <!-- ===== run:exp-d ===== -->
+        <div class="mt" data-m="run-exp-d" hidden>
+          <div class="run">
+            <div class="runh">exp-d.ipynb · 3-turn tool chain · 3 seeds</div>
+            <div class="runb"><span class="c"># naive harness, string-typed tool surface</span>
+<span class="k">for</span> turn <span class="k">in</span> <span class="k">range</span>(3):
+    r = call(tool=spec.<span class="g">string</span>)
+    <span class="c"># turn 3: argument drift, no recoverable state</span>
+<span class="k">assert</span> r.typed   <span class="c"># fails 2/3 seeds</span>
+
+<span class="c"># same chain, enum-typed tool surface</span>
+r = call(tool=spec.<span class="s">enum</span>)
+<span class="k">assert</span> r.typed   <span class="c"># passes 3/3 seeds</span></div>
+          </div>
+          <div class="page" style="padding-top:6px">
+            <div class="cap">chain completion, everything else held fixed</div>
+            <div class="tbl">
+              <div class="r"><span class="c"><i>string</i></span><span class="c" style="grid-column:2/4">38.1%</span></div>
+              <div class="r win"><span class="c"><i>enum</i></span><span class="c" style="grid-column:2/4">81.7%</span></div>
+            </div>
+            <div class="tnote">+43.6 points — the mechanism, isolated</div>
+          </div>
+        </div>
+
+        <!-- ===== run:exp-e ===== -->
+        <div class="mt" data-m="run-exp-e" hidden>
+          <div class="page">
+            <div class="page-no">exp-e.ipynb · cost of the instrumented harness</div>
+            <h3>What the stronger harness costs</h3>
+            <p class="dim">If the harness is doing work, it is spending tokens doing it. Same 240 tasks,
+              same two models.</p>
+            <p>The instrumented harness adds a schema preamble per turn. Over three-turn chains this is
+              <span class="hit">not free</span>, and for the 20B model it is large enough to narrow most
+              of its advantage.</p>
+          </div>
+          <div class="run"><div class="runh">exp-e · measured, 3 seeds</div><div class="runb">turns              8B naive    8B instr    20B naive   20B instr
+<span class="c">-----------------------------------------------</span>
+prompt tokens        <span class="g">1,204</span>      <span class="g">2,880</span>      <span class="g">1,204</span>      2,880
+completion tokens      <span class="s">86</span>         <span class="s">94</span>        <span class="s">141</span>        148
+wall clock (s)        <span class="g">4.11</span>      <span class="s">7.94</span>        <span class="g">9.02</span>       11.30
+exact match           <span class="g">41.2%</span>      <span class="s">88.1%</span>       <span class="g">74.3%</span>       <span class="s">90.8%</span>
+<span class="c">-----------------------------------------------</span>
+cost / 1k tasks   <span class="g">$4.11</span>      <span class="g">$11.72</span>      <span class="g">$12.84</span>      <span class="g">$19.30</span></div></div>
+          <div class="page" style="padding-top:6px">
+            <div class="tnote">accuracy is up 47 points; spend is up 165%</div>
+          </div>
+        </div>
+
+        <!-- ===== repro:reka ===== -->
+        <div class="mt" data-m="repro-reka" hidden>
+          <div class="logwrap">
+            <div class="logh">reka-2026-08-06.log · llama-server · AMD 7900X3D</div>
+            <div class="logb">model    = qwen2.5-8b-instruct-q4_k_m
+baseline = qwen2.5-20b-instruct-q4_k_m
+harness  = myelin 0.9 (same as yours)
+
+seed 1  8b <span class="s">79%</span>   20b <span class="g">82%</span>
+seed 2  8b <span class="s">77%</span>   20b <span class="g">84%</span>
+seed 3  8b <span class="s">80%</span>   20b <span class="g">81%</span>
+<span class="g">GAP = 20b leads by ~3.6 points. Claim does not reproduce.</span>
+<span class="c">...</span>
+<span class="c">note: your 20B baseline looks like a different quant</span>
+<span class="c">      than your 8B. not sure that is intended.</span></div>
+            <div class="logv">Flagged by reka: the 20B baseline appears to have been served at a different
+              quantisation than the 8B. Unresolved as of this draft.</div>
+          </div>
+        </div>
+
+        <!-- ===== repro:nakamura ===== -->
+        <div class="mt" data-m="repro-nakamura" hidden>
+          <div class="logwrap">
+            <div class="logh">nakamura-2026-08-19.log · llama-server · RTX 4090</div>
+            <div class="logb">model    = qwen2.5-8b-instruct-q4_k_m
+baseline = qwen2.5-20b-instruct-q4_k_m
+harness  = myelin 0.9 (same as yours)
+tasks    = tasksuite-v4 (identical)
+
+seed 1  8b <span class="s">87%</span>   20b <span class="s">89%</span>
+seed 2  8b <span class="s">89%</span>   20b <span class="s">90%</span>
+seed 3  8b <span class="s">86%</span>   20b <span class="s">91%</span>
+<span class="s">Crossover holds. 8B + instrumented within 2.4 of 20B + naive.</span></div>
+            <div class="logv ok">Reproduces closely. Same task file, same quantisation on both sides,
+              unlike the original run.</div>
+          </div>
+        </div>
+
+        <!-- ===== thread ===== -->
+        <div class="mt" data-m="thread-hn" hidden>
+          <div class="thr">
+            <div class="post">
+              <div class="who"><b>kv_quant_nerd</b> · 3 days ago</div>
+              <p>Took the 41/74 numbers and re-ran them. Your 20B baseline is q4_k_m but your 8B is q4_0.
+                That is not a like-for-like comparison and it accounts for most of the gap.</p>
+              <div class="op"><span class="vote">▲ 214</span> · linked from reka's log</div>
+            </div>
+            <div class="post">
+              <div class="who"><b>author</b> · 2 days ago</div>
+              <p>That is fair and it is my error. Both sides should be q4_k_m. I will correct Table 4.2 and
+                reissue the 20B cell. It does not change the direction of the result but it does change
+                the margin by about six points.</p>
+              <div class="op">accepted · erratum raised</div>
+            </div>
+            <div class="post">
+              <div class="who"><b>skeptical_sam</b> · 1 day ago</div>
+              <p>Worth reading Svensson §4 before you decide the effect is real. Their variance decomposition
+                suggests the suite may be doing the work, not the scaffold.</p>
+              <div class="op"><span class="vote">▲ 88</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== draft:v1 ===== -->
+        <div class="mt" data-m="draft-v1" hidden>
+          <div class="page">
+            <div class="page-no">draft v1 · 9 Aug · superseded</div>
+            <h3>The abstract as it was written before the chain benchmark</h3>
+          </div>
+          <div class="diffwrap">
+            <div class="diffh">v1 → v3</div>
+            <div class="diff"><span class="del">Harness quality is the main lever in tool-call accuracy.</span>
+<span class="add">Harness quality, not parameter count, is the dominant lever in tool-call</span>
+<span class="add">accuracy — an 8B model with a strong harness beats a 20B model with a naive one.</span>
+<span class="c"> </span>
+<span class="del">We find consistent gains from schema validation.</span>
+<span class="add">The gain is concentrated in chains of three or more turns, and we can</span>
+<span class="add">isolate it: replacing a free string with an enum recovers 43.6 points.</span></div>
+          </div>
+          <div class="page" style="padding-top:6px">
+            <p class="dim">v1 claimed the effect was general. The three-turn chain benchmark on 9 August
+              showed the effect is concentrated in long chains and near-zero for single-turn tasks. v1 was
+              kept rather than deleted; this draft supersedes it.</p>
+          </div>
+        </div>
+
+        <!-- ===== erratum ===== -->
+        <div class="mt" data-m="erratum" hidden>
+          <div class="page">
+            <div class="page-no">erratum · raised 12 Aug · unresolved</div>
+            <h3>Table 4.2, 20B naive cell</h3>
+            <p>The 20B baseline was served at <span class="hit-w">q4_k_m</span> while the 8B was served at
+              <span class="hit-w">q4_0</span>. The comparison is not like-for-like.</p>
+            <p>A like-for-like rerun on both sides moves the 20B naive cell from 74.3% to approximately
+              80.1%, narrowing the reported margin from 14 points to roughly 8.</p>
+            <div class="tnote w">the direction of the result is unchanged; the magnitude is wrong</div>
+          </div>
+          <div class="page" style="padding-top:0">
+            <p class="dim">This is the most likely explanation for reka's AMD result, which did not
+              reproduce the crossover. It is not confirmed: nakamura's rerun on matched quantisation
+              reproduced closely, which is consistent with but does not prove this account.</p>
+          </div>
+        </div>
+
+        <!-- ===== talk ===== -->
+        <div class="mt" data-m="talk-cdnw" hidden>
+          <div class="slides">
+            <div class="sl"><div class="n">slide 1</div><h5>Your model is not your agent</h5></div>
+            <div class="sl"><div class="n">slide 7</div><h5>41 → 88 on the same 8B weights</h5></div>
+            <div class="sl"><div class="n">slide 12</div><h5>The gap closes by 14B. That's the honest limit.</h5></div>
+            <div class="sl"><div class="n">slide 19</div><h5>It's also 165% more tokens. Pick your poison.</h5></div>
+          </div>
+          <div class="page" style="padding-top:6px">
+            <p class="dim">Talk given 3 March 2026, two months before this draft. Reported as background:
+              it states the same crossover but attributes it to a different mechanism, and the
+              attribution is not supported by anything in this paper.</p>
+          </div>
+        </div>
+
+        <!-- ===== background articles ===== -->
+        <div class="mt" data-m="art-1" hidden>
+          <div class="webbar">themodelweekly.com</div>
+          <div class="webin"><div class="src">12 Jan 2026</div>
+            <h3>Small models are catching up</h3>
+            <p>Vendor evaluations continue to show narrowing gaps between 7B-class and 30B-class models
+              on tool-use benchmarks.</p>
+            <p>No scaffold variable is isolated. The article does not mention harness structure at all.</p>
+            <div class="notice">Read, not cited. Establishes that the direction of travel is not in
+              dispute; says nothing about cause.</div></div>
+        </div>
+        <div class="mt" data-m="art-2" hidden>
+          <div class="webbar">themodelweekly.com</div>
+          <div class="webin"><div class="src">3 Feb 2026</div>
+            <h3>The new scaffolding wars</h3>
+            <p>Vendors are converging on the same observation from different directions: the gap between
+              a strong and a weak agent harness has widened faster than the gap between model
+              generations.</p>
+            <p>None of the vendors quoted isolate the harness as a variable. Each reports its own harness
+              as a fixed condition.</p>
+            <div class="notice">Read, not cited. States the direction of travel; cannot support or refute
+              the claim.</div></div>
+        </div>
+        <div class="mt" data-m="art-3" hidden>
+          <div class="webbar">agentweekly.io</div>
+          <div class="webin"><div class="src">28 Feb 2026</div>
+            <h3>Why agents fail at tool use</h3>
+            <p>A survey of production agent failures. Attribute errors dominate the taxonomy, followed by
+              retrieval misses and then by genuine reasoning errors — the same ordering this paper finds
+              in a controlled setting.</p>
+            <p>The survey has no scaffold manipulation and no parameter control.</p>
+            <div class="notice">Cited in passing for the ordering only. Its taxonomy is consistent with
+              this paper's; its data cannot establish it.</div></div>
+        </div>
+        <div class="mt" data-m="art-4" hidden>
+          <div class="webbar">vendor.example / benchmark</div>
+          <div class="webin"><div class="src">undated</div>
+            <h3>Our agent outperforms models 4× our size</h3>
+            <p>Marketing claim. No task suite published, no scaffold description, no seeds. The
+              comparison is against a competitor's published numbers rather than a rerun.</p>
+            <div class="notice">Not cited and not relied on. Listed because it is the claim most likely
+              to be confused with this paper's, and it is not evidence.</div></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="grip" id="grip"></div>
+
+    <section id="paneR">
+      <!-- ============ THE ARTICLE. ORDINARY PROSE. NO FIGURES, NO TABLES. ============ -->
+      <div class="doc" id="doc">
+        <h1>Harness quality, not scale, dominates tool-call accuracy</h1>
+        <p class="byline"><b>author</b> · draft v3, unreviewed · 14 Aug · 17 attached sources</p>
+
+        <nav class="toc">
+          <h4>Contents</h4>
+          <ol>
+            <li><a href="#abstract">Abstract</a></li>
+            <li><a href="#intro">Introduction</a></li>
+            <li><a href="#related">Related work</a></li>
+            <li><a href="#method">Method</a></li>
+            <li><a href="#results">Results</a></li>
+            <li><a href="#mechanism">Where the effect comes from</a></li>
+            <li><a href="#cost">What it costs</a></li>
+            <li><a href="#threats">Threats to validity</a></li>
+            <li><a href="#repros">Reproductions</a></li>
+            <li><a href="#conclusion">Conclusion</a></li>
+          </ol>
+        </nav>
+
+        <h2 id="abstract">Abstract</h2>
+        <p class="abstract">Tool-call accuracy is usually treated as a property of a model. We find that,
+          below roughly 14B parameters, it is substantially a property of the harness the model runs
+          inside. Across a controlled grid of five model sizes and two harness conditions, an 8B model in
+          an instrumented harness outperforms a 20B model in a naive one. We isolate the mechanism to
+          tool-schema typing, quantify the cost of the stronger harness, and report two independent
+          reproductions — one of which fails to reproduce the result, for a reason we believe we have
+          identified but have not confirmed.</p>
+
+        <h2 id="intro">Introduction</h2>
+        <p>There is a strong intuition in applied work that a bigger model is a better agent. It is
+          probably right. It is also, in the range where most tool-using systems actually run, not the
+          dominant variable.</p>
+        <p>We built a 240-task suite of multi-turn tool calls, stratified by turn count and tool
+          count<a class="cite" data-a="data-tasksuite">tasksuite-v4</a>, and ran five model sizes from 8B
+          to 70B through two harness conditions. The <strong>instrumented</strong> harness constrains tool
+          arguments to a typed schema<a class="cite" data-a="spec">draft-2026-09</a>, re-asks once on a
+          validation failure, and keeps an explicit turn state. The <strong>naive</strong> harness exposes
+          the same tools as free strings and relies on the model to stay in format.</p>
+        <p>The headline is a crossover. At 8B, the instrumented harness turns a 41.2% model into an 88.1%
+          model. At 20B, the same harness moves 74.3% to 90.8%. The 8B instrumented model therefore beats
+          the 20B naive model by fourteen points<a class="cite" data-a="paper-mine">Table 4.2</a> — and by
+          about eight once our own quantisation error in that table is
+          corrected<a class="cite" data-a="erratum">erratum</a>.</p>
+        <p>This is not a new observation in direction. Vendors have been saying some version of it for
+          two years<a class="cite" data-a="talk-cdnw">CDNW slides</a>, and an industry survey reports the
+          same ordering of failure modes<a class="cite" data-a="art-3">agentweekly</a> without isolating
+          the cause. What is new here is the controlled manipulation, the isolation of a mechanism, and
+          the willingness to publish a reproduction that does not
+          reproduce<a class="cite" data-a="repro-reka">reka's log</a>.</p>
+
+        <h2 id="related">Related work</h2>
+        <p>Tanaka et al. report a crossover below 10B parameters across four model families, with
+          scaffolding quality predicting completion better than parameter
+          count<a class="cite" data-a="paper-tanaka">Table 3</a>. Their rig is independent of ours — a
+          different harness, a different task suite, a different evaluation stack — and their crossover
+          sits in the same place. That convergence is the strongest evidence in this paper, and it is
+          evidence we did not produce.</p>
+        <p>Svensson argues the whole framing is confounded: that scaffold interventions and task
+          difficulty are not independent, and that "harness" bundles at least four variables that published
+          comparisons cannot separate<a class="cite" data-a="paper-svensson">§4</a>. We think this
+          objection is largely correct and we have tried to answer it by varying one component at a time
+          rather than swapping a whole harness. It is not fully answered.</p>
+
+        <h2 id="method">Method</h2>
+        <h3>Task suite</h3>
+        <p>240 tasks across eight categories, stratified by turn count (2 to 5) and tool count (1 to 3).
+          Exact-match scoring on the full emitted call, not on tool selection alone — a call with the right
+          tool and a malformed argument scores zero. Three seeds per cell. The suite itself is
+          attached<a class="cite" data-a="data-tasksuite">tasksuite-v4</a>.</p>
+        <h3>Models and serving</h3>
+        <p>Five sizes from 8B to 70B, all Qwen2.5 instruct, served through llama.cpp with matched
+          quantisation. <em>This was not true of the original run and is the subject of an open
+          erratum</em>; the original 20B baseline was q4_k_m and the 8B was q4_0.</p>
+        <h3>Harness conditions</h3>
+        <p>Both conditions expose identical tool descriptions. They differ in three ways: argument typing
+          (enum vs. free string), retry policy (one re-ask vs. none), and turn state (explicit vs.
+          implicit). We vary them separately rather than swapping the whole harness.</p>
+
+        <h2 id="results">Results</h2>
+        <p>The naive condition rises from 41.2% at 8B to 73.8% at 14B, and then flattens — 74.3% at 20B,
+          81.6% at 32B, 83.9% at 70B. The instrumented condition rises from 88.1% to 96.0% across the
+          same range and flattens for the same reason: past a certain point the remaining failures are no
+          longer format failures.</p>
+        <p>The gap is 46.9 points at 8B and 12.1 at 70B. The two curves cross at 14B. The complete grid is
+          attached as a figure<a class="cite" data-a="fig-crossover">Figure 2</a> and the per-task
+          breakdown as a dataset<a class="cite" data-a="data-tasksuite">tasksuite-v4</a>.</p>
+        <p>We have included the 32B and 70B cells specifically because they are where the claim stops
+          mattering. If you are running a 32B model, this paper is not for you, and we would rather say so
+          here than let you infer it from a headline number.</p>
+
+        <h2 id="mechanism">Where the effect comes from</h2>
+        <p>Svensson's objection is that "harness" bundles several variables. We agree, so we varied them
+          separately. Turning the harness from naive to instrumented in a single step is uninformative.
+          Turning on argument typing alone, with retry policy and turn state fixed, recovers most of the
+          effect<a class="cite" data-a="run-exp-d">exp-d</a>: string-typed tool surfaces complete 38.1% of
+          three-turn chains, and enum-typed surfaces complete 81.7%.</p>
+        <p>The dominant naive-harness failure is not choosing the wrong tool. It is choosing the right tool
+          and emitting an argument the runtime cannot dispatch — and then failing to recover on the next
+          turn, because there is no turn state to recover with. This is why the naive column collapses
+          fastest exactly where turn count rises<a class="cite" data-a="data-tasksuite">per-task
+          breakdown</a>. A two-turn task shows a modest gap; a five-turn task shows almost none.</p>
+        <p>We should be clear about what this does not establish. It establishes that typing is a large
+          component of the observed harness effect on <em>this</em> suite. It does not establish that
+          typing is the whole of it.</p>
+
+        <h2 id="cost">What it costs</h2>
+        <p>A harness is not free, and any honest version of this claim has to say what it
+          buys<a class="cite" data-a="run-exp-e">exp-e</a>. Accuracy on the 8B rises 41 points; spend
+          rises about 165%, from $4.11 to $11.72 per thousand tasks. The 20B model gets both more accurate
+          and more expensive — the stronger harness narrows its cost disadvantage by only about a third.
+          Wall clock roughly doubles at 8B, so if your binding constraint is latency this is a different
+          trade entirely.</p>
+        <p>So the honest version of the headline is not "use a smaller model." It is: below 14B, spend on
+          the harness before you spend on parameters, and know that you are buying it with tokens.</p>
+
+        <h2 id="threats">Threats to validity</h2>
+        <p><strong>Our own quantisation error.</strong> The published Table 4.2 compared a q4_0 8B against
+          a q4_k_m 20B<a class="cite" data-a="erratum">erratum</a>. A matched rerun moves the 20B naive
+          cell to about 80.1%, cutting the headline margin from fourteen points to roughly eight. The
+          direction survives. The number in the abstract was wrong until this draft.</p>
+        <p><strong>We previously overclaimed.</strong> The first version of this paper said harness quality
+          was the main lever, generally. A three-turn chain benchmark on 9 August showed the effect is
+          concentrated in long chains and near-zero for single-turn tasks. That draft was superseded
+          rather than deleted<a class="cite" data-a="draft-v1">v1</a>.</p>
+        <p><strong>Confounding with task suite.</strong> Svensson's central point<a class="cite"
+          data-a="paper-svensson">§4</a> stands: a scaffold that lowers the difficulty of a task will look
+          like a capability improvement. Our defence is that typing is varied against a fixed task suite
+          and fixed tool descriptions, but we have not run the orthogonal suite this objection calls
+          for.</p>
+        <p><strong>One suite, one model family.</strong> All five sizes are Qwen2.5 instruct. Tanaka's
+          four families are a real check on the crossover's location<a class="cite"
+          data-a="paper-tanaka">Table 3</a>, but the effect sizes here are single-family.</p>
+        <p><strong>No claim about reasoning.</strong> The failures we measure are format and recovery
+          failures. We find no evidence that a stronger harness improves reasoning, and the 70B cell
+          suggests it does not.</p>
+
+        <h2 id="repros">Reproductions</h2>
+        <p>Two independent attempts, opposite outcomes.</p>
+        <p>Reka re-ran the grid on an AMD 7900X3D with the same harness version and a matched task file,
+          and found the 8B <em>behind</em> by about 3.6 points rather than ahead<a class="cite"
+          data-a="repro-reka">her log</a>. She flagged that our two baseline cells appeared to use
+          different quantisations. That is correct and it is our error.</p>
+        <p>Nakamura re-ran on an RTX 4090 with matched quantisation on both sides and reproduced the
+          crossover closely, with the 8B instrumented model within 2.4 points of the 20B naive
+          model<a class="cite" data-a="repro-nakamura">his log</a>. The quantisation explanation is
+          consistent with this pair of outcomes but does not prove it — a hardware-specific explanation
+          would fit equally well.</p>
+        <p>Where the mismatch surfaced, and where the erratum was raised, is
+          public<a class="cite" data-a="thread-hn">the thread</a>. We have left the failing reproduction
+          attached to this paper rather than withdrawing it.</p>
+
+        <h2 id="conclusion">Conclusion</h2>
+        <p>Below about 14B parameters, tool-call accuracy is more a property of the harness than of the
+          model. The effect is large enough to invert the usual size heuristic, isolated to argument
+          typing, and reproduced independently by a group with no stake in it. It is also, we now know,
+          overstated by our own error in the headline table, and contested on confounding grounds we have
+          not fully answered.</p>
+        <p>The claim survives all three of those qualifications. That is the state of it, and the sources
+          above are attached so a reader can check any part of that sentence rather than take it.</p>
+
+        <h3>Sources</h3>
+        <ol class="refs">
+          <li><b>01</b> Harness overhead in tool calling — Table 4.2, §4.2.</li>
+          <li><b>02</b> Scaffolding ablation across four model families — Table 3, §5.</li>
+          <li><b>03</b> On the limits of harness effects in tool-use evaluation — §4.</li>
+          <li><b>04</b> json-schema/tool-call, draft-2026-09.</li>
+          <li><b>05</b> tasksuite-v4 — 240 tasks; Figure 2 — crossover curves.</li>
+          <li><b>06</b> exp-d, exp-e — notebook runs.</li>
+          <li><b>07</b> reka-2026-08-06.log; nakamura-2026-08-19.log.</li>
+          <li><b>08</b> Erratum on Table 4.2, raised 12 Aug; this paper, draft v1.</li>
+          <li><b>09</b> Background reporting, read and not relied on.</li>
+        </ol>
+      </div>
+
+      <!-- ============ AND HERE IS THE WHOLE AUTHORING BURDEN ============ -->
+      <div class="raw" id="raw">
+        <h1>The file on disk</h1>
+        <p class="note">This is the entire authored artifact — roughly 4,000 words of ordinary Markdown
+          with ordinary links in it. Every number, quote, figure, table, log line, and argument attributed
+          to anyone else is pulled from the attachment at render time. There is no embedded figure in the
+          article body; the figure <em>is</em> an attachment, and the sentence that needs it links to it.
+          There are no relation verbs here, no gloss sentences, no lattice, and no attachment state.</p>
+<pre><span class="c"># Harness quality, not scale, dominates tool-call accuracy</span>
+
+Across a controlled grid, an **8B model on our instrumented harness reached
+88% tool-call exact match**. A **20B model on a naive harness reached 74%**.
+The smaller model won by fourteen points. [<span class="l">Table 4.2</span>](myelin://paper:mine#4.2)
+
+Svensson argues the whole framing is confounded: that scaffold interventions
+and task difficulty are not independent, and that "harness" bundles at least
+four variables. [<span class="l">§4</span>](myelin://paper:svensson#4) We think
+this objection is largely correct and we have tried to answer it by varying one
+component at a time. It is not fully answered.
+
+The complete grid is attached as a figure.
+[<span class="l">Figure 2</span>](myelin://figure:crossover) The per-task
+breakdown is attached as a dataset.
+[<span class="l">tasksuite-v4</span>](myelin://data:tasksuite-v4)
+
+A harness is not free. Accuracy on the 8B rises 41 points; spend rises about
+165%. [<span class="l">exp-e</span>](myelin://run:exp-e)
+
+The published table compared a q4_0 8B against a q4_k_m 20B.
+[<span class="l">erratum</span>](myelin://erratum:open)
+
+Reka re-ran on AMD and found the 8B behind by 3.6 points.
+[<span class="l">her log</span>](myelin://contrib:reka#2026-08-06)
+Nakamura re-ran with matched quantisation and reproduced closely.
+[<span class="l">his log</span>](myelin://contrib:nakamura#2026-08-19)
+
+<span class="c"># … ~4,000 words, 24 links, no figure, no table, no structure declared.</span></pre>
+        <p class="after"><b>Everything Myelin knows is derived from those 24 links.</b> Which attachment a
+          sentence leans on; that two of them support and one challenges; that the erratum and reka's log
+          are the same kind of object; that this paper's own v1 is superseded by v3; that the four articles
+          are attached but cited at most once each and are therefore background; and which of them you are
+          reading right now, which is what the left pane is showing. None of that is written down. All of it
+          falls out of the links, the files they point at, and your scroll position.</p>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="demo">
+  <span class="lab">demo</span>
+  <button id="t-raw" aria-pressed="false">the file on disk</button>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const paneR = $('#paneR'), doc = $('#doc'), mloc = $('#mloc'), material = $('#material');
+
+const LOC = {
+  'paper-mine':'<b>paper:mine</b> · §4.2 Variance decomposition · p. 11',
+  'paper-tanaka':'<b>paper:tanaka-2025</b> · Table 3 Scaffolding ablation',
+  'paper-svensson':'<b>paper:svensson-2026</b> · §4 On the limits of harness effects',
+  'spec':'<b>draft-2026-09</b> · json-schema/tool-call',
+  'fig-crossover':'<b>figure:cross-over-curves</b> · five model sizes · three seeds',
+  'data-tasksuite':'<b>data:tasksuite-v4</b> · 240 tasks · 8 categories',
+  'run-exp-d':'<b>exp-d.ipynb</b> · enum vs string · 3 seeds',
+  'run-exp-e':'<b>exp-e.ipynb</b> · cost and latency',
+  'repro-reka':'<b>reka-2026-08-06.log</b> · AMD 7900X3D · does not reproduce',
+  'repro-nakamura':'<b>nakamura-2026-08-19.log</b> · RTX 4090 · reproduces',
+  'thread-hn':'<b>discussion</b> · where the quantisation bug surfaced',
+  'draft-v1':'<b>this paper, v1</b> · 9 Aug · superseded',
+  'erratum':'<b>erratum</b> · Table 4.2 quantisation · open',
+  'talk-cdnw':'<b>CDNW 2026</b> · slides · background',
+  'art-1':'<b>themodelweekly</b> · small models are catching up',
+  'art-2':'<b>themodelweekly</b> · the new scaffolding wars',
+  'art-3':'<b>agentweekly</b> · why agents fail at tool use',
+  'art-4':'<b>vendor.example</b> · unattributed benchmark claim'
+};
+
+const atts  = [...document.querySelectorAll('.att')];
+const cites = [...doc.querySelectorAll('.cite')];
+
+let cur = null;        // what is materialised in the pane
+let scrollFirst = null; // first citation in document order that is in the viewport
+let pinned = null;      // an explicit click beats scroll
+let hovered = null;     // a hover beats scroll, loses to a pin
+
+function materialise(id, why){
+  if (!id || id === cur) return;
+  cur = id;
+  document.querySelectorAll('.mt').forEach(el => el.hidden = el.dataset.m !== id);
+  atts.forEach(b => b.classList.toggle('on', b.dataset.a === id));
+  cites.forEach(c => c.classList.toggle('on', c.dataset.a === id));
+  mloc.innerHTML = LOC[id];
+  mloc.classList.remove('tick'); void mloc.offsetWidth; mloc.classList.add('tick');
+  material.scrollTop = 0;
+  if (why === 'scroll') document.querySelector('.mf-live').classList.remove('idle');
+}
+
+function apply(){
+  materialise(pinned || hovered || scrollFirst, pinned ? 'pin' : hovered ? 'hover' : 'scroll');
+}
+
+/* ---------- which attachments are in view right now ---------- */
+function sync(){
+  if (doc.classList.contains('off')) return;
+  const r = paneR.getBoundingClientRect();
+  const top = r.top + 12, bottom = r.bottom - 12;
+  const inView = new Set();
+  let first = null;
+  for (const c of cites){                       // document order, so the first hit is the first
+    const b = c.getBoundingClientRect();
+    if (b.bottom > top && b.top < bottom){
+      inView.add(c.dataset.a);
+      if (!first) first = c.dataset.a;
+    }
+  }
+  scrollFirst = first;
+  atts.forEach(b => b.classList.toggle('inview', inView.has(b.dataset.a)));
+
+  const live = document.querySelector('.mf-live');
+  if (inView.size){
+    live.classList.remove('idle');
+    live.querySelector('span:last-child').innerHTML =
+      'reading — <b>' + inView.size + '</b> in view, showing <b>' + (first||'').split('-')[0] + '</b>';
+  } else {
+    live.classList.add('idle');
+    live.querySelector('span:last-child').textContent = 'scrolling — none in view';
+  }
+  apply();
+}
+
+let ticking = false;
+paneR.addEventListener('scroll', () => {
+  if (ticking) return;
+  ticking = true;
+  requestAnimationFrame(() => { ticking = false; sync(); });
+}, { passive:true });
+window.addEventListener('resize', sync);
+
+/* ---------- pointer overrides ---------- */
+atts.forEach(b => {
+  b.addEventListener('mouseenter', () => { hovered = b.dataset.a; apply(); });
+  b.addEventListener('mouseleave', () => { hovered = null; apply(); });
+  b.addEventListener('click', () => {
+    const id = b.dataset.a;
+    if (pinned === id){ pinned = null; b.classList.remove('pinned'); apply(); return; }
+    pinned = id;
+    atts.forEach(x => x.classList.remove('pinned'));
+    b.classList.add('pinned');
+    apply();
+    const first = cites.find(c => c.dataset.a === id);
+    if (first){
+      first.scrollIntoView({ block:'center', behavior:'smooth' });
+      first.classList.add('found');
+      setTimeout(() => first.classList.remove('found'), 1800);
+    }
+  });
+});
+
+cites.forEach(c => {
+  c.addEventListener('mouseenter', () => { hovered = c.dataset.a; apply(); });
+  c.addEventListener('mouseleave', () => { hovered = null; apply(); });
+  c.addEventListener('click', e => { e.preventDefault(); materialise(c.dataset.a, 'hover'); });
+});
+
+/* ---------- table of contents scrolls the pane, not the window ---------- */
+document.querySelectorAll('.toc a').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const t = document.querySelector(a.getAttribute('href'));
+    if (t) t.scrollIntoView({ block:'start', behavior:'smooth' });
+  });
+});
+
+/* ---------- resizer, as shipped ---------- */
+const split = $('#split'), grip = $('#grip'), paneL = $('#paneL');
+grip.addEventListener('mousedown', e => {
+  e.preventDefault(); document.body.style.userSelect = 'none';
+  const move = ev => {
+    const b = split.getBoundingClientRect();
+    paneL.style.width = Math.max(26, Math.min(66, ((ev.clientX - b.left) / b.width) * 100)) + '%';
+  };
+  const up = () => { document.body.style.userSelect=''; sync();
+    window.removeEventListener('mousemove',move); window.removeEventListener('mouseup',up); };
+  window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+});
+
+$('#t-raw').addEventListener('click', e => {
+  const on = e.currentTarget.getAttribute('aria-pressed') !== 'true';
+  e.currentTarget.setAttribute('aria-pressed', on);
+  doc.classList.toggle('off', on);
+  $('#raw').classList.toggle('on', on);
+  if (!on) requestAnimationFrame(sync);
+});
+
+sync();
+</script>
+</body>
+</html>

@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Myelin — iteration 2 · material lens</title>
+<style>
+:root{
+  --paper:#f7f5f1; --sheet:#fffdfa; --ink:#191714; --ink-2:#4a453e; --ink-3:#8a8377;
+  --rule:#e3ded4; --rule-2:#cfc8ba; --rule-3:#b9b1a1;
+  --supports:#2f6f4e; --supports-bg:#e8f2ec;
+  --contradicts:#9c3b28; --contradicts-bg:#f8ebe7;
+  --mentions:#8a8377; --mentions-bg:#f0ede7;
+  --revised:#6b4fa8; --revised-bg:#f0ecf8;
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --paper:#131211;--sheet:#1b1917;--ink:#ece7dd;--ink-2:#b2ab9f;--ink-3:#7c7568;
+    --rule:#292622;--rule-2:#39352e;--rule-3:#4d4840;
+    --supports:#71bb96;--supports-bg:#182620;
+    --contradicts:#db8c76;--contradicts-bg:#2a1a14;
+    --mentions:#7c7568;--mentions-bg:#1f1d1a;
+    --revised:#a892d8;--revised-bg:#1f1a2b;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:15px;
+  line-height:1.55;-webkit-font-smoothing:antialiased;overflow:hidden}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+
+/* ============ the split: this already exists in Myelin ============ */
+.shell{height:100vh;display:flex;flex-direction:column}
+
+.bar{flex:none;height:38px;display:flex;align-items:center;gap:13px;padding:0 14px;
+  border-bottom:1px solid var(--rule);background:var(--paper);position:relative;z-index:30}
+.bar .crumb{font-size:11.5px;color:var(--ink-3);letter-spacing:.02em}
+.bar .crumb b{color:var(--ink-2);font-weight:500}
+.sp{flex:1}
+.chip{font-size:11px;color:var(--ink-3);border:1px solid var(--rule-2);border-radius:999px;
+  padding:3px 9px;letter-spacing:.01em;transition:.14s;white-space:nowrap}
+.chip:hover{color:var(--ink);border-color:var(--ink-3)}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.kbd{font-family:var(--mono);font-size:10px;color:var(--ink-3);border:1px solid var(--rule-2);
+  border-radius:3px;padding:0 4px;margin:0 1px}
+
+.split{flex:1;display:flex;min-height:0;position:relative}
+.pane{overflow:auto;min-width:0;position:relative}
+#paneL{flex:none;width:43%;background:var(--sheet);border-right:1px solid var(--rule)}
+#paneR{flex:1}
+
+.grip{flex:none;width:9px;cursor:col-resize;background:transparent;position:relative;z-index:20}
+.grip::after{content:"";position:absolute;inset:0 4px;background:transparent;transition:.16s}
+.grip:hover::after{background:var(--rule-2)}
+
+/* ============ pane headers: provenance, not navigation ============ */
+.phead{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:9px;
+  padding:9px 15px;border-bottom:1px solid var(--rule);
+  background:color-mix(in srgb,var(--sheet) 92%,transparent);backdrop-filter:blur(6px)}
+#paneR .phead{background:color-mix(in srgb,var(--paper) 92%,transparent)}
+.ph-kind{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);flex:none}
+.ph-title{font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;flex:1;min-width:0}
+.ph-title b{font-weight:500;color:var(--ink)}
+.ph-act{font-size:11px;color:var(--ink-3);border:1px solid var(--rule-2);border-radius:4px;
+  padding:2px 7px;flex:none;transition:.14s}
+.ph-act:hover{color:var(--ink);border-color:var(--ink-3)}
+.ph-act[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+
+/* ============ LEFT: the material lens — five media, one pane ============ */
+.lens{display:block;animation:fade .2s ease}
+@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.lens[hidden]{display:none}
+
+/* a) paper page */
+.page{padding:26px 30px 60px;max-width:56ch;margin:0 auto}
+.page-no{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);
+  margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--rule)}
+.page h3{font-family:var(--serif);font-size:19px;font-weight:400;line-height:1.3;margin:0 0 14px;
+  letter-spacing:-.01em}
+.page p{font-family:var(--serif);font-size:15px;line-height:1.68;margin:0 0 14px;color:var(--ink-2)}
+.page p.lede{color:var(--ink-3)}
+.hit{background:var(--supports-bg);color:var(--ink);border-radius:2px;
+  box-shadow:0 0 0 3px var(--supports-bg)}
+.hit-x{background:var(--contradicts-bg);color:var(--ink);border-radius:2px;
+  box-shadow:0 0 0 3px var(--contradicts-bg)}
+.dcap{margin:16px 0 6px;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-3)}
+.tbl{border-top:1px solid var(--rule-2);border-bottom:1px solid var(--rule);margin:8px 0 0;
+  font-size:13px}
+.tbl .tr{display:grid;grid-template-columns:1.4fr 1fr 1fr;border-bottom:1px solid var(--rule);
+  align-items:center}
+.tbl .tr:last-child{border-bottom:0}
+.tbl .th{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);
+  padding:7px 6px}
+.tbl .td{padding:8px 6px;display:flex;align-items:center;gap:7px}
+.tbl .td span:first-child{color:var(--ink-3);font-size:11px}
+.bar-i,.bar-n{height:13px;border-radius:2px;flex:none}
+.bar-i{background:var(--supports)} .bar-n{background:var(--ink-3)}
+.val{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.tbl .win{background:var(--supports-bg)}
+.tbl-note{margin-top:9px;font-size:11.5px;color:var(--supports);display:flex;gap:7px;
+  align-items:center}
+.tbl-note::before{content:"";width:14px;height:1px;background:var(--supports);flex:none}
+
+/* b) notebook / run */
+.run{margin:20px 24px;font-family:var(--mono);font-size:12.5px;line-height:1.75;
+  background:var(--paper);border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+.run-h{display:flex;gap:8px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--rule);
+  font-family:var(--sans);font-size:11px;color:var(--ink-3);letter-spacing:.04em;
+  text-transform:uppercase}
+.run-h .dot{width:6px;height:6px;border-radius:50%;background:var(--supports)}
+.run-b{padding:12px 14px;color:var(--ink-2);white-space:pre-wrap}
+.run-b .c{color:var(--ink-3)}
+.run-b .k{color:var(--revised)}
+.run-b .s{color:var(--supports)}
+.run-b .g{color:var(--contradicts)}
+.run-o{padding:11px 14px;border-top:1px solid var(--rule);font-family:var(--sans);font-size:12px}
+.run-o .row{display:flex;gap:10px;padding:3px 0;color:var(--ink-2)}
+.run-o .row b{font-family:var(--mono);font-weight:400;width:64px;flex:none;color:var(--ink)}
+.run-o .warn{margin-top:8px;padding-top:8px;border-top:1px dashed var(--rule-2);
+  color:var(--contradicts);font-size:11.5px}
+
+/* c) web article */
+.web{margin:0;padding:0}
+.web-bar{display:flex;gap:8px;align-items:center;padding:7px 14px;background:var(--paper);
+  border-bottom:1px solid var(--rule);font-size:11px;color:var(--ink-3)}
+.web-bar .dot{width:6px;height:6px;border-radius:50%;background:var(--rule-2)}
+.web-in{padding:24px 28px 60px;max-width:54ch}
+.web-in .src{font-size:11px;color:var(--ink-3);letter-spacing:.04em;margin-bottom:12px}
+.web-in h3{font-family:var(--serif);font-size:21px;font-weight:400;line-height:1.28;margin:0 0 12px}
+.web-in p{font-family:var(--sans);font-size:14px;line-height:1.66;margin:0 0 13px;color:var(--ink-2)}
+.web-in .paywall{margin-top:16px;padding:13px 15px;background:var(--mentions-bg);
+  border-left:2px solid var(--rule-2);font-size:12.5px;color:var(--ink-3);border-radius:0 4px 4px 0}
+
+/* d) reader artifact */
+.logwrap{margin:20px 24px;border:1px solid var(--rule);border-radius:6px;overflow:hidden;
+  background:var(--paper)}
+.log-h{padding:9px 13px;border-bottom:1px solid var(--rule);font-size:11px;color:var(--ink-3);
+  letter-spacing:.04em;text-transform:uppercase;display:flex;gap:8px;align-items:center}
+.log-b{padding:12px 14px;font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--ink-2);
+  white-space:pre-wrap}
+.log-b .g{color:var(--contradicts)} .log-b .s{color:var(--supports)}
+.log-verdict{margin:0;padding:12px 14px;border-top:1px solid var(--rule);font-size:12.5px;
+  background:var(--contradicts-bg);color:var(--ink)}
+
+/* e) survey — the same marks, rotated */
+.survey{padding:24px 26px 60px}
+.survey h4{margin:0 0 4px;font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:500}
+.survey p.sub{margin:0 0 18px;font-size:12.5px;color:var(--ink-3);max-width:46ch}
+.lattice{margin-top:18px;display:grid;grid-template-columns:16px 1fr;column-gap:10px;row-gap:2px}
+.lrow{grid-column:1/3;display:grid;grid-template-columns:16px 108px 1fr 78px;gap:10px;
+  align-items:center;padding:9px 0;border-top:1px solid var(--rule);cursor:default;transition:.14s}
+.lrow:hover{background:var(--supports-bg)}
+.lrow .m{text-align:center;font-size:11px}
+.lrow .h{font-family:var(--serif);font-size:14px;line-height:1.35;color:var(--ink)}
+.lrow .e{font-size:12px;color:var(--ink-3);line-height:1.45}
+.lrow .r{font-size:11.5px;text-align:right;letter-spacing:.01em}
+.r.ok{color:var(--supports)} .r.no{color:var(--contradicts)} .r.unk{color:var(--ink-3)}
+
+/* ============ RIGHT: the argument strand ============ */
+.body{padding:0 34px 120px;max-width:74ch;margin:0 auto}
+.row{display:grid;grid-template-columns:32px 1fr;align-items:start}
+.row .mg{padding-top:3px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.mark{width:15px;height:15px;display:grid;place-items:center;font-size:11px;line-height:1;
+  border-radius:3px;flex:none;transition:.14s;cursor:default}
+.mark.s{color:var(--supports);background:var(--supports-bg)}
+.mark.x{color:var(--contradicts);background:var(--contradicts-bg)}
+.mark.m{color:var(--mentions);background:var(--mentions-bg)}
+.mark.r{color:var(--revised);background:var(--revised-bg)}
+.mark.hollow{background:none;border:1px solid var(--rule-2);color:var(--ink-3)}
+.mark:hover{transform:scale(1.15)}
+.rail{width:1px;flex:1;background:var(--rule)}
+
+.row .bd{min-width:0;padding:22px 0}
+.row.focus .bd{background:linear-gradient(90deg,var(--supports-bg),transparent 70%);
+  border-radius:0 4px 4px 0}
+.row.muted{opacity:.3}
+.row.focus{opacity:1}
+
+.claim-meta{display:flex;gap:9px;align-items:center;flex-wrap:wrap;font-size:11px;
+  color:var(--ink-3);letter-spacing:.04em;margin-bottom:11px}
+.pill{border:1px solid var(--rule-2);border-radius:999px;padding:2px 9px}
+.pill.ok{color:var(--supports);border-color:color-mix(in srgb,var(--supports) 34%,transparent)}
+.pill.no{color:var(--contradicts);border-color:color-mix(in srgb,var(--contradicts) 34%,transparent)}
+h1.claim{font-family:var(--serif);font-size:26px;line-height:1.3;letter-spacing:-.008em;
+  margin:0;max-width:36em;font-weight:400}
+h1.claim em{font-style:italic;color:var(--ink-2)}
+
+.v1wrap{margin-bottom:16px}
+.v1{margin:0 0 7px;padding:8px 0 8px 13px;border-left:2px solid var(--rule-2);
+  font-family:var(--serif);font-size:15px;color:var(--ink-3);text-decoration:line-through;
+  text-decoration-color:color-mix(in srgb,var(--ink-3) 42%,transparent)}
+.v1 .lbl{display:block;font-family:var(--sans);font-size:10.5px;letter-spacing:.05em;
+  text-transform:uppercase;text-decoration:none;margin-bottom:2px}
+
+.ev-h{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap;margin-bottom:3px}
+.ev-k{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);flex:none}
+.ev-t{font-family:var(--serif);font-size:17px;line-height:1.35;letter-spacing:-.003em}
+.gloss{margin:5px 0 0;font-size:13.5px;color:var(--ink-2);max-width:42em}
+.gloss b{font-weight:600;color:var(--ink)}
+.peek{font-size:11.5px;color:var(--ink-3);margin-top:9px;display:inline-flex;gap:6px;
+  align-items:center}
+.peek em{font-style:normal;color:var(--ink-2);border-bottom:1px dashed var(--rule-2)}
+
+.mlist{margin-top:11px;max-width:42em}
+.mn{display:grid;grid-template-columns:13px 1fr auto;gap:10px;align-items:baseline;padding:6px 0;
+  border-bottom:1px dotted var(--rule);font-size:13px;color:var(--ink-2)}
+.mn:last-child{border-bottom:0}
+.mn .d{color:var(--mentions);font-size:10px;line-height:1.7}
+.mn .s{font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+
+.contrib{border-top:1px solid var(--rule);padding-top:20px}
+.who{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--ink-3);margin-bottom:8px}
+.av{width:17px;height:17px;border-radius:50%;background:var(--revised);color:var(--sheet);
+  display:grid;place-items:center;font-size:9px;font-weight:600;flex:none}
+.said{font-family:var(--serif);font-size:16px;line-height:1.5;margin:0 0 9px;max-width:34em}
+.acts{display:flex;gap:7px;flex-wrap:wrap;margin-top:11px}
+.act{font-size:11.5px;border:1px solid var(--rule-2);border-radius:999px;padding:4px 11px;
+  color:var(--ink-2);transition:.14s}
+.act:hover{border-color:var(--ink);color:var(--ink)}
+
+.concl{border-top:2px solid var(--ink);margin-top:4px}
+.concl p{font-family:var(--serif);font-size:18.5px;line-height:1.46;margin:24px 0 0;max-width:34em}
+
+@media(max-width:900px){
+  .split{flex-direction:column}
+  #paneL{width:100%!important;border-right:0;border-bottom:1px solid var(--rule);flex:none;
+    height:44%}
+  .grip{display:none}
+  .body{padding:0 18px 80px}
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <div class="bar">
+    <span class="crumb"><b>tool-calling / harness-vs-scale</b> · private</span>
+    <span class="sp"></span>
+    <span class="crumb" style="opacity:.7">point at a margin mark — the left pane follows</span>
+    <button class="chip" id="t-v1" aria-pressed="false">superseded</button>
+    <button class="chip" id="t-contrib" aria-pressed="true">contribution</button>
+    <button class="chip" id="t-appx" aria-pressed="false">payload</button>
+  </div>
+
+  <div class="split" id="split">
+    <section class="pane" id="paneL"></section>
+    <div class="grip" id="grip"></div>
+    <section class="pane" id="paneR"></section>
+  </div>
+</div>
+
+<!-- ======================= LEFT: lens stack ======================= -->
+<div id="lensStack">
+  <div class="phead" id="lensHead">
+    <span class="ph-kind" id="lensKind">material</span>
+    <span class="ph-title" id="lensTitle"></span>
+    <button class="ph-act" id="btnSurvey" aria-pressed="false">survey</button>
+    <button class="ph-act" id="btnSwap" title="transpose the two panes">⇄</button>
+  </div>
+
+  <!-- lens: paper page (yours) -->
+  <div class="lens" data-lens="e1">
+    <div class="page">
+      <div class="page-no">paper:mine · p. 11</div>
+      <h3>§4.2 Variance decomposition across the harness grid</h3>
+      <p class="lede">We evaluate 2 model sizes × 2 harness conditions, 3 seeds, 240 tasks each.</p>
+      <p>Holding the model fixed, the harness term dominates. In the naive condition the failure mode
+        is uniformly <span class="hit">schema adherence under multi-step chains</span> — the model
+        selects the correct tool and emits an ill-typed argument.</p>
+      <p>This is not a reasoning failure and does not scale with parameters: the 20B naive condition
+        trails the 8B instrumented condition by 14 points.</p>
+      <div class="dcap">Table 4.2 — tool-call exact match</div>
+      <div class="tbl">
+        <div class="tr"><span class="th"></span><span class="th">8B</span><span class="th">20B</span></div>
+        <div class="tr"><span class="td"><span>naive</span></span>
+          <span class="td"><span class="bar-n" style="width:41px"></span><span class="val">41%</span></span>
+          <span class="td"><span class="bar-n" style="width:74px"></span><span class="val">74%</span></span></div>
+        <div class="tr win"><span class="td"><span>instrumented</span></span>
+          <span class="td"><span class="bar-i" style="width:88px"></span><span class="val">88%</span></span>
+          <span class="td"><span class="bar-i" style="width:91px"></span><span class="val">91%</span></span></div>
+      </div>
+      <div class="tbl-note">the swap: 8B + instrumented exceeds 20B + naive</div>
+    </div>
+  </div>
+
+  <!-- lens: paper page (theirs) -->
+  <div class="lens" data-lens="e2" hidden>
+    <div class="page">
+      <div class="page-no">paper:tanaka-2025 · Table 3</div>
+      <h3>§5 Scaffolding ablation across four model families</h3>
+      <p class="lede">Peer-reviewed. Independent harness, independent task set, independent eval harness.</p>
+      <p>We observe a <span class="hit">crossover below 10B parameters</span>: scaffolding quality
+        predicts task completion better than parameter count. Above 14B the two explanations are
+        statistically indistinguishable in our setup.</p>
+      <p>We do not claim scaffolding quality is universally dominant. Our evaluation does not include
+        long-horizon tool chains, and we do not vary the tool schema's typing.</p>
+      <div class="dcap">Table 3 — task completion, best vs. weakest scaffolding</div>
+      <div class="tbl">
+        <div class="tr"><span class="th"></span><span class="th">7B</span><span class="th">13B</span></div>
+        <div class="tr"><span class="td"><span>weakest</span></span>
+          <span class="td"><span class="bar-n" style="width:46px"></span><span class="val">46%</span></span>
+          <span class="td"><span class="bar-n" style="width:38px"></span><span class="val">38%</span></span></div>
+        <div class="tr win"><span class="td"><span>best</span></span>
+          <span class="td"><span class="bar-i" style="width:84px"></span><span class="val">84%</span></span>
+          <span class="td"><span class="bar-i" style="width:79px"></span><span class="val">79%</span></span></div>
+      </div>
+      <div class="tbl-note">same swap, different rig</div>
+    </div>
+  </div>
+
+  <!-- lens: your own run -->
+  <div class="lens" data-lens="e3" hidden>
+    <div class="run">
+      <div class="run-h"><span class="dot"></span>exp-d · enum-vs-string · 3 seeds</div>
+      <div class="run-b"><span class="c"># 3-turn tool chain, 8B, naive harness</span>
+<span class="k">for</span> turn <span class="k">in</span> <span class="k">range</span>(3):
+    r = call(tool=spec.<span class="g">string</span>)
+    <span class="c"># returns "get_weather(city='Lisbon')"</span>
+    <span class="c"># 3rd turn: argument drift, no recoverable state</span>
+    <span class="k">assert</span> r.typed <span class="c"># fails 2/3 seeds</span>
+
+<span class="c"># same chain, enum-typed tool surface</span>
+r = call(tool=spec.<span class="s">enum</span>)
+<span class="k">assert</span> r.typed <span class="c"># passes 3/3 seeds</span></div>
+      <div class="run-o">
+        <div class="row"><b>string</b><span>38.1% chain completion</span></div>
+        <div class="row"><b>enum</b><span>81.7% chain completion</span></div>
+        <div class="row"><b>Δ</b><span>+43.6 points — the mechanism, isolated</span></div>
+        <div class="warn">Note: §6 of the paper does not yet report this run. Do not cite the mechanism
+          as established.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- lens: web article -->
+  <div class="lens" data-lens="e4" hidden>
+    <div class="web">
+      <div class="web-bar"><span class="dot"></span>themodelweekly.com · /posts/scaffolding-wars</div>
+      <div class="web-in">
+        <div class="src">adjacent reporting · 3 Feb 2026</div>
+        <h3>The new scaffolding wars</h3>
+        <p>Vendors are converging on the same observation from different directions: the gap between a
+          strong and a weak agent harness has widened faster than the gap between model generations.</p>
+        <p>None of the vendors quoted isolate the harness as a variable. All report their own harness as
+          a fixed condition.</p>
+        <div class="paywall">Context only. This article cannot support or refute the claim; it exists to
+          show the direction of travel and that you read it.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- lens: reader artifact -->
+  <div class="lens" data-lens="c1" hidden>
+    <div class="logwrap">
+      <div class="log-h">reka-2026-08-06.log · llama-server, AMD 7900X3D</div>
+      <div class="log-b">model      = qwen2.5-8b-instruct-q4_k_m
+baseline   = qwen2.5-20b-instruct-q4_k_m
+harness    = myelin 0.9 (same as yours)
+
+seed 1    8b  tool-exact  <span class="s">79%</span>   20b  <span class="g">82%</span>
+seed 2    8b  tool-exact  <span class="s">77%</span>   20b  <span class="g">84%</span>
+seed 3    8b  tool-exact  <span class="s">80%</span>   20b  <span class="g">81%</span>
+<span class="g">GAP = 20b leads by ~3.6 points. Claim does not reproduce.</span></div>
+      <div class="log-verdict">Possible cause flagged by reka: your 20B baseline appears to have been
+        served with a different quantisation than the 8B. Unresolved.</div>
+    </div>
+  </div>
+
+  <!-- lens: survey — the same marks, rotated 90° -->
+  <div class="lens" data-lens="__survey" hidden>
+    <div class="survey">
+      <h4>competing explanations</h4>
+      <p class="sub">Not a table you built. The same margin marks, counted per hypothesis. Point at a
+        row and the left pane returns to its material.</p>
+      <div class="lattice">
+        <div class="lrow" data-lens="e1"><span class="m mark s">▲</span>
+          <span class="h">Harness quality</span>
+          <span class="e">your §4.2 · their Table 3 · exp-d</span>
+          <span class="r ok">partially supported</span></div>
+        <div class="lrow" data-lens="e3"><span class="m mark s">●</span>
+          <span class="h">Typing, not reasoning</span>
+          <span class="e">exp-d (3 seeds) · mechanism only</span>
+          <span class="r unk">unreported</span></div>
+        <div class="lrow" data-lens="c1"><span class="m mark hollow">✕</span>
+          <span class="h">Hardware / serving</span>
+          <span class="e">reka's log · 3 seeds · AMD</span>
+          <span class="r no">challenging</span></div>
+        <div class="lrow" data-lens="e4"><span class="m mark m">○</span>
+          <span class="h">Vendor benchmark bias</span>
+          <span class="e">4 articles · no isolation</span>
+          <span class="r no">rejected</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= RIGHT: argument stack ======================= -->
+<div id="argStack">
+  <div class="phead" id="argHead">
+    <span class="ph-kind">argument</span>
+    <span class="ph-title"><b>the claim</b> · 5 marks · revised 2×</span>
+    <span class="ph-act" aria-hidden="true" style="border:0;padding:0"><span class="kbd">]</span>
+      <span class="kbd">[</span></span>
+  </div>
+  <div class="body" id="argBody">
+
+    <div class="row" data-key="claim" data-lens="e1">
+      <div class="mg"><span class="mark r" title="revised twice">↺</span><span class="rail"></span></div>
+      <div class="bd">
+        <div class="claim-meta"><span class="pill">claim</span><span class="pill ok">2 strong supports</span>
+          <span class="pill no">1 open objection</span><span>revised 2×</span></div>
+        <div class="v1wrap" id="v1wrap" hidden>
+          <p class="v1"><span class="lbl">v1 · 9 Aug — kept, not deleted</span>Harness quality is the main
+            lever in tool-call accuracy.</p>
+          <p class="v1"><span class="lbl">what superseded it</span>3-turn chain benchmark: the 8B lead
+            vanishes.</p>
+        </div>
+        <h1 class="claim">Harness quality, not parameter count, is the dominant lever in tool-call
+          accuracy — an <em>8B</em> model with a strong harness beats a <em>20B</em> model with a naive
+          one.</h1>
+      </div>
+    </div>
+
+    <div class="row" data-key="e1" data-lens="e1">
+      <div class="mg"><span class="rail"></span><span class="mark s" title="establishes">▲</span>
+        <span class="rail"></span></div>
+      <div class="bd">
+        <div class="ev-h"><span class="ev-k">establishes</span>
+          <span class="ev-t">your paper · §4.2</span></div>
+        <p class="gloss"><b>The load-bearing number.</b> Placed first because everything below it either
+          corroborates this or narrows it.</p>
+        <span class="peek">◱ <em>left pane holds §4.2</em></span>
+      </div>
+    </div>
+
+    <div class="row" data-key="e2" data-lens="e2">
+      <div class="mg"><span class="rail"></span><span class="mark s" title="independent">●</span>
+        <span class="rail"></span></div>
+      <div class="bd">
+        <div class="ev-h"><span class="ev-k">establishes · independent</span>
+          <span class="ev-t">their paper · Table 3</span></div>
+        <p class="gloss"><b>The convergence is the evidence.</b> Not that they agree — that they found
+          the same asymmetry on a rig you had no hand in.</p>
+        <span class="peek">◱ <em>left pane holds Table 3</em></span>
+      </div>
+    </div>
+
+    <div class="row" data-key="e3" data-lens="e3">
+      <div class="mg"><span class="rail"></span><span class="mark m" title="mechanism, untested">○</span>
+        <span class="rail"></span></div>
+      <div class="bd">
+        <div class="ev-h"><span class="ev-k">explains · unreported</span>
+          <span class="ev-t">your experiment · exp-d</span></div>
+        <p class="gloss">Not evidence for the claim — your <b>candidate mechanism</b>. Kept here rather
+          than with the supports because the claim currently outruns it.</p>
+        <span class="peek">◱ <em>left pane holds the run</em></span>
+      </div>
+    </div>
+
+    <div class="row" data-key="e4" data-lens="e4">
+      <div class="mg"><span class="rail"></span><span class="mark m" title="context">○</span><span class="rail"></span></div>
+      <div class="bd">
+        <div class="ev-h"><span class="ev-k">contextualizes · 4</span>
+          <span class="ev-t">background reporting</span></div>
+        <p class="gloss">Adjacent. <b>None isolate the harness variable.</b> Listed so you know they were
+          considered — deliberately the quietest row on the page.</p>
+        <div class="mlist">
+          <div class="mn"><span class="d">○</span><span>"Small models are catching up"</span><span class="s">context</span></div>
+          <div class="mn"><span class="d">○</span><span>"The new scaffolding wars"</span><span class="s">context</span></div>
+          <div class="mn"><span class="d">○</span><span>"Why agents fail at tool use"</span><span class="s">mentions swap</span></div>
+          <div class="mn"><span class="d">○</span><span>vendor benchmark post</span><span class="s">conflicts</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row" data-key="c1" data-lens="c1" id="contribRow">
+      <div class="mg"><span class="rail"></span><span class="mark hollow" title="challenged">✕</span>
+        <span class="rail"></span></div>
+      <div class="bd contrib">
+        <div class="who"><span class="av">RK</span><span>reka · reader · 2 days ago · contribution</span></div>
+        <p class="said">Reproduced on AMD and got the opposite. My 8B does <em>not</em> beat the 20B
+          baseline — it loses by about 3 points. Log attached. Worth checking whether your 20B baseline
+          was served quantized.</p>
+        <p class="gloss"><b>Your paper is not marked wrong.</b> The claim keeps its marks; this hangs off
+          it as an open objection, with the history of who said what intact.</p>
+        <span class="peek">◱ <em>left pane holds their log</em></span>
+        <div class="acts"><button class="act">investigate</button><button class="act">reproduce</button>
+          <button class="act">revise the claim</button><button class="act">decline with a reason</button></div>
+      </div>
+    </div>
+
+    <div class="row" data-key="z1" data-lens="e1">
+      <div class="mg"><span class="rail"></span><span class="mark s">▲</span></div>
+      <div class="bd concl">
+        <p>The claim rests on two independent numbers and one unattributed vendor post. The mechanism is
+          still a hypothesis, and one reproduction contradicts it. That asymmetry is the honest state of
+          the work — visible without opening either paper.</p>
+      </div>
+    </div>
+
+    <!-- payload appendix lives in the argument pane; it is authored text -->
+    <div class="row" id="appxRow" hidden>
+      <div class="mg"><span class="rail"></span><span class="mark m">⌗</span></div>
+      <div class="bd">
+        <div class="ev-h"><span class="ev-k">what you actually typed</span></div>
+        <p class="gloss">Everything else on both sides of this split is pulled from the attachment at
+          render time. The gloss sentences, the order, and these five lines are the whole authored
+          payload.</p>
+        <div class="run" style="margin-top:14px"><div class="run-b"><span class="c">// claim.harness-vs-scale.md</span>
+<span class="k">establishes</span>   paper:mine   §4.2      <span class="s">load-bearing number</span>
+<span class="k">establishes</span>   paper:tanaka Table 3   <span class="s">same swap, other rig</span>
+<span class="k">explains</span>      run:exp-d    <span class="c">unreported in §6</span>
+<span class="k">contextualizes</span> article ×4  <span class="c">none isolate the variable</span>
+<span class="k">challenged_by</span> reka 2026-08-06  <span class="c">reproduced:false · state:open</span>
+
+<span class="c">// v1 is superseded, not deleted</span>
+<span class="k">supersedes</span> v1-2026-08-09  <span class="k">because</span> bench-3turn  <span class="k">by</span> self</div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const paneL = $('#paneL'), paneR = $('#paneR');
+let lensStack = $('#lensStack'), argStack = $('#argStack');
+
+paneL.appendChild(lensStack);
+paneR.appendChild(argStack);
+
+/* ---------- the lens follows the mark you point at ---------- */
+const META = {
+  e1:  ['paper · yours',    '§4.2 Variance decomposition · p. 11'],
+  e2:  ['paper · theirs',   'Table 3 Scaffolding ablation'],
+  e3:  ['run · yours',      'exp-d enum-vs-string'],
+  e4:  ['web · article',    'themodelweekly.com · scaffolding-wars'],
+  c1:  ['artifact · reader','reka-2026-08-06.log · AMD'],
+  __survey: ['survey', 'competing explanations']
+};
+const order = ['e1','e2','e3','e4','c1'];
+let pinned = null, current = null;
+
+function show(key){
+  if (key === current) return;
+  current = key;
+  document.querySelectorAll('.lens').forEach(el => { el.hidden = el.dataset.lens !== key; });
+  const [kind, title] = META[key];
+  $('#lensKind').textContent = kind;
+  $('#lensTitle').textContent = title;
+  $('#btnSurvey').setAttribute('aria-pressed', key === '__survey');
+}
+
+function focusRow(row){
+  if (!row) return;
+  document.querySelectorAll('.row').forEach(r => r.classList.remove('focus','muted'));
+  row.classList.add('focus');
+  document.querySelectorAll('.row').forEach(r => { if (r !== row) r.classList.add('muted'); });
+  if (!pinned) show(row.dataset.lens);
+}
+
+const body = $('#argBody');
+body.addEventListener('mouseover', e => {
+  const row = e.target.closest('.row');
+  if (row && row.dataset.lens) focusRow(row);
+});
+body.addEventListener('mouseleave', () => {
+  document.querySelectorAll('.row').forEach(r => r.classList.remove('focus','muted'));
+});
+
+/* click pins: now you can scroll the left pane without it running away */
+body.addEventListener('click', e => {
+  if (e.target.closest('.act') || e.target.closest('button')) return;
+  const row = e.target.closest('.row');
+  if (!row || !row.dataset.lens) return;
+  if (pinned === row) { pinned = null; show('e1'); return; }
+  pinned = row;
+  show(row.dataset.lens);
+});
+
+/* survey: same marks, rotated */
+$('#btnSurvey').addEventListener('click', () => show(current === '__survey' ? 'e1' : '__survey'));
+document.querySelectorAll('.lrow').forEach(lr => {
+  lr.addEventListener('mouseover', () => {
+    document.querySelectorAll('.lrow').forEach(r => r.style.background='');
+    lr.style.background = 'var(--supports-bg)';
+  });
+  lr.addEventListener('mouseleave', () => lr.style.background = '');
+  lr.addEventListener('click', () => { show(lr.dataset.lens); pinned = lr; });
+});
+
+/* transpose: "my reading of their paper" / "their paper against mine" */
+$('#btnSwap').addEventListener('click', () => {
+  const lp = lensStack.parentNode, ap = argStack.parentNode;
+  lp.appendChild(argStack); ap.appendChild(lensStack);
+  const t = lensStack; lensStack = argStack; argStack = t;
+});
+
+/* step through relations */
+document.addEventListener('keydown', e => {
+  if (e.key !== ']' && e.key !== '[') return;
+  if (document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  const i = order.indexOf(current);
+  const next = e.key === ']'
+    ? order[(i + 1 + order.length) % order.length]
+    : order[(i - 1 + order.length) % order.length];
+  show(next);
+  const row = document.querySelector(`.row[data-key="${next}"]`);
+  if (row) row.scrollIntoView({block:'center', behavior:'smooth'});
+});
+
+/* bar: real split, already in the app */
+const split = $('#split'), grip = $('#grip');
+grip.addEventListener('mousedown', e => {
+  e.preventDefault();
+  document.body.style.userSelect = 'none';
+  const move = ev => {
+    const b = split.getBoundingClientRect();
+    const pct = ((ev.clientX - b.left) / b.width) * 100;
+    paneL.style.width = Math.max(22, Math.min(72, pct)) + '%';
+  };
+  const up = () => {
+    document.body.style.userSelect = '';
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+});
+
+/* chrome toggles */
+$('#t-v1').addEventListener('click', e => {
+  const on = e.currentTarget.getAttribute('aria-pressed') !== 'true';
+  e.currentTarget.setAttribute('aria-pressed', on);
+  $('#v1wrap').hidden = !on;
+});
+$('#t-contrib').addEventListener('click', e => {
+  const on = e.currentTarget.getAttribute('aria-pressed') !== 'true';
+  e.currentTarget.setAttribute('aria-pressed', on);
+  $('#contribRow').style.display = on ? '' : 'none';
+});
+$('#t-appx').addEventListener('click', e => {
+  const on = e.currentTarget.getAttribute('aria-pressed') !== 'true';
+  e.currentTarget.setAttribute('aria-pressed', on);
+  $('#appxRow').hidden = on ? false : true;
+});
+
+show('e1');
+</script>
+</body>
+</html>
