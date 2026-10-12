@@ -339,14 +339,6 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   .att.pinned{background:var(--paper)}
   .att.pinned::after{display:none}
   .att.chall .n{color:var(--warn)}
-  /* the collapse rail is a desktop idea; on a phone the strip is always the strip */
-  .manifest.collapsed{width:auto}
-  .manifest.collapsed .mf-toggle{display:none}
-  .manifest.collapsed .att{display:flex;padding:8px 13px;border-right:0;
-    border-bottom:2px solid transparent;justify-items:stretch}
-  .manifest.collapsed .att .g,.manifest.collapsed .att .n,
-  .manifest.collapsed .att .d,.manifest.collapsed .att .dot{display:block}
-  .manifest.collapsed .att .g,.manifest.collapsed .att .dot{display:none}
 
   .material{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;height:66vh;
     border-top:1px solid var(--rule);border-radius:16px 16px 0 0;z-index:40;
@@ -1287,6 +1279,7 @@ paneR.addEventListener('scroll', closeCtx, { passive:true });
 const manifest = document.querySelector('.manifest');
 const mftoggle = $('#mftoggle');
 const MIN_MATERIAL = 360;
+const PHONE = matchMedia('(max-width:720px)');   // same cutoff as the strip's media query
 let expandedW = 0;
 
 function expandedWidth(){
@@ -1309,6 +1302,12 @@ function setCollapsed(on, manual){
     : 'Expanded — there is room for both';
 }
 function autoCollapse(){
+  // Never on a phone. The split is display:block there, so the left pane reads
+  // as the full width and the arithmetic always says "collapse" - which armed
+  // the desktop rail on every phone load and, via the specificity of those
+  // rail rules, wiped the strip's own in-view border. The rail is a desktop
+  // idea; the strip is the phone's answer to the same question.
+  if (PHONE.matches) return setCollapsed(false, false);
   const material = split.getBoundingClientRect().width * leftShare() - expandedWidth();
   setCollapsed(material < MIN_MATERIAL, false);
 }
