@@ -44,8 +44,30 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .manifest{flex:none;width:266px;border-right:1px solid var(--rule);overflow:auto;
   padding:10px 0 50px;position:relative}
 .mf-head{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
-  padding:0 14px 10px;display:flex;justify-content:space-between;align-items:baseline}
+  padding:0 12px 10px;display:flex;align-items:center;gap:7px}
+.mf-head>span{flex:1;min-width:0}
 .mf-head em{font-style:normal;letter-spacing:0;text-transform:none;font-size:11px}
+.mf-toggle{flex:none;width:16px;height:16px;display:grid;place-items:center;
+  color:var(--ink-3);border-radius:3px;transition:.16s;line-height:1}
+.mf-toggle:hover{color:var(--ink);background:var(--paper)}
+.mf-toggle svg{transition:transform .22s cubic-bezier(.22,.85,.3,1)}
+.manifest.collapsed .mf-toggle svg{transform:rotate(180deg)}
+.manifest.collapsed{width:30px}
+.manifest.collapsed .mf-head{padding:0 0 10px;justify-content:center}
+.manifest.collapsed .mf-head>span,.manifest.collapsed .mf-head>em,
+.manifest.collapsed .mf-live,.manifest.collapsed .mgroup{display:none}
+.manifest.collapsed .att{grid-template-columns:1fr;justify-items:center;
+  padding:7px 0;border-left:0;border-right:2px solid transparent}
+.manifest.collapsed .att .g,.manifest.collapsed .att .n{display:none}
+.manifest.collapsed .att .d,.manifest.collapsed .att.pinned::after{display:none}
+.manifest.collapsed .att .dot{opacity:0}
+.manifest.collapsed .att.cited .dot{opacity:.5}
+.manifest.collapsed .att.inview .dot{opacity:1;background:var(--live);width:6px;height:6px}
+.manifest.collapsed .att.inview{border-right-color:var(--live)}
+.manifest.collapsed .att.on{border-right-color:var(--live);background:var(--paper)}
+.manifest.collapsed .att.on .dot{opacity:1;background:var(--live)}
+.manifest.collapsed .att:hover{background:var(--paper)}
+
 .mf-live{font-size:10px;letter-spacing:.03em;text-transform:none;color:var(--ink-3);
   padding:0 14px 12px;display:flex;align-items:center;gap:6px}
 .mf-live b{font-weight:500;color:var(--live)}
@@ -299,6 +321,14 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   .att.pinned{background:var(--paper)}
   .att.pinned::after{display:none}
   .att.chall .n{color:var(--warn)}
+  /* the collapse rail is a desktop idea; on a phone the strip is always the strip */
+  .manifest.collapsed{width:auto}
+  .manifest.collapsed .mf-toggle{display:none}
+  .manifest.collapsed .att{display:flex;padding:8px 13px;border-right:0;
+    border-bottom:2px solid transparent;justify-items:stretch}
+  .manifest.collapsed .att .g,.manifest.collapsed .att .n,
+  .manifest.collapsed .att .d,.manifest.collapsed .att .dot{display:block}
+  .manifest.collapsed .att .g,.manifest.collapsed .att .dot{display:none}
 
   .material{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;height:66vh;
     border-top:1px solid var(--rule);border-radius:16px 16px 0 0;z-index:40;
@@ -355,7 +385,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   <div class="split" id="split">
     <section id="paneL">
       <nav class="manifest">
-        <div class="mf-head"><span>attachments · in order read</span><em>18</em></div>
+        <div class="mf-head"><button class="mf-toggle" id="mftoggle" aria-expanded="true" aria-label="Collapse attachment list"><svg width="9" height="9" viewBox="0 0 9 9"><path d="M6 1 L2.5 4.5 L6 8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span>attachments · in order read</span><em>18</em></div>
         <div class="mf-live idle" id="mflive"><span class="dot"></span><span>scrolling — none in view</span></div>
 
         <button class="att key" data-a="data-tasksuite">
@@ -1170,6 +1200,31 @@ cites.forEach(c => {
 });
 
 /* ---------- phone sheet: close, escape, swipe the grip down ---------- */
+/* ---------- collapse the attachment list to a state rail ----------
+   The list is worth its width when you are choosing an attachment. It is not
+   worth 200px of a 1000px window when the material on the right is a five
+   column table being cropped mid-cell. Collapsing hands that width back. */
+const manifest = document.querySelector('.manifest');
+const mftoggle = $('#mftoggle');
+const MANIFEST_KEY = 'preview_manifest_collapsed';
+function setCollapsed(on, save){
+  manifest.classList.toggle('collapsed', on);
+  mftoggle.setAttribute('aria-expanded', on ? 'false' : 'true');
+  mftoggle.setAttribute('aria-label', on ? 'Expand attachment list' : 'Collapse attachment list');
+  if (save) { try { localStorage.setItem(MANIFEST_KEY, on ? '1' : '0'); } catch(e){} }
+}
+mftoggle.addEventListener('click', e => {
+  e.stopPropagation();
+  setCollapsed(!manifest.classList.contains('collapsed'), true);
+});
+let saved = null;
+try { saved = localStorage.getItem(MANIFEST_KEY); } catch(e){}
+setCollapsed(saved === '1', false);
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === '\\')
+    setCollapsed(!manifest.classList.contains('collapsed'), true);
+});
+
 $('#mclose').addEventListener('click', closeSheet);
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && document.body.classList.contains('sheet-open')) closeSheet();
