@@ -257,13 +257,89 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   padding:3px 10px;transition:.13s}
 .demo button:hover{color:var(--ink);border-color:var(--ink-3)}
 .demo button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.mclose{display:none}
 
-@media(max-width:980px){
-  .split{flex-direction:column}
-  #paneL{width:100%!important;height:44%;border-right:0;border-bottom:1px solid var(--rule)}
-  .grip{display:none} .manifest{display:none}
-  .doc{padding:32px 20px 90px} .doc h1{font-size:25px} .doc p{font-size:16px}
+/* ============ tablet: same split, tighter furniture ============ */
+@media(max-width:1000px){
+  .manifest{width:206px}
+  .att{grid-template-columns:6px 24px 1fr;column-gap:5px;padding-left:10px}
+  .doc{padding:44px 28px 120px} .doc h1{font-size:27px} .doc p{font-size:16.5px}
   .toc ol{columns:1}
+  #paneL{width:44%!important}
+}
+
+/* ============ phone: the article owns the screen ============
+   The split cannot survive, so it does not. The article goes full-bleed, the
+   attachments become a horizontal strip on the bottom edge, and the material
+   becomes a bottom sheet that rises over the article — leaving the cited
+   sentence visible above it, which is the entire point. */
+@media(max-width:720px){
+  .titlebar{height:36px;padding:0 12px}
+  .titlebar .sub{display:none}
+  #split{display:block}
+  #paneL{width:100%!important;display:block;background:none;border:0;overflow:visible}
+  #paneR{width:100%;height:calc(100vh - 36px);padding-bottom:64px;scroll-behavior:auto}
+  .grip{display:none}
+
+  .manifest{position:fixed;left:0;right:0;bottom:0;width:auto;height:auto;
+    display:flex;overflow-x:auto;overflow-y:hidden;padding:0;border-right:0;
+    border-top:1px solid var(--rule);background:var(--paper);z-index:30;
+    scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .manifest::-webkit-scrollbar{display:none}
+  .mf-head,.mf-live,.mgroup{display:none}
+  .att{display:flex;flex:none;width:auto;max-width:56vw;padding:8px 13px;
+    border-left:0;border-bottom:2px solid transparent}
+  .att .g,.att .dot{display:none}
+  .att .d,.att.key .d{display:none}
+  .att .n{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    line-height:1.4}
+  .att.inview{border-bottom-color:var(--live)}
+  .att.inview .n{color:var(--ink)}
+  .att.on{border-bottom-color:var(--live);background:var(--live-bg)}
+  .att.pinned{background:var(--paper)}
+  .att.pinned::after{display:none}
+  .att.chall .n{color:var(--warn)}
+
+  .material{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;height:66vh;
+    border-top:1px solid var(--rule);border-radius:16px 16px 0 0;z-index:40;
+    transform:translateY(101%);transition:transform .3s cubic-bezier(.22,.85,.3,1);
+    box-shadow:0 -10px 34px rgba(0,0,0,.2);background:var(--sheet)}
+  .sheet-open .material{transform:translateY(0)}
+  .mbar{border-radius:16px 16px 0 0;padding:15px 16px 11px}
+  .mbar::before{content:"";position:absolute;top:6px;left:50%;transform:translateX(-50%);
+    width:36px;height:4px;border-radius:2px;background:var(--rule-2)}
+  .mclose{display:inline-flex;margin-left:4px}
+  .page,.webin,.web,.fig{padding-left:18px;padding-right:18px}
+  .page{padding-top:18px;padding-bottom:90px}
+  .logwrap,.run,.ds,.spec,.diffwrap,.slides,.thr{margin-left:14px;margin-right:14px}
+  /* wide data keeps every column and scrolls sideways, rather than lying about it */
+  .ds,.tbl{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .dsr,.tbl .r{min-width:430px}
+  .dsr>div:first-child,.tbl .c i{white-space:nowrap}
+
+  .doc{padding:30px 18px 60px;max-width:100%}
+  .doc h1{font-size:24px;margin-bottom:12px}
+  .doc h2{font-size:19px;margin-top:36px}
+  .doc p{font-size:16.5px;line-height:1.64;margin-bottom:16px}
+  .doc p.abstract{font-size:15.5px}
+  .byline{font-size:11.5px;margin-bottom:22px;padding-bottom:18px}
+  .toc{padding:13px 15px;margin-bottom:26px}
+  .toc ol{font-size:13px;line-height:1.65}
+  .refs li{font-size:13px}
+
+  .cite{padding-bottom:2px}
+  /* the demo control is not part of the design; keep it out of the way */
+  .demo{bottom:70px;top:auto;left:10px;right:auto;padding:3px 4px;opacity:.75;
+    border-radius:8px}
+  .demo .lab{display:none}
+  .demo button{font-size:10.5px;padding:2px 8px}
+  .sheet-open .demo{display:none}   /* the sheet is a reading mode; demo chrome steps aside */
+}
+
+/* short landscape phones: do not let the sheet eat the whole screen */
+@media(max-width:900px) and (max-height:520px){
+  .material{height:84vh}
+  #paneR{height:calc(100vh - 36px)}
 }
 </style>
 </head>
@@ -332,7 +408,8 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
       </nav>
 
       <div class="material" id="material">
-        <div class="mbar"><span class="aim">source</span><span class="loc" id="mloc"></span></div>
+        <div class="mbar"><span class="aim">source</span><span class="loc" id="mloc"></span>
+          <button class="ph-act mclose" id="mclose" aria-label="Close source">✕</button></div>
 
         <!-- ===== paper:mine ===== -->
         <div class="mt" data-m="paper-mine">
@@ -723,7 +800,7 @@ seed 3  8b <span class="s">86%</span>   20b <span class="s">91%</span>
       <!-- ============ THE ARTICLE. ORDINARY PROSE. NO FIGURES, NO TABLES. ============ -->
       <div class="doc" id="doc">
         <h1>Harness quality, not scale, dominates tool-call accuracy</h1>
-        <p class="byline"><b>author</b> · draft v3, unreviewed · 14 Aug · 17 attached sources</p>
+        <p class="byline"><b>author</b> · draft v3, unreviewed · 14 Aug · 18 attached sources</p>
 
         <nav class="toc">
           <h4>Contents</h4>
@@ -1014,6 +1091,7 @@ function sync(){
   }
   scrollFirst = first;
   atts.forEach(b => b.classList.toggle('inview', inView.has(b.dataset.a)));
+  if (first) revealChip(first);
 
   const live = document.querySelector('.mf-live');
   if (inView.size){
@@ -1035,16 +1113,40 @@ paneR.addEventListener('scroll', () => {
 }, { passive:true });
 window.addEventListener('resize', sync);
 
-/* ---------- pointer overrides ---------- */
+/* ---------- pointer overrides ----------
+   Hover is a mouse affordance. On touch it fires on tap and never gets a
+   matching leave, which would freeze the pane on whatever you last touched, so
+   it is gated on a genuinely hover-capable pointer. Touch gets its own model. */
+const FINE_POINTER = matchMedia('(hover:hover) and (pointer:fine)').matches;
+
+function openSheet(){ document.body.classList.add('sheet-open'); }
+function closeSheet(){
+  document.body.classList.remove('sheet-open');
+  pinned = null;
+  atts.forEach(x => x.classList.remove('pinned'));
+  apply();
+}
+/* keep the lit chip in view as the article scrolls */
+function revealChip(id){
+  const el = atts.find(a => a.dataset.a === id);
+  if (!el || !el.classList.contains('inview')) return;
+  const s = el.parentElement.getBoundingClientRect(), b = el.getBoundingClientRect();
+  if (b.left < s.left || b.right > s.right)
+    el.scrollIntoView({ inline:'center', block:'nearest', behavior:'smooth' });
+}
+
 atts.forEach(b => {
-  b.addEventListener('mouseenter', () => { hovered = b.dataset.a; apply(); });
-  b.addEventListener('mouseleave', () => { hovered = null; apply(); });
+  if (FINE_POINTER){
+    b.addEventListener('mouseenter', () => { hovered = b.dataset.a; apply(); });
+    b.addEventListener('mouseleave', () => { hovered = null; apply(); });
+  }
   b.addEventListener('click', () => {
     const id = b.dataset.a;
     if (pinned === id){ pinned = null; b.classList.remove('pinned'); apply(); return; }
     pinned = id;
     atts.forEach(x => x.classList.remove('pinned'));
     b.classList.add('pinned');
+    openSheet();
     apply();
     const first = cites.find(c => c.dataset.a === id);
     if (first){
@@ -1056,9 +1158,35 @@ atts.forEach(b => {
 });
 
 cites.forEach(c => {
-  c.addEventListener('mouseenter', () => { hovered = c.dataset.a; apply(); });
-  c.addEventListener('mouseleave', () => { hovered = null; apply(); });
-  c.addEventListener('click', e => { e.preventDefault(); materialise(c.dataset.a, 'hover'); });
+  if (FINE_POINTER){
+    c.addEventListener('mouseenter', () => { hovered = c.dataset.a; apply(); });
+    c.addEventListener('mouseleave', () => { hovered = null; apply(); });
+  }
+  c.addEventListener('click', e => {
+    e.preventDefault();
+    materialise(c.dataset.a, 'hover');
+    if (!FINE_POINTER) openSheet();   // unpinned on purpose: the sheet rides the scroll
+  });
+});
+
+/* ---------- phone sheet: close, escape, swipe the grip down ---------- */
+$('#mclose').addEventListener('click', closeSheet);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.body.classList.contains('sheet-open')) closeSheet();
+});
+let dragY = null;
+material.addEventListener('touchstart', e => { dragY = e.touches[0].clientY; }, { passive:true });
+material.addEventListener('touchmove', e => {
+  if (dragY === null) return;
+  const dy = e.touches[0].clientY - dragY;
+  if (dy > 0) material.style.transform = 'translateY(' + dy + 'px)';
+}, { passive:true });
+material.addEventListener('touchend', e => {
+  if (dragY === null) return;
+  const dy = e.changedTouches[0].clientY - dragY;
+  material.style.transform = '';
+  if (dy > 90) closeSheet();
+  dragY = null;
 });
 
 /* ---------- table of contents scrolls the pane, not the window ---------- */
