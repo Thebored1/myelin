@@ -108,7 +108,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .att.chall .n{color:var(--warn)}
 .att:hover{background:var(--paper)}
 .att.pinned{background:var(--paper)}
-.att.pinned::after{content:"held";position:absolute;right:12px;top:9px;font-size:8.5px;
+.att.pinned::after{content:"pinned";position:absolute;right:12px;top:9px;font-size:8.5px;
   letter-spacing:.07em;text-transform:uppercase;color:var(--live)}
 
 /* ---- the material, at its own fidelity ---- */
@@ -283,6 +283,21 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .demo button:hover{color:var(--ink);border-color:var(--ink-3)}
 .demo button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 .mclose{display:none}
+
+/* right-click menu: the two attachment states, named */
+.ctxmenu{position:fixed;z-index:70;display:none;min-width:198px;background:var(--sheet);
+  border:1px solid var(--rule-2);border-radius:6px;box-shadow:0 8px 30px rgba(0,0,0,.24);
+  padding:5px;overflow:hidden}
+.ctxmenu.open{display:block}
+.ctxmenu .cm-h{font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);
+  padding:6px 9px 7px;border-bottom:1px solid var(--rule);margin-bottom:4px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ctxmenu button{display:flex;width:100%;align-items:baseline;gap:10px;padding:6px 9px;
+  border-radius:4px;font-size:12.5px;color:var(--ink-2);text-align:left}
+.ctxmenu button:hover{background:var(--paper);color:var(--ink)}
+.ctxmenu button[aria-disabled="true"]{opacity:.4}
+.ctxmenu button em{font-style:normal;margin-left:auto;font-size:9px;letter-spacing:.07em;
+  text-transform:uppercase;color:var(--ink-3)}
 
 /* ============ tablet: same split, tighter furniture ============ */
 @media(max-width:1000px){
@@ -1168,26 +1183,40 @@ function revealChip(id){
     el.scrollIntoView({ inline:'center', block:'nearest', behavior:'smooth' });
 }
 
+function free(){
+  if (!pinned) return;
+  pinned = null;
+  atts.forEach(x => x.classList.remove('pinned'));
+}
+function persist(id){
+  pinned = id;
+  atts.forEach(x => x.classList.remove('pinned'));
+  const b = atts.find(x => x.dataset.a === id);
+  if (b) b.classList.add('pinned');
+}
+function gotoCitation(id){
+  const first = cites.find(c => c.dataset.a === id);
+  if (!first) return;
+  first.scrollIntoView({ block:'center', behavior:'smooth' });
+  first.classList.add('found');
+  setTimeout(() => first.classList.remove('found'), 1800);
+}
+
+/* Click = choose, and stay free, so the pane keeps following the scroll.
+   Double-click = persist, which is the only thing that stops the scroll. */
 atts.forEach(b => {
+  const id = b.dataset.a;
   if (FINE_POINTER){
-    b.addEventListener('mouseenter', () => { hovered = b.dataset.a; apply(); });
-    b.addEventListener('mouseleave', () => { hovered = null; apply(); });
+    b.addEventListener('mouseenter', () => { if (!pinned){ hovered = id; apply(); } });
+    b.addEventListener('mouseleave', () => { if (!pinned){ hovered = null; apply(); } });
   }
   b.addEventListener('click', () => {
-    const id = b.dataset.a;
-    if (pinned === id){ pinned = null; b.classList.remove('pinned'); apply(); return; }
-    pinned = id;
-    atts.forEach(x => x.classList.remove('pinned'));
-    b.classList.add('pinned');
-    openSheet();
+    if (pinned === id) free();                       // click it again to let go
+    else { materialise(id, 'pick'); gotoCitation(id); openSheet(); }
     apply();
-    const first = cites.find(c => c.dataset.a === id);
-    if (first){
-      first.scrollIntoView({ block:'center', behavior:'smooth' });
-      first.classList.add('found');
-      setTimeout(() => first.classList.remove('found'), 1800);
-    }
   });
+  b.addEventListener('dblclick', () => { persist(id); apply(); });
+  b.addEventListener('contextmenu', e => { e.preventDefault(); openCtxMenu(b.dataset.a, e.clientX, e.clientY); });
 });
 
 cites.forEach(c => {
@@ -1201,6 +1230,48 @@ cites.forEach(c => {
     if (!FINE_POINTER) openSheet();   // unpinned on purpose: the sheet rides the scroll
   });
 });
+
+/* ---------- right-click menu: the same two states, named ---------- */
+const ctx = document.createElement('div');
+ctx.className = 'ctxmenu';
+ctx.setAttribute('role','menu');
+document.body.appendChild(ctx);
+let ctxFor = null;
+
+function openCtxMenu(id, x, y){
+  ctxFor = id;
+  const label = (atts.find(a => a.dataset.a === id) || {}).textContent || id;
+  ctx.innerHTML =
+    '<div class="cm-h"></div>' +
+    '<button data-act="free" role="menuitem"><span>Follow the scroll</span><em>free</em></button>' +
+    '<button data-act="persist" role="menuitem"><span>Keep this one open</span><em>persist</em></button>' +
+    '<button data-act="goto" role="menuitem"><span>Show where it is cited</span></button>';
+  ctx.querySelector('.cm-h').textContent = label.trim().replace(/\s+/g,' ');
+  const freeBtn = ctx.querySelector('[data-act="free"]');
+  const pinBtn  = ctx.querySelector('[data-act="persist"]');
+  const hasCite = cites.some(c => c.dataset.a === id);
+  if (!pinned){ freeBtn.setAttribute('aria-disabled','true'); freeBtn.style.opacity = '.4'; }
+  if (pinned === id){ pinBtn.setAttribute('aria-disabled','true'); pinBtn.style.opacity = '.4'; }
+  if (!hasCite){ const g = ctx.querySelector('[data-act="goto"]');
+                 g.setAttribute('aria-disabled','true'); g.style.opacity = '.4'; }
+  ctx.classList.add('open');
+  const r = ctx.getBoundingClientRect();
+  ctx.style.left = Math.min(x, innerWidth - r.width - 8) + 'px';
+  ctx.style.top  = Math.min(y, innerHeight - r.height - 8) + 'px';
+}
+function closeCtx(){ ctx.classList.remove('open'); ctxFor = null; }
+ctx.addEventListener('click', e => {
+  const act = e.target.closest('button');
+  if (!act || act.getAttribute('aria-disabled') === 'true') return;
+  const id = ctxFor;
+  if (act.dataset.act === 'free'){ free(); apply(); }
+  if (act.dataset.act === 'persist'){ persist(id); apply(); }
+  if (act.dataset.act === 'goto') gotoCitation(id);
+  closeCtx();
+});
+document.addEventListener('pointerdown', e => { if (!ctx.contains(e.target)) closeCtx(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtx(); });
+paneR.addEventListener('scroll', closeCtx, { passive:true });
 
 /* ---------- phone sheet: close, escape, swipe the grip down ---------- */
 /* ---------- collapse the attachment list to a state rail ----------
