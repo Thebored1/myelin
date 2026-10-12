@@ -33,7 +33,10 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 
 /* ---- the split, as shipped: sources left, document right ---- */
 .split{flex:1;display:flex;min-height:0}
-#paneL{flex:none;width:41%;background:var(--sheet);border-right:1px solid var(--rule);
+/* 48% rather than 41%: the left pane holds the list AND the material, so a
+   narrower default leaves the material cropped even before anything
+   collapses. This is close to the app's own 50% splitRatio. */
+#paneL{flex:none;width:48%;background:var(--sheet);border-right:1px solid var(--rule);
   display:flex;min-width:0}
 #paneR{flex:1;overflow:auto;min-width:0;scroll-behavior:smooth}
 .grip{flex:none;width:9px;cursor:col-resize;position:relative}
@@ -1201,29 +1204,52 @@ cites.forEach(c => {
 
 /* ---------- phone sheet: close, escape, swipe the grip down ---------- */
 /* ---------- collapse the attachment list to a state rail ----------
-   The list is worth its width when you are choosing an attachment. It is not
-   worth 200px of a 1000px window when the material on the right is a five
-   column table being cropped mid-cell. Collapsing hands that width back. */
+   Manual, because a fixed-width list next to a resizable split will always
+   win against the material at some window size. Automatic, because the user
+   should not have to notice and click.
+
+   The list's width is spent on rows the reader is not reading while the
+   material beside it is being cropped. So the rule is one number: if the
+   material would be narrower than MIN_MATERIAL, the list gives up its width
+   and keeps only its state rail. No persisted preference - the correct state
+   is a function of the window, not something to remember. */
 const manifest = document.querySelector('.manifest');
 const mftoggle = $('#mftoggle');
-const MANIFEST_KEY = 'preview_manifest_collapsed';
-function setCollapsed(on, save){
+const MIN_MATERIAL = 360;
+let expandedW = 0;
+
+function expandedWidth(){
+  if (manifest.classList.contains('collapsed')) return expandedW || 266;
+  expandedW = manifest.offsetWidth;
+  return expandedW;
+}
+function leftShare(){
+  const total = split.getBoundingClientRect().width || 1;
+  const set = parseFloat(paneL.style.width);
+  return Number.isFinite(set) ? set / 100 : paneL.getBoundingClientRect().width / total;
+}
+function setCollapsed(on, manual){
   manifest.classList.toggle('collapsed', on);
   mftoggle.setAttribute('aria-expanded', on ? 'false' : 'true');
   mftoggle.setAttribute('aria-label', on ? 'Expand attachment list' : 'Collapse attachment list');
-  if (save) { try { localStorage.setItem(MANIFEST_KEY, on ? '1' : '0'); } catch(e){} }
+  if (manual) mftoggle.title = 'Set by you';
+  else mftoggle.title = on
+    ? 'Collapsed automatically — the material needs the width'
+    : 'Expanded — there is room for both';
+}
+function autoCollapse(){
+  const material = split.getBoundingClientRect().width * leftShare() - expandedWidth();
+  setCollapsed(material < MIN_MATERIAL, false);
 }
 mftoggle.addEventListener('click', e => {
   e.stopPropagation();
   setCollapsed(!manifest.classList.contains('collapsed'), true);
 });
-let saved = null;
-try { saved = localStorage.getItem(MANIFEST_KEY); } catch(e){}
-setCollapsed(saved === '1', false);
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === '\\')
     setCollapsed(!manifest.classList.contains('collapsed'), true);
 });
+window.addEventListener('resize', autoCollapse);
 
 $('#mclose').addEventListener('click', closeSheet);
 document.addEventListener('keydown', e => {
@@ -1261,7 +1287,7 @@ grip.addEventListener('mousedown', e => {
     const b = split.getBoundingClientRect();
     paneL.style.width = Math.max(26, Math.min(66, ((ev.clientX - b.left) / b.width) * 100)) + '%';
   };
-  const up = () => { document.body.style.userSelect=''; sync();
+  const up = () => { document.body.style.userSelect=''; autoCollapse(); sync();
     window.removeEventListener('mousemove',move); window.removeEventListener('mouseup',up); };
   window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
 });
@@ -1274,6 +1300,7 @@ $('#t-raw').addEventListener('click', e => {
   if (!on) requestAnimationFrame(sync);
 });
 
+autoCollapse();   // split and paneL are defined by now; the list sizes itself to the window
 sync();
 </script>
 </body>
