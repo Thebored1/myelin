@@ -6,7 +6,7 @@
 // embedded as a classic script. The files on disk stay the source of truth;
 // this file is a build artefact of them.
 //
-//   node preview/attachments/build-embed.mjs
+//   node myelinweb/attachments/build-embed.mjs
 
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
