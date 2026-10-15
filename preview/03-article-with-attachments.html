@@ -336,13 +336,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .render .lithead{position:relative}
 .render .lithead::after{content:"";position:absolute;left:-14px;top:2px;bottom:2px;width:2px;
   background:var(--live);border-radius:1px}
-.render .flag{position:sticky;top:44px;z-index:6;margin:0;padding:7px 26px;
-  font-size:11px;letter-spacing:.04em;color:var(--ink-3);background:var(--sheet);
-  border-bottom:1px solid var(--rule);display:flex;align-items:baseline;gap:10px;
-  white-space:nowrap;overflow:hidden}
-.render .flag b{color:var(--live);font-weight:500}
-.render .flag .grow{margin-left:auto;font-size:10px;color:var(--ink-3);
-  overflow:hidden;text-overflow:ellipsis}
+.render .flag{display:none}
 
 /* right-click menu: the two attachment states, named */
 .ctxmenu{position:fixed;z-index:70;display:none;min-width:198px;background:var(--sheet);
@@ -426,8 +420,6 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   .toc ol{font-size:13px;line-height:1.65}
   .refs li{font-size:13px}
 
-  .render .flag{top:0;padding:6px 18px;font-size:10.5px}
-  .render .flag .grow{display:none}
   .render .rmax{padding-left:18px;padding-right:18px}
   .render table{font-size:11.5px}
   .render p,.render ul,.render ol{font-size:14px}
@@ -821,14 +813,6 @@ function materialise(id, why){
   readFile(a.f).then(src => { if (seq === renderSeq) paint(id, a, src); });
 }
 
-function flag(whole){
-  return '<div class="flag"><span>' +
-    (whole ? 'whole file in focus' : 'showing <b>the cited section</b> · rest of file dimmed') +
-    '</span><span class="grow">' +
-    (whole ? 'scroll back up to return to the section' : 'scroll the file to bring all of it into focus') +
-    '</span></div>';
-}
-
 function paint(id, a, src){
   const r = document.getElementById('render');
   r.classList.remove('whole');
@@ -866,10 +850,20 @@ function focusSection(r, anchor){
   lit.forEach(b => b.classList.remove('off'));
   lit.forEach(b => b.classList.add('lit'));
   lit[0].classList.add('lithead');
-  r.insertAdjacentHTML('afterbegin', flag(false));
+  // Centre the cited section when it fits, so it is read in the middle of the
+  // pane rather than jammed under the top edge. Only when it is taller than
+  // the pane does its start become the anchor.
   programScroll(() => {
-    const d = lit[0].getBoundingClientRect().top - material.getBoundingClientRect().top;
-    material.scrollTop = Math.max(0, d - 4);
+    const pane = material.getBoundingClientRect();
+    const first = lit[0].getBoundingClientRect();
+    const last = lit[lit.length - 1].getBoundingClientRect();
+    const sectionH = last.bottom - first.top;
+    const pad = 14;
+    const offset = first.top - pane.top;
+    const y = sectionH + pad * 2 <= pane.height
+      ? offset - (pane.height - sectionH) / 2
+      : offset - pad;
+    material.scrollTop = Math.max(0, y);
   });
 }
 
@@ -961,7 +955,6 @@ material.addEventListener('scroll', () => {
   const r = document.getElementById('render');
   if (r.classList.contains('whole')) return;
   r.classList.add('whole');
-  r.querySelector('.flag').outerHTML = flag(true);
   document.querySelectorAll('.off').forEach(b => b.classList.remove('off'));
 }, { passive:true });
 
