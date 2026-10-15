@@ -447,21 +447,20 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   #paneR{height:calc(100vh - 36px)}
 }
 
-/* ============ desktop: the list overlays the article, not the source ============
-   Placed last so it wins on source order against the base .manifest rules above.
-   The left third is then always exactly the material, and the article reserves
-   matching room on its right so the overlay never sits on top of the prose. */
+/* ============ desktop: the list stays at the left edge ============
+   It sits in the flow at the left of the source pane as before. Opening it
+   does not squeeze the source panel - the split grows by the list's width
+   and the source panel slides right, keeping exactly the same size. The
+   article gives up the corresponding width, which is the honest trade.
+
+   Placed last so it wins on source order against the base rules above. */
 @media(min-width:721px){
-  .manifest{position:absolute;top:40px;right:0;bottom:0;left:auto;width:266px;
-    border-left:1px solid var(--rule);border-right:0;z-index:35;box-sizing:border-box}
+  body{--man:266px; --split:33.33%}
+  body.man-collapsed{--man:30px}
+  #paneL{width:calc(var(--split) + var(--man))}
+  .manifest{width:var(--man);flex:none}
   .manifest.collapsed{width:30px}
-  /* No transition on padding-right: the initial state is set during parse,
-     before any frame renders, so a transition from it never advances and
-     getComputedStyle reports the stale value. Verified broken, then removed. */
-  #paneR{padding-right:266px}
-  body.man-collapsed #paneR{padding-right:30px}
-  #paneL{position:relative;z-index:1}
-  .material{width:100%}
+  .material{flex:1;min-width:0}
 }
 </style>
 </head>
@@ -1184,14 +1183,15 @@ paneR.addEventListener('scroll', closeCtx, { passive:true });
    win against the material at some window size. Automatic, because the user
    should not have to notice and click.
 
-   The list's width is spent on rows the reader is not reading while the
-   material beside it is being cropped. So the rule is one number: if the
-   material would be narrower than MIN_MATERIAL, the list gives up its width
-   and keeps only its state rail. No persisted preference - the correct state
-   is a function of the window, not something to remember. */
+   The list is a column at the left of the source pane, and opening it makes
+   the split wider rather than the source panel narrower, so the source panel
+   keeps its size and the article absorbs the difference. The rule is then one
+   number: if the article would be left narrower than MIN_ARTICLE, the list
+   gives up its width and keeps only its state rail. No persisted preference -
+   the correct state is a function of the window, not something to remember. */
 const manifest = document.querySelector('.manifest');
 const mftoggle = $('#mftoggle');
-const MIN_MATERIAL = 360;
+const MIN_ARTICLE = 520;
 const PHONE = matchMedia('(max-width:720px)');   // same cutoff as the strip's media query
 let expandedW = 0;
 
@@ -1201,9 +1201,8 @@ function expandedWidth(){
   return expandedW;
 }
 function leftShare(){
-  const total = split.getBoundingClientRect().width || 1;
-  const set = parseFloat(paneL.style.width);
-  return Number.isFinite(set) ? set / 100 : paneL.getBoundingClientRect().width / total;
+  const v = parseFloat(getComputedStyle(document.body).getPropertyValue('--split'));
+  return Number.isFinite(v) ? v / 100 : 1/3;
 }
 function setCollapsed(on, manual){
   manifest.classList.toggle('collapsed', on);
@@ -1223,8 +1222,10 @@ function autoCollapse(){
   // rail rules, wiped the strip's own in-view border. The rail is a desktop
   // idea; the strip is the phone's answer to the same question.
   if (PHONE.matches) return setCollapsed(false, false);
-  const material = split.getBoundingClientRect().width * leftShare() - expandedWidth();
-  setCollapsed(material < MIN_MATERIAL, false);
+  // The source panel is exactly the split and never changes width, so the list
+  // is measured against the article, which is what it actually takes from.
+  const article = split.getBoundingClientRect().width * (1 - leftShare()) - expandedWidth();
+  setCollapsed(article < MIN_ARTICLE, false);
 }
 mftoggle.addEventListener('click', e => {
   e.stopPropagation();
@@ -1270,7 +1271,9 @@ grip.addEventListener('mousedown', e => {
   e.preventDefault(); document.body.style.userSelect = 'none';
   const move = ev => {
     const b = split.getBoundingClientRect();
-    paneL.style.width = Math.max(26, Math.min(66, ((ev.clientX - b.left) / b.width) * 100)) + '%';
+    const pct = Math.max(20, Math.min(60, ((ev.clientX - b.left) / b.width) * 100));
+    // drive the variable, so the list's width stays additive to the split
+    document.body.style.setProperty('--split', pct.toFixed(2) + '%');
   };
   const up = () => { document.body.style.userSelect=''; autoCollapse(); sync();
     window.removeEventListener('mousemove',move); window.removeEventListener('mouseup',up); };
