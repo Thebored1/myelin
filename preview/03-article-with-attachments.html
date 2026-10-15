@@ -810,7 +810,7 @@ function flag(whole){
   return '<div class="flag"><span>' +
     (whole ? 'whole file in focus' : 'showing <b>the cited section</b> · rest of file dimmed') +
     '</span><span class="grow">' +
-    (whole ? 'pinned — scroll back up to return to the section' : 'scroll the file to bring all of it into focus') +
+    (whole ? 'scroll back up to return to the section' : 'scroll the file to bring all of it into focus') +
     '</span></div>';
 }
 
@@ -928,26 +928,26 @@ paneR.addEventListener('scroll', () => {
 }, { passive:true });
 window.addEventListener('resize', sync);
 
-/* Distinguish our own scrolling from the reader's. */
-let progScroll = false;
+/* Distinguish our own scrolling from the reader's.
+   Cleared by timestamp rather than requestAnimationFrame: rAF is throttled to
+   nothing in a background tab, which left this flag stuck true and silently
+   killed the scroll-to-whole transition. */
+let progUntil = 0;
 function programScroll(fn){
-  progScroll = true;
+  progUntil = performance.now() + 140;
   fn();
-  requestAnimationFrame(() => requestAnimationFrame(() => { progScroll = false; }));
 }
 
 /* Scrolling the file is the reader saying they want the whole document, not
-   the one passage. So it brings the entire file into focus and pins it, the
-   same as a double-click would - the section is no longer the thing on screen,
-   so pinning it would be a lie. */
+   the one passage, so it brings all of it into focus. It does not pin: they
+   read something else on screen, they did not choose this attachment. */
 material.addEventListener('scroll', () => {
-  if (progScroll || material.scrollTop <= 4) return;
+  if (performance.now() < progUntil || material.scrollTop <= 4) return;
   const r = document.getElementById('render');
   if (r.classList.contains('whole')) return;
   r.classList.add('whole');
   r.querySelector('.flag').outerHTML = flag(true);
   document.querySelectorAll('.off').forEach(b => b.classList.remove('off'));
-  if (cur) persist(cur);
 }, { passive:true });
 
 /* ---------- a very small markdown renderer ----------
@@ -1088,8 +1088,9 @@ function gotoCitation(id){
   setTimeout(() => first.classList.remove('found'), 1800);
 }
 
-/* Click = choose, and stay free, so the pane keeps following the scroll.
-   Double-click = persist, which is the only thing that stops the scroll. */
+/* Click selects and pins, and jumps the article to the citing sentence.
+   Clicking a pinned row releases it and leaves the pane where it is - being
+   let go should not move you somewhere else. */
 atts.forEach(b => {
   const id = b.dataset.a;
   if (FINE_POINTER){
@@ -1097,12 +1098,14 @@ atts.forEach(b => {
     b.addEventListener('mouseleave', () => { if (!pinned){ hovered = null; apply(); } });
   }
   b.addEventListener('click', () => {
-    if (pinned === id) free();                       // click it again to let go
-    else { materialise(id, 'pick'); gotoCitation(id); openSheet(); }
+    if (pinned === id){ free(); return; }
+    materialise(id, 'pick');
+    persist(id);
+    gotoCitation(id);
+    openSheet();
     apply();
   });
-  b.addEventListener('dblclick', () => { persist(id); apply(); });
-  b.addEventListener('contextmenu', e => { e.preventDefault(); openCtxMenu(b.dataset.a, e.clientX, e.clientY); });
+  b.addEventListener('contextmenu', e => { e.preventDefault(); openCtxMenu(id, e.clientX, e.clientY); });
 });
 
 cites.forEach(c => {
