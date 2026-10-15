@@ -33,10 +33,10 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 
 /* ---- the split, as shipped: sources left, document right ---- */
 .split{flex:1;display:flex;min-height:0}
-/* 48% rather than 41%: the left pane holds the list AND the material, so a
-   narrower default leaves the material cropped even before anything
-   collapses. This is close to the app's own 50% splitRatio. */
-#paneL{flex:none;width:48%;background:var(--sheet);border-right:1px solid var(--rule);
+/* One third to the sources, two thirds to the article. The article is the
+   thing being read, so it gets the majority; the source pane only has to hold
+   one document at a time. */
+#paneL{flex:none;width:33.33%;background:var(--sheet);border-right:1px solid var(--rule);
   display:flex;min-width:0}
 #paneR{flex:1;overflow:auto;min-width:0;scroll-behavior:smooth}
 .grip{flex:none;width:9px;cursor:col-resize;position:relative}
@@ -228,9 +228,9 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .sl h5{font-family:var(--serif);font-size:16px;font-weight:400;margin:5px 0 0}
 
 /* ---- RIGHT: an ordinary long article. nothing added to the prose. ---- */
-.doc{max-width:64ch;margin:0 auto;padding:52px 44px 160px}
-.doc h1{font-family:var(--serif);font-size:32px;font-weight:400;line-height:1.2;letter-spacing:-.013em;
-  margin:0 0 14px;max-width:22em}
+.doc{max-width:80ch;margin:0 auto;padding:48px 36px 160px}
+.doc h1{font-family:var(--serif);font-size:33px;font-weight:400;line-height:1.2;letter-spacing:-.014em;
+  margin:0 0 14px;max-width:24em}
 .byline{font-size:12.5px;color:var(--ink-3);margin:0 0 30px;padding-bottom:22px;
   border-bottom:1px solid var(--rule)}
 .byline b{color:var(--ink-2);font-weight:500}
@@ -239,7 +239,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   letter-spacing:-.006em;scroll-margin-top:24px}
 .doc h3{font-family:var(--sans);font-size:12px;letter-spacing:.05em;text-transform:uppercase;
   color:var(--ink-2);margin:28px 0 9px;font-weight:600;scroll-margin-top:24px}
-.doc p{font-family:var(--serif);font-size:17px;line-height:1.68;margin:0 0 18px;color:var(--ink-2)}
+.doc p{font-family:var(--serif);font-size:17.5px;line-height:1.7;margin:0 0 19px;color:var(--ink-2)}
 .doc p strong{color:var(--ink);font-weight:600}
 .doc p em{font-style:italic}
 .doc p.abstract{font-family:var(--serif);font-size:16px;color:var(--ink-3);line-height:1.66;
@@ -299,7 +299,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
    saying they want the whole thing. */
 .render{padding:0 0 60px;font-family:var(--sans)}
 .render[hidden]{display:none}
-.render .rmax{max-width:62ch;margin:0 auto;padding:22px 26px 0}
+.render .rmax{max-width:72ch;margin:0 auto;padding:22px 26px 0}
 .render h1{font-family:var(--serif);font-size:20px;font-weight:400;line-height:1.3;
   margin:0 0 14px;letter-spacing:-.01em}
 .render h2{font-family:var(--serif);font-size:15.5px;font-weight:400;line-height:1.35;
@@ -342,7 +342,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   white-space:nowrap;overflow:hidden}
 .render .flag b{color:var(--live);font-weight:500}
 .render .flag .grow{margin-left:auto;font-size:10px;color:var(--ink-3);
-  overflow:hidden;text-overflow:ellipsis}}
+  overflow:hidden;text-overflow:ellipsis}
 
 /* right-click menu: the two attachment states, named */
 .ctxmenu{position:fixed;z-index:70;display:none;min-width:198px;background:var(--sheet);
@@ -363,9 +363,8 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 @media(max-width:1000px){
   .manifest{width:206px}
   .att{grid-template-columns:6px 24px 1fr;column-gap:5px;padding-left:10px}
-  .doc{padding:44px 28px 120px} .doc h1{font-size:27px} .doc p{font-size:16.5px}
+  .doc{padding:40px 26px 120px} .doc h1{font-size:27px} .doc p{font-size:16.5px}
   .toc ol{columns:1}
-  #paneL{width:44%!important}
 }
 
 /* ============ phone: the article owns the screen ============
