@@ -1,0 +1,46 @@
+================================================================================
+nakamura-2026-08-19.log
+reader reproduction of the 8B-vs-20B crossover claim
+================================================================================
+date        = 2026-08-19
+runner      = nakamura
+hardware    = NVIDIA RTX 4090 (Ada, 24 GB), cuda 12.4, driver 550.54
+server      = llama-server, --n-gpu-layers 999, ctx 8192
+model       = qwen2.5-8b-instruct-q4_k_m
+baseline    = qwen2.5-20b-instruct-q4_k_m
+harness     = myelin 0.9 (same as yours)
+tasks       = tasksuite-v4 (identical)
+quantisation= q4_k_m on BOTH sides (matched, verified by sha256 on the
+              weight files before the first run)
+seeds       = [11, 12, 13]
+
+--------------------------------------------------------------------------------
+seed 1   8b 87%    20b 89%
+seed 2   8b 89%    20b 90%
+seed 3   8b 86%    20b 91%
+--------------------------------------------------------------------------------
+
+Crossover holds. 8B instrumented is within 2.7 points of 20B naive.
+
+Seed spread is 3 points on the 8B side and 2 on the 20B side, which is inside
+the run-to-run noise I would expect at this temperature. The direction is the
+same at every seed: the 8B on the instrumented harness sits level with the
+20B on the naive one, which is what the paper reports.
+
+I ran this after reading reka's 2026-08-06 log in this thread. My setup
+differs from hers on the hardware, but the difference I would actually point at
+is not the hardware — it is the quantisation. I matched q4_k_m on both sides
+and verified it before running, which is the one thing I could not confirm
+she had done.
+
+That matched quantisation on both sides is the difference from the original
+run, and from reka's rerun. Same task file, same harness version, same seeds.
+
+Worth noting that reka's result and mine are not actually in conflict once the
+20B cell is matched. I would not close her log on hardware grounds. The open
+question is what the original 20B cell was served from, and that still needs
+someone with the original weights.
+
+================================================================================
+end of log
+================================================================================

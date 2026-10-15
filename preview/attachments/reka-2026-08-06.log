@@ -1,0 +1,48 @@
+================================================================================
+reka-2026-08-06.log
+reader reproduction of the 8B-vs-20B crossover claim
+================================================================================
+date        = 2026-08-06
+runner      = reka
+hardware    = AMD 7900X3D (RDNA3, 32 GB), linux 6.8, ROCm 6.1
+server      = llama-server, --n-gpu-layers 999, ctx 8192
+model       = qwen2.5-8b-instruct-q4_k_m
+baseline    = qwen2.5-20b-instruct-q4_k_m
+harness     = myelin 0.9 (same as yours)
+tasks       = tasksuite-v4 (identical file)
+seeds       = [11, 12, 13]
+
+--------------------------------------------------------------------------------
+seed 1   8b 79%    20b 82%
+seed 2   8b 77%    20b 84%
+seed 3   8b 80%    20b 81%
+--------------------------------------------------------------------------------
+
+GAP = 20b leads by ~3.7 points. Claim does not reproduce.
+
+Expected, per the paper, is for the 8B to close and pass once the harness is
+instrumented. On this machine the 8B never closes it. Gap is in the same
+direction at every seed, so it is not seed noise.
+
+I re-checked the task file, the seed order, and the harness version before
+concluding this. All three match the paper.
+
+I then went looking for a cause and I think I found one, but I want to be
+careful about how strongly I put it.
+
+note: your 20B baseline looks like a different quant than your 8B.
+      The 8B file is q4_k_m. The 20B file behaves more like q4_0 in this
+      reproduction — the gap between the two serving paths is larger than it
+      should be for a matched pair. I did not fully confirm this by hashing
+      the weights, so treat it as a suspicion, not a diagnosis.
+
+Not sure that was intended. If the 20B was served at a worse quant than the
+8B, the two cells are not comparable and the crossover number in the paper
+is measuring the quant gap rather than the harness effect.
+
+Handing this back rather than filing it. Someone who has the original
+weights on hand should check what the 20B cell was actually served from.
+
+================================================================================
+end of log
+================================================================================

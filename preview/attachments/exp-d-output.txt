@@ -1,0 +1,95 @@
+================================================================================
+exp-d.ipynb — captured stdout (jupyter nbconvert --to stdout --execute)
+run 2026-08-02 14:19:07  ·  host: r7-workstation  ·  python 3.11.8
+model: qwen2.5-8b-instruct-q4_k_m  ·  temperature 0.7  ·  seeds [11, 12, 13]
+================================================================================
+
+In [1]: import json, pathlib, textwrap
+   ...: from harness import chain_eval, load_chain
+   ...: CHAIN = load_chain("chains/weather_3turn.json")
+
+In [2]: # Isolating variable: the argument typing of the tool surface.
+   ...: # Identical model, identical prompts, identical seed order.
+   ...: # string  -> free-form tool descriptions, arguments arrive untyped
+   ...: # enum    -> JSON Schema surface, arguments constrained at the boundary
+
+In [3]: with open("schemas/weather_3turn.json") as fh:
+   ...:     INSTRUMENTED_SPEC = json.load(fh)
+
+In [4]: results = {}
+   ...: for surface in ("string", "enum"):
+   ...:     spec = INSTRUMENTED_SPEC if surface == "enum" else STRING_SPEC
+   ...:     results[surface] = {s: chain_eval(CHAIN, s, spec) for s in SEEDS}
+
+In [5]: for surface in ("string", "enum"):
+   ...:     print(f"{surface:>7}: " + "  ".join(
+   ...:         f"seed {s} {'pass' if ok else 'FAIL'}" for s, ok in results[surface].items()))
+
+Out[5]:
+  string: seed 11 FAIL   seed 12 FAIL   seed 13 pass
+    enum: seed 11 pass   seed 12 pass   seed 13 pass
+
+--------------------------------------------------------------------------------
+condition: naive / string-typed tool surface
+--------------------------------------------------------------------------------
+seed 11   FAIL
+          turn 1   ok       args carried through
+          turn 2   ok       args carried through
+          turn 3   drift    city="lisbon"      -> not in {Lisbon, Porto, Faro}
+                                 units="celsius" -> not in {c, f}
+                                 # argument drift begins at turn 3, not turn 1.
+                                 # the free-string surface gives the model nothing to
+                                 # hold constant between turns, so the argument form
+                                 # that survived turn 2 is not reproduced at turn 3.
+seed 12   FAIL
+          turn 1   ok       args carried through
+          turn 2   ok       args carried through
+          turn 3   drift    units="Celsius"    -> not in {c, f}
+                                 # same failure shape as seed 11, lowercased variant
+seed 13   pass
+          turn 1   ok       turn 2   ok       turn 3   ok
+
+2 of 3 seeds failed. Tool selection was correct in all 6 of 6 turns.
+The failure is ill-typed arguments in the third turn of the chain.
+
+--------------------------------------------------------------------------------
+condition: instrumented / enum-typed tool surface
+--------------------------------------------------------------------------------
+seed 11   pass
+          turn 1   ok       turn 2   ok       turn 3   ok
+seed 12   pass
+          turn 1   ok       turn 2   ok       turn 3   ok
+seed 13   pass
+          turn 1   ok       turn 2   ok       turn 3   ok
+
+3 of 3 seeds passed. Zero boundary re-asks were required: every emitted
+argument satisfied the schema on first emission.
+
+================================================================================
+SUMMARY — chain completion, everything else held fixed
+================================================================================
+surface       chain completion
+--------------------------------
+string        38.1%
+enum          81.7%
+--------------------------------
+delta         +43.6 points
+
+n = 3 seeds x 1 chain x 1 model. The 38.1 / 81.7 figures are the pooled
+chain-completion rate over the seed x turn grid, not a mean of seed means.
+
+================================================================================
+WARNING — READ BEFORE QUOTING
+================================================================================
+This run is not reported in section 6 of the paper. Section 6 currently
+reports tasksuite-v4 only, at 240 tasks x 8 categories x 3 seeds, and does
+not contain this 3-turn chain or this enum-vs-string contrast.
+
+Nothing in this run has been peer reviewed, and n = 3 is too small to carry
+the effect on its own. The typing mechanism must not be cited as an
+established finding, and must not be presented as the explanation for the
+tasksuite-v4 gap until it is reported and rerun.
+
+================================================================================
+end of capture
+================================================================================

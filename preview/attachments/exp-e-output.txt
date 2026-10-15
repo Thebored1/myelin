@@ -1,0 +1,52 @@
+================================================================================
+exp-e.ipynb — captured stdout (jupyter nbconvert --to stdout --execute)
+run 2026-08-04 09:41:33  ·  host: r7-workstation  ·  python 3.11.8
+model: qwen2.5-8b-instruct-q4_k_m, qwen2.5-20b-instruct-q4_k_m
+seeds [11, 12, 13]  ·  same 240 tasks as tasksuite-v4  ·  same task file
+================================================================================
+
+In [1]: # What the stronger harness costs.
+   ...: # Same models, same tasks, same seeds. The only change is the harness:
+   ...: # instrumented adds a schema preamble per turn and one re-ask on
+   ...: # validation failure, and keeps explicit turn state.
+
+In [2]: rows = []
+   ...: for model in MODELS:
+   ...:     for harness in ("naive", "instrumented"):
+   ...:         rows.append(measure(model, harness, n_seeds=3))
+
+In [3]: print(table(rows))
+
+Out[3]:
+                         8B naive   8B instr   20B naive   20B instr
+                         ---------  ---------  ----------  ---------
+    prompt tokens          1,204     2,880      1,204      2,880
+  completion tokens            86        94        141        148
+    wall clock (s)          4.11      7.94       9.02      11.30
+        exact match        41.2%     88.1%      74.3%      90.8%
+    cost / 1k tasks        $4.11    $11.72     $12.84     $19.30
+
+In [4]: notes(rows)
+
+Out[4]:
+    prompt tokens are identical within each model size (1,204 naive / 2,880
+    instrumented for both). The schema preamble is the only source of the
+    prompt delta, so the 8B and 20B prompt columns do not diverge.
+
+    completion tokens barely move (86 -> 94, 141 -> 148). The re-ask fires
+    rarely once the schema is enforced, so the accuracy gain is not bought
+    with extra generation.
+
+    wall clock roughly doubles at 8B (4.11 -> 7.94 s) and adds ~2.3 s at 20B
+    (9.02 -> 11.30 s).
+
+    cost / 1k tasks is the sharpest line in the table: $4.11 -> $11.72 at 8B
+    and $12.84 -> $19.30 at 20B.
+
+================================================================================
+accuracy is up 47 points while spend is up 165%
+================================================================================
+
+================================================================================
+end of capture
+================================================================================

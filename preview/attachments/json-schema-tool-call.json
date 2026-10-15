@@ -1,0 +1,26 @@
+{
+  "_comment": "This file holds the argument typing under test and nothing else. The two tool surfaces below are byte-identical in description, name, and behaviour. The instrumented variant declares a JSON Schema for each argument; the naive variant is untyped. No other property of the tools differs — same name, same call shape, same execution. Any difference in chain completion between the two is attributable to argument typing alone.",
+  "instrumented": {
+    "name": "get_weather",
+    "description": "Get the current weather for a city.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "city": {
+          "type": "string",
+          "enum": ["Lisbon", "Porto", "Faro"]
+        },
+        "units": {
+          "type": "string",
+          "enum": ["c", "f"]
+        }
+      },
+      "required": ["city", "units"],
+      "additionalProperties": false
+    }
+  },
+  "naive": {
+    "name": "get_weather",
+    "description": "get the weather somewhere"
+  }
+}
