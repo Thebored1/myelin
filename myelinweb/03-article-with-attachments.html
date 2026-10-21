@@ -83,20 +83,25 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .mgroup span{color:var(--rule-2)}
 
 /* one flat list, in the order the article reaches them.
+   Order is the structure; kind is only a label. The title is the first thing on
+   the line and the tag trails it, so the list reads down the article rather
+   than across a taxonomy.
    three-level state:
    cited  — cited somewhere in the article (a quiet dot)
    inview — cited in the current viewport (bright dot, ink text)
    on     — currently materialised in the pane (rule + fill)          */
 .att{display:grid;width:100%;text-align:left;padding:7px 14px 7px 12px;
-  grid-template-columns:7px 27px 1fr;column-gap:6px;align-items:baseline;
+  grid-template-columns:7px 1fr auto;column-gap:6px;align-items:baseline;
   border-left:2px solid transparent;transition:.14s;position:relative}
-.att .g{font-size:8.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);
-  line-height:1.7}
-.att .n{font-size:12.5px;color:var(--ink-3);line-height:1.35}
-.att .d{grid-column:3;font-size:11px;color:var(--ink-3);line-height:1.4;margin-top:2px;
-  display:none}
-.att .dot{width:5px;height:5px;border-radius:50%;background:var(--rule-2);opacity:0;
-  transition:.16s;align-self:center}
+.att .dot{grid-column:1;grid-row:1;width:5px;height:5px;border-radius:50%;
+  background:var(--rule-2);opacity:0;transition:.16s;align-self:center}
+.att .n{grid-column:2;grid-row:1;font-size:12.5px;color:var(--ink-3);line-height:1.35}
+/* the kind, as a label: right-aligned, quiet, never the first thing read */
+.att .g{grid-column:3;grid-row:1;justify-self:end;font-size:8px;
+  letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  line-height:1.7;opacity:.62;white-space:nowrap}
+.att .d{grid-column:2/4;grid-row:2;font-size:11px;color:var(--ink-3);line-height:1.4;
+  margin-top:2px;display:none}
 .att.cited .dot{opacity:1}
 .att.inview{border-left-color:color-mix(in srgb,var(--live) 34%,transparent)}
 .att.inview .dot{background:var(--live);opacity:1}
@@ -114,6 +119,8 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .att.pinned .n{color:var(--ink)}
 .att.pinned .dot{background:var(--live);opacity:1;width:6px;height:6px}
 .att.pinned.inview .dot{box-shadow:0 0 0 3px color-mix(in srgb,var(--live) 22%,transparent)}
+/* keep the kind label clear of the pinned badge on the same line */
+.att.pinned .g{padding-right:46px}
 .att.pinned::after{content:"pinned";position:absolute;right:11px;top:8px;font-size:8px;
   letter-spacing:.08em;text-transform:uppercase;color:var(--live);
   border:1px solid color-mix(in srgb,var(--live) 40%,transparent);border-radius:3px;
@@ -468,7 +475,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   <div class="split" id="split">
     <section id="paneL">
       <nav class="manifest">
-        <div class="mf-head"><button class="mf-toggle" id="mftoggle" aria-expanded="true" aria-label="Collapse attachment list"><svg width="9" height="9" viewBox="0 0 9 9"><path d="M6 1 L2.5 4.5 L6 8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span>attachments · in order read</span><em>18</em></div>
+        <div class="mf-head"><button class="mf-toggle" id="mftoggle" aria-expanded="true" aria-label="Collapse attachment list"><svg width="9" height="9" viewBox="0 0 9 9"><path d="M6 1 L2.5 4.5 L6 8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span>attachments · in article order</span><em>18</em></div>
         <div class="mf-live idle" id="mflive"><span class="dot"></span><span>scrolling — none in view</span></div>
 
         <button class="att key" data-a="data-tasksuite">
