@@ -44,10 +44,11 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .grip:hover::after{background:var(--rule-2)}
 
 /* ---- left pane = attachments. a manifest beside the material, not tabs ---- */
-.manifest{flex:none;width:266px;border-right:1px solid var(--rule);overflow:auto;
-  padding:10px 0 50px;position:relative}
-.mf-head{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
-  padding:0 12px 10px;display:flex;align-items:center;gap:7px}
+.manifest{flex:none;width:266px;border-right:1px solid var(--rule);
+  display:flex;flex-direction:column;overflow:hidden;position:relative}
+.mf-scroll{flex:1;min-height:0;overflow:auto;padding:0 0 26px;scrollbar-width:thin}
+.mf-head{flex:none;font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  padding:10px 12px;display:flex;align-items:center;gap:7px}
 .mf-head>span{flex:1;min-width:0}
 .mf-head em{font-style:normal;letter-spacing:0;text-transform:none;font-size:11px}
 .mf-toggle{flex:none;width:16px;height:16px;display:grid;place-items:center;
@@ -56,7 +57,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .mf-toggle svg{transition:transform .22s cubic-bezier(.22,.85,.3,1)}
 .manifest.collapsed .mf-toggle svg{transform:rotate(180deg)}
 .manifest.collapsed{width:30px}
-.manifest.collapsed .mf-head{padding:0 0 10px;justify-content:center}
+.manifest.collapsed .mf-head{padding:10px 0;justify-content:center}
 .manifest.collapsed .mf-head>span,.manifest.collapsed .mf-head>em,
 .manifest.collapsed .mf-live,.manifest.collapsed .mgroup{display:none}
 .manifest.collapsed .att{grid-template-columns:1fr;justify-items:center;
@@ -71,8 +72,11 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .manifest.collapsed .att.on .dot{opacity:1;background:var(--live)}
 .manifest.collapsed .att:hover{background:var(--paper)}
 
-.mf-live{font-size:10px;letter-spacing:.03em;text-transform:none;color:var(--ink-3);
-  padding:0 14px 12px;display:flex;align-items:center;gap:6px}
+.mf-live{flex:none;font-size:10px;letter-spacing:.03em;text-transform:none;color:var(--ink-3);
+  padding:0 14px 12px;display:flex;align-items:center;gap:6px;transition:color .2s}
+.mf-live.held{color:var(--ink-2)}
+.mf-live.held .dot{opacity:1;background:var(--live)}
+.mf-live>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mf-live b{font-weight:500;color:var(--live)}
 .mf-live .dot{width:5px;height:5px;border-radius:50%;background:var(--live);flex:none;
   transition:opacity .2s}
@@ -81,6 +85,65 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .mgroup{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
   padding:15px 14px 6px;border-top:1px solid var(--rule);margin-top:8px}
 .mgroup span{color:var(--rule-2)}
+
+/* ---- contributions for the section in view ----
+   Append-only, and the accent is the state: unresolved / addressed /
+   withdrawn. Nothing is ever removed, so the list is ranked rather than
+   filtered - unresolved first, then newest - and every item keeps a row.
+   When the rail narrows, the same distribution survives as a stack of
+   segments, so a count is never silently dropped from view. */
+.contribs{flex:none;max-height:46%;display:flex;flex-direction:column;
+  border-top:1px solid var(--rule);background:var(--sheet)}
+.cb-head{flex:none;display:flex;align-items:baseline;gap:6px;padding:10px 12px 7px;
+  font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.cb-head .cb-t{flex:none}
+.cb-head b{font-weight:500;letter-spacing:.02em;text-transform:none;font-size:10.5px;
+  color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  margin-left:auto;min-width:0}
+.cb-head em{flex:none;font-style:normal;letter-spacing:0;text-transform:none;
+  font-size:9.5px;color:var(--rule-2);margin-left:4px}
+.cb-bar{flex:none;display:flex;height:3px;margin:0 12px 8px;border-radius:2px;
+  overflow:hidden;background:var(--rule)}
+.cb-bar i{display:block;height:100%;transition:width .25s ease}
+.cb-bar i[data-s="open"]{background:var(--warn)}
+.cb-bar i[data-s="addressed"]{background:color-mix(in srgb,var(--live) 72%,transparent)}
+.cb-bar i[data-s="withdrawn"]{background:var(--rule-2)}
+.cb-list{flex:1;min-height:0;overflow:auto;scrollbar-width:thin;padding-bottom:6px}
+.cb-empty{padding:2px 14px 12px;font-size:10.5px;color:var(--ink-3)}
+
+.c{display:block;width:100%;text-align:left;padding:7px 12px 8px 10px;
+  border-left:2px solid var(--rule-2);transition:background .14s}
+.c:hover{background:var(--paper)}
+.c .c1{display:flex;align-items:baseline;gap:6px;min-width:0}
+.c .cs{flex:none;font-size:8px;letter-spacing:.09em;text-transform:uppercase;line-height:1.6}
+.c .cw{font-size:10.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.c .cv{flex:none;margin-left:auto;font-size:9.5px;color:var(--ink-3);
+  font-variant-numeric:tabular-nums}
+.c .cv::after{content:"↑";font-size:8px;margin-left:2px;opacity:.6}
+.c .cx{display:block;font-size:11px;line-height:1.42;color:var(--ink-2);margin-top:2px}
+.c .ct{display:block;font-size:9.5px;line-height:1.45;color:var(--ink-3);margin-top:4px}
+.c[data-state="open"]{border-left-color:var(--warn)}
+.c[data-state="open"] .cs{color:var(--warn)}
+.c[data-state="addressed"]{border-left-color:color-mix(in srgb,var(--live) 74%,transparent)}
+.c[data-state="addressed"] .cs{color:var(--live)}
+.c[data-state="withdrawn"]{border-left-color:var(--rule-2)}
+.c[data-state="withdrawn"] .cs{color:var(--ink-3)}
+.c[data-state="withdrawn"] .cx,.c[data-state="withdrawn"] .cw{color:var(--ink-3)}
+.c[data-state="withdrawn"] .ct::before{content:"still here · ";color:var(--rule-2)}
+
+/* the same distribution, as a shape, when the list has narrowed to a rail */
+.cb-rail{display:none}
+.manifest.collapsed .contribs{max-height:none;padding:10px 0 12px;border-top:1px solid var(--rule)}
+.manifest.collapsed .cb-head,.manifest.collapsed .cb-bar,
+.manifest.collapsed .cb-list{display:none}
+.manifest.collapsed .cb-rail{display:flex;flex-direction:column;align-items:center;gap:5px}
+.cb-v{display:flex;flex-direction:column;width:4px;height:52px;border-radius:2px;
+  overflow:hidden;background:var(--rule)}
+.cb-v i{display:block;width:100%}
+.cb-v i[data-s="open"]{background:var(--warn)}
+.cb-v i[data-s="addressed"]{background:color-mix(in srgb,var(--live) 72%,transparent)}
+.cb-v i[data-s="withdrawn"]{background:var(--rule-2)}
+.cb-n{font-size:9px;line-height:1;color:var(--warn);font-variant-numeric:tabular-nums}
 
 /* one flat list, in the order the article reaches them.
    Order is the structure; kind is only a label. The title is the first thing on
@@ -111,6 +174,13 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
 .att.key .n{color:var(--ink-2)}
 .att.key .d{display:block}
 .att.chall .n{color:var(--warn)}
+/* A challenge is not a quieter kind of source. It keeps its accent in the
+   expanded list AND in the narrowed rail, where everything else is a dot.
+   Reka's failed reproduction is the item that makes the paper credible, so
+   it is the last thing that should be reducible to an anonymous mark. */
+.att.chall{border-left-color:color-mix(in srgb,var(--warn) 55%,transparent)}
+.manifest.collapsed .att.chall{border-right-color:var(--warn)}
+.manifest.collapsed .att.chall .dot{opacity:1;background:var(--warn)}
 .att:hover{background:var(--paper)}
 /* pinned has to survive three situations: expanded row, collapsed rail, and a
    narrow strip. So it is carried by a rule, a dot, a tint and a label, and any
@@ -378,15 +448,36 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
   .titlebar .sub{display:none}
   #split{display:block}
   #paneL{width:100%!important;display:block;background:none;border:0;overflow:visible}
-  #paneR{width:100%;height:calc(100vh - 36px);padding-bottom:64px;scroll-behavior:auto}
+  #paneR{width:100%;height:calc(100vh - 36px);padding-bottom:152px;scroll-behavior:auto}
   .grip{display:none}
 
   .manifest{position:fixed;left:0;right:0;bottom:0;width:auto;height:auto;
-    display:flex;overflow-x:auto;overflow-y:hidden;padding:0;border-right:0;
+    display:flex;flex-direction:column;overflow:visible;padding:0;border-right:0;
     border-top:1px solid var(--rule);background:var(--paper);z-index:30;
     scrollbar-width:none;-webkit-overflow-scrolling:touch}
   .manifest::-webkit-scrollbar{display:none}
   .mf-head,.mf-live,.mgroup{display:none}
+
+  /* the strip is two rows here: contributions for the section in view, then
+     the attachment chips. Same ranking, same accents, just laid on its side. */
+  .mf-scroll{display:flex;flex:none;overflow-x:auto;overflow-y:hidden;padding:0;
+    scrollbar-width:none}
+  .mf-scroll::-webkit-scrollbar{display:none}
+  .contribs{order:-1;max-height:none;border-top:0;border-bottom:1px solid var(--rule)}
+  .cb-head{padding:7px 12px 4px}
+  .cb-bar{margin:0 12px 6px}
+  .cb-list{display:flex;flex:none;overflow-x:auto;overflow-y:hidden;padding:0;
+    scrollbar-width:none}
+  .cb-list::-webkit-scrollbar{display:none}
+  .c{flex:0 0 auto;width:min(72vw,300px);border-left:0;
+    border-bottom:2px solid var(--rule-2)}
+  .c[data-state="open"]{border-bottom-color:var(--warn)}
+  .c[data-state="addressed"]{border-bottom-color:var(--live)}
+  .c[data-state="withdrawn"]{border-bottom-color:var(--rule-2)}
+  .c .ct{display:none}
+  .c .cx{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden}
+  .cb-rail{display:none!important}
   .att{display:flex;flex:none;width:auto;max-width:56vw;padding:8px 13px;
     border-left:0;border-bottom:2px solid transparent}
   .att .g,.att .dot{display:none}
@@ -478,6 +569,7 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
         <div class="mf-head"><button class="mf-toggle" id="mftoggle" aria-expanded="true" aria-label="Collapse attachment list"><svg width="9" height="9" viewBox="0 0 9 9"><path d="M6 1 L2.5 4.5 L6 8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><span>attachments · in article order</span><em>18</em></div>
         <div class="mf-live idle" id="mflive"><span class="dot"></span><span>scrolling — none in view</span></div>
 
+        <div class="mf-scroll">
         <button class="att key" data-a="data-tasksuite">
           <span class="dot"></span><span class="g">dat</span><span class="n">tasksuite-v4 · 240 tasks</span>
           <span class="d">the thing being measured</span></button>
@@ -525,6 +617,22 @@ button{font:inherit;color:inherit;background:0;border:0;cursor:pointer}
         <button class="att" data-a="art-1"><span class="g"></span><span class="n" style="grid-column:2/4">"Small models are catching up"</span></button>
         <button class="att" data-a="art-2"><span class="g"></span><span class="n" style="grid-column:2/4">"The new scaffolding wars"</span></button>
         <button class="att" data-a="art-4"><span class="g"></span><span class="n" style="grid-column:2/4">vendor benchmark post</span></button>
+        </div>
+
+        <!-- ===== contributions for the section in view =====
+             Append-only. Nothing here is ever removed: the author answers,
+             resolves and references, and a withdrawn contribution keeps its
+             place with its own accent. Ranked, never filtered. -->
+        <div class="contribs" id="contribs">
+          <div class="cb-head">
+            <span class="cb-t">contributions</span>
+            <b id="cbsec">—</b>
+            <em id="cbcount"></em>
+          </div>
+          <div class="cb-bar" id="cbbar" aria-hidden="true"></div>
+          <div class="cb-list" id="cblist"></div>
+          <div class="cb-rail" id="cbrail"></div>
+        </div>
       </nav>
 
       <div class="material" id="material">
@@ -799,6 +907,68 @@ const ATT = {
 const atts  = [...document.querySelectorAll('.att')];
 const cites = [...doc.querySelectorAll('.cite')];
 
+/* ---------- contributions ----------
+   Append-only, and that is a rule rather than a habit. Nothing in this list
+   is ever removed: the author answers, resolves or references, and a
+   contributor may withdraw their own contribution - which is recorded, not
+   deleted. The state lives on the accent, so the list is readable before it
+   is read: unresolved, addressed, withdrawn.
+
+   Order inside a section is state first, then recency. Popularity is shown
+   as vote count and as the bar above the list, but it never sorts and never
+   filters - a contribution with one vote keeps its row exactly like the one
+   with 312. */
+const CONTRIBS = [
+  { sec:'results', who:'reka', at:'2026-08-06', when:'6 Aug', votes:312, state:'open',
+    text:'Re-ran the grid on an AMD 7900X3D with the same harness. The 8B came out 3.7 points behind, not ahead.',
+    trail:['author responded 7 Aug','referenced in §Reproductions'], att:'repro-reka' },
+  { sec:'results', who:'kv_quant_nerd', at:'2026-10-12', when:'12 Oct', votes:214, state:'addressed',
+    text:'Table 4.2 compares q4_0 with q4_k_m. Two variables changed in a two-cell comparison.',
+    trail:['author responded 13 Aug','resolved by the erratum'], att:'erratum' },
+  { sec:'results', who:'skeptical_sam', at:'2026-10-14', when:'14 Oct', votes:88, state:'open',
+    text:'The corrected margin sits much closer to the ceiling in arXiv 2602.04119. Worth an explicit comparison.',
+    trail:['author responded 14 Oct','referenced in §Threats'], att:'paper-svensson' },
+  { sec:'results', who:'one_point_five', at:'2026-09-09', when:'9 Sep', votes:41, state:'addressed',
+    text:'Is the crossover an artefact of task length rather than model size?',
+    trail:['author responded 9 Sep','resolved by exp-d'], att:'run-exp-d' },
+  { sec:'results', who:'dgerard', at:'2026-08-22', when:'22 Aug', votes:27, state:'addressed',
+    text:'Publish the per-task file, not only the aggregate table.',
+    trail:['resolved by attachment · tasksuite-v4'], att:'data-tasksuite' },
+  { sec:'results', who:'mattm', at:'2026-10-11', when:'11 Oct', votes:12, state:'withdrawn',
+    text:'The 88.1% cell cannot be right: the suite has 240 tasks and the denominators do not divide.',
+    trail:['withdrawn by contributor 11 Oct','after checking the seed files'] },
+
+  { sec:'threats', who:'svensson', at:'2026-08-08', when:'8 Aug', votes:156, state:'open',
+    text:'The confounding objection stands. Typing is varied; task difficulty is not.',
+    trail:['author responded 8 Aug','referenced in §Threats','not fully answered'], att:'paper-svensson' },
+  { sec:'threats', who:'a_wilson', at:'2026-08-19', when:'19 Aug', votes:33, state:'addressed',
+    text:'State the single-turn ceiling explicitly rather than leaving it to be inferred.',
+    trail:['resolved in draft v2'], att:'draft-v1' },
+
+  { sec:'method', who:'gputopia', at:'2026-08-11', when:'11 Aug', votes:64, state:'addressed',
+    text:'Which quantisation was used per cell? The table does not say.',
+    trail:['author responded 12 Aug','resolved by the erratum'], att:'erratum' },
+
+  { sec:'cost', who:'rnair', at:'2026-08-20', when:'20 Aug', votes:19, state:'addressed',
+    text:'165% spend for 41 points — worth stating per task, not per token.',
+    trail:['author responded 20 Aug','resolved in exp-e'], att:'run-exp-e' },
+
+  { sec:'related', who:'tanaka_fan', at:'2026-09-02', when:'2 Sep', votes:8, state:'withdrawn',
+    text:"Tanaka's rig is not independent; they cite this work.",
+    trail:['withdrawn by contributor 2 Sep','after checking the citation graph'] },
+
+  { sec:'conclusion', who:'hypecurve', at:'2026-08-15', when:'15 Aug', votes:77, state:'open',
+    text:'So always use the smallest model with a typed schema?',
+    trail:['author responded 15 Aug','referenced in §What it costs'], att:'run-exp-e' },
+
+  { sec:'intro', who:'newreader', at:'2026-08-07', when:'7 Aug', votes:5, state:'addressed',
+    text:'What counts as a "naive" harness, concretely?',
+    trail:['resolved by §Method'], att:'spec' }
+];
+
+const STATE_RANK = { open:0, addressed:1, withdrawn:2 };
+const STATE_LABEL = { open:'unresolved', addressed:'addressed', withdrawn:'withdrawn' };
+
 let cur = null;        // what is materialised in the pane
 let scrollFirst = null; // first citation in document order that is in the viewport
 let pinned = null;      // an explicit click beats scroll
@@ -893,6 +1063,69 @@ function apply(){
               pinned ? 'pin' : hovered ? 'hover' : 'scroll');
 }
 
+/* ---------- contributions for the section in view ----------
+   The list is rebuilt when the section changes, never filtered by popularity.
+   Rank: unresolved, then addressed, then withdrawn; newest first inside each.
+   The bar is the volume, the rows are every contribution, and the rail keeps
+   the same distribution as segments when the list narrows to 30px. */
+const secHeads = [...doc.querySelectorAll('h2[id]')];
+let cbSec = null;
+let lastInView = new Set();
+let resumedUntil = 0;
+
+function sectionAt(){
+  const mark = paneR.getBoundingClientRect().top + 100;
+  let hit = secHeads[0] || null;
+  for (const h of secHeads){
+    if (h.getBoundingClientRect().top <= mark) hit = h; else break;
+  }
+  return hit;
+}
+
+function renderContribs(secId, label){
+  const all = CONTRIBS.filter(c => c.sec === secId)
+    .sort((a,b) => STATE_RANK[a.state] - STATE_RANK[b.state] || b.at.localeCompare(a.at));
+  const n = all.length;
+  const count = { open:0, addressed:0, withdrawn:0 };
+  all.forEach(c => count[c.state]++);
+
+  $('#cbsec').textContent = label || '—';
+  $('#cbcount').textContent = n ? n + ' kept' : 'none yet';
+
+  $('#cbbar').innerHTML = n
+    ? ['open','addressed','withdrawn'].filter(k => count[k])
+        .map(k => '<i data-s="'+k+'" style="width:'+(count[k]/n*100).toFixed(2)+'%"></i>').join('')
+    : '';
+
+  $('#cblist').innerHTML = n
+    ? all.map(c =>
+        '<button class="c" data-state="'+c.state+'"'+(c.att?' data-a="'+c.att+'"':'')+'>' +
+          '<span class="c1"><span class="cs">'+STATE_LABEL[c.state]+'</span>' +
+          '<span class="cw">'+esc(c.who)+'</span>' +
+          '<span class="cv">'+c.votes+'</span></span>' +
+          '<span class="cx">'+esc(c.text)+'</span>' +
+          '<span class="ct">'+esc(c.trail.join(' · '))+'</span>' +
+        '</button>').join('')
+    : '<div class="cb-empty">No contributions in this section. Nothing omitted.</div>';
+  $('#cblist').scrollTop = 0;
+
+  $('#cbrail').innerHTML = n
+    ? '<span class="cb-v" title="'+n+' contributions · '+count.open+' unresolved · '+
+        count.addressed+' addressed · '+count.withdrawn+' withdrawn">' +
+        ['open','addressed','withdrawn'].filter(k => count[k])
+          .map(k => '<i data-s="'+k+'" style="height:'+(count[k]/n*100).toFixed(2)+'%"></i>').join('') +
+      '</span>' + (count.open ? '<span class="cb-n">'+count.open+'</span>' : '')
+    : '';
+}
+
+function syncContribs(){
+  const h = sectionAt();
+  const id = h ? h.id : '';
+  if (id === cbSec) return;
+  cbSec = id;
+  renderContribs(id, h ? h.textContent.trim() : '—');
+}
+
 /* ---------- which attachments are in view right now ----------
    A pick has to survive its own scroll. Clicking a chip scrolls the article
    to the citing sentence, which fires sync(), whose first-in-view citation is
@@ -904,6 +1137,62 @@ function hold(ms, cap){
   const now = performance.now();
   holdUntil = Math.max(holdUntil, now + (ms || 200));
   holdMax = Math.max(holdMax, now + (cap || 1800));
+}
+
+/* ---------- the follow state, said quietly ----------
+   The pane has two hands on it: the reader's scroll and the reader's click.
+   When a click wins, say so in the one place the reader is already looking
+   for "what am I following" rather than letting the pane silently stop. */
+function nameOf(id){
+  const b = atts.find(x => x.dataset.a === id);
+  return b ? b.querySelector('.n').textContent.trim() : id;
+}
+function paintLive(inView){
+  const live = document.querySelector('.mf-live');
+  const txt = live.querySelector('span:last-child');
+  if (pinned){
+    live.classList.remove('idle');
+    live.classList.add('held');
+    txt.innerHTML = 'held — <b>' + esc(nameOf(pinned)) + '</b> · not following the scroll';
+    return;
+  }
+  live.classList.remove('held');
+  if (performance.now() < resumedUntil){
+    live.classList.remove('idle');
+    txt.textContent = 'following the scroll again';
+    return;
+  }
+  if (inView && inView.size){
+    live.classList.remove('idle');
+    const showing = cur ? cur.split('-')[0] : '—';
+    txt.innerHTML = 'reading — <b>' + inView.size + '</b> in view, showing <b>' +
+      esc(showing) + '</b>';
+  } else {
+    live.classList.add('idle');
+    txt.textContent = 'scrolling — none in view';
+  }
+}
+
+/* ---------- dwell before the pane moves ----------
+   Crossing a section boundary fires a burst of candidates, and following
+   each one turns the pane into a flipbook: five sources in under a second.
+   A candidate must stay the same for DWELL ms before the pane follows it;
+   any new candidate resets the clock. Picks and hovers do not come through
+   here - they are explicit and take effect immediately. */
+const DWELL = 420;
+let cand = null, candTimer = 0;
+
+function scheduleFollow(id){
+  if (id === cand) return;
+  cand = id;
+  clearTimeout(candTimer);
+  if (!cur){ scrollFirst = id; apply(); return; }   // nothing on screen yet
+  candTimer = setTimeout(() => {
+    if (cand !== id) return;                          // the reader moved on
+    scrollFirst = id;
+    apply();
+    paintLive(lastInView);
+  }, DWELL);
 }
 
 function sync(){
@@ -920,20 +1209,12 @@ function sync(){
       if (!first) first = c.dataset.a;
     }
   }
-  scrollFirst = first;
+  lastInView = inView;
   atts.forEach(b => b.classList.toggle('inview', inView.has(b.dataset.a)));
   if (first) revealChip(first);
-
-  const live = document.querySelector('.mf-live');
-  if (inView.size){
-    live.classList.remove('idle');
-    live.querySelector('span:last-child').innerHTML =
-      'reading — <b>' + inView.size + '</b> in view, showing <b>' + (first||'').split('-')[0] + '</b>';
-  } else {
-    live.classList.add('idle');
-    live.querySelector('span:last-child').textContent = 'scrolling — none in view';
-  }
-  apply();
+  syncContribs();
+  scheduleFollow(first);
+  paintLive(inView);
 }
 
 let ticking = false;
@@ -949,6 +1230,10 @@ paneR.addEventListener('scroll', () => {
       holdUntil = Math.min(now + 220, holdMax);
       return;
     }
+    // Click pins, scroll releases. The guard above is what makes that safe:
+    // the click's own scroll-to-citation happens inside the hold, so only a
+    // deliberate scroll afterwards counts as letting go.
+    if (pinned) free();
     sync();
   });
 }, { passive:true });
@@ -1082,7 +1367,9 @@ function closeSheet(){
   document.body.classList.remove('sheet-open');
   pinned = null;
   atts.forEach(x => x.classList.remove('pinned'));
+  resumedUntil = performance.now() + 1600;
   apply();
+  paintLive(lastInView);
 }
 /* keep the lit chip in view as the article scrolls */
 function revealChip(id){
@@ -1097,12 +1384,15 @@ function free(){
   if (!pinned) return;
   pinned = null;
   atts.forEach(x => x.classList.remove('pinned'));
+  resumedUntil = performance.now() + 1600;
+  paintLive(lastInView);
 }
 function persist(id){
   pinned = id;
   atts.forEach(x => x.classList.remove('pinned'));
   const b = atts.find(x => x.dataset.a === id);
   if (b) b.classList.add('pinned');
+  paintLive(lastInView);
 }
 function gotoCitation(id){
   const first = cites.find(c => c.dataset.a === id);
@@ -1111,6 +1401,9 @@ function gotoCitation(id){
   first.scrollIntoView({ block:'center', behavior:'smooth' });
   first.classList.add('found');
   setTimeout(() => first.classList.remove('found'), 1800);
+  // the contributions belong to the section the citation lands in, not the one
+  // that happened to be on screen when the click was made
+  setTimeout(syncContribs, 760);
 }
 
 /* Click selects and pins, and jumps the article to the citing sentence.
@@ -1131,6 +1424,22 @@ atts.forEach(b => {
     apply();
   });
   b.addEventListener('contextmenu', e => { e.preventDefault(); openCtxMenu(id, e.clientX, e.clientY); });
+});
+
+/* A contribution that points at a source behaves like that source's row:
+   selecting it materialises the file and takes you to the sentence. A
+   withdrawn contribution stays where it is and does nothing - it is still
+   part of the record, it just no longer asks to be answered. */
+$('#cblist').addEventListener('click', e => {
+  const b = e.target.closest('.c');
+  if (!b || !b.dataset.a) return;
+  const id = b.dataset.a;
+  materialise(id, 'pick');
+  persist(id);
+  gotoCitation(id);
+  openSheet();
+  apply();
+  paintLive(lastInView);
 });
 
 cites.forEach(c => {
